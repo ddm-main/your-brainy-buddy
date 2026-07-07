@@ -97,7 +97,7 @@ export const Route = createFileRoute("/api/chat")({
           await supabase.from("messages").insert({
             thread_id: threadId,
             role: "user",
-            parts: lastUser.parts as unknown as Record<string, unknown>[],
+            parts: lastUser.parts as unknown as never,
           });
         }
 
@@ -139,7 +139,7 @@ export const Route = createFileRoute("/api/chat")({
               await supabase.from("messages").insert({
                 thread_id: threadId,
                 role: "assistant",
-                parts: assistantMsg.parts as unknown as Record<string, unknown>[],
+                parts: assistantMsg.parts as unknown as never,
               });
               await supabase
                 .from("threads")
