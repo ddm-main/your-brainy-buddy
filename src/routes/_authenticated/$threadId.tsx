@@ -340,8 +340,8 @@ function ChatPage() {
                               <ToolHeader
                                 type={"tool-web_search" as never}
                                 state={p.state as never}
-                                icon={<Globe className="size-4" />}
                               />
+
                               <ToolContent>
                                 <ToolInput input={p.input} />
                                 <ToolOutput
