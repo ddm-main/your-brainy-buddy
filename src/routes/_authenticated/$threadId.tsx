@@ -201,13 +201,13 @@ function ChatPage() {
   };
 
   const [input, setInput] = useState("");
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!input.trim()) return;
-    const text = input.trim();
+  const handleSubmit = async (message: { text: string }) => {
+    const text = (message.text ?? input).trim();
+    if (!text) return;
     setInput("");
     await sendMessage({ text });
   };
+
 
   const isLoading = status === "submitted" || status === "streaming";
 
