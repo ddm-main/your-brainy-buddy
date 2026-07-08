@@ -919,10 +919,32 @@ const MIME = {
   '.png': 'image/png', '.ico': 'image/x-icon',
 };
 
+// Auth for /api/* — when HUD_TOKEN is set, require it via `Authorization: Bearer <token>`
+// or `?token=<token>`. Loopback callers (127.0.0.1 / ::1) are trusted so the local
+// browser HUD keeps working without configuration.
+const HUD_TOKEN = process.env.HUD_TOKEN || '';
+const isLoopback = (req) => {
+  const ip = req.socket?.remoteAddress || '';
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+};
+const authorized = (req, url) => {
+  if (isLoopback(req)) return true;
+  if (!HUD_TOKEN) return false; // non-loopback + no token configured → deny
+  const hdr = req.headers['authorization'] || '';
+  const bearer = hdr.startsWith('Bearer ') ? hdr.slice(7) : '';
+  const token = bearer || url.searchParams.get('token') || '';
+  return token && token === HUD_TOKEN;
+};
+
 createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const route = `${req.method} ${url.pathname}`;
   try {
+    // Gate every /api/* route. Static assets (HUD frontend) remain public so the
+    // local browser can load the shell; API calls from that shell are on loopback.
+    if (url.pathname.startsWith('/api/') && !authorized(req, url)) {
+      return json(res, 401, { error: 'unauthorized' });
+    }
     /* ---- API ---- */
     if (route === 'GET /api/state') {
       try { return json(res, 200, await state()); }
@@ -1095,7 +1117,9 @@ createServer(async (req, res) => {
   } catch (e) {
     return json(res, 500, { error: String(e.message || e) });
   }
-}).listen(PORT, () => {
-  console.log(`JARVIS HUD online at http://localhost:${PORT}`);
+}).listen(PORT, process.env.HUD_HOST || '127.0.0.1', () => {
+  const host = process.env.HUD_HOST || '127.0.0.1';
+  console.log(`JARVIS HUD online at http://${host}:${PORT}`);
   if (!SUPABASE_URL || !KEY) console.warn('WARNING: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — /api/state will report offline');
+  if (host !== '127.0.0.1' && !HUD_TOKEN) console.warn('WARNING: HUD_HOST is non-loopback and HUD_TOKEN is unset — /api/* will refuse remote callers');
 });
