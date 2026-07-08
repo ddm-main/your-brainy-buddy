@@ -1,0 +1,4 @@
+[run]
+dev = "PORT=8080 node Apps/hud/server.mjs"
+build:dev = "true"
+build = "true"
