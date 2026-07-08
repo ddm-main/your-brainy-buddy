@@ -1,0 +1,12 @@
+{
+  "name": "jarvis-hud",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "PORT=8080 node Apps/hud/server.mjs",
+    "build": "rm -rf dist && mkdir -p dist && cp -r Apps/hud/public/. dist/",
+    "build:dev": "rm -rf dist && mkdir -p dist && cp -r Apps/hud/public/. dist/",
+    "start": "PORT=8080 node Apps/hud/server.mjs"
+  }
+}
