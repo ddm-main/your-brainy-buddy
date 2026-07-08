@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//e/Claude/JARVIS/**)",
+      "Edit(//e/Claude/JARVIS/**)",
+      "Write(//e/Claude/JARVIS/**)",
+      "Glob",
+      "Grep",
+      "WebSearch",
+      "WebFetch(domain:*)"
+    ],
+    "deny": []
+  }
+}

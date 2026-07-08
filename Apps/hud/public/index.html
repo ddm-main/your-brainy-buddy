@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS — HUD</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' fill='none' stroke='%2335d6ed' stroke-width='8'/><circle cx='50' cy='50' r='14' fill='%2335d6ed'/></svg>">
+</head>
+<body>
+<header class="topbar">
+  <button class="brand" id="brandBtn" title="Click to talk to JARVIS">
+    <span class="brand-dot" id="statusDot" aria-hidden="true"></span>
+    <span class="brand-name">J.A.R.V.I.S</span>
+    <span class="brand-mic" aria-hidden="true">🎙</span>
+  </button>
+  <div class="top-status">
+    <span id="backendStatus" class="pill pill-ok">BACKEND ONLINE</span>
+    <span id="clock" class="clock">--:--:--</span>
+    <button class="gear" id="gearBtn" title="Settings" aria-label="Settings">⚙</button>
+  </div>
+</header>
+
+<!-- ================= HUD VIEW ================= -->
+<main class="grid" id="hudView">
+  <section class="col" id="colLeft">
+    <article class="panel tilt" id="focusPanel" data-panel="focus">
+      <h2>Today's Focus</h2>
+      <ul class="focus-list scrolly" id="focusList"><li class="empty">No focus set — run /brief</li></ul>
+      <form class="quick-form" id="focusForm">
+        <input type="text" id="focusInput" placeholder="add a focus item…" maxlength="200" autocomplete="off">
+        <button type="submit" title="Add focus item">+</button>
+      </form>
+    </article>
+    <article class="panel tilt" id="projectsPanel" data-panel="projects">
+      <h2>Active Projects <span class="count" id="projectCount"></span>
+        <button class="mini-btn" id="newProjectBtn" title="New project">+ new</button>
+      </h2>
+      <div class="scrolly" id="projectList"><div class="empty">No active projects yet</div></div>
+      <form class="quick-form stack" id="projectForm" hidden>
+        <input type="text" id="projTitle" placeholder="project title" maxlength="80" autocomplete="off">
+        <input type="text" id="projOutcome" placeholder="outcome — what does done look like?" maxlength="200" autocomplete="off">
+        <div class="row">
+          <input type="text" id="projAction" placeholder="first next action" maxlength="200" autocomplete="off">
+          <button type="submit" title="Create project">✓</button>
+        </div>
+      </form>
+    </article>
+    <article class="panel tilt" id="financePanel" data-panel="finance">
+      <h2>Finance <span class="count" id="finCount"></span>
+        <span class="h2-btns">
+          <button class="mini-btn" id="finScan" title="Scan mail for transactions & statements">↻ scan</button>
+          <button class="mini-btn" id="finOpen" title="Open the finance section">⤢ open</button>
+        </span>
+      </h2>
+      <div class="fin-summary" id="finSummary"><span class="empty">no transactions tracked yet</span></div>
+      <ul class="fin-list scrolly" id="finList"><li class="empty">Hit “↻ scan” to read transaction mail</li></ul>
+    </article>
+  </section>
+
+  <section class="col col-center">
+    <div class="reactor-wrap" id="reactorWrap" title="Click to talk to JARVIS">
+      <canvas id="globeCanvas" width="420" height="420" aria-label="JARVIS core — click to talk"></canvas>
+      <div class="voice-ring" aria-hidden="true"></div>
+      <div class="reactor-label">
+        <div class="big-date" id="bigDate">—</div>
+        <div class="big-day" id="bigDay">—</div>
+        <div class="voice-status" id="voiceStatus"></div>
+      </div>
+    </div>
+    <div class="stats-row" role="list">
+      <button class="stat tilt" data-goto="projectsPanel" role="listitem"><div class="stat-value" id="statProjects">0</div><div class="stat-label">projects</div></button>
+      <button class="stat tilt" data-goto="inboxPanel" role="listitem"><div class="stat-value" id="statInbox">0</div><div class="stat-label">inbox</div></button>
+      <button class="stat tilt" data-goto="projectsPanel" role="listitem"><div class="stat-value" id="statActions">0</div><div class="stat-label">next actions</div></button>
+      <button class="stat tilt" data-goto="gmailPanel" role="listitem"><div class="stat-value" id="statMail">0</div><div class="stat-label">unread mail</div></button>
+    </div>
+    <div class="voice-console" id="voiceConsole" hidden>
+      <div class="voice-you" id="voiceYou"></div>
+      <div class="voice-answer" id="voiceAnswer"></div>
+    </div>
+    <div class="sync-note" id="syncNote">awaiting first contact…</div>
+  </section>
+
+  <section class="col" id="colRight">
+    <article class="panel tilt" id="inboxPanel" data-panel="inbox">
+      <h2>Inbox <span class="count" id="inboxCount"></span></h2>
+      <form class="quick-form" id="captureForm">
+        <input type="text" id="captureInput" placeholder="capture a thought, task, or link…" maxlength="500" autocomplete="off">
+        <button type="submit" title="Capture to inbox">+</button>
+      </form>
+      <ul class="inbox-list scrolly" id="inboxList"><li class="empty">Inbox zero. Immaculate, sir.</li></ul>
+    </article>
+    <article class="panel tilt" id="gmailPanel" data-panel="mail">
+      <h2>Recent Mail <span class="count" id="mailCount"></span>
+        <button class="mini-btn" id="mailRefresh" title="Refresh mail" hidden>↻</button>
+      </h2>
+      <div class="scrolly" id="gmailBody"><div class="empty">checking gmail…</div></div>
+    </article>
+  </section>
+</main>
+
+<!-- ================= FINANCE VIEW ================= -->
+<main class="grid finance-grid" id="financeView" hidden>
+  <section class="col">
+    <article class="panel">
+      <h2>Accounts · Cards · Loans <span class="count" id="acctCount"></span>
+        <button class="mini-btn" id="finBack" title="Back to HUD">← hud</button>
+      </h2>
+      <div class="scrolly" id="acctList"><div class="empty">Nothing registered yet — add your banks, cards and loans below</div></div>
+      <form class="quick-form stack" id="acctForm">
+        <div class="row">
+          <select id="acctType" title="Type">
+            <option value="bank">bank account</option>
+            <option value="credit_card">credit card</option>
+            <option value="loan">loan</option>
+          </select>
+          <input type="text" id="acctName" placeholder="name — e.g. Axis Savings" maxlength="40" autocomplete="off">
+        </div>
+        <div class="row">
+          <input type="text" id="acctInst" placeholder="institution — e.g. Axis Bank" maxlength="40" autocomplete="off">
+          <input type="text" id="acctLast4" placeholder="last 4 digits" maxlength="4" pattern="\d{4}" autocomplete="off">
+          <button type="submit" title="Add account">+</button>
+        </div>
+      </form>
+    </article>
+    <article class="panel grow">
+      <h2>Goals <span class="count" id="goalCount"></span></h2>
+      <ul class="goal-list scrolly" id="goalList"><li class="empty">No goals yet — give me a target, sir</li></ul>
+      <form class="quick-form stack" id="goalForm">
+        <input type="text" id="goalTitle" placeholder="goal — e.g. Emergency fund" maxlength="60" autocomplete="off">
+        <div class="row">
+          <input type="number" id="goalTarget" placeholder="target ₹" min="1" autocomplete="off">
+          <input type="date" id="goalDeadline" title="Deadline (optional)">
+          <button type="submit" title="Add goal">+</button>
+        </div>
+      </form>
+    </article>
+  </section>
+
+  <section class="col">
+    <article class="panel">
+      <h2>This Month by Category</h2>
+      <div class="cat-bars scrolly" id="catBars"><div class="empty">No spends tracked this month</div></div>
+    </article>
+    <article class="panel grow">
+      <h2>Statements <span class="count" id="stCount"></span></h2>
+      <div class="scrolly" id="stList"><div class="empty">No statements found yet</div></div>
+    </article>
+  </section>
+
+  <section class="col">
+    <article class="panel grow">
+      <h2>Transactions <span class="count" id="txCount"></span>
+        <button class="mini-btn" id="finScanFull" title="Rescan mail">↻ scan</button>
+      </h2>
+      <div class="chip-row fin-filter" id="catFilter"></div>
+      <ul class="fin-list tx-full scrolly" id="txFullList"><li class="empty">No transactions yet</li></ul>
+      <div class="empty fin-hint">click a category tag to correct it — JARVIS learns the rule</div>
+    </article>
+  </section>
+</main>
+
+<!-- ================= SETTINGS VIEW ================= -->
+<main class="grid settings-grid" id="settingsView" hidden>
+  <section class="col">
+    <article class="panel">
+      <h2>Connections</h2>
+      <div class="set-block">
+        <div class="set-title">Supabase backend</div>
+        <div id="supaStatus" class="set-body">checking…</div>
+      </div>
+      <div class="set-block">
+        <div class="set-title">Gmail accounts <span class="empty">read-only · tokens stay on this machine</span></div>
+        <div id="gmailAccounts" class="set-body">—</div>
+      </div>
+    </article>
+    <article class="panel">
+      <h2>Display</h2>
+      <div class="set-block">
+        <div class="set-title">Visible panels</div>
+        <div class="set-body toggles" id="panelToggles"></div>
+      </div>
+      <div class="set-block">
+        <div class="set-title">Refresh interval</div>
+        <div class="set-body chip-row" id="refreshChips"></div>
+      </div>
+      <div class="set-block">
+        <div class="set-title">Accent</div>
+        <div class="set-body chip-row" id="accentChips"></div>
+      </div>
+    </article>
+  </section>
+
+  <section class="col">
+    <article class="panel">
+      <h2>Areas <span class="empty">click a value to edit</span></h2>
+      <ul class="area-list" id="areaList"></ul>
+    </article>
+    <article class="panel">
+      <h2>Memory <span class="count" id="memoryCount"></span></h2>
+      <form class="quick-form" id="memoryForm">
+        <select id="memoryCat" title="Category">
+          <option value="notes">notes</option>
+          <option value="profile">profile</option>
+          <option value="preferences">preferences</option>
+          <option value="people">people</option>
+          <option value="decisions">decisions</option>
+        </select>
+        <input type="text" id="memoryInput" placeholder="remember something…" maxlength="300" autocomplete="off">
+        <button type="submit" title="Save memory">+</button>
+      </form>
+      <ul class="memory-list scrolly" id="memoryList"><li class="empty">Nothing remembered yet</li></ul>
+    </article>
+  </section>
+
+  <section class="col">
+    <article class="panel grow">
+      <h2>Recent Log</h2>
+      <div class="log-lines scrolly grow" id="logLines"><div class="empty">No log entries</div></div>
+    </article>
+  </section>
+</main>
+
+<div class="toast" id="toast" role="status"></div>
+<script src="hud.js"></script>
+<script type="module" src="globe.js"></script>
+</body>
+</html>
