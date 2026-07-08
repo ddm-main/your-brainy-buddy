@@ -110,6 +110,7 @@
 
 <!-- ================= FINANCE VIEW ================= -->
 <main class="grid finance-grid" id="financeView" hidden>
+  <div class="fin-alerts" id="finAlerts" hidden></div>
   <section class="col">
     <article class="panel">
       <h2>Accounts · Cards · Loans <span class="count" id="acctCount"></span>
@@ -148,7 +149,12 @@
 
   <section class="col">
     <article class="panel">
+      <h2>Spend Trend</h2>
+      <div class="chart-wrap" id="spendChart"><div class="empty">Not enough history yet</div></div>
+    </article>
+    <article class="panel">
       <h2>This Month by Category</h2>
+      <div class="chart-wrap chart-wrap-sm" id="catDonut"></div>
       <div class="cat-bars scrolly" id="catBars"><div class="empty">No spends tracked this month</div></div>
     </article>
     <article class="panel">
@@ -165,6 +171,10 @@
           <button type="submit" title="Add loan">+</button>
         </div>
       </form>
+    </article>
+    <article class="panel">
+      <h2>Needs Review <span class="count" id="reviewCount"></span></h2>
+      <div class="scrolly" id="reviewList"><div class="empty">Nothing to review</div></div>
     </article>
     <article class="panel grow">
       <h2>Statements <span class="count" id="stCount"></span></h2>

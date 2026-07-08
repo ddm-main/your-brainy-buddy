@@ -465,10 +465,85 @@ function renderFinancePanel() {
     : '<li class="empty">Hit “↻ scan” to read transaction mail</li>';
 }
 
+// Dashboard heads-up alerts (unusual spend / missing statement / upcoming
+// payment) computed server-side fresh on every fetch — no dismiss state to
+// track, they just stop showing once the underlying condition clears.
+function renderFinAlerts(alerts) {
+  const el = $("finAlerts");
+  if (!alerts?.length) { el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML = alerts.map((a) => `<span class="fin-alert fin-alert-${esc(a.severity)}">${a.severity === "warn" ? "⚠" : "ℹ"} ${esc(a.message)}</span>`).join("");
+}
+
+// Ambiguous statement-line-item matches (2+ same-amount/date-window
+// candidates) — pick a candidate or confirm it's a new transaction.
+function renderReviewQueue(queue) {
+  $("reviewCount").textContent = queue?.length ? `· ${queue.length}` : "";
+  $("reviewList").innerHTML = queue?.length
+    ? queue.map((r) => `
+      <div class="review-item">
+        <div class="review-top">
+          <span>${esc(r.lineItem.merchant || "unknown merchant")}</span>
+          <span class="amt ${esc(r.lineItem.type)}">${r.lineItem.type === "debit" ? "−" : "+"}₹${r.lineItem.amount.toLocaleString("en-IN")}</span>
+        </div>
+        <div class="review-meta">statement line item · ${esc(r.date)}</div>
+        <div class="chip-row">
+          ${r.candidates.map((c) => `<button class="chip" data-review-resolve="${esc(r.id)}" data-choice="${esc(c.txId)}" title="${esc(c.reason)}">match (${Math.round(c.score * 100)}%)</button>`).join("")}
+          <button class="chip chip-add" data-review-resolve="${esc(r.id)}" data-choice="new">none — add as new</button>
+        </div>
+      </div>`).join("")
+    : '<div class="empty">Nothing to review</div>';
+}
+
+// Hand-rolled SVG bar chart, no charting dependency — last 6 months of
+// spent vs. received from the same monthly totals the dashboard already has.
+function renderSpendChart(totals) {
+  const el = $("spendChart");
+  const months = Object.keys(totals || {}).sort().slice(-6);
+  if (!months.length) { el.innerHTML = '<div class="empty">Not enough history yet</div>'; return; }
+  const W = 280, H = 120, pad = 20;
+  const max = Math.max(1, ...months.flatMap((m) => [totals[m].spent, totals[m].received]));
+  const bw = (W - pad * 2) / months.length;
+  const bars = months.map((m, i) => {
+    const x = pad + i * bw;
+    const spentH = (totals[m].spent / max) * (H - pad * 2);
+    const recvH = (totals[m].received / max) * (H - pad * 2);
+    return `
+      <rect x="${x + 2}" y="${H - pad - spentH}" width="${bw / 2 - 3}" height="${spentH}" fill="var(--alert)" opacity="0.8" rx="2"></rect>
+      <rect x="${x + bw / 2 + 1}" y="${H - pad - recvH}" width="${bw / 2 - 3}" height="${recvH}" fill="var(--good)" opacity="0.8" rx="2"></rect>
+      <text x="${x + bw / 2}" y="${H - pad + 12}" text-anchor="middle" class="chart-label">${esc(m.slice(5))}</text>`;
+  }).join("");
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H + 10}" class="fin-chart">${bars}<line x1="${pad}" y1="${H - pad}" x2="${W - pad}" y2="${H - pad}" class="chart-axis"></line></svg>
+    <div class="chart-legend"><span><i style="background:var(--alert)"></i>spent</span><span><i style="background:var(--good)"></i>received</span></div>`;
+}
+
+// Hand-rolled SVG donut — current month's category split, alongside (not
+// replacing) the existing catBars list so both a quick-scan list and a
+// proportional visual are available.
+function renderCatDonut(cats) {
+  const el = $("catDonut");
+  const total = cats.reduce((s, [, v]) => s + v, 0);
+  if (!total) { el.innerHTML = ""; return; }
+  const colors = ["var(--accent)", "var(--good)", "var(--warn)", "var(--alert)", "var(--accent-dim)", "var(--ink-3)"];
+  const r = 40, cx = 50, cy = 50, circumference = 2 * Math.PI * r;
+  let offset = 0;
+  const segs = cats.slice(0, 6).map(([, v], i) => {
+    const dash = (v / total) * circumference;
+    const seg = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${colors[i % colors.length]}" stroke-width="16"
+      stroke-dasharray="${dash} ${circumference - dash}" stroke-dashoffset="${-offset}" transform="rotate(-90 ${cx} ${cy})"></circle>`;
+    offset += dash;
+    return seg;
+  }).join("");
+  el.innerHTML = `<svg viewBox="0 0 100 100" class="fin-donut">${segs}</svg>`;
+}
+
 function renderFinanceView() {
   if (!FIN) return;
   const p = FIN.profile;
   const month = new Date().toLocaleDateString("en-CA").slice(0, 7);
+  renderFinAlerts(FIN.alerts);
+  renderReviewQueue(FIN.reviewQueue);
+  renderSpendChart(FIN.totals);
 
   /* accounts / cards */
   $("acctCount").textContent = p.accounts.length ? `· ${p.accounts.length}` : "";
@@ -486,11 +561,23 @@ function renderFinanceView() {
         <div class="set-title">Which connected Gmail address(es) get this account's statements?</div>
         <div class="chip-row">${gmailAccts.map((e) => `
           <button class="chip ${a.gmailAddresses?.includes(e) ? "active" : ""}" data-acct-gmail="${esc(a.id)}" data-email="${esc(e)}">${esc(e.split("@")[0])}</button>`).join("") || '<span class="empty">connect Gmail first</span>'}</div>
+        <div class="set-title">Statement PDF passwords — tried in order (banks that change format, or a couple of guesses)</div>
+        ${(a.passwordCount || 0) > 0
+          ? `<div class="chip-row">${Array.from({ length: a.passwordCount }, (_, i) => `
+              <span class="chip-group"><span class="chip active">password ${i + 1}</span>
+                <button class="chip-x" data-pw-remove="${esc(a.id)}" data-pw-index="${i}" title="Remove this password">×</button></span>`).join("")}</div>`
+          : ""}
         <div class="row">
-          <input type="password" class="acct-pw-input" data-acct-pw="${esc(a.id)}" placeholder="statement PDF password" maxlength="60" autocomplete="new-password">
+          <input type="password" class="acct-pw-input" data-acct-pw="${esc(a.id)}" placeholder="add a statement PDF password" maxlength="60" autocomplete="new-password">
           <input type="text" class="acct-hint-input" data-acct-hint="${esc(a.id)}" placeholder="hint (e.g. DDMMYYYY of DOB)" maxlength="80" value="${esc(a.passwordHint || "")}">
-          <button data-acct-pw-save="${esc(a.id)}">save</button>
+          <button data-acct-pw-save="${esc(a.id)}">add</button>
         </div>
+        ${a.type === "credit_card" ? `
+        <div class="set-title">Payment due date (this cycle)</div>
+        <div class="row">
+          <input type="date" class="acct-due-input" data-acct-due="${esc(a.id)}" value="${esc(a.dueDate || "")}">
+          <button data-acct-due-save="${esc(a.id)}">save</button>
+        </div>` : ""}
       </div>`).join("")
     : '<div class="empty">Nothing registered yet — add your banks and cards below. The last-4 digits let me pin transactions to the right account.</div>';
 
@@ -509,18 +596,24 @@ function renderFinanceView() {
     }).join("")
     : '<li class="empty">No goals yet — give me a target, sir</li>';
 
-  /* loans */
+  /* loans — payoffPct/monthsRemaining/totalInterestRemaining/projectedPayoffDate
+     are computed server-side (computeAmortization) so voice answers and the
+     UI always agree. */
   const loans = p.loans || [];
   $("loanCount").textContent = loans.length ? `· ${loans.length}` : "";
   $("loanList").innerHTML = loans.length
     ? loans.map((l) => {
-      const pct = Math.min(100, Math.round(((l.principal - l.outstandingBalance) / l.principal) * 100));
+      const pct = l.payoffPct ?? 0;
+      const payoff = l.monthsRemaining == null
+        ? "EMI doesn't cover interest — will never pay off at this rate"
+        : `${l.monthsRemaining} mo left${l.totalInterestRemaining != null ? ` · ${inr(l.totalInterestRemaining)} interest remaining` : ""}`;
       return `<li class="goal">
         <div class="goal-top"><span>${esc(l.name)}${l.lender ? ` <span class="acct-sub">${esc(l.lender)}</span>` : ""}</span>
           <span class="goal-nums"><b>${inr(l.outstandingBalance)}</b> / ${inr(l.principal)}</span>
           <button class="chip-x" data-del-loan="${esc(l.id)}" title="Remove loan">×</button></div>
         <div class="goal-bar"><div class="goal-fill" style="width:${pct}%"></div></div>
         <div class="goal-meta">${pct}% repaid · EMI ${inr(l.emiAmount)}${l.nextDueDate ? ` · next due ${esc(l.nextDueDate)}` : ""}</div>
+        <div class="goal-meta">${payoff}${l.projectedPayoffDate ? ` · payoff ~${esc(l.projectedPayoffDate)}` : ""}</div>
       </li>`;
     }).join("")
     : '<div class="empty">No loans tracked yet</div>';
@@ -532,6 +625,7 @@ function renderFinanceView() {
   }
   const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
   const max = cats[0]?.[1] || 1;
+  renderCatDonut(cats);
   $("catBars").innerHTML = cats.length
     ? cats.map(([c, v]) => `
       <div class="cat-row" data-cat-filter="${esc(c)}" title="Filter transactions: ${esc(c)}">
@@ -884,6 +978,15 @@ document.addEventListener("click", async (e) => {
     const catF = e.target.closest("[data-cat-filter]");
     if (catF) { finFilter = catF.dataset.catFilter; return renderFinanceView(); }
 
+    const reviewResolve = e.target.closest("[data-review-resolve]");
+    if (reviewResolve) {
+      try {
+        await api("api/finance/reconcile/resolve", { reviewId: reviewResolve.dataset.reviewResolve, choice: reviewResolve.dataset.choice });
+        toast("Reconciled");
+        loadFinance();
+      } catch (err) { toast(err.message, "err"); }
+      return;
+    }
     const delLoan = e.target.closest("[data-del-loan]");
     if (delLoan) {
       if (confirm("Remove this loan?")) {
@@ -915,8 +1018,22 @@ document.addEventListener("click", async (e) => {
       const password = document.querySelector(`[data-acct-pw="${id}"]`)?.value.trim();
       const passwordHint = document.querySelector(`[data-acct-hint="${id}"]`)?.value.trim();
       if (!password) { toast("Enter a password first", "err"); return; }
-      await api("api/finance/accounts", { op: "setPassword", id, account: { password, passwordHint } });
-      toast("Statement password saved (encrypted)"); loadFinance();
+      await api("api/finance/accounts", { op: "addPassword", id, account: { password, passwordHint } });
+      toast("Statement password added (encrypted)"); loadFinance();
+      return;
+    }
+    const pwRemove = e.target.closest("[data-pw-remove]");
+    if (pwRemove) {
+      await api("api/finance/accounts", { op: "removePassword", id: pwRemove.dataset.pwRemove, account: { index: Number(pwRemove.dataset.pwIndex) } });
+      toast("Password removed"); loadFinance();
+      return;
+    }
+    const acctDueSave = e.target.closest("[data-acct-due-save]");
+    if (acctDueSave) {
+      const id = acctDueSave.dataset.acctDueSave;
+      const dueDate = document.querySelector(`[data-acct-due="${id}"]`)?.value || "";
+      await api("api/finance/accounts", { op: "setDueDate", id, account: { dueDate } });
+      toast("Due date saved"); loadFinance();
       return;
     }
 

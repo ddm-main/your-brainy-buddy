@@ -7,9 +7,10 @@
       "institution": "Axis Bank",
       "last4": "2605",
       "note": "",
-      "statementPassword": null,
       "passwordHint": "",
-      "gmailAddresses": []
+      "gmailAddresses": [],
+      "statementPasswords": [],
+      "dueDate": ""
     },
     {
       "id": "04068c15-6e53-45c8-ab7d-597e3db3be70",
@@ -17,7 +18,8 @@
       "name": "Axis Savings",
       "institution": "Axis Bank",
       "last4": "",
-      "note": ""
+      "note": "",
+      "statementPasswords": []
     }
   ],
   "goals": [

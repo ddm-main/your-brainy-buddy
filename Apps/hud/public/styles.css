@@ -298,6 +298,33 @@ body[data-voice="speaking"] .voice-ring {
 .h2-btns { margin-left: auto; display: flex; gap: 6px; }
 .h2-btns .mini-btn { margin-left: 0; }
 
+/* ---------- finance alerts strip ---------- */
+.fin-alerts {
+  grid-column: 1 / -1;
+  display: flex; flex-wrap: wrap; gap: 8px 18px;
+  padding: 8px 4px; margin-bottom: 4px;
+  font-size: 11.5px;
+}
+.fin-alert { display: inline-flex; align-items: center; gap: 5px; }
+.fin-alert-warn { color: var(--warn); }
+.fin-alert-info { color: var(--accent); }
+
+/* ---------- reconciliation review queue ---------- */
+.review-item { padding: 7px 2px; border-top: 1px solid rgba(255,255,255,0.04); }
+.review-item:first-child { border-top: 0; }
+.review-top { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--ink); }
+.review-meta { font-size: 10.5px; color: var(--ink-3); margin: 2px 0 5px; }
+
+/* ---------- hand-rolled finance charts (no charting dependency) ---------- */
+.chart-wrap { padding: 4px 0 2px; }
+.chart-wrap-sm { display: flex; justify-content: center; padding: 6px 0; }
+.fin-chart { width: 100%; height: auto; }
+.chart-label { font-size: 7px; fill: var(--ink-3); font-family: var(--mono); }
+.chart-axis { stroke: var(--surface-edge); stroke-width: 1; }
+.chart-legend { display: flex; gap: 14px; justify-content: center; font-size: 10.5px; color: var(--ink-2); margin-top: 2px; }
+.chart-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.fin-donut { width: 100px; height: 100px; }
+
 .acct-row {
   display: flex; align-items: center; gap: 9px;
   padding: 6px 2px; border-top: 1px solid rgba(255,255,255,.04); font-size: 12.5px;

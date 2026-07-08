@@ -457,8 +457,12 @@ function buildStQuery(profile, { days, sinceDate, untilDate } = {}) {
 }
 
 function loadLedger() {
-  try { return JSON.parse(readFileSync(LEDGER_FILE, 'utf8')); }
-  catch { return { transactions: [], statements: [], scannedAt: null, lastAutoScanAt: null }; }
+  try {
+    const l = JSON.parse(readFileSync(LEDGER_FILE, 'utf8'));
+    l.reviewQueue ??= []; // added for reconciliation review — older ledgers won't have it
+    return l;
+  }
+  catch { return { transactions: [], statements: [], scannedAt: null, lastAutoScanAt: null, reviewQueue: [] }; }
 }
 
 /* -- statement passwords at rest: AES-256-GCM via node:crypto (built-in, no dependency) -- */
@@ -500,17 +504,30 @@ const BUILTIN_RULES = [
   [/vpa|upi_|upi\b/i, 'Transfers'],
 ];
 
+// Accounts used to have one `statementPassword`; banks that change their PDF
+// password format (or cases where Deepak has 2-3 guesses to try) need more
+// than one, so this migrates in place to a `statementPasswords` array the
+// first time an old-shape account is loaded. No data is dropped.
+function migrateAccountPasswords(accounts) {
+  return accounts.map((a) => {
+    if (a.statementPasswords) return a;
+    const { statementPassword, ...rest } = a;
+    return { ...rest, statementPasswords: statementPassword ? [statementPassword] : [] };
+  });
+}
 function loadFinProfile() {
   try {
     const p = JSON.parse(readFileSync(FIN_PROFILE_FILE, 'utf8'));
-    return { accounts: [], goals: [], loans: [], rules: [], overrides: {}, ...p };
+    const merged = { accounts: [], goals: [], loans: [], rules: [], overrides: {}, ...p };
+    merged.accounts = migrateAccountPasswords(merged.accounts);
+    return merged;
   } catch { return { accounts: [], goals: [], loans: [], rules: [], overrides: {} }; }
 }
 // Never echo decrypted/plaintext statement passwords back to any API response.
 function scrubProfileForClient(profile) {
   return {
     ...profile,
-    accounts: profile.accounts.map(({ statementPassword, ...a }) => ({ ...a, hasPassword: !!statementPassword })),
+    accounts: profile.accounts.map(({ statementPasswords, ...a }) => ({ ...a, passwordCount: (statementPasswords || []).length })),
   };
 }
 async function saveFinProfile(p) {
@@ -701,10 +718,27 @@ function normalizeStatementDate(raw) {
 // transactions for the same account within ±2 days by exact amount + type;
 // confirms/links a match (no duplicate created), or creates a new
 // source:'statement' transaction when the alert scan missed it entirely.
-// Ambiguous multi-candidate matches are left unreconciled rather than guessed.
+// Ambiguous multi-candidate matches go to ledger.reviewQueue for a manual
+// pick instead of being guessed or silently dropped.
+// Ranks an ambiguous candidate by date proximity + merchant-token overlap —
+// used only when reconcileStatement can't auto-link (0 or 1 candidate is
+// unambiguous and doesn't need scoring).
+function scoreReconcileCandidate(item, tx, itemTs) {
+  const dayMs = 86400000;
+  const dateDiffDays = Math.round(Math.abs(new Date(tx.date).getTime() - itemTs) / dayMs);
+  const merchantHay = `${tx.merchant || ''} ${tx.subject || ''}`.toLowerCase();
+  const itemTokens = (item.merchant || '').toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+  const tokenHits = itemTokens.filter((w) => merchantHay.includes(w)).length;
+  const merchantScore = itemTokens.length ? tokenHits / itemTokens.length : 0;
+  const dateScore = dateDiffDays === 0 ? 1 : dateDiffDays === 1 ? 0.6 : 0.3;
+  const reason = `${dateDiffDays === 0 ? 'same day' : `${dateDiffDays}d apart`}${merchantScore > 0 ? ', merchant match' : ''}`;
+  return { txId: tx.id, score: Math.round((dateScore * 0.6 + merchantScore * 0.4) * 100) / 100, reason };
+}
+
 function reconcileStatement(statement, lineItems, ledger, accountId) {
   let reconciledCount = 0;
   let addedCount = 0;
+  let queuedCount = 0;
   lineItems.forEach((item, idx) => {
     const date = normalizeStatementDate(item.dateRaw);
     if (!date) return;
@@ -717,7 +751,9 @@ function reconcileStatement(statement, lineItems, ledger, accountId) {
       t.type === item.type &&
       Math.abs(new Date(t.date).getTime() - itemTs) <= 2 * dayMs);
     if (candidates.length === 1) {
+      const dateDiffDays = Math.round(Math.abs(new Date(candidates[0].date).getTime() - itemTs) / dayMs);
       candidates[0].reconciledWith = statement.id;
+      candidates[0].reconcileConfidence = dateDiffDays === 0 ? 'high' : 'medium';
       item.reconciled = true;
       item.reconciledTxId = candidates[0].id;
       reconciledCount++;
@@ -734,10 +770,23 @@ function reconcileStatement(statement, lineItems, ledger, accountId) {
         item.reconciledTxId = id;
         addedCount++;
       }
+    } else {
+      // Ambiguous (2+ same-amount/same-type/nearby-date candidates) — rank
+      // and hand off to the review queue instead of guessing or dropping it.
+      const ranked = candidates
+        .map((t) => scoreReconcileCandidate(item, t, itemTs))
+        .sort((a, b) => b.score - a.score);
+      ledger.reviewQueue.push({
+        id: `review:${statement.id}:${idx}`,
+        statementId: statement.id, accountId, lineItem: item, date,
+        statementAccount: statement.account, statementFrom: statement.from,
+        candidates: ranked, createdAt: new Date().toISOString(),
+      });
+      item.reconciled = false;
+      queuedCount++;
     }
-    // candidates.length > 1: ambiguous — leave unreconciled for manual review
   });
-  return { reconciledCount, addedCount };
+  return { reconciledCount, addedCount, queuedCount };
 }
 
 async function scanFinance(opts = {}) {
@@ -747,6 +796,7 @@ async function scanFinance(opts = {}) {
   const knownSt = new Set(ledger.statements.map((s) => s.id));
   const errors = [];
   let added = 0;
+  let queued = 0;
   const txQuery = buildTxQuery(profile, opts);
   const stQuery = buildStQuery(profile, opts);
   for (const email of Object.keys(tokenStore())) {
@@ -784,15 +834,15 @@ async function scanFinance(opts = {}) {
         };
         const matched = matchAccount({ subject: statement.subject, merchant: '', from: statement.from, account: email }, profile);
         statement.accountId = matched?.id || null;
-        if (matched?.statementPassword) {
+        if (matched?.statementPasswords?.length) {
           try {
             const attachment = findPdfAttachment(msg.payload);
             if (!attachment) throw new Error('no PDF attachment found');
             const bytes = await gmailAttachmentBytes(email, freshSt[i], attachment.attachmentId);
-            const password = decryptSecret(matched.statementPassword);
-            const text = await parseStatementPdf(bytes, [password]);
+            const passwords = matched.statementPasswords.map(decryptSecret);
+            const text = await parseStatementPdf(bytes, passwords);
             const lineItems = extractStatementLineItems(text);
-            reconcileStatement(statement, lineItems, ledger, matched.id);
+            queued += reconcileStatement(statement, lineItems, ledger, matched.id).queuedCount;
             statement.lineItems = lineItems;
             statement.parsed = true;
           } catch (e) {
@@ -809,7 +859,7 @@ async function scanFinance(opts = {}) {
   ledger.scannedAt = new Date().toISOString();
   await saveLedger(ledger);
   await writeExpensesMd(ledger);
-  return { ledger, added, errors };
+  return { ledger, added, errors, queued };
 }
 
 async function maybeAutoScan() {
@@ -849,6 +899,117 @@ function withComputedGoals(profile, decoratedTransactions) {
         .reduce((s, t) => s + t.amount, 0);
       return { ...g, saved: sum };
     }),
+  };
+}
+
+// Reducing-balance amortization simulated forward from the *current*
+// outstandingBalance (not from loan origination) using the stored EMI — this
+// answers "how much longer / how much more interest" from today, which is
+// what a dashboard and voice queries actually need. Capped at 50 years so an
+// EMI too small to cover interest can't spin the loop forever.
+function computeAmortization(loan) {
+  const principal = Number(loan.principal) || 0;
+  const rate = Number(loan.annualRate) || 0;
+  const emi = Number(loan.emiAmount) || 0;
+  const outstanding = Number(loan.outstandingBalance ?? principal);
+  const monthlyRate = rate / 12 / 100;
+  const payoffPct = principal > 0 ? Math.max(0, Math.min(100, Math.round(((principal - outstanding) / principal) * 100))) : 0;
+  if (outstanding <= 0) return { payoffPct: 100, monthsRemaining: 0, totalInterestRemaining: 0, projectedPayoffDate: null };
+  if (emi <= 0) return { payoffPct, monthsRemaining: null, totalInterestRemaining: null, projectedPayoffDate: null };
+  let balance = outstanding;
+  let months = 0;
+  let totalInterest = 0;
+  const maxMonths = 600;
+  while (balance > 0.01 && months < maxMonths) {
+    const interest = balance * monthlyRate;
+    const principalPaid = emi - interest;
+    if (principalPaid <= 0) { months = null; break; } // EMI doesn't cover interest — will never pay off
+    balance -= principalPaid;
+    totalInterest += interest;
+    months++;
+  }
+  let projectedPayoffDate = null;
+  if (months) {
+    const d = new Date();
+    d.setMonth(d.getMonth() + months);
+    projectedPayoffDate = d.toLocaleDateString('en-CA');
+  }
+  return {
+    payoffPct, monthsRemaining: months,
+    totalInterestRemaining: months ? Math.round(totalInterest) : null,
+    projectedPayoffDate,
+  };
+}
+function withComputedLoans(profile) {
+  return { ...profile, loans: (profile.loans || []).map((l) => ({ ...l, ...computeAmortization(l) })) };
+}
+
+// Dashboard-level heads-up alerts, computed fresh on every finance fetch —
+// nothing persisted, so there's no separate "dismiss" state to manage.
+function computeFinanceAlerts(ledger, profile, transactions) {
+  const alerts = [];
+  const today = new Date().toLocaleDateString('en-CA');
+
+  // Unusual spend: this month's per-category spend vs. trailing 3-month average
+  const byMonthCat = {};
+  for (const t of transactions) {
+    if (t.type !== 'debit' || t.currency !== 'INR') continue;
+    const m = t.date.slice(0, 7);
+    (byMonthCat[m] ??= {})[t.category] = (byMonthCat[m][t.category] || 0) + t.amount;
+  }
+  const thisMonth = today.slice(0, 7);
+  const priorMonths = Object.keys(byMonthCat).filter((m) => m < thisMonth).sort().slice(-3);
+  for (const [cat, spent] of Object.entries(byMonthCat[thisMonth] || {})) {
+    if (spent < 1000) continue; // floor — avoid noise on small categories
+    const priorVals = priorMonths.map((m) => byMonthCat[m]?.[cat] || 0).filter((v) => v > 0);
+    if (!priorVals.length) continue;
+    const avg = priorVals.reduce((s, v) => s + v, 0) / priorVals.length;
+    if (spent > avg * 1.5) {
+      alerts.push({
+        type: 'unusual_spend', severity: 'warn', category: cat,
+        message: `${cat} spend this month (₹${Math.round(spent).toLocaleString('en-IN')}) is ${Math.round((spent / avg - 1) * 100)}% above your recent average`,
+      });
+    }
+  }
+
+  // Missing statement: bank/credit_card accounts with nothing ingested in ~35 days
+  const cutoff = Date.now() - 35 * 86400000;
+  for (const a of profile.accounts) {
+    if (a.type !== 'bank' && a.type !== 'credit_card') continue;
+    if (!ledger.statements.some((s) => s.accountId === a.id && s.ts >= cutoff)) {
+      alerts.push({ type: 'missing_statement', severity: 'warn', accountId: a.id, message: `No statement received for ${a.name} in the last 35 days` });
+    }
+  }
+
+  // Upcoming payments: loan EMIs and credit-card dues within 7 days
+  const in7 = Date.now() + 7 * 86400000;
+  const soon = (ts) => ts >= Date.now() - 86400000 && ts <= in7;
+  for (const l of profile.loans || []) {
+    if (l.nextDueDate && soon(new Date(l.nextDueDate).getTime())) {
+      alerts.push({ type: 'upcoming_payment', severity: 'info', loanId: l.id, message: `${l.name} EMI (₹${Math.round(l.emiAmount).toLocaleString('en-IN')}) due ${l.nextDueDate}` });
+    }
+  }
+  for (const a of profile.accounts) {
+    if (a.type === 'credit_card' && a.dueDate && soon(new Date(a.dueDate).getTime())) {
+      alerts.push({ type: 'upcoming_payment', severity: 'info', accountId: a.id, message: `${a.name} payment due ${a.dueDate}` });
+    }
+  }
+
+  return alerts;
+}
+
+// Shared shape for every route that returns the full finance picture — keeps
+// reviewQueue/alerts/computed-loans consistent everywhere instead of each
+// route hand-assembling (and risking drift from) the same object.
+function buildFinanceResponse(ledger, extra = {}) {
+  const profile = loadFinProfile();
+  const transactions = decorateTransactions(ledger, profile);
+  const computedProfile = withComputedLoans(withComputedGoals(profile, transactions));
+  return {
+    ok: true, gmail: gmailStatus(), ...ledger, transactions,
+    totals: financeTotals(ledger), profile: scrubProfileForClient(computedProfile),
+    categories: CATEGORIES, alerts: computeFinanceAlerts(ledger, profile, transactions),
+    ...extra,
   };
 }
 
@@ -1058,7 +1219,7 @@ const TOOLS = [
       const profile = loadFinProfile();
       profile.accounts.push({
         id: crypto.randomUUID(), type, name: name.trim(), institution: institution?.trim() || '',
-        last4: last4 || '', note: '', gmailAddresses: [], statementPassword: null, passwordHint: '',
+        last4: last4 || '', note: '', gmailAddresses: [], statementPasswords: [], passwordHint: '',
       });
       await saveFinProfile(profile);
     },
@@ -1601,40 +1762,49 @@ createServer(async (req, res) => {
       return json(res, 200, { ok: true });
     }
     if (route === 'GET /api/finance') {
-      const ledger = loadLedger();
-      const profile = loadFinProfile();
-      const transactions = decorateTransactions(ledger, profile);
-      return json(res, 200, {
-        ok: true, gmail: gmailStatus(), ...ledger, transactions,
-        totals: financeTotals(ledger), profile: scrubProfileForClient(withComputedGoals(profile, transactions)),
-        categories: CATEGORIES,
-      });
+      return json(res, 200, buildFinanceResponse(loadLedger()));
     }
     if (route === 'POST /api/finance/scan') {
       if (!gmailStatus().connected) return json(res, 400, { error: 'no Gmail account connected' });
-      const { ledger, added, errors } = await scanFinance();
-      const profile = loadFinProfile();
-      const transactions = decorateTransactions(ledger, profile);
-      return json(res, 200, {
-        ok: true, gmail: gmailStatus(), ...ledger, transactions,
-        added, errors, totals: financeTotals(ledger),
-        profile: scrubProfileForClient(withComputedGoals(profile, transactions)), categories: CATEGORIES,
-      });
+      const { ledger, added, errors, queued } = await scanFinance();
+      return json(res, 200, buildFinanceResponse(ledger, { added, errors, queued }));
     }
     if (route === 'POST /api/finance/scan/range') {
       if (!gmailStatus().connected) return json(res, 400, { error: 'no Gmail account connected' });
       const { from, to } = await readBody(req);
       if (!from || !to) return json(res, 400, { error: 'from and to dates required (YYYY-MM-DD)' });
-      const { ledger, added, errors } = await scanFinance({
+      const { ledger, added, errors, queued } = await scanFinance({
         sinceDate: from.replace(/-/g, '/'), untilDate: to.replace(/-/g, '/'),
       });
-      const profile = loadFinProfile();
-      const transactions = decorateTransactions(ledger, profile);
-      return json(res, 200, {
-        ok: true, gmail: gmailStatus(), ...ledger, transactions,
-        added, errors, totals: financeTotals(ledger),
-        profile: scrubProfileForClient(withComputedGoals(profile, transactions)), categories: CATEGORIES,
-      });
+      return json(res, 200, buildFinanceResponse(ledger, { added, errors, queued }));
+    }
+    if (route === 'POST /api/finance/reconcile/resolve') {
+      const { reviewId, choice } = await readBody(req);
+      if (!reviewId || !choice) return json(res, 400, { error: 'reviewId and choice (a transaction id, or "new") required' });
+      const ledger = loadLedger();
+      const idx = ledger.reviewQueue.findIndex((r) => r.id === reviewId);
+      if (idx === -1) return json(res, 400, { error: 'review item not found — it may have already been resolved' });
+      const item = ledger.reviewQueue[idx];
+      if (choice === 'new') {
+        const id = `stmt:${item.statementId}:${reviewId}`;
+        if (!ledger.transactions.some((t) => t.id === id)) {
+          ledger.transactions.push({
+            id, account: item.statementAccount || '', ts: new Date(item.date).getTime(), date: item.date,
+            from: item.statementFrom || '', subject: `Statement line item: ${item.lineItem.merchant}`,
+            amount: item.lineItem.amount, currency: 'INR', type: item.lineItem.type, merchant: item.lineItem.merchant,
+            last4: item.lineItem.last4, reconciledWith: item.statementId, source: 'statement',
+          });
+        }
+      } else {
+        const tx = ledger.transactions.find((t) => t.id === choice);
+        if (!tx) return json(res, 400, { error: 'chosen transaction not found' });
+        tx.reconciledWith = item.statementId;
+        tx.reconcileConfidence = 'manual';
+      }
+      ledger.reviewQueue.splice(idx, 1);
+      await saveLedger(ledger);
+      await writeExpensesMd(ledger);
+      return json(res, 200, buildFinanceResponse(ledger));
     }
     if (route === 'POST /api/finance/receipt') {
       if (!GEMINI_KEY && !OPENROUTER_KEY) return json(res, 400, { error: 'no LLM provider configured (set GEMINI_API_KEY or OPENROUTER_API_KEY)' });
@@ -1645,7 +1815,6 @@ createServer(async (req, res) => {
       try { extracted = await extractReceiptWithLLM(image, mime); }
       catch (e) { return json(res, 400, { error: e.message }); }
       const ledger = loadLedger();
-      const profile = loadFinProfile();
       const date = /^\d{4}-\d{2}-\d{2}$/.test(extracted.date || '') ? extracted.date : new Date().toLocaleDateString('en-CA');
       const id = `receipt:${crypto.randomUUID()}`;
       ledger.transactions.push({
@@ -1656,11 +1825,7 @@ createServer(async (req, res) => {
       });
       await saveLedger(ledger);
       await writeExpensesMd(ledger);
-      const transactions = decorateTransactions(ledger, profile);
-      return json(res, 200, {
-        ok: true, ...ledger, transactions, totals: financeTotals(ledger),
-        profile: scrubProfileForClient(withComputedGoals(profile, transactions)), categories: CATEGORIES,
-      });
+      return json(res, 200, buildFinanceResponse(ledger));
     }
     if (route === 'POST /api/finance/accounts') {
       const { op, id, account } = await readBody(req);
@@ -1668,20 +1833,37 @@ createServer(async (req, res) => {
       if (op === 'add') {
         if (!account?.name?.trim() || !account?.type) return json(res, 400, { error: 'account name and type required' });
         if (account.last4 && !/^\d{4}$/.test(account.last4)) return json(res, 400, { error: 'last4 must be exactly 4 digits' });
+        if (account.dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(account.dueDate)) return json(res, 400, { error: 'dueDate must be YYYY-MM-DD' });
         const gmailAddresses = (account.gmailAddresses || []).filter((e) => Object.keys(tokenStore()).includes(e));
         profile.accounts.push({
           id: crypto.randomUUID(), type: account.type, name: account.name.trim(),
           institution: account.institution?.trim() || '', last4: account.last4 || '', note: account.note?.trim() || '',
-          gmailAddresses, statementPassword: null, passwordHint: account.passwordHint?.trim() || '',
+          gmailAddresses, statementPasswords: [], passwordHint: account.passwordHint?.trim() || '',
+          dueDate: account.dueDate || '', billingCycleDay: Number(account.billingCycleDay) || null,
         });
       } else if (op === 'delete') {
         profile.accounts = profile.accounts.filter((a) => a.id !== id);
-      } else if (op === 'setPassword') {
+      } else if (op === 'addPassword') {
         const a = profile.accounts.find((x) => x.id === id);
         if (!a) return json(res, 400, { error: 'account not found' });
         if (!account?.password?.trim()) return json(res, 400, { error: 'account.password required' });
-        a.statementPassword = encryptSecret(account.password.trim());
+        a.statementPasswords ??= [];
+        a.statementPasswords.push(encryptSecret(account.password.trim()));
         if (account.passwordHint != null) a.passwordHint = account.passwordHint.trim();
+      } else if (op === 'removePassword') {
+        const a = profile.accounts.find((x) => x.id === id);
+        if (!a) return json(res, 400, { error: 'account not found' });
+        const idx = Number(account?.index);
+        if (!Number.isInteger(idx) || idx < 0) return json(res, 400, { error: 'account.index required' });
+        (a.statementPasswords ??= []).splice(idx, 1);
+      } else if (op === 'setDueDate') {
+        const a = profile.accounts.find((x) => x.id === id);
+        if (!a) return json(res, 400, { error: 'account not found' });
+        if (account?.dueDate != null) {
+          if (account.dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(account.dueDate)) return json(res, 400, { error: 'dueDate must be YYYY-MM-DD' });
+          a.dueDate = account.dueDate;
+        }
+        if (account?.billingCycleDay != null) a.billingCycleDay = Number(account.billingCycleDay) || null;
       } else if (op === 'setGmailAddresses') {
         const a = profile.accounts.find((x) => x.id === id);
         if (!a) return json(res, 400, { error: 'account not found' });
@@ -1735,7 +1917,7 @@ createServer(async (req, res) => {
       } else return json(res, 400, { error: 'unknown op' });
       await saveFinProfile(profile);
       await writeExpensesMd(loadLedger());
-      return json(res, 200, { ok: true, profile: scrubProfileForClient(profile) });
+      return json(res, 200, { ok: true, profile: scrubProfileForClient(withComputedLoans(profile)) });
     }
     if (route === 'POST /api/finance/categorize') {
       const { id, category, match } = await readBody(req);
