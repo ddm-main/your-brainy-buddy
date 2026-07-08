@@ -82,11 +82,16 @@ body.settings .gear { transform: rotate(180deg); color: var(--warn); }
   grid-template-columns: minmax(0,1fr) minmax(0,1.06fr) minmax(0,1fr);
   gap: 16px;
   padding: 14px 22px 18px;
-  max-width: 1600px; width: 100%; margin: 0 auto;
+  max-width: min(2200px, 96vw); width: 100%; margin: 0 auto;
   perspective: 1400px;
 }
 .col { display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; }
-.col-center { align-items: center; justify-content: center; gap: 10px; }
+.col-center { align-items: center; justify-content: space-evenly; gap: 10px; }
+
+@media (min-width: 1800px) {
+  .grid { gap: 22px; }
+  .reactor-wrap { width: min(560px, 44vh, 92%); }
+}
 .grow { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
 
 /* panels split available height; lists inside scroll invisibly */
@@ -137,13 +142,19 @@ ul { list-style: none; }
 }
 .action-item { cursor: pointer; border-radius: 5px; padding: 1px 4px; }
 .action-item:hover { background: rgba(74,222,128,.10); color: var(--good); text-decoration: line-through; }
+.project-quickadd { margin-top: 5px; }
+.project-quickadd input {
+  width: 100%; background: rgba(255,255,255,.02); border: 1px solid transparent; border-radius: 6px;
+  color: var(--ink-2); font: inherit; font-size: 11px; padding: 3px 7px;
+}
+.project-quickadd input:focus { background: rgba(255,255,255,.04); border-color: var(--surface-edge); outline: none; color: var(--ink); }
 
 /* ---------- log ---------- */
 .log-lines { font-size: 12px; color: var(--ink-2); display: flex; flex-direction: column; gap: 5px; }
 .log-lines .log-date { color: var(--accent-dim); font-size: 10.5px; letter-spacing: 2px; margin-top: 6px; }
 
 /* ---------- center: globe ---------- */
-.reactor-wrap { position: relative; width: min(400px, 34vh, 90%); aspect-ratio: 1; cursor: pointer; }
+.reactor-wrap { position: relative; width: min(520px, 42vh, 92%); aspect-ratio: 1; cursor: pointer; }
 .reactor-wrap canvas { width: 100%; height: 100%; display: block; }
 .reactor-wrap:hover canvas { filter: drop-shadow(0 0 18px rgba(var(--accent-rgb), .25)); }
 
@@ -232,6 +243,23 @@ body[data-voice="speaking"] .voice-ring {
   #hudView .panel, #hudView .stat, .reactor-wrap, .voice-ring { animation: none !important; }
 }
 
+/* ---------- view switching: fade+rise instead of an instant hidden-toggle ---------- */
+@keyframes viewLeave { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-6px); } }
+@keyframes viewEnter { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.view-leaving { animation: viewLeave .16s ease forwards; }
+.view-entering { animation: viewEnter .25s cubic-bezier(.2,.7,.3,1); }
+@media (prefers-reduced-motion: reduce) {
+  .view-leaving, .view-entering { animation: none !important; }
+}
+
+/* ---------- keyed list-item enter/exit (diffList helper) ---------- */
+.diff-item { transition: opacity .25s ease, transform .25s ease; }
+.diff-item.entering { opacity: 0; transform: translateY(4px); }
+.diff-item.leaving { opacity: 0; transform: translateY(-4px); }
+@media (prefers-reduced-motion: reduce) {
+  .diff-item { transition: none !important; }
+}
+
 /* ---------- finance ---------- */
 .fin-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 7px; flex: 0 0 auto; }
 .fin-chip {
@@ -268,6 +296,15 @@ body[data-voice="speaking"] .voice-ring {
 .acct-row .acct-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .acct-row b { color: var(--ink); font-weight: normal; }
 .acct-row .acct-sub { color: var(--ink-3); font-size: 10.5px; letter-spacing: .5px; }
+.acct-lock-panel {
+  padding: 8px 4px 12px; border-bottom: 1px solid rgba(255,255,255,.04);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.acct-lock-panel input { flex: 1; min-width: 0; }
+.acct-pw-input, .acct-hint-input {
+  background: rgba(255,255,255,.03); border: 1px solid var(--surface-edge); border-radius: 6px;
+  color: var(--ink); font: inherit; font-size: 11.5px; padding: 5px 8px;
+}
 
 .goal { padding: 7px 2px; border-top: 1px solid rgba(255,255,255,.04); }
 .goal:first-child { border-top: 0; }
@@ -412,6 +449,28 @@ code { color: var(--accent-dim); font-size: 11px; }
 /* memory (settings) */
 .memory-list li { padding: 4px 0; font-size: 12px; color: var(--ink-2); }
 .memory-list .cat { color: var(--accent-dim); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; margin-right: 7px; }
+
+/* ---------- mail reader overlay ---------- */
+.mail-reader { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; }
+.mail-reader-backdrop { position: absolute; inset: 0; background: rgba(3,7,12,.6); backdrop-filter: blur(2px); }
+.mail-reader-panel {
+  position: relative; width: min(640px, 92vw); max-height: 80vh;
+  display: flex; flex-direction: column; padding: 16px 18px; gap: 10px;
+}
+.mail-reader-head { display: flex; align-items: center; gap: 10px; }
+.mail-reader-subject { flex: 1 1 auto; font-size: 13px; font-weight: 600; color: var(--ink); }
+.mail-reader-actions { display: flex; gap: 6px; }
+.mail-reader-actions .mini-btn, #mailReaderClose { margin-left: 0; }
+.mail-reader-from { font-size: 11.5px; color: var(--ink-3); }
+.mail-reader-body { flex: 1 1 auto; white-space: pre-wrap; font-size: 12.5px; line-height: 1.5; color: var(--ink-2); padding-right: 4px; }
+.mail-reply-form { display: flex; flex-direction: column; gap: 8px; }
+.mail-reply-form textarea {
+  resize: vertical; min-height: 80px; background: rgba(255,255,255,.03);
+  border: 1px solid var(--surface-edge); border-radius: 8px; color: var(--ink);
+  font: inherit; font-size: 12.5px; padding: 8px 10px;
+}
+.mail-reply-form button { align-self: flex-end; }
+#mailReaderReplyToggle { align-self: flex-start; }
 
 /* ---------- toast ---------- */
 .toast {

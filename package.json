@@ -4,9 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "PORT=8080 node Apps/hud/server.mjs",
-    "build": "rm -rf dist && mkdir -p dist && cp -r Apps/hud/public/. dist/",
-    "build:dev": "rm -rf dist && mkdir -p dist && cp -r Apps/hud/public/. dist/",
-    "start": "PORT=8080 node Apps/hud/server.mjs"
+    "dev": "npm ci && PORT=8080 node Apps/hud/server.mjs",
+    "build": "npm ci && rm -rf dist && mkdir -p dist && cp -r Apps/hud/public/. dist/",
+    "build:dev": "npm ci && rm -rf dist && mkdir -p dist && cp -r Apps/hud/public/. dist/",
+    "start": "npm ci && PORT=8080 node Apps/hud/server.mjs"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^4.0.0"
   }
 }

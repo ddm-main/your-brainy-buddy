@@ -6,10 +6,10 @@
 .gmail-token.json
 .gmail-tokens.json
 
-# Apps/hud is a zero-dependency Node server by design — never let npm/bun
-# tooling creep back in and break the Lovable <-> VS Code parity.
+# npm is the only supported package manager here — package-lock.json is
+# committed intentionally for reproducible `npm ci` in Lovable's cloud build
+# and local dev (Apps/hud gained its first real dependency: pdfjs-dist, for
+# password-protected statement PDFs). node_modules/dist stay ignored as
+# build output.
 node_modules/
 dist/
-bun.lock
-package-lock.json
-yarn.lock

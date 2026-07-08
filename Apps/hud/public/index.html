@@ -83,12 +83,12 @@
 
   <section class="col" id="colRight">
     <article class="panel tilt" id="inboxPanel" data-panel="inbox">
-      <h2>Inbox <span class="count" id="inboxCount"></span></h2>
+      <h2>Quick Capture <span class="count" id="inboxCount"></span></h2>
       <form class="quick-form" id="captureForm">
         <input type="text" id="captureInput" placeholder="capture a thought, task, or link…" maxlength="500" autocomplete="off">
-        <button type="submit" title="Capture to inbox">+</button>
+        <button type="submit" title="Capture a note">+</button>
       </form>
-      <ul class="inbox-list scrolly" id="inboxList"><li class="empty">Inbox zero. Immaculate, sir.</li></ul>
+      <ul class="inbox-list scrolly" id="inboxList"><li class="empty">Nothing captured. Immaculate, sir.</li></ul>
     </article>
     <article class="panel tilt" id="gmailPanel" data-panel="mail">
       <h2>Recent Mail <span class="count" id="mailCount"></span>
@@ -142,6 +142,21 @@
       <h2>This Month by Category</h2>
       <div class="cat-bars scrolly" id="catBars"><div class="empty">No spends tracked this month</div></div>
     </article>
+    <article class="panel">
+      <h2>Loans <span class="count" id="loanCount"></span></h2>
+      <div class="scrolly" id="loanList"><div class="empty">No loans tracked yet</div></div>
+      <form class="quick-form stack" id="loanForm">
+        <div class="row">
+          <input type="text" id="loanName" placeholder="name — e.g. Home Loan" maxlength="40" autocomplete="off">
+          <input type="text" id="loanLender" placeholder="lender" maxlength="40" autocomplete="off">
+        </div>
+        <div class="row">
+          <input type="number" id="loanPrincipal" placeholder="principal ₹" min="1" autocomplete="off">
+          <input type="number" id="loanEmi" placeholder="EMI ₹" min="0" autocomplete="off">
+          <button type="submit" title="Add loan">+</button>
+        </div>
+      </form>
+    </article>
     <article class="panel grow">
       <h2>Statements <span class="count" id="stCount"></span></h2>
       <div class="scrolly" id="stList"><div class="empty">No statements found yet</div></div>
@@ -151,9 +166,17 @@
   <section class="col">
     <article class="panel grow">
       <h2>Transactions <span class="count" id="txCount"></span>
-        <button class="mini-btn" id="finScanFull" title="Rescan mail">↻ scan</button>
+        <span class="h2-btns">
+          <button class="mini-btn" id="finAutoCat" title="Auto-categorize transactions in Other using JARVIS">✨ categorize</button>
+          <button class="mini-btn" id="finScanFull" title="Rescan mail">↻ scan</button>
+        </span>
       </h2>
       <div class="chip-row fin-filter" id="catFilter"></div>
+      <form class="quick-form" id="scanRangeForm" title="Scan a custom date range (bypasses the daily auto-scan throttle)">
+        <input type="date" id="scanRangeFrom" title="From date">
+        <input type="date" id="scanRangeTo" title="To date">
+        <button type="submit">Scan range</button>
+      </form>
       <ul class="fin-list tx-full scrolly" id="txFullList"><li class="empty">No transactions yet</li></ul>
       <div class="empty fin-hint">click a category tag to correct it — JARVIS learns the rule</div>
     </article>
@@ -169,10 +192,6 @@
         <div class="set-title">Supabase backend</div>
         <div id="supaStatus" class="set-body">checking…</div>
       </div>
-      <div class="set-block">
-        <div class="set-title">Gmail accounts <span class="empty">read-only · tokens stay on this machine</span></div>
-        <div id="gmailAccounts" class="set-body">—</div>
-      </div>
     </article>
     <article class="panel">
       <h2>Display</h2>
@@ -187,6 +206,10 @@
       <div class="set-block">
         <div class="set-title">Accent</div>
         <div class="set-body chip-row" id="accentChips"></div>
+      </div>
+      <div class="set-block">
+        <div class="set-title">Voice language</div>
+        <div class="set-body chip-row" id="languageChips"></div>
       </div>
     </article>
   </section>
@@ -214,12 +237,50 @@
   </section>
 
   <section class="col">
+    <article class="panel">
+      <h2>Gmail accounts <span class="empty">read/write · tokens stay on this machine</span></h2>
+      <div id="gmailAccounts" class="set-body">—</div>
+    </article>
     <article class="panel grow">
       <h2>Recent Log</h2>
       <div class="log-lines scrolly grow" id="logLines"><div class="empty">No log entries</div></div>
     </article>
   </section>
 </main>
+
+<div class="mail-reader" id="mailReader" hidden>
+  <div class="mail-reader-backdrop" id="mailReaderBackdrop"></div>
+  <div class="mail-reader-panel panel">
+    <div class="mail-reader-head">
+      <button class="mini-btn" id="mailReaderClose" title="Close">×</button>
+      <span class="mail-reader-subject" id="mailReaderSubject"></span>
+      <span class="mail-reader-actions">
+        <button class="mini-btn" id="mailReaderUnread" title="Toggle read/unread">●</button>
+        <button class="mini-btn" id="mailReaderTrash" title="Delete">🗑</button>
+        <a class="mini-btn" id="mailReaderExternal" href="#" target="_blank" title="Open in Gmail">⤢</a>
+      </span>
+    </div>
+    <div class="mail-reader-from" id="mailReaderFrom"></div>
+    <div class="mail-reader-body scrolly" id="mailReaderBody"></div>
+    <form class="mail-reply-form" id="mailReplyForm" hidden>
+      <textarea id="mailReplyText" placeholder="Type your reply…" maxlength="4000"></textarea>
+      <button type="submit">Send reply</button>
+    </form>
+    <button class="mini-btn" id="mailReaderReplyToggle">↩ Reply</button>
+  </div>
+</div>
+
+<div class="mail-reader" id="projectDetail" hidden>
+  <div class="mail-reader-backdrop" id="projectDetailBackdrop"></div>
+  <div class="mail-reader-panel panel">
+    <div class="mail-reader-head">
+      <button class="mini-btn" id="projectDetailClose" title="Close">×</button>
+      <span class="mail-reader-subject" id="projectDetailTitle"></span>
+    </div>
+    <div class="mail-reader-from" id="projectDetailMeta"></div>
+    <div class="mail-reader-body scrolly" id="projectDetailBody"></div>
+  </div>
+</div>
 
 <div class="toast" id="toast" role="status"></div>
 <script src="hud.js"></script>

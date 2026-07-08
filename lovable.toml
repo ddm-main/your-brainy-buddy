@@ -1,4 +1,6 @@
 [run]
-dev = "sh -c 'PORT=8080 node Apps/hud/server.mjs'"
-"build:dev" = "sh -c 'rm -rf dist && mkdir -p dist && cp -r Apps/hud/public/. dist/'"
-build = "sh -c 'rm -rf dist && mkdir -p dist && cp -r Apps/hud/public/. dist/'"
+# Apps/hud gained its first real dependency (pdfjs-dist, for password-protected
+# statement PDFs) — keep these commands in sync with package.json's scripts.
+dev = "sh -c 'npm ci && PORT=8080 node Apps/hud/server.mjs'"
+"build:dev" = "sh -c 'npm ci && rm -rf dist && mkdir -p dist && cp -r Apps/hud/public/. dist/'"
+build = "sh -c 'npm ci && rm -rf dist && mkdir -p dist && cp -r Apps/hud/public/. dist/'"

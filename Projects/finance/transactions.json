@@ -1,6 +1,36 @@
 {
   "transactions": [
     {
+      "id": "19f4092f63fa2139",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1783494800000,
+      "date": "2026-07-08",
+      "from": "Axis Bank Alerts",
+      "subject": "INR 11.2 spent on credit card no. XX2605",
+      "amount": 11.2,
+      "currency": "INR",
+      "type": "debit",
+      "merchant": "",
+      "last4": "2605",
+      "reconciledWith": null,
+      "source": "alert"
+    },
+    {
+      "id": "19f409178ecc807b",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1783494702000,
+      "date": "2026-07-08",
+      "from": "Axis Bank Alerts",
+      "subject": "INR 11.25 spent on credit card no. XX2605",
+      "amount": 11.25,
+      "currency": "INR",
+      "type": "debit",
+      "merchant": "",
+      "last4": "2605",
+      "reconciledWith": null,
+      "source": "alert"
+    },
+    {
       "id": "19f3d03bb8da60d6",
       "account": "ddongarecc@gmail.com",
       "ts": 1783435081000,
@@ -1479,6 +1509,18 @@
       "subject": "Your SBI Card BPCL Monthly Statement -May 2026"
     },
     {
+      "id": "19de952d3c5be2a6",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1777736005000,
+      "date": "2026-05-02",
+      "from": "SBI Credit Card Statement",
+      "subject": "Your CASHBACK SBI Card Monthly Statement -May 2026",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
+    },
+    {
       "id": "19dcf837a28f33e6",
       "account": "ddongare07@gmail.com",
       "ts": 1777302992000,
@@ -1591,6 +1633,42 @@
       "subject": "CDSL Consolidated Account Statement (CAS) across Mutual Funds and Depositories for-MAR2026-855999291-2-1"
     },
     {
+      "id": "19d543749d05c02e",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1775234394000,
+      "date": "2026-04-03",
+      "from": "SBI Credit Card Statement",
+      "subject": "Your SBI Card BPCL Monthly Statement -Apr 2026",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
+    },
+    {
+      "id": "19d503a9fd8493aa",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1775167502000,
+      "date": "2026-04-03",
+      "from": "SBI Credit Card Statement",
+      "subject": "Your CASHBACK SBI Card Monthly Statement -Apr 2026",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
+    },
+    {
+      "id": "19d3801febae2899",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1774761143000,
+      "date": "2026-03-29",
+      "from": "HDFC Bank Cards",
+      "subject": "Your HDFC Bank - Millennia Credit Card Statement - March-2026",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
+    },
+    {
       "id": "19d33547d9a419ae",
       "account": "ddongare07@gmail.com",
       "ts": 1774682642000,
@@ -1607,6 +1685,18 @@
       "subject": "Important : New statement for your ICICI Bank card XXXX-6003 is here"
     },
     {
+      "id": "19d0f5b7e9104911",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1774079141000,
+      "date": "2026-03-21",
+      "from": "",
+      "subject": "Amazon Pay ICICI Bank Credit Card Statement for the period February 21, 2026 to March 20, 2026",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
+    },
+    {
       "id": "19d0b6515aaf75f6",
       "account": "msdeepakdon@gmail.com",
       "ts": 1774012596000,
@@ -1615,12 +1705,36 @@
       "subject": "Statement of Account for Folio No. XXXXX845 in SBI Mutual Fund"
     },
     {
+      "id": "19d03ceacda732f6",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1773827360000,
+      "date": "2026-03-18",
+      "from": "Axis Bank",
+      "subject": "Convenience delivered: Access your credit card statement instantly!",
+      "accountId": "505fdaa6-83fa-4431-86c7-4be674e17ad9",
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
+    },
+    {
       "id": "19cfdd4c30608e43",
       "account": "ddongare07@gmail.com",
       "ts": 1773785082000,
       "date": "2026-03-18",
       "from": "SBI Mutual Fund",
       "subject": "Statement of Account for Folio No. XXXXX466 in SBI Mutual Fund"
+    },
+    {
+      "id": "19cfd90ee3df0df0",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1773780650000,
+      "date": "2026-03-18",
+      "from": "SBI Credit Card Statement",
+      "subject": "Your CASHBACK SBI Card Monthly Statement -Jan 2026",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
     },
     {
       "id": "19ce8c8093dd73fe",
@@ -1661,6 +1775,54 @@
       "date": "2026-03-08",
       "from": "eCAS@cdslstatement.com",
       "subject": "CDSL Consolidated Account Statement (CAS) across Mutual Funds and Depositories for-FEB2026-829011403-1-1"
+    },
+    {
+      "id": "19cb49c455d1c2b6",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1772556664000,
+      "date": "2026-03-03",
+      "from": "Estatement",
+      "subject": "ICICI Bank Statement from February 01, 2026 to February 28, 2026 for XXXXXXXX3037",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
+    },
+    {
+      "id": "19cb007bfa66f8b2",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1772479815000,
+      "date": "2026-03-03",
+      "from": "SBI Credit Card Statement",
+      "subject": "Your CASHBACK SBI Card Monthly Statement -Mar 2026",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
+    },
+    {
+      "id": "19ca7ce7ff980042",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1772341851000,
+      "date": "2026-03-01",
+      "from": "HDFC Bank Cards",
+      "subject": "Your HDFC Bank - Millennia Credit Card Statement - February-2026",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
+    },
+    {
+      "id": "19c80c0133326a8c",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1771686592000,
+      "date": "2026-02-21",
+      "from": "",
+      "subject": "Amazon Pay ICICI Bank Credit Card Statement for the period January 21, 2026 to February 20, 2026",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
     },
     {
       "id": "19c7ee341659d7da",
@@ -1711,6 +1873,54 @@
       "subject": "CDSL Consolidated Account Statement (CAS) across Mutual Funds and Depositories for-JAN2026-823247073-1-1"
     },
     {
+      "id": "19c238efbe0f1f9f",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1770123091000,
+      "date": "2026-02-03",
+      "from": "SBI Credit Card Statement",
+      "subject": "Your SBI Card BPCL Monthly Statement -Feb 2026",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
+    },
+    {
+      "id": "19c1ff1d0257cf09",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1770062457000,
+      "date": "2026-02-03",
+      "from": "SBI Credit Card Statement",
+      "subject": "Your CASHBACK SBI Card Monthly Statement -Feb 2026",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
+    },
+    {
+      "id": "19c1ae85a643530d",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1769977958000,
+      "date": "2026-02-02",
+      "from": "Estatement",
+      "subject": "ICICI Bank Statement from January 01, 2026 to January 31, 2026 for XXXXXXXX3037",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
+    },
+    {
+      "id": "19c08450b2a39363",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1769665265000,
+      "date": "2026-01-29",
+      "from": "HDFC Bank Cards",
+      "subject": "Your HDFC Bank - Millennia Credit Card Statement - January-2026",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
+    },
+    {
       "id": "19c074cf20a53b7e",
       "account": "msdeepakdon@gmail.com",
       "ts": 1769649009000,
@@ -1725,6 +1935,18 @@
       "date": "2026-01-22",
       "from": "CRED",
       "subject": "Important : New statement for your ICICI Bank card XXXX-6003 is here"
+    },
+    {
+      "id": "19bdf8b73df471d2",
+      "account": "ddongarecc@gmail.com",
+      "ts": 1768982011000,
+      "date": "2026-01-21",
+      "from": "",
+      "subject": "Amazon Pay ICICI Bank Credit Card Statement for the period December 21, 2025 to January 20, 2026",
+      "accountId": null,
+      "parsed": false,
+      "parseError": null,
+      "lineItems": []
     },
     {
       "id": "19bd8b5d7c663ad8",
@@ -1759,5 +1981,6 @@
       "subject": "CDSL Consolidated Account Statement (CAS) across Mutual Funds and Depositories for-DEC2025-781492777-1-1"
     }
   ],
-  "scannedAt": "2026-07-08T05:16:31.199Z"
+  "scannedAt": "2026-07-08T08:06:10.321Z",
+  "lastAutoScanAt": "2026-07-08T08:02:02.748Z"
 }

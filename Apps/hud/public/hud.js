@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const daysAgo = (iso) => Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
 
-let SETTINGS = { accent: "#35d6ed", refreshSeconds: 30, panels: { focus: true, projects: true, finance: true, inbox: true, mail: true } };
+let SETTINGS = { accent: "#35d6ed", refreshSeconds: 30, language: "auto", panels: { focus: true, projects: true, finance: true, inbox: true, mail: true } };
 let refreshTimer;
 
 /* ---------- clock & date ---------- */
@@ -40,6 +40,15 @@ function hexToRgb(hex) {
   return `${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}`;
 }
 const ACCENTS = ["#35d6ed", "#ff4d4d", "#4ade80", "#fbbf24"];
+// BCP-47 tag → label. "auto" lets the browser's default mic language handle
+// input; JARVIS always replies in whichever of these three the question was
+// asked in, regardless of this setting.
+const LANGUAGES = [
+  ["auto", "Auto"],
+  ["en-IN", "English"],
+  ["hi-IN", "हिंदी"],
+  ["mr-IN", "मराठी"],
+];
 
 function applySettings() {
   document.documentElement.style.setProperty("--accent", SETTINGS.accent);
@@ -64,15 +73,34 @@ function renderSettingsControls() {
     <button class="chip ${SETTINGS.refreshSeconds === s ? "active" : ""}" data-interval="${s}">${s}s</button>`).join("");
   $("accentChips").innerHTML = ACCENTS.map((c) => `
     <button class="swatch ${SETTINGS.accent === c ? "active" : ""}" data-accent="${c}" style="background:${c}" title="${c}"></button>`).join("");
+  $("languageChips").innerHTML = LANGUAGES.map(([tag, label]) => `
+    <button class="chip ${(SETTINGS.language || "auto") === tag ? "active" : ""}" data-language="${tag}">${label}</button>`).join("");
 }
 
 /* ---------- view toggle: hud | settings | finance ---------- */
 function setView(name) {
-  document.body.classList.toggle("settings", name === "settings");
-  $("hudView").hidden = name !== "hud";
-  $("settingsView").hidden = name !== "settings";
-  $("financeView").hidden = name !== "finance";
-  if (name === "finance") renderFinanceView();
+  const views = { hud: $("hudView"), settings: $("settingsView"), finance: $("financeView") };
+  const current = Object.keys(views).find((k) => !views[k].hidden);
+  if (current === name) return;
+  const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const finish = () => {
+    document.body.classList.toggle("settings", name === "settings");
+    for (const k of Object.keys(views)) views[k].hidden = k !== name;
+    if (!reduced) {
+      const next = views[name];
+      next.classList.remove("view-entering");
+      void next.offsetWidth; // restart the animation even if the class was already present
+      next.classList.add("view-entering");
+    }
+    if (name === "finance") renderFinanceView();
+  };
+  const currentEl = current && views[current];
+  if (currentEl && !reduced) {
+    currentEl.classList.add("view-leaving");
+    setTimeout(() => { currentEl.classList.remove("view-leaving"); finish(); }, 160);
+  } else {
+    finish();
+  }
 }
 
 /* ---------- panel tilt (CSS 3D) — cached nodes, one update per frame ---------- */
@@ -103,6 +131,8 @@ document.addEventListener("pointerleave", () => {
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let voiceState = "idle"; // idle | listening | thinking | speaking
 let recognizer = null, speakTimer = null;
+let conversationMode = false; // long-press starts a multi-turn conversation; plain click stays single-shot
+let longPressFired = false;
 
 function setVoiceState(state, statusText) {
   voiceState = state;
@@ -111,13 +141,20 @@ function setVoiceState(state, statusText) {
   window.dispatchEvent(new CustomEvent("voice:state", { detail: state }));
 }
 
-let cachedVoice;
+let cachedVoice, cachedVoiceLang;
 function jarvisVoice() {
-  if (cachedVoice) return cachedVoice;
+  const tag = SETTINGS.language && SETTINGS.language !== "auto" ? SETTINGS.language : "en-IN";
+  if (cachedVoice && cachedVoiceLang === tag) return cachedVoice;
+  cachedVoiceLang = tag;
   const voices = speechSynthesis.getVoices();
-  const prefer = ["Google UK English Male", "Daniel", "Ryan", "George", "Microsoft Ryan Online (Natural) - English (United Kingdom)"];
-  cachedVoice = prefer.map((n) => voices.find((v) => v.name.includes(n))).find(Boolean)
-    || voices.find((v) => v.lang === "en-GB") || voices.find((v) => v.lang.startsWith("en")) || null;
+  const short = tag.split("-")[0];
+  if (short === "en") {
+    const prefer = ["Google UK English Male", "Daniel", "Ryan", "George", "Microsoft Ryan Online (Natural) - English (United Kingdom)"];
+    cachedVoice = prefer.map((n) => voices.find((v) => v.name.includes(n))).find(Boolean)
+      || voices.find((v) => v.lang === "en-GB") || voices.find((v) => v.lang.startsWith("en")) || null;
+  } else {
+    cachedVoice = voices.find((v) => v.lang === tag) || voices.find((v) => v.lang.startsWith(short)) || null;
+  }
   return cachedVoice;
 }
 if ("speechSynthesis" in window) speechSynthesis.onvoiceschanged = () => (cachedVoice = null);
@@ -129,7 +166,10 @@ function speak(text) {
   const v = jarvisVoice();
   if (v) u.voice = v;
   u.rate = 1.04; u.pitch = 0.92;
-  u.onend = u.onerror = () => setVoiceState("idle");
+  u.onend = u.onerror = () => {
+    setVoiceState("idle");
+    if (conversationMode) startListening(); // re-arm for the next turn
+  };
   setVoiceState("speaking");
   speechSynthesis.speak(u);
 }
@@ -161,13 +201,10 @@ async function askJarvis(question) {
   }
 }
 
-function toggleVoice() {
-  if (voiceState === "listening") { recognizer?.stop(); return; }
-  if (voiceState === "speaking") { speechSynthesis.cancel(); setVoiceState("idle"); return; }
-  if (voiceState === "thinking") return;
-  if (!SR) { toast("Voice input needs Chrome or Edge (Web Speech API)", "err"); return; }
+function startListening() {
+  if (!SR) { toast("Voice input needs Chrome or Edge (Web Speech API)", "err"); conversationMode = false; return; }
   recognizer = new SR();
-  recognizer.lang = "en-IN";
+  recognizer.lang = SETTINGS.language && SETTINGS.language !== "auto" ? SETTINGS.language : "en-IN";
   recognizer.interimResults = true;
   recognizer.maxAlternatives = 1;
   let transcript = "";
@@ -181,6 +218,7 @@ function toggleVoice() {
   };
   recognizer.onerror = (ev) => {
     setVoiceState("idle");
+    conversationMode = false;
     if (ev.error === "not-allowed") toast("Microphone blocked — allow mic access for localhost", "err");
     else if (ev.error !== "aborted" && ev.error !== "no-speech") toast(`voice error: ${ev.error}`, "err");
     if (ev.error === "no-speech") $("voiceYou").textContent = "» (heard nothing, sir)";
@@ -188,41 +226,116 @@ function toggleVoice() {
   recognizer.onend = () => {
     if (voiceState !== "listening") return;
     if (transcript) askJarvis(transcript);
-    else setVoiceState("idle");
+    else { setVoiceState("idle"); conversationMode = false; }
   };
-  try { recognizer.start(); } catch { setVoiceState("idle"); }
+  try { recognizer.start(); } catch { setVoiceState("idle"); conversationMode = false; }
+}
+
+// Plain click: single-shot ask (today's default behavior, unchanged). A
+// long-press on the brand/globe instead starts a standing conversation —
+// after each spoken reply, listening re-arms automatically until the user
+// clicks again to stop (see startConversation / the pointer handlers below).
+function toggleVoice() {
+  if (voiceState === "listening") { conversationMode = false; recognizer?.stop(); return; }
+  if (voiceState === "speaking") { conversationMode = false; speechSynthesis.cancel(); setVoiceState("idle"); return; }
+  if (voiceState === "thinking") return;
+  startListening();
+}
+
+function startConversation() {
+  if (voiceState !== "idle") return;
+  conversationMode = true;
+  toast("Conversation mode — click JARVIS again to stop", "ok");
+  startListening();
+}
+
+// Long-press (550ms) the brand/globe to start conversation mode; a normal
+// click still falls through to the single-shot toggleVoice() in the main
+// click handler below (guarded by longPressFired so it doesn't double-fire).
+{
+  let pressTimer = null;
+  const cancelPress = () => clearTimeout(pressTimer);
+  [$("brandBtn"), $("reactorWrap")].filter(Boolean).forEach((el) => {
+    el.addEventListener("pointerdown", () => {
+      longPressFired = false;
+      clearTimeout(pressTimer);
+      pressTimer = setTimeout(() => { longPressFired = true; startConversation(); }, 550);
+    });
+    el.addEventListener("pointerup", cancelPress);
+    el.addEventListener("pointerleave", cancelPress);
+    el.addEventListener("pointercancel", cancelPress);
+  });
 }
 
 /* ---------- renderers ---------- */
+// Minimal keyed-list diff: reconciles `container`'s children against `items`
+// (matched by keyFn) so unchanged rows stay untouched and only real
+// additions/removals animate in/out — instead of a full innerHTML replace
+// on every refresh. renderFn(item, el) sets el's className/attrs/innerHTML;
+// diff-item bookkeeping classes are applied on top, not overwritten.
+function diffList(container, items, keyFn, renderFn, tag = "div") {
+  const existing = new Map([...container.children].map((el) => [el.dataset.key, el]));
+  const frag = document.createDocumentFragment();
+  for (const item of items) {
+    const key = String(keyFn(item));
+    let el = existing.get(key);
+    const isNew = !el;
+    if (el) existing.delete(key);
+    else { el = document.createElement(tag); el.dataset.key = key; }
+    renderFn(item, el);
+    el.classList.add("diff-item");
+    el.classList.remove("leaving");
+    if (isNew) el.classList.add("entering");
+    frag.appendChild(el);
+  }
+  for (const stale of existing.values()) {
+    stale.classList.add("leaving");
+    stale.addEventListener("transitionend", () => stale.remove(), { once: true });
+    setTimeout(() => stale.remove(), 400);
+  }
+  container.innerHTML = "";
+  container.append(frag, ...existing.values());
+  requestAnimationFrame(() => container.querySelectorAll(".entering").forEach((el) => el.classList.remove("entering")));
+}
+
 function renderFocus(logs) {
   const today = new Date().toLocaleDateString("en-CA");
   const todayLog = logs.find((l) => l.log_date === today);
   const el = $("focusList");
   const section = todayLog ? (todayLog.content.split(/^##\s*Today'?s Focus\s*$/mi)[1] || "") : "";
-  const items = [...section.matchAll(/^-\s*\[([ xX])\]\s*(.+)$/gm)];
+  const items = [...section.matchAll(/^-\s*\[([ xX])\]\s*(.+)$/gm)].map(([, done, text]) => ({ done: done.trim().toLowerCase() === "x", text: text.trim() }));
   if (!items.length) { el.innerHTML = '<li class="empty">No focus set — run /brief or add one below</li>'; return; }
-  el.innerHTML = items.map(([, done, text]) => {
-    const isDone = done.trim().toLowerCase() === "x";
-    return `<li class="${isDone ? "done" : ""} clickable" data-text="${esc(text)}" data-done="${isDone}" title="Click to toggle">
-      <span class="box">${isDone ? "◉" : "◯"}</span><span>${esc(text)}</span></li>`;
-  }).join("");
+  diffList(el, items, (i) => i.text, (i, li) => {
+    li.className = i.done ? "done clickable" : "clickable";
+    li.dataset.text = i.text;
+    li.dataset.done = i.done;
+    li.title = "Click to toggle";
+    li.innerHTML = `<span class="box">${i.done ? "◉" : "◯"}</span><span>${esc(i.text)}</span>`;
+  }, "li");
 }
 
 function renderProjects(projects, actions) {
   $("projectCount").textContent = projects.length ? `· ${projects.length}` : "";
   const el = $("projectList");
   if (!projects.length) { el.innerHTML = '<div class="empty">No active projects — hit “+ new”</div>'; return; }
-  el.innerHTML = projects.map((p) => {
+  diffList(el, projects, (p) => p.id, (p, div) => {
     const acts = actions.filter((a) => a.project_id === p.id);
     const stale = daysAgo(p.updated_at) > 14;
-    return `<div class="project">
-      <div class="project-name">${esc(p.title)}<span class="badge">${esc(p.status)}</span></div>
+    const total = p.totalActions || 0;
+    const pct = total ? Math.round(((p.doneActions || 0) / total) * 100) : 0;
+    div.className = "project";
+    div.innerHTML = `
+      <div class="project-name clickable" data-project-open="${esc(p.slug || p.id)}" title="Click for full detail">${esc(p.title)}<span class="badge">${esc(p.status)}</span></div>
+      ${total ? `<div class="goal-bar"><div class="goal-fill" style="width:${pct}%"></div></div>` : ""}
       ${acts.length
         ? acts.slice(0, 3).map((a) => `<div class="project-meta action-item" data-action="${esc(a.id)}" title="Click to complete">◯ ${esc(a.description)}</div>`).join("")
         : '<div class="project-meta stale">⚠ no next action</div>'}
       ${stale ? '<div class="project-meta stale">⚠ stale — untouched 14+ days</div>' : ""}
-    </div>`;
-  }).join("");
+      <form class="project-quickadd" data-project-slug="${esc(p.slug || p.id)}">
+        <input type="text" placeholder="+ add next action…" maxlength="140" autocomplete="off">
+      </form>
+    `;
+  });
 }
 
 function renderLog(logs) {
@@ -238,10 +351,11 @@ function renderLog(logs) {
 function renderInbox(inbox) {
   $("inboxCount").textContent = inbox.length ? `· ${inbox.length}` : "";
   const el = $("inboxList");
-  if (!inbox.length) { el.innerHTML = '<li class="empty">Inbox zero. Immaculate, sir.</li>'; return; }
-  el.innerHTML = inbox.map((i) =>
-    `<li><span>${esc(i.content)}</span><span class="when">${esc(i.captured_on)}</span>
-     <button class="mini-btn done-btn" data-id="${esc(i.id)}" title="Mark processed">✓</button></li>`).join("");
+  if (!inbox.length) { el.innerHTML = '<li class="empty">Nothing captured. Immaculate, sir.</li>'; return; }
+  diffList(el, inbox, (i) => i.id, (i, li) => {
+    li.innerHTML = `<span>${esc(i.content)}</span><span class="when">${esc(i.captured_on)}</span>
+     <button class="mini-btn done-btn" data-id="${esc(i.id)}" title="Mark processed">✓</button>`;
+  }, "li");
 }
 
 function renderAreas(areas) {
@@ -264,6 +378,7 @@ function renderMemory(memories) {
 const inr = (n) => `₹${Math.round(n).toLocaleString("en-IN")}`;
 let FIN = null;           // last /api/finance payload
 let finFilter = "";       // active category filter in the finance view
+let openAcctLockId = null; // which account's statement-password panel is expanded
 const ACCT_ICON = { bank: "🏦", credit_card: "💳", loan: "📉" };
 const ACCT_LABEL = { bank: "bank", credit_card: "card", loan: "loan" };
 
@@ -309,17 +424,29 @@ function renderFinanceView() {
   const p = FIN.profile;
   const month = new Date().toLocaleDateString("en-CA").slice(0, 7);
 
-  /* accounts / cards / loans */
+  /* accounts / cards */
   $("acctCount").textContent = p.accounts.length ? `· ${p.accounts.length}` : "";
+  const gmailAccts = FIN.gmail?.accounts || [];
   $("acctList").innerHTML = p.accounts.length
     ? p.accounts.map((a) => `
       <div class="acct-row">
         <span class="acct-icon">${ACCT_ICON[a.type] || "•"}</span>
         <span class="acct-main"><b>${esc(a.name)}</b>
-          <span class="acct-sub">${esc(a.institution || ACCT_LABEL[a.type] || "")}${a.last4 ? ` ··${esc(a.last4)}` : ""}</span></span>
+          <span class="acct-sub">${esc(a.institution || ACCT_LABEL[a.type] || "")}${a.last4 ? ` ··${esc(a.last4)}` : ""}${a.hasPassword ? " · 🔒 statement password set" : ""}</span></span>
+        <button class="chip-x" data-acct-lock="${esc(a.id)}" title="Statement email / password settings">⚙</button>
         <button class="chip-x" data-del-acct="${esc(a.id)}" title="Remove ${esc(a.name)}">×</button>
+      </div>
+      <div class="acct-lock-panel" id="acctLock-${esc(a.id)}" ${openAcctLockId === a.id ? "" : "hidden"}>
+        <div class="set-title">Which connected Gmail address(es) get this account's statements?</div>
+        <div class="chip-row">${gmailAccts.map((e) => `
+          <button class="chip ${a.gmailAddresses?.includes(e) ? "active" : ""}" data-acct-gmail="${esc(a.id)}" data-email="${esc(e)}">${esc(e.split("@")[0])}</button>`).join("") || '<span class="empty">connect Gmail first</span>'}</div>
+        <div class="row">
+          <input type="password" class="acct-pw-input" data-acct-pw="${esc(a.id)}" placeholder="statement PDF password" maxlength="60" autocomplete="new-password">
+          <input type="text" class="acct-hint-input" data-acct-hint="${esc(a.id)}" placeholder="hint (e.g. DDMMYYYY of DOB)" maxlength="80" value="${esc(a.passwordHint || "")}">
+          <button data-acct-pw-save="${esc(a.id)}">save</button>
+        </div>
       </div>`).join("")
-    : '<div class="empty">Nothing registered yet — add your banks, cards and loans below. The last-4 digits let me pin transactions to the right account.</div>';
+    : '<div class="empty">Nothing registered yet — add your banks and cards below. The last-4 digits let me pin transactions to the right account.</div>';
 
   /* goals */
   $("goalCount").textContent = p.goals.length ? `· ${p.goals.length}` : "";
@@ -327,14 +454,30 @@ function renderFinanceView() {
     ? p.goals.map((g) => {
       const pct = Math.min(100, Math.round((g.saved / g.target) * 100));
       return `<li class="goal">
-        <div class="goal-top"><span>${esc(g.title)}</span>
-          <span class="goal-nums"><b class="goal-saved" data-goal="${esc(g.id)}" title="Click to update saved amount">${inr(g.saved)}</b> / ${inr(g.target)}</span>
+        <div class="goal-top"><span>${esc(g.title)}${g.autoTrack ? ' <span class="acct-sub">(auto)</span>' : ""}</span>
+          <span class="goal-nums"><b class="goal-saved" ${g.autoTrack ? "" : `data-goal="${esc(g.id)}" title="Click to update saved amount"`}>${inr(g.saved)}</b> / ${inr(g.target)}</span>
           <button class="chip-x" data-del-goal="${esc(g.id)}" title="Remove goal">×</button></div>
         <div class="goal-bar"><div class="goal-fill" style="width:${pct}%"></div></div>
         <div class="goal-meta">${pct}%${g.deadline ? ` · by ${esc(g.deadline)}` : ""}</div>
       </li>`;
     }).join("")
     : '<li class="empty">No goals yet — give me a target, sir</li>';
+
+  /* loans */
+  const loans = p.loans || [];
+  $("loanCount").textContent = loans.length ? `· ${loans.length}` : "";
+  $("loanList").innerHTML = loans.length
+    ? loans.map((l) => {
+      const pct = Math.min(100, Math.round(((l.principal - l.outstandingBalance) / l.principal) * 100));
+      return `<li class="goal">
+        <div class="goal-top"><span>${esc(l.name)}${l.lender ? ` <span class="acct-sub">${esc(l.lender)}</span>` : ""}</span>
+          <span class="goal-nums"><b>${inr(l.outstandingBalance)}</b> / ${inr(l.principal)}</span>
+          <button class="chip-x" data-del-loan="${esc(l.id)}" title="Remove loan">×</button></div>
+        <div class="goal-bar"><div class="goal-fill" style="width:${pct}%"></div></div>
+        <div class="goal-meta">${pct}% repaid · EMI ${inr(l.emiAmount)}${l.nextDueDate ? ` · next due ${esc(l.nextDueDate)}` : ""}</div>
+      </li>`;
+    }).join("")
+    : '<div class="empty">No loans tracked yet</div>';
 
   /* category bars for current month */
   const byCat = {};
@@ -404,6 +547,9 @@ function openCategoryPicker(chip) {
 /* ---------- gmail ---------- */
 let mailAccount = "";
 let mailUnread = 0;
+let mailMessages = [];
+let mailNextPageToken = null;
+let mailReaderState = null; // { id, account, threadId, subject, from, messageIdHeader, references, unread }
 const accountTag = (email) => esc(email.split("@")[0]);
 
 function renderGmailSettings(gmail) {
@@ -430,16 +576,21 @@ function renderGmail(gmail) {
   if (!body.dataset.loaded) loadMail();
 }
 
-async function loadMail() {
+async function loadMail(reset = true) {
   const body = $("gmailBody");
   body.dataset.loaded = "1";
-  body.innerHTML = '<div class="empty">fetching mail…</div>';
+  if (reset) { mailMessages = []; mailNextPageToken = null; body.innerHTML = '<div class="empty">fetching mail…</div>'; }
   try {
-    const { ok, messages, errors, accounts, error } = await api(`api/gmail/messages${mailAccount ? `?account=${encodeURIComponent(mailAccount)}` : ""}`);
+    const params = new URLSearchParams();
+    if (mailAccount) params.set("account", mailAccount);
+    if (!reset && mailNextPageToken) params.set("pageToken", mailNextPageToken);
+    const { ok, messages, nextPageToken, errors, accounts, error } = await api(`api/gmail/messages${params.toString() ? `?${params}` : ""}`);
     if (!ok) throw new Error(error);
-    mailUnread = messages.filter((m) => m.unread).length;
+    mailMessages = reset ? messages : [...mailMessages, ...messages];
+    mailNextPageToken = nextPageToken || null;
+    mailUnread = mailMessages.filter((m) => m.unread).length;
     $("statMail").textContent = mailUnread;
-    $("mailCount").textContent = messages.length ? `· ${messages.length}` : "";
+    $("mailCount").textContent = mailMessages.length ? `· ${mailMessages.length}` : "";
     const chips = accounts.length > 1 ? `<div class="chip-row">
       <button class="chip ${mailAccount === "" ? "active" : ""}" data-acct="">all</button>
       ${accounts.map((a) => `<button class="chip ${mailAccount === a ? "active" : ""}" data-acct="${esc(a)}">${accountTag(a)}</button>`).join("")}
@@ -447,17 +598,77 @@ async function loadMail() {
     const multi = accounts.length > 1 && !mailAccount;
     body.innerHTML = chips +
       (errors?.length ? errors.map((e) => `<div class="empty">⚠ ${esc(e)}</div>`).join("") : "") +
-      (messages.length ? `<ul class="mail-list">` + messages.map((m) => `
-      <li class="${m.unread ? "unread" : ""}" data-mail="${esc(m.id)}" data-mailacct="${esc(m.account)}" title="Open in Gmail">
+      (mailMessages.length ? `<ul class="mail-list">` + mailMessages.map((m) => `
+      <li class="${m.unread ? "unread" : ""}" data-mail="${esc(m.id)}" data-mailacct="${esc(m.account)}" title="Open message">
         <div class="mail-top"><span class="mail-from">${multi ? `<span class="acct-tag">${accountTag(m.account)}</span>` : ""}${esc(m.from)}</span>
         <span class="when">${esc(m.date.replace(/:\d\d\s/, " ").split(" +")[0].slice(0, 22))}</span></div>
         <div class="mail-subject">${esc(m.subject)}</div>
-      </li>`).join("") + `</ul>` : '<div class="empty">No mail. Suspiciously quiet, sir.</div>');
+      </li>`).join("") + `</ul>` : '<div class="empty">No mail. Suspiciously quiet, sir.</div>') +
+      (mailNextPageToken && mailAccount ? `<button class="mini-btn" id="mailLoadMore">Load more</button>` : "");
   } catch (e) {
     body.dataset.loaded = ""; // allow the next refresh cycle to retry
     body.innerHTML = `<div class="empty">mail error: ${esc(e.message)}</div>`;
   }
 }
+
+/* ---------- mail reader: full read / reply / delete / mark-read ---------- */
+async function openMailReader(id, account) {
+  const reader = $("mailReader");
+  reader.hidden = false;
+  $("mailReaderSubject").textContent = "loading…";
+  $("mailReaderFrom").textContent = "";
+  $("mailReaderBody").textContent = "";
+  $("mailReplyForm").hidden = true;
+  try {
+    const { ok, message, error } = await api(`api/gmail/message?account=${encodeURIComponent(account)}&id=${encodeURIComponent(id)}`);
+    if (!ok) throw new Error(error);
+    mailReaderState = message;
+    $("mailReaderSubject").textContent = message.subject;
+    $("mailReaderFrom").textContent = `${message.from} · ${message.date}`;
+    $("mailReaderBody").textContent = message.body;
+    $("mailReaderExternal").href = `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(account)}#all/${id}`;
+    $("mailReaderUnread").textContent = message.unread ? "● unread" : "○ read";
+    if (message.unread) {
+      await api("api/gmail/read", { account, id, unread: false });
+      message.unread = false;
+      const inList = mailMessages.find((m) => m.id === id);
+      if (inList) inList.unread = false;
+      document.querySelector(`#gmailBody [data-mail="${CSS.escape(id)}"]`)?.classList.remove("unread");
+      mailUnread = mailMessages.filter((m) => m.unread).length;
+      $("statMail").textContent = mailUnread;
+    }
+  } catch (e) {
+    $("mailReaderSubject").textContent = "error";
+    $("mailReaderBody").textContent = e.message;
+  }
+}
+function closeMailReader() {
+  $("mailReader").hidden = true;
+  mailReaderState = null;
+  $("mailReplyForm").hidden = true;
+}
+
+/* ---------- project drill-in detail ---------- */
+async function openProjectDetail(slug) {
+  const panel = $("projectDetail");
+  panel.hidden = false;
+  $("projectDetailTitle").textContent = "loading…";
+  $("projectDetailMeta").textContent = "";
+  $("projectDetailBody").textContent = "";
+  try {
+    const d = await api(`api/projects/detail?slug=${encodeURIComponent(slug)}`);
+    $("projectDetailTitle").textContent = d.title;
+    $("projectDetailMeta").textContent = `${d.status || "active"}${d.outcome ? ` · ${d.outcome}` : ""}${d.deadline ? ` · due ${d.deadline}` : ""}`;
+    const actions = [...d.nextActions.matchAll(/^-\s*\[([ xX])\]\s*(.+)$/gm)]
+      .map(([, done, text]) => `${done.trim() ? "☑" : "☐"} ${esc(text)}`).join("\n") || "(none)";
+    const log = [...d.log.matchAll(/^-\s+(.+)$/gm)].map((m) => `· ${esc(m[1])}`).join("\n") || "(none)";
+    $("projectDetailBody").innerHTML = `<b>Next actions</b>\n${actions}\n\n<b>Log</b>\n${log}`;
+  } catch (e) {
+    $("projectDetailTitle").textContent = "error";
+    $("projectDetailBody").textContent = e.message;
+  }
+}
+function closeProjectDetail() { $("projectDetail").hidden = true; }
 
 /* ---------- supabase status (settings) ---------- */
 function renderSupaStatus(s) {
@@ -487,6 +698,13 @@ document.addEventListener("submit", async (e) => {
       $("focusInput").value = "";
       toast("Focus item added"); refresh();
     }
+    if (e.target.classList.contains("project-quickadd")) {
+      const input = e.target.querySelector("input");
+      const description = input.value.trim(); if (!description) return;
+      await api("api/actions", { projectSlug: e.target.dataset.projectSlug, description });
+      input.value = "";
+      toast("Next action added"); refresh();
+    }
     if (e.target.id === "projectForm") {
       const title = $("projTitle").value.trim(); if (!title) return;
       await api("api/projects", { title, outcome: $("projOutcome").value, firstAction: $("projAction").value });
@@ -509,11 +727,42 @@ document.addEventListener("submit", async (e) => {
       e.target.reset();
       toast(`Goal "${title}" set — ${inr(target)}`); loadFinance();
     }
+    if (e.target.id === "loanForm") {
+      const name = $("loanName").value.trim(); const principal = Number($("loanPrincipal").value);
+      if (!name || !(principal > 0)) return;
+      await api("api/finance/loans", {
+        op: "add",
+        loan: { name, lender: $("loanLender").value.trim(), principal, emiAmount: Number($("loanEmi").value) || 0 },
+      });
+      e.target.reset();
+      toast(`Loan "${name}" added`); loadFinance();
+    }
+    if (e.target.id === "scanRangeForm") {
+      const from = $("scanRangeFrom").value; const to = $("scanRangeTo").value;
+      if (!from || !to) return;
+      toast("Scanning date range…");
+      const result = await api("api/finance/scan/range", { from, to });
+      FIN = result;
+      renderFinancePanel(); renderFinanceView();
+      toast(result.added ? `${result.added} new transaction${result.added > 1 ? "s" : ""} found` : "No new transactions in range");
+    }
     if (e.target.id === "memoryForm") {
       const v = $("memoryInput").value.trim(); if (!v) return;
       await api("api/memories", { category: $("memoryCat").value, content: v });
       $("memoryInput").value = "";
       toast("Remembered"); refresh();
+    }
+    if (e.target.id === "mailReplyForm") {
+      const bodyText = $("mailReplyText").value.trim();
+      if (!bodyText || !mailReaderState) return;
+      const m = mailReaderState;
+      await api("api/gmail/reply", {
+        account: m.account, threadId: m.threadId, to: m.from, subject: m.subject,
+        inReplyTo: m.messageIdHeader, references: m.references, bodyText,
+      });
+      $("mailReplyText").value = "";
+      $("mailReplyForm").hidden = true;
+      toast("Reply sent");
     }
   } catch (err) { toast(err.message, "err"); }
 });
@@ -522,12 +771,26 @@ document.addEventListener("click", async (e) => {
   try {
     if (e.target.closest("#gearBtn")) return setView(document.body.classList.contains("settings") ? "hud" : "settings");
 
-    if (e.target.closest("#brandBtn") || e.target.closest("#reactorWrap")) return toggleVoice();
+    if (e.target.closest("#brandBtn") || e.target.closest("#reactorWrap")) {
+      if (longPressFired) { longPressFired = false; return; } // already handled by the long-press timer
+      if ($("hudView").hidden) setView("hud"); // clicking JARVIS always brings you home first
+      return toggleVoice();
+    }
 
     /* -- finance section -- */
     if (e.target.id === "finOpen") return setView("finance");
     if (e.target.id === "finBack") return setView("hud");
     if (e.target.id === "finScanFull") return loadFinance(true);
+    if (e.target.id === "finAutoCat") {
+      toast("Asking JARVIS to categorize…");
+      try {
+        const result = await api("api/finance/categorize/auto");
+        FIN = result;
+        renderFinancePanel(); renderFinanceView();
+        toast(result.categorized ? `${result.categorized} transaction${result.categorized > 1 ? "s" : ""} categorized` : "Nothing to categorize");
+      } catch (e2) { toast(e2.message, "err"); }
+      return;
+    }
     const delAcct = e.target.closest("[data-del-acct]");
     if (delAcct) {
       if (confirm("Remove this account from the finance profile?")) {
@@ -565,6 +828,42 @@ document.addEventListener("click", async (e) => {
     const catF = e.target.closest("[data-cat-filter]");
     if (catF) { finFilter = catF.dataset.catFilter; return renderFinanceView(); }
 
+    const delLoan = e.target.closest("[data-del-loan]");
+    if (delLoan) {
+      if (confirm("Remove this loan?")) {
+        await api("api/finance/loans", { op: "delete", id: delLoan.dataset.delLoan });
+        toast("Loan removed"); loadFinance();
+      }
+      return;
+    }
+    const acctLock = e.target.closest("[data-acct-lock]");
+    if (acctLock) {
+      const id = acctLock.dataset.acctLock;
+      openAcctLockId = openAcctLockId === id ? null : id;
+      return renderFinanceView();
+    }
+    const acctGmail = e.target.closest("[data-acct-gmail]");
+    if (acctGmail) {
+      const id = acctGmail.dataset.acctGmail;
+      const a = FIN?.profile.accounts.find((x) => x.id === id);
+      const current = new Set(a?.gmailAddresses || []);
+      const email = acctGmail.dataset.email;
+      current.has(email) ? current.delete(email) : current.add(email);
+      await api("api/finance/accounts", { op: "setGmailAddresses", id, account: { gmailAddresses: [...current] } });
+      toast("Statement email binding updated"); loadFinance();
+      return;
+    }
+    const acctPwSave = e.target.closest("[data-acct-pw-save]");
+    if (acctPwSave) {
+      const id = acctPwSave.dataset.acctPwSave;
+      const password = document.querySelector(`[data-acct-pw="${id}"]`)?.value.trim();
+      const passwordHint = document.querySelector(`[data-acct-hint="${id}"]`)?.value.trim();
+      if (!password) { toast("Enter a password first", "err"); return; }
+      await api("api/finance/accounts", { op: "setPassword", id, account: { password, passwordHint } });
+      toast("Statement password saved (encrypted)"); loadFinance();
+      return;
+    }
+
     const doneBtn = e.target.closest(".done-btn");
     if (doneBtn) { await api("api/inbox/process", { id: doneBtn.dataset.id }); toast("Processed"); return refresh(); }
 
@@ -581,7 +880,44 @@ document.addEventListener("click", async (e) => {
 
     const mailItem = e.target.closest("[data-mail]");
     if (mailItem) {
+      // Recent Mail panel rows open the in-app reader; Finance rows (which
+      // share the same [data-mail] markup to reference a grounding email)
+      // keep opening Gmail's own web UI in a new tab.
+      if (mailItem.closest("#gmailBody")) return openMailReader(mailItem.dataset.mail, mailItem.dataset.mailacct);
       window.open(`https://mail.google.com/mail/u/?authuser=${encodeURIComponent(mailItem.dataset.mailacct)}#all/${mailItem.dataset.mail}`, "_blank");
+      return;
+    }
+    if (e.target.closest("#mailLoadMore")) return loadMail(false);
+    if (e.target.closest("#mailReaderClose") || e.target.closest("#mailReaderBackdrop")) return closeMailReader();
+    const projOpen = e.target.closest("[data-project-open]");
+    if (projOpen) return openProjectDetail(projOpen.dataset.projectOpen);
+    if (e.target.closest("#projectDetailClose") || e.target.closest("#projectDetailBackdrop")) return closeProjectDetail();
+    if (e.target.closest("#mailReaderReplyToggle")) {
+      const f = $("mailReplyForm");
+      f.hidden = !f.hidden;
+      if (!f.hidden) $("mailReplyText").focus();
+      return;
+    }
+    if (e.target.closest("#mailReaderTrash")) {
+      if (mailReaderState && confirm("Move this message to trash?")) {
+        await api("api/gmail/trash", { account: mailReaderState.account, id: mailReaderState.id });
+        mailMessages = mailMessages.filter((m) => m.id !== mailReaderState.id);
+        toast("Moved to trash");
+        closeMailReader();
+        loadMail();
+      }
+      return;
+    }
+    if (e.target.closest("#mailReaderUnread")) {
+      if (mailReaderState) {
+        const nextUnread = !mailReaderState.unread;
+        await api("api/gmail/read", { account: mailReaderState.account, id: mailReaderState.id, unread: nextUnread });
+        mailReaderState.unread = nextUnread;
+        $("mailReaderUnread").textContent = nextUnread ? "● unread" : "○ read";
+        const inList = mailMessages.find((m) => m.id === mailReaderState.id);
+        if (inList) inList.unread = nextUnread;
+        loadMail();
+      }
       return;
     }
 
@@ -632,6 +968,8 @@ document.addEventListener("click", async (e) => {
     if (interval) return saveSettings({ refreshSeconds: Number(interval.dataset.interval) });
     const accent = e.target.closest("[data-accent]");
     if (accent) return saveSettings({ accent: accent.dataset.accent });
+    const language = e.target.closest("[data-language]");
+    if (language) return saveSettings({ language: language.dataset.language });
   } catch (err) { toast(err.message, "err"); }
 });
 
