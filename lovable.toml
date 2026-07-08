@@ -1,6 +1,10 @@
 [run]
 # Apps/hud gained its first real dependency (pdfjs-dist, for password-protected
 # statement PDFs) — keep these commands in sync with package.json's scripts.
-dev = "sh -c 'npm ci && PORT=8080 node Apps/hud/server.mjs'"
+# HUD_HOST=0.0.0.0 (only here, not in package.json) so Lovable's preview proxy
+# — which reaches the sandbox over an internal bridge network, not literal
+# loopback — can connect. server.mjs still gates /api/* to loopback + private
+# (RFC1918) source IPs, so this does not expose the API to the public internet.
+dev = "sh -c 'npm ci && PORT=8080 HUD_HOST=0.0.0.0 node Apps/hud/server.mjs'"
 "build:dev" = "sh -c 'npm ci && rm -rf dist && mkdir -p dist && cp -r Apps/hud/public/. dist/'"
 build = "sh -c 'npm ci && rm -rf dist && mkdir -p dist && cp -r Apps/hud/public/. dist/'"

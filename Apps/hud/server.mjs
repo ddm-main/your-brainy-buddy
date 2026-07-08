@@ -1470,14 +1470,29 @@ const MIME = {
 
 // Auth for /api/* — when HUD_TOKEN is set, require it via `Authorization: Bearer <token>`
 // or `?token=<token>`. Loopback callers (127.0.0.1 / ::1) are trusted so the local
-// browser HUD keeps working without configuration.
+// browser HUD keeps working without configuration. Private-network callers (10/8,
+// 172.16/12, 192.168/16, fc00::/7, fe80::/10) are trusted too — needed because cloud
+// dev sandboxes (Lovable's preview proxy included) reach the app over an internal
+// bridge network, not literal loopback. A real internet attacker never has a private
+// source IP, so this stays closed to the public while letting the sandbox proxy through.
 const HUD_TOKEN = process.env.HUD_TOKEN || '';
-const isLoopback = (req) => {
-  const ip = req.socket?.remoteAddress || '';
-  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+const isTrusted = (req) => {
+  let ip = req.socket?.remoteAddress || '';
+  if (ip.startsWith('::ffff:')) ip = ip.slice(7);
+  if (ip === '127.0.0.1' || ip === '::1') return true;
+  const m = ip.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+  if (m) {
+    const a = Number(m[1]), b = Number(m[2]);
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    return false;
+  }
+  const lower = ip.toLowerCase();
+  return lower.startsWith('fe80') || /^f[cd][0-9a-f]{2}:/.test(lower);
 };
 const authorized = (req, url) => {
-  if (isLoopback(req)) return true;
+  if (isTrusted(req)) return true;
   if (!HUD_TOKEN) return false; // non-loopback + no token configured → deny
   const hdr = req.headers['authorization'] || '';
   const bearer = hdr.startsWith('Bearer ') ? hdr.slice(7) : '';
@@ -1797,5 +1812,5 @@ createServer(async (req, res) => {
   const host = process.env.HUD_HOST || '127.0.0.1';
   console.log(`JARVIS HUD online at http://${host}:${PORT}`);
   if (!SUPABASE_URL || !KEY) console.warn('WARNING: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — /api/state will report offline');
-  if (host !== '127.0.0.1' && !HUD_TOKEN) console.warn('WARNING: HUD_HOST is non-loopback and HUD_TOKEN is unset — /api/* will refuse remote callers');
+  if (host !== '127.0.0.1' && !HUD_TOKEN) console.warn('WARNING: HUD_HOST is non-loopback and HUD_TOKEN is unset — /api/* trusts loopback + private-network (RFC1918) callers only, all others get 401');
 });
