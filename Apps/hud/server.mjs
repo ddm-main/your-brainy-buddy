@@ -850,13 +850,17 @@ createServer(async (req, res) => {
       saveTokenStore(store);
       return json(res, 200, { ok: true, accounts: Object.keys(store) });
     }
-    /* ---- static ---- */
+    /* ---- static (SPA fallback: unknown non-asset paths serve index.html) ---- */
     let file = url.pathname === '/' ? '/index.html' : url.pathname;
     file = normalize(file).replace(/^([.][.][/\\])+/, '');
-    const full = join(PUBLIC_DIR, file);
+    let full = join(PUBLIC_DIR, file);
+    const hasExt = !!extname(file);
     if (!full.startsWith(PUBLIC_DIR) || !existsSync(full)) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      return res.end('not found');
+      if (hasExt) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        return res.end('not found');
+      }
+      full = join(PUBLIC_DIR, 'index.html');
     }
     res.writeHead(200, { 'Content-Type': MIME[extname(full)] || 'application/octet-stream' });
     return res.end(readFileSync(full));
