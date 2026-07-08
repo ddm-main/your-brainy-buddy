@@ -5,3 +5,11 @@
 .claude/settings.local.json
 .gmail-token.json
 .gmail-tokens.json
+
+# Apps/hud is a zero-dependency Node server by design — never let npm/bun
+# tooling creep back in and break the Lovable <-> VS Code parity.
+node_modules/
+dist/
+bun.lock
+package-lock.json
+yarn.lock

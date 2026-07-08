@@ -4,7 +4,7 @@
 // (source of truth) and Supabase, and a read-only Gmail OAuth integration.
 // Credentials come from process env or Apps/hud/.env (gitignored).
 import { createServer } from 'node:http';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, extname, dirname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -29,6 +29,34 @@ const GMAIL_TOKEN_FILE = join(__dirname, '.gmail-token.json');
 const REDIRECT_URI = `http://localhost:${PORT}/api/gmail/callback`;
 
 const today = () => new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD local
+const hasSupabase = () => !!(SUPABASE_URL && KEY);
+
+function encodeLocalId(type, payload) {
+  return `local:${type}:${Buffer.from(JSON.stringify(payload)).toString('base64url')}`;
+}
+
+function decodeLocalId(id, type) {
+  const prefix = `local:${type}:`;
+  if (!id?.startsWith(prefix)) return null;
+  try { return JSON.parse(Buffer.from(id.slice(prefix.length), 'base64url').toString('utf8')); }
+  catch { return null; }
+}
+
+function parseSection(text, heading) {
+  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = text.match(new RegExp(`^##\\s*${escaped}\\s*$([\\s\\S]*?)(?=^##\\s|\\Z)`, 'mi'));
+  return match?.[1]?.trim() || '';
+}
+
+function buildStateEnvelope(parts) {
+  return {
+    generatedAt: new Date().toISOString(),
+    gmail: gmailStatus(),
+    settings: loadSettings(),
+    voice: { ai: !!(GEMINI_KEY || OPENROUTER_KEY) },
+    ...parts,
+  };
+}
 
 /* ---------------- Supabase helpers ---------------- */
 const sbHeaders = {
@@ -36,6 +64,7 @@ const sbHeaders = {
   'Content-Type': 'application/json', Prefer: 'return=representation',
 };
 async function sb(method, path, body) {
+  if (!hasSupabase()) throw new Error('Supabase credentials not configured');
   const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     method, headers: sbHeaders, body: body ? JSON.stringify(body) : undefined,
   });
@@ -45,7 +74,7 @@ async function sb(method, path, body) {
 }
 const q = (path) => sb('GET', path);
 
-async function state() {
+async function remoteState() {
   const [projects, actions, inbox, areas, memories, logs] = await Promise.all([
     q('projects?select=*&status=eq.active&order=updated_at.desc'),
     q('next_actions?select=*&done=is.false&order=created_at.asc'),
@@ -54,11 +83,132 @@ async function state() {
     q('memories?select=category,content,updated_at&order=updated_at.desc&limit=100'),
     q('daily_logs?select=*&order=log_date.desc&limit=7'),
   ]);
-  return {
-    generatedAt: new Date().toISOString(), online: true,
-    gmail: gmailStatus(), settings: loadSettings(), voice: { ai: !!ANTHROPIC_KEY },
+  return buildStateEnvelope({
+    online: true,
+    remoteOnline: true,
     projects, actions, inbox, areas, memories, logs,
-  };
+  });
+}
+
+function localLogs() {
+  const dir = join(OS_ROOT, 'System', 'Logs');
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => /^\d{4}-\d{2}-\d{2}\.md$/.test(name))
+    .map((name) => ({
+      log_date: name.replace(/\.md$/, ''),
+      content: readFileOr(join(dir, name), ''),
+    }))
+    .sort((a, b) => String(b.log_date).localeCompare(String(a.log_date)))
+    .slice(0, 7);
+}
+
+function localInbox() {
+  const text = readFileOr(join(OS_ROOT, 'Inbox', 'inbox.md'), '');
+  return [...text.matchAll(/^- \[ \] (\d{4}-\d{2}-\d{2}) · (.+)$/gm)].map(([, captured_on, content]) => ({
+    id: encodeLocalId('inbox', { captured_on, content }),
+    captured_on,
+    content,
+  }));
+}
+
+function localProjectsAndActions() {
+  const dir = join(OS_ROOT, 'Projects');
+  if (!existsSync(dir)) return { projects: [], actions: [] };
+  const folders = readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .filter((entry) => !entry.name.startsWith('.'));
+
+  const projects = [];
+  const actions = [];
+  for (const folder of folders) {
+    const slug = folder.name;
+    const overview = join(dir, slug, '_overview.md');
+    if (!existsSync(overview)) continue;
+    const text = readFileOr(overview, '');
+    const title = text.match(/^# Project:\s+(.+)$/m)?.[1]?.trim() || slug;
+    const statusLine = text.match(/^\*\*Status:\*\*\s+(.+)$/m)?.[1]?.trim() || 'active';
+    const status = statusLine.split('·')[0].trim();
+    const updated_at = statSync(overview).mtime.toISOString();
+    projects.push({ id: slug, slug, title, status, updated_at });
+
+    const nextActions = parseSection(text, 'Next actions');
+    [...nextActions.matchAll(/^- \[ \] (.+)$/gm)].forEach((match) => {
+      actions.push({
+        id: encodeLocalId('action', { projectSlug: slug, description: match[1].trim() }),
+        project_id: slug,
+        description: match[1].trim(),
+        created_at: updated_at,
+      });
+    });
+  }
+
+  projects.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
+  return { projects, actions };
+}
+
+function localAreas() {
+  const dir = join(OS_ROOT, 'Areas');
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const file = join(dir, entry.name, '_overview.md');
+      const text = readFileOr(file, '');
+      const health = text.match(/^\*\*Health check \([^)]+\):\*\*\s+(.+)$/m)?.[1]?.trim() || '';
+      return { name: entry.name, health_check: health };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function localMemories() {
+  const dir = join(OS_ROOT, 'System', 'Memory');
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith('.md') && name !== 'MEMORY.md')
+    .flatMap((name) => {
+      const file = join(dir, name);
+      const updated_at = statSync(file).mtime.toISOString();
+      const category = name.replace(/\.md$/, '');
+      const text = readFileOr(file, '');
+      const bullets = [...text.matchAll(/^- (.+)$/gm)].map((match) => match[1].trim());
+      return bullets.length
+        ? bullets.map((content) => ({ category, content, updated_at }))
+        : [{ category, content: text.replace(/^# .+\n?/, '').trim(), updated_at }].filter((x) => x.content);
+    })
+    .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+    .slice(0, 100);
+}
+
+function localState(error) {
+  const { projects, actions } = localProjectsAndActions();
+  return buildStateEnvelope({
+    online: true,
+    remoteOnline: false,
+    degraded: true,
+    error,
+    projects,
+    actions,
+    inbox: localInbox(),
+    areas: localAreas(),
+    memories: localMemories(),
+    logs: localLogs(),
+  });
+}
+
+async function state() {
+  if (!hasSupabase()) return localState('Supabase credentials not configured');
+  try { return await remoteState(); }
+  catch (e) { return localState(String(e.message || e)); }
+}
+
+async function syncIfPossible(work, label) {
+  if (!hasSupabase()) return null;
+  try { return await work(); }
+  catch (e) {
+    console.warn(`${label} sync skipped: ${e.message}`);
+    return null;
+  }
 }
 
 /* ---------------- file-side writes (files are the source of truth) ---------------- */
@@ -81,13 +231,21 @@ async function captureInbox(content) {
   const file = join(OS_ROOT, 'Inbox', 'inbox.md');
   const line = `- [ ] ${today()} · ${content}`;
   writeFileSync(file, readFileOr(file, '# 📥 Inbox\n') .replace(/\s*$/, '') + `\n${line}\n`);
-  await sb('POST', 'inbox_items', { content, captured_on: today(), processed: false });
+  await syncIfPossible(() => sb('POST', 'inbox_items', { content, captured_on: today(), processed: false }), 'Inbox capture');
 }
 
 async function processInbox(id) {
-  const [item] = await q(`inbox_items?id=eq.${encodeURIComponent(id)}&select=*`);
-  if (!item) throw new Error('inbox item not found');
-  await sb('PATCH', `inbox_items?id=eq.${encodeURIComponent(id)}`, { processed: true, routed_to: 'processed via HUD' });
+  let item = null;
+  const local = decodeLocalId(id, 'inbox');
+  if (local) item = local;
+  else {
+    [item] = await q(`inbox_items?id=eq.${encodeURIComponent(id)}&select=*`);
+    if (!item) throw new Error('inbox item not found');
+    await syncIfPossible(
+      () => sb('PATCH', `inbox_items?id=eq.${encodeURIComponent(id)}`, { processed: true, routed_to: 'processed via HUD' }),
+      'Inbox process',
+    );
+  }
   const file = join(OS_ROOT, 'Inbox', 'inbox.md');
   const txt = readFileOr(file, '');
   const escaped = item.content.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -108,7 +266,7 @@ function ensureTodayLog() {
 async function addFocus(text) {
   const p = ensureTodayLog();
   writeFileSync(p, readFileSync(p, 'utf8').replace(/\s*$/, '') + `\n- [ ] ${text}\n`);
-  await syncDailyLog(today());
+  await syncIfPossible(() => syncDailyLog(today()), 'Daily log');
 }
 
 async function toggleFocus(text, done) {
@@ -117,7 +275,7 @@ async function toggleFocus(text, done) {
   const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const updated = txt.replace(new RegExp(`^(-\\s*)\\[[ xX]\\](\\s*${escaped})\\s*$`, 'm'), `$1[${done ? 'x' : ' '}]$2`);
   writeFileSync(p, updated);
-  await syncDailyLog(today());
+  await syncIfPossible(() => syncDailyLog(today()), 'Daily log');
 }
 
 /* ---------------- settings ---------------- */
@@ -163,17 +321,38 @@ ${firstAction ? `- [ ] ${firstAction}` : ''}
 ## Log
 - ${today()} — project created (via HUD)
 `);
-  const [proj] = await sb('POST', 'projects', { slug, title, outcome: outcome || null, status: 'active', started_on: today() });
-  if (firstAction) await sb('POST', 'next_actions', { project_id: proj.id, description: firstAction });
+  const created = await syncIfPossible(
+    () => sb('POST', 'projects', { slug, title, outcome: outcome || null, status: 'active', started_on: today() }),
+    'Project create',
+  );
+  const proj = created?.[0] || { id: slug, slug, title, outcome: outcome || null, status: 'active', updated_at: new Date().toISOString() };
+  if (firstAction && created?.[0]?.id) {
+    await syncIfPossible(() => sb('POST', 'next_actions', { project_id: proj.id, description: firstAction }), 'Next action create');
+  }
   return proj;
 }
 
 async function completeAction(id) {
-  const [action] = await q(`next_actions?id=eq.${encodeURIComponent(id)}&select=*,projects(slug)`);
-  if (!action) throw new Error('action not found');
-  await sb('PATCH', `next_actions?id=eq.${encodeURIComponent(id)}`, { done: true, completed_at: new Date().toISOString() });
-  await sb('PATCH', `projects?id=eq.${action.project_id}`, { updated_at: new Date().toISOString() });
-  const file = join(OS_ROOT, 'Projects', action.projects.slug, '_overview.md');
+  let action = null;
+  let projectSlug = null;
+  const local = decodeLocalId(id, 'action');
+  if (local) {
+    action = { description: local.description };
+    projectSlug = local.projectSlug;
+  } else {
+    [action] = await q(`next_actions?id=eq.${encodeURIComponent(id)}&select=*,projects(slug)`);
+    if (!action) throw new Error('action not found');
+    projectSlug = action.projects.slug;
+    await syncIfPossible(
+      () => sb('PATCH', `next_actions?id=eq.${encodeURIComponent(id)}`, { done: true, completed_at: new Date().toISOString() }),
+      'Action complete',
+    );
+    await syncIfPossible(
+      () => sb('PATCH', `projects?id=eq.${action.project_id}`, { updated_at: new Date().toISOString() }),
+      'Project update',
+    );
+  }
+  const file = join(OS_ROOT, 'Projects', projectSlug, '_overview.md');
   if (existsSync(file)) {
     const txt = readFileSync(file, 'utf8');
     writeFileSync(file, txt.replace(new RegExp(`^(-\\s*)\\[ \\](\\s*${escRe(action.description)})\\s*$`, 'm'), '$1[x]$2'));
@@ -189,7 +368,10 @@ async function updateArea(name, health) {
     ? txt.replace(/^\*\*Health check \(.*$/m, line)
     : txt.replace(/^(# Area: .+)$/m, `$1\n\n${line}`);
   writeFileSync(file, txt);
-  await sb('PATCH', `areas?name=eq.${encodeURIComponent(name)}`, { health_check: health, reviewed_at: new Date().toISOString() });
+  await syncIfPossible(
+    () => sb('PATCH', `areas?name=eq.${encodeURIComponent(name)}`, { health_check: health, reviewed_at: new Date().toISOString() }),
+    'Area update',
+  );
 }
 
 async function addMemory(category, content) {
@@ -202,7 +384,10 @@ async function addMemory(category, content) {
   } else {
     writeFileSync(file, readFileSync(file, 'utf8').replace(/\s*$/, '') + `\n- ${content}\n`);
   }
-  await sb('POST', 'memories', { category: cat, content, source_file: `System/Memory/${cat}.md` });
+  await syncIfPossible(
+    () => sb('POST', 'memories', { category: cat, content, source_file: `System/Memory/${cat}.md` }),
+    'Memory add',
+  );
 }
 
 /* ---------------- Finance: transaction & statement tracking ---------------- */
@@ -428,10 +613,14 @@ async function writeExpensesMd(ledger) {
 }
 
 /* ---------------- JARVIS voice brain ---------------- */
-// Answers spoken questions. Uses the Claude API when ANTHROPIC_API_KEY is set
-// (raw HTTP — this server is zero-dependency by design); otherwise falls back
-// to an instant, offline, state-aware responder.
-const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+// Answers spoken questions. Gemini is primary; if it errors (rate limit,
+// outage, quota) it automatically falls over to OpenRouter, then finally to
+// an instant offline state-aware responder — whichever keys are set
+// (raw HTTP — this server is zero-dependency by design).
+const GEMINI_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'anthropic/claude-haiku-4.5';
 const voiceHistory = []; // rolling short-term conversation memory
 
 function stateBrief(s) {
@@ -459,32 +648,66 @@ function financeLine() {
   return `Finance this month (${month}): spent ₹${Math.round(t?.spent || 0).toLocaleString('en-IN')}, received ₹${Math.round(t?.received || 0).toLocaleString('en-IN')} across ${t?.count || 0} transactions. Latest: ${last.type} ${last.currency === 'USD' ? '$' : '₹'}${last.amount} ${last.merchant ? `at ${last.merchant}` : `(${last.subject})`} on ${last.date}. Statements on file: ${led.statements.length}.`;
 }
 
-async function askClaude(question, context) {
-  const system = `You are JARVIS, Deepak's personal AI operating system — calm, competent, concise, lightly witty (Iron Man's JARVIS, not a corporate chatbot). Address him as "sir" sparingly. Your answers are spoken aloud by text-to-speech, so keep them to 1-3 short sentences of plain prose: no markdown, no lists, no code. Ground answers in the live system state below; never invent facts about Deepak's life — if the state doesn't say it, say you don't know.
+function jarvisSystemPrompt(context) {
+  return `You are JARVIS, Deepak's personal AI operating system — calm, competent, concise, lightly witty (Iron Man's JARVIS, not a corporate chatbot). Address him as "sir" sparingly. Your answers are spoken aloud by text-to-speech, so keep them to 1-3 short sentences of plain prose: no markdown, no lists, no code. Ground answers in the live system state below; never invent facts about Deepak's life — if the state doesn't say it, say you don't know.
 
 Current system state (${new Date().toString()}):
 ${context}`;
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
+}
+
+function recordVoiceTurn(question, answer) {
+  voiceHistory.push({ role: 'user', content: question }, { role: 'assistant', content: answer });
+  while (voiceHistory.length > 12) voiceHistory.shift();
+}
+
+async function askGemini(question, context) {
+  const r = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: jarvisSystemPrompt(context) }] },
+        contents: [
+          ...voiceHistory.map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
+          { role: 'user', parts: [{ text: question }] },
+        ],
+        generationConfig: { maxOutputTokens: 300 },
+      }),
+    },
+  );
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error?.message || `Gemini API HTTP ${r.status}`);
+  const candidate = data.candidates?.[0];
+  if (candidate?.finishReason === 'SAFETY') throw new Error('request declined');
+  const answer = (candidate?.content?.parts || []).map((p) => p.text || '').join(' ').trim();
+  if (!answer) throw new Error('empty answer');
+  recordVoiceTurn(question, answer);
+  return answer;
+}
+
+async function askOpenRouter(question, context) {
+  const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
-      'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01',
+      Authorization: `Bearer ${OPENROUTER_KEY}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'claude-opus-4-8',
+      model: OPENROUTER_MODEL,
       max_tokens: 300,
-      output_config: { effort: 'low' }, // fast spoken replies
-      system,
-      messages: [...voiceHistory, { role: 'user', content: question }],
+      messages: [
+        { role: 'system', content: jarvisSystemPrompt(context) },
+        ...voiceHistory,
+        { role: 'user', content: question },
+      ],
     }),
   });
   const data = await r.json();
-  if (!r.ok) throw new Error(data.error?.message || `Claude API HTTP ${r.status}`);
-  if (data.stop_reason === 'refusal') throw new Error('request declined');
-  const answer = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim();
+  if (!r.ok) throw new Error(data.error?.message || `OpenRouter HTTP ${r.status}`);
+  const answer = data.choices?.[0]?.message?.content?.trim();
   if (!answer) throw new Error('empty answer');
-  voiceHistory.push({ role: 'user', content: question }, { role: 'assistant', content: answer });
-  while (voiceHistory.length > 12) voiceHistory.shift();
+  recordVoiceTurn(question, answer);
   return answer;
 }
 
@@ -534,15 +757,20 @@ function localBrain(question, s) {
   if (/\b(status|report|brief|summary|what.s up)\b/.test(q)) {
     return `All systems nominal. ${s.projects.length} project${s.projects.length === 1 ? '' : 's'}, ${s.actions.length} open actions, ${s.inbox.length} in the inbox, ${s.memories.length} memories on file.`;
   }
-  return 'I heard you, sir, but my full intelligence is offline — add an ANTHROPIC_API_KEY to Apps/hud/.env and I shall answer anything. For now, ask me about your focus, inbox, projects, or the time.';
+  return 'I heard you, sir, but my full intelligence is offline — add a GEMINI_API_KEY or OPENROUTER_API_KEY to Apps/hud/.env and I shall answer anything. For now, ask me about your focus, inbox, projects, or the time.';
 }
 
 async function askJarvis(question) {
   let s = null;
   try { s = await state(); } catch { /* offline */ }
-  if (ANTHROPIC_KEY) {
-    try { return { answer: await askClaude(question, stateBrief(s)), source: 'claude' }; }
-    catch (e) { console.warn('claude fallback:', e.message); }
+  const context = stateBrief(s);
+  if (GEMINI_KEY) {
+    try { return { answer: await askGemini(question, context), source: 'gemini' }; }
+    catch (e) { console.warn('gemini fallback:', e.message); }
+  }
+  if (OPENROUTER_KEY) {
+    try { return { answer: await askOpenRouter(question, context), source: 'openrouter' }; }
+    catch (e) { console.warn('openrouter fallback:', e.message); }
   }
   return { answer: localBrain(question, s), source: 'local' };
 }
@@ -698,7 +926,7 @@ createServer(async (req, res) => {
     /* ---- API ---- */
     if (route === 'GET /api/state') {
       try { return json(res, 200, await state()); }
-      catch (e) { return json(res, 200, { online: false, error: String(e.message || e), gmail: gmailStatus() }); }
+      catch (e) { return json(res, 200, localState(String(e.message || e))); }
     }
     if (route === 'POST /api/inbox') {
       const { content } = await readBody(req);
