@@ -1,14 +1,4 @@
-[tasks]
-dev = "PORT=8080 node Apps/hud/server.mjs"
-"build:dev" = "true"
-build = "true"
-
 [run]
-dev = "PORT=8080 node Apps/hud/server.mjs"
-"build:dev" = "true"
-build = "true"
-
-[scripts]
-dev = "PORT=8080 node Apps/hud/server.mjs"
-"build:dev" = "true"
-build = "true"
+dev = "sh -c 'PORT=8080 node Apps/hud/server.mjs'"
+"build:dev" = "sh -c 'true'"
+build = "sh -c 'true'"
