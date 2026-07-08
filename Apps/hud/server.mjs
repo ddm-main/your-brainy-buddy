@@ -1117,7 +1117,9 @@ createServer(async (req, res) => {
   } catch (e) {
     return json(res, 500, { error: String(e.message || e) });
   }
-}).listen(PORT, () => {
-  console.log(`JARVIS HUD online at http://localhost:${PORT}`);
+}).listen(PORT, process.env.HUD_HOST || '127.0.0.1', () => {
+  const host = process.env.HUD_HOST || '127.0.0.1';
+  console.log(`JARVIS HUD online at http://${host}:${PORT}`);
   if (!SUPABASE_URL || !KEY) console.warn('WARNING: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set — /api/state will report offline');
+  if (host !== '127.0.0.1' && !HUD_TOKEN) console.warn('WARNING: HUD_HOST is non-loopback and HUD_TOKEN is unset — /api/* will refuse remote callers');
 });
