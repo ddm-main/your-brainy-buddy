@@ -358,6 +358,26 @@ function renderInbox(inbox) {
   }, "li");
 }
 
+// Proactive monitoring banner — computed client-side from data /api/state
+// already fetches every refresh, no extra backend calls. Dismissing hides it
+// for the rest of the day (localStorage, keyed by date so it reappears
+// tomorrow if the underlying issue is still there).
+function renderBriefBanner(projects, inbox) {
+  const today = new Date().toLocaleDateString("en-CA");
+  const banner = $("briefBanner");
+  if (localStorage.getItem("briefDismissed") === today) { banner.hidden = true; return; }
+  const stale = projects.filter((p) => daysAgo(p.updated_at) > 14).length;
+  const overdue = projects.filter((p) => p.deadline && p.deadline < today).length;
+  const backlog = inbox.length > 5 ? inbox.length : 0;
+  const parts = [];
+  if (overdue) parts.push(`${overdue} project${overdue > 1 ? "s" : ""} past deadline`);
+  if (stale) parts.push(`${stale} project${stale > 1 ? "s" : ""} untouched 14+ days`);
+  if (backlog) parts.push(`${backlog} items sitting in inbox`);
+  if (!parts.length) { banner.hidden = true; return; }
+  $("briefText").textContent = `⚠ ${parts.join(" · ")}`;
+  banner.hidden = false;
+}
+
 function renderAreas(areas) {
   $("areaList").innerHTML = areas.map((a) => {
     const health = a.health_check;
@@ -394,6 +414,32 @@ async function loadFinance(scan = false) {
     sum.innerHTML = `<span class="empty">⚠ ${esc(e.message)}</span>`;
   }
 }
+
+// Receipt OCR: read the chosen photo as base64 and hand it to the vision LLM
+// server-side (no client-side OCR dependency) to log it as a transaction.
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = () => reject(new Error("could not read file"));
+    reader.readAsDataURL(file);
+  });
+}
+$("finReceiptInput").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = ""; // allow re-selecting the same file next time
+  if (!file) return;
+  toast("Reading receipt…");
+  try {
+    const image = await fileToBase64(file);
+    FIN = await api("api/finance/receipt", { image, mimeType: file.type || "image/jpeg" });
+    toast(`Logged ₹${FIN.transactions[FIN.transactions.length - 1]?.amount ?? "?"} from receipt`);
+    renderFinancePanel();
+    if (!$("financeView").hidden) renderFinanceView();
+  } catch (err) {
+    toast(err.message, "err");
+  }
+});
 
 function renderFinancePanel() {
   if (!FIN) return;
@@ -771,6 +817,16 @@ document.addEventListener("click", async (e) => {
   try {
     if (e.target.closest("#gearBtn")) return setView(document.body.classList.contains("settings") ? "hud" : "settings");
 
+    if (e.target.closest("#briefSpeakBtn")) {
+      if ($("hudView").hidden) setView("hud");
+      return askJarvis("Give me my morning briefing, sir — today's focus, project status, and anything overdue or stale.");
+    }
+    if (e.target.closest("#briefDismissBtn")) {
+      localStorage.setItem("briefDismissed", new Date().toLocaleDateString("en-CA"));
+      $("briefBanner").hidden = true;
+      return;
+    }
+
     if (e.target.closest("#brandBtn") || e.target.closest("#reactorWrap")) {
       if (longPressFired) { longPressFired = false; return; } // already handled by the long-press timer
       if ($("hudView").hidden) setView("hud"); // clicking JARVIS always brings you home first
@@ -1002,6 +1058,7 @@ async function refresh() {
       renderProjects(s.projects, s.actions);
       renderLog(s.logs);
       renderInbox(s.inbox);
+      renderBriefBanner(s.projects, s.inbox);
       renderAreas(s.areas);
       renderMemory(s.memories);
       renderGmail(s.gmail);

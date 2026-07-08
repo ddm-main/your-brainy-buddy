@@ -21,6 +21,12 @@
   </div>
 </header>
 
+<div class="brief-banner" id="briefBanner" hidden>
+  <span class="brief-text" id="briefText"></span>
+  <button class="mini-btn" id="briefSpeakBtn" title="Have JARVIS read out the morning briefing">🔊 brief me</button>
+  <button class="mini-btn" id="briefDismissBtn" title="Dismiss for today">✕</button>
+</div>
+
 <!-- ================= HUD VIEW ================= -->
 <main class="grid" id="hudView">
   <section class="col" id="colLeft">
@@ -50,6 +56,9 @@
       <h2>Finance <span class="count" id="finCount"></span>
         <span class="h2-btns">
           <button class="mini-btn" id="finScan" title="Scan mail for transactions & statements">↻ scan</button>
+          <label class="mini-btn" id="finReceiptBtn" title="Log a transaction from a photographed or scanned receipt">
+            📷 receipt<input type="file" id="finReceiptInput" accept="image/*" hidden>
+          </label>
           <button class="mini-btn" id="finOpen" title="Open the finance section">⤢ open</button>
         </span>
       </h2>

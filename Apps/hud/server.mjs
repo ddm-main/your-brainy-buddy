@@ -1102,6 +1102,67 @@ async function askOpenRouterRaw(prompt, maxTokens = 500) {
   return answer;
 }
 
+// Vision variants of the raw one-shot helpers above, for receipt OCR — same
+// Gemini→OpenRouter failover, just with an inline image part alongside the
+// prompt. No OCR library dependency: both providers already do multimodal.
+async function askGeminiVisionRaw(prompt, imageBase64, mimeType, maxTokens = 500) {
+  const r = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: prompt }, { inline_data: { mime_type: mimeType, data: imageBase64 } }] }],
+        generationConfig: { maxOutputTokens: maxTokens },
+      }),
+    },
+  );
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error?.message || `Gemini API HTTP ${r.status}`);
+  const answer = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join(' ').trim();
+  if (!answer) throw new Error('empty answer');
+  return answer;
+}
+
+async function askOpenRouterVisionRaw(prompt, imageBase64, mimeType, maxTokens = 500) {
+  const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${OPENROUTER_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: OPENROUTER_MODEL, max_tokens: maxTokens,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+        ],
+      }],
+    }),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error?.message || `OpenRouter HTTP ${r.status}`);
+  const answer = data.choices?.[0]?.message?.content?.trim();
+  if (!answer) throw new Error('empty answer');
+  return answer;
+}
+
+// Extracts merchant/date/amount from a photographed or scanned receipt via
+// vision LLM — complements the pdfjs-dist text-PDF statement path, which
+// can't read images. Manual trigger only (user uploads a photo), same as
+// categorizeBatchWithLLM.
+async function extractReceiptWithLLM(imageBase64, mimeType) {
+  const prompt = `This is a photo of a purchase receipt. Extract these fields as strict JSON only (no markdown, no prose, no explanation): {"merchant": string or null, "date": "YYYY-MM-DD" or null if unreadable, "amount": number (the final total paid, no currency symbol or commas), "currency": "INR" unless another currency symbol/code is clearly printed}. If the total amount cannot be read at all, set "amount" to 0.`;
+  let raw;
+  if (GEMINI_KEY) { try { raw = await askGeminiVisionRaw(prompt, imageBase64, mimeType); } catch { /* fall through */ } }
+  if (!raw && OPENROUTER_KEY) raw = await askOpenRouterVisionRaw(prompt, imageBase64, mimeType);
+  if (!raw) throw new Error('no LLM provider available for receipt extraction');
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error('could not read this receipt — try a clearer, well-lit photo');
+  const parsed = JSON.parse(match[0]);
+  if (!(Number(parsed.amount) > 0)) throw new Error('could not read a total amount from this receipt');
+  return parsed;
+}
+
 async function runTool(name, args) {
   const tool = toolByName[name];
   if (!tool) throw new Error(`unknown tool: ${name}`);
@@ -1454,10 +1515,10 @@ function json(res, code, obj) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(obj));
 }
-function readBody(req) {
+function readBody(req, maxBytes = 1e6) {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (c) => { data += c; if (data.length > 1e6) reject(new Error('body too large')); });
+    req.on('data', (c) => { data += c; if (data.length > maxBytes) reject(new Error('body too large')); });
     req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
   });
 }
@@ -1572,6 +1633,32 @@ createServer(async (req, res) => {
       return json(res, 200, {
         ok: true, gmail: gmailStatus(), ...ledger, transactions,
         added, errors, totals: financeTotals(ledger),
+        profile: scrubProfileForClient(withComputedGoals(profile, transactions)), categories: CATEGORIES,
+      });
+    }
+    if (route === 'POST /api/finance/receipt') {
+      if (!GEMINI_KEY && !OPENROUTER_KEY) return json(res, 400, { error: 'no LLM provider configured (set GEMINI_API_KEY or OPENROUTER_API_KEY)' });
+      const { image, mimeType } = await readBody(req, 8e6); // receipts are photos — allow up to ~6MB raw
+      if (!image) return json(res, 400, { error: 'image (base64, no data: prefix) required' });
+      const mime = /^image\/(png|jpe?g|webp|heic|heif)$/i.test(mimeType || '') ? mimeType : 'image/jpeg';
+      let extracted;
+      try { extracted = await extractReceiptWithLLM(image, mime); }
+      catch (e) { return json(res, 400, { error: e.message }); }
+      const ledger = loadLedger();
+      const profile = loadFinProfile();
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(extracted.date || '') ? extracted.date : new Date().toLocaleDateString('en-CA');
+      const id = `receipt:${crypto.randomUUID()}`;
+      ledger.transactions.push({
+        id, account: 'receipt-upload', ts: new Date(date).getTime(), date,
+        from: extracted.merchant || 'Receipt', subject: `Receipt: ${extracted.merchant || 'unknown merchant'}`,
+        amount: Number(extracted.amount), currency: extracted.currency || 'INR', type: 'debit',
+        merchant: extracted.merchant || null, reconciledWith: null, source: 'receipt',
+      });
+      await saveLedger(ledger);
+      await writeExpensesMd(ledger);
+      const transactions = decorateTransactions(ledger, profile);
+      return json(res, 200, {
+        ok: true, ...ledger, transactions, totals: financeTotals(ledger),
         profile: scrubProfileForClient(withComputedGoals(profile, transactions)), categories: CATEGORIES,
       });
     }
