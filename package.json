@@ -1,15 +1,46 @@
 {
   "name": "jarvis-hud",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "npm ci && PORT=8080 node Apps/hud/server.mjs",
-    "build": "npm ci && rm -rf dist && mkdir -p dist && cp -r Apps/hud/public/. dist/",
-    "build:dev": "npm ci && rm -rf dist && mkdir -p dist && cp -r Apps/hud/public/. dist/",
-    "start": "npm ci && PORT=8080 node Apps/hud/server.mjs"
+    "dev": "vite --host 0.0.0.0 --port 8080",
+    "dev:api": "PORT=3960 HUD_HOST=127.0.0.1 node Apps/hud/server.mjs",
+    "build": "vite build",
+    "build:dev": "vite build --mode development",
+    "preview": "vite preview --host 0.0.0.0 --port 8080",
+    "start": "vite --host 0.0.0.0 --port 8080"
   },
   "dependencies": {
-    "pdfjs-dist": "^4.0.0"
+    "@ai-sdk/react": "^2.0.0",
+    "@fontsource/inter": "^5.1.0",
+    "@fontsource/orbitron": "^5.1.0",
+    "@fontsource/rajdhani": "^5.1.0",
+    "@react-three/drei": "^9.114.0",
+    "@react-three/fiber": "^8.17.10",
+    "@supabase/supabase-js": "^2.110.1",
+    "@tanstack/react-query": "^5.62.0",
+    "ai": "^5.0.0",
+    "clsx": "^2.1.1",
+    "framer-motion": "^11.11.17",
+    "lucide-react": "^0.469.0",
+    "pdfjs-dist": "^4.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "tailwind-merge": "^2.5.5",
+    "three": "^0.170.0",
+    "zod": "^3.23.0",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/three": "^0.170.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
   }
 }

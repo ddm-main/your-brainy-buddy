@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS — HUD</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='40' fill='none' stroke='%2335d6ed' stroke-width='8'/><circle cx='50' cy='50' r='14' fill='%2335d6ed'/></svg>">
+</head>
+<body>
+<header class="topbar">
+  <button class="brand" id="brandBtn" title="Click to talk to JARVIS">
+    <span class="brand-dot" id="statusDot" aria-hidden="true"></span>
+    <span class="brand-name">J.A.R.V.I.S</span>
+    <span class="brand-mic" aria-hidden="true">🎙</span>
+  </button>
+  <div class="top-status">
+    <span id="backendStatus" class="pill pill-ok">BACKEND ONLINE</span>
+    <span id="clock" class="clock">--:--:--</span>
+    <button class="gear" id="gearBtn" title="Settings" aria-label="Settings">⚙</button>
+  </div>
+</header>
+
+<div class="brief-banner" id="briefBanner" hidden>
+  <span class="brief-text" id="briefText"></span>
+  <button class="mini-btn" id="briefSpeakBtn" title="Have JARVIS read out the morning briefing">🔊 brief me</button>
+  <button class="mini-btn" id="briefDismissBtn" title="Dismiss for today">✕</button>
+</div>
+
+<!-- ================= HUD VIEW ================= -->
+<main class="grid" id="hudView">
+  <section class="col" id="colLeft">
+    <article class="panel tilt" id="focusPanel" data-panel="focus">
+      <h2>Today's Focus</h2>
+      <ul class="focus-list scrolly" id="focusList"><li class="empty">No focus set — run /brief</li></ul>
+      <form class="quick-form" id="focusForm">
+        <input type="text" id="focusInput" placeholder="add a focus item…" maxlength="200" autocomplete="off">
+        <button type="submit" title="Add focus item">+</button>
+      </form>
+    </article>
+    <article class="panel tilt" id="projectsPanel" data-panel="projects">
+      <h2>Active Projects <span class="count" id="projectCount"></span>
+        <button class="mini-btn" id="newProjectBtn" title="New project">+ new</button>
+      </h2>
+      <div class="scrolly" id="projectList"><div class="empty">No active projects yet</div></div>
+      <form class="quick-form stack" id="projectForm" hidden>
+        <input type="text" id="projTitle" placeholder="project title" maxlength="80" autocomplete="off">
+        <input type="text" id="projOutcome" placeholder="outcome — what does done look like?" maxlength="200" autocomplete="off">
+        <div class="row">
+          <input type="text" id="projAction" placeholder="first next action" maxlength="200" autocomplete="off">
+          <button type="submit" title="Create project">✓</button>
+        </div>
+      </form>
+    </article>
+    <article class="panel tilt" id="financePanel" data-panel="finance">
+      <h2>Finance <span class="count" id="finCount"></span>
+        <span class="h2-btns">
+          <button class="mini-btn" id="finScan" title="Scan mail for transactions & statements">↻ scan</button>
+          <label class="mini-btn" id="finReceiptBtn" title="Log a transaction from a photographed or scanned receipt">
+            📷 receipt<input type="file" id="finReceiptInput" accept="image/*" hidden>
+          </label>
+          <button class="mini-btn" id="finOpen" title="Open the finance section">⤢ open</button>
+        </span>
+      </h2>
+      <div class="fin-summary" id="finSummary"><span class="empty">no transactions tracked yet</span></div>
+      <ul class="fin-list scrolly" id="finList"><li class="empty">Hit “↻ scan” to read transaction mail</li></ul>
+    </article>
+  </section>
+
+  <section class="col col-center">
+    <div class="reactor-wrap" id="reactorWrap" title="Click to talk to JARVIS">
+      <canvas id="globeCanvas" width="420" height="420" aria-label="JARVIS core — click to talk"></canvas>
+      <div class="voice-ring" aria-hidden="true"></div>
+      <div class="reactor-label">
+        <div class="big-date" id="bigDate">—</div>
+        <div class="big-day" id="bigDay">—</div>
+        <div class="voice-status" id="voiceStatus"></div>
+      </div>
+    </div>
+    <div class="stats-row" role="list">
+      <button class="stat tilt" data-goto="projectsPanel" role="listitem"><div class="stat-value" id="statProjects">0</div><div class="stat-label">projects</div></button>
+      <button class="stat tilt" data-goto="inboxPanel" role="listitem"><div class="stat-value" id="statInbox">0</div><div class="stat-label">inbox</div></button>
+      <button class="stat tilt" data-goto="projectsPanel" role="listitem"><div class="stat-value" id="statActions">0</div><div class="stat-label">next actions</div></button>
+      <button class="stat tilt" data-goto="gmailPanel" role="listitem"><div class="stat-value" id="statMail">0</div><div class="stat-label">unread mail</div></button>
+    </div>
+    <div class="voice-console" id="voiceConsole" hidden>
+      <div class="voice-you" id="voiceYou"></div>
+      <div class="voice-answer" id="voiceAnswer"></div>
+    </div>
+    <div class="sync-note" id="syncNote">awaiting first contact…</div>
+  </section>
+
+  <section class="col" id="colRight">
+    <article class="panel tilt" id="inboxPanel" data-panel="inbox">
+      <h2>Quick Capture <span class="count" id="inboxCount"></span></h2>
+      <form class="quick-form" id="captureForm">
+        <input type="text" id="captureInput" placeholder="capture a thought, task, or link…" maxlength="500" autocomplete="off">
+        <button type="submit" title="Capture a note">+</button>
+      </form>
+      <ul class="inbox-list scrolly" id="inboxList"><li class="empty">Nothing captured. Immaculate, sir.</li></ul>
+    </article>
+    <article class="panel tilt" id="gmailPanel" data-panel="mail">
+      <h2>Recent Mail <span class="count" id="mailCount"></span>
+        <button class="mini-btn" id="mailRefresh" title="Refresh mail" hidden>↻</button>
+      </h2>
+      <div class="scrolly" id="gmailBody"><div class="empty">checking gmail…</div></div>
+    </article>
+  </section>
+</main>
+
+<!-- ================= FINANCE VIEW ================= -->
+<main class="grid finance-grid" id="financeView" hidden>
+  <div class="fin-alerts" id="finAlerts" hidden></div>
+  <section class="col">
+    <article class="panel">
+      <h2>Accounts · Cards · Loans <span class="count" id="acctCount"></span>
+        <button class="mini-btn" id="finBack" title="Back to HUD">← hud</button>
+      </h2>
+      <div class="scrolly" id="acctList"><div class="empty">Nothing registered yet — add your banks, cards and loans below</div></div>
+      <form class="quick-form stack" id="acctForm">
+        <div class="row">
+          <select id="acctType" title="Type">
+            <option value="bank">bank account</option>
+            <option value="credit_card">credit card</option>
+            <option value="loan">loan</option>
+          </select>
+          <input type="text" id="acctName" placeholder="name — e.g. Axis Savings" maxlength="40" autocomplete="off">
+        </div>
+        <div class="row">
+          <input type="text" id="acctInst" placeholder="institution — e.g. Axis Bank" maxlength="40" autocomplete="off">
+          <input type="text" id="acctLast4" placeholder="last 4 digits" maxlength="4" pattern="\d{4}" autocomplete="off">
+          <button type="submit" title="Add account">+</button>
+        </div>
+      </form>
+    </article>
+    <article class="panel grow">
+      <h2>Goals <span class="count" id="goalCount"></span></h2>
+      <ul class="goal-list scrolly" id="goalList"><li class="empty">No goals yet — give me a target, sir</li></ul>
+      <form class="quick-form stack" id="goalForm">
+        <input type="text" id="goalTitle" placeholder="goal — e.g. Emergency fund" maxlength="60" autocomplete="off">
+        <div class="row">
+          <input type="number" id="goalTarget" placeholder="target ₹" min="1" autocomplete="off">
+          <input type="date" id="goalDeadline" title="Deadline (optional)">
+          <button type="submit" title="Add goal">+</button>
+        </div>
+      </form>
+    </article>
+  </section>
+
+  <section class="col">
+    <article class="panel">
+      <h2>Spend Trend</h2>
+      <div class="chart-wrap" id="spendChart"><div class="empty">Not enough history yet</div></div>
+    </article>
+    <article class="panel">
+      <h2>This Month by Category</h2>
+      <div class="chart-wrap chart-wrap-sm" id="catDonut"></div>
+      <div class="cat-bars scrolly" id="catBars"><div class="empty">No spends tracked this month</div></div>
+    </article>
+    <article class="panel">
+      <h2>Loans <span class="count" id="loanCount"></span></h2>
+      <div class="scrolly" id="loanList"><div class="empty">No loans tracked yet</div></div>
+      <form class="quick-form stack" id="loanForm">
+        <div class="row">
+          <input type="text" id="loanName" placeholder="name — e.g. Home Loan" maxlength="40" autocomplete="off">
+          <input type="text" id="loanLender" placeholder="lender" maxlength="40" autocomplete="off">
+        </div>
+        <div class="row">
+          <input type="number" id="loanPrincipal" placeholder="principal ₹" min="1" autocomplete="off">
+          <input type="number" id="loanEmi" placeholder="EMI ₹" min="0" autocomplete="off">
+          <button type="submit" title="Add loan">+</button>
+        </div>
+      </form>
+    </article>
+    <article class="panel">
+      <h2>Needs Review <span class="count" id="reviewCount"></span></h2>
+      <div class="scrolly" id="reviewList"><div class="empty">Nothing to review</div></div>
+    </article>
+    <article class="panel grow">
+      <h2>Statements <span class="count" id="stCount"></span></h2>
+      <div class="scrolly" id="stList"><div class="empty">No statements found yet</div></div>
+    </article>
+  </section>
+
+  <section class="col">
+    <article class="panel grow">
+      <h2>Transactions <span class="count" id="txCount"></span>
+        <span class="h2-btns">
+          <button class="mini-btn" id="finAutoCat" title="Auto-categorize transactions in Other using JARVIS">✨ categorize</button>
+          <button class="mini-btn" id="finScanFull" title="Rescan mail">↻ scan</button>
+        </span>
+      </h2>
+      <div class="chip-row fin-filter" id="catFilter"></div>
+      <form class="quick-form" id="scanRangeForm" title="Scan a custom date range (bypasses the daily auto-scan throttle)">
+        <input type="date" id="scanRangeFrom" title="From date">
+        <input type="date" id="scanRangeTo" title="To date">
+        <button type="submit">Scan range</button>
+      </form>
+      <ul class="fin-list tx-full scrolly" id="txFullList"><li class="empty">No transactions yet</li></ul>
+      <div class="empty fin-hint">click a category tag to correct it — JARVIS learns the rule</div>
+    </article>
+  </section>
+</main>
+
+<!-- ================= SETTINGS VIEW ================= -->
+<main class="grid settings-grid" id="settingsView" hidden>
+  <section class="col">
+    <article class="panel">
+      <h2>Connections</h2>
+      <div class="set-block">
+        <div class="set-title">Supabase backend</div>
+        <div id="supaStatus" class="set-body">checking…</div>
+      </div>
+    </article>
+    <article class="panel">
+      <h2>Display</h2>
+      <div class="set-block">
+        <div class="set-title">Visible panels</div>
+        <div class="set-body toggles" id="panelToggles"></div>
+      </div>
+      <div class="set-block">
+        <div class="set-title">Refresh interval</div>
+        <div class="set-body chip-row" id="refreshChips"></div>
+      </div>
+      <div class="set-block">
+        <div class="set-title">Accent</div>
+        <div class="set-body chip-row" id="accentChips"></div>
+      </div>
+      <div class="set-block">
+        <div class="set-title">Voice language</div>
+        <div class="set-body chip-row" id="languageChips"></div>
+      </div>
+    </article>
+  </section>
+
+  <section class="col">
+    <article class="panel">
+      <h2>Areas <span class="empty">click a value to edit</span></h2>
+      <ul class="area-list" id="areaList"></ul>
+    </article>
+    <article class="panel">
+      <h2>Memory <span class="count" id="memoryCount"></span></h2>
+      <form class="quick-form" id="memoryForm">
+        <select id="memoryCat" title="Category">
+          <option value="notes">notes</option>
+          <option value="profile">profile</option>
+          <option value="preferences">preferences</option>
+          <option value="people">people</option>
+          <option value="decisions">decisions</option>
+        </select>
+        <input type="text" id="memoryInput" placeholder="remember something…" maxlength="300" autocomplete="off">
+        <button type="submit" title="Save memory">+</button>
+      </form>
+      <ul class="memory-list scrolly" id="memoryList"><li class="empty">Nothing remembered yet</li></ul>
+    </article>
+  </section>
+
+  <section class="col">
+    <article class="panel">
+      <h2>Gmail accounts <span class="empty">read/write · tokens stay on this machine</span></h2>
+      <div id="gmailAccounts" class="set-body">—</div>
+    </article>
+    <article class="panel grow">
+      <h2>Recent Log</h2>
+      <div class="log-lines scrolly grow" id="logLines"><div class="empty">No log entries</div></div>
+    </article>
+  </section>
+</main>
+
+<div class="mail-reader" id="mailReader" hidden>
+  <div class="mail-reader-backdrop" id="mailReaderBackdrop"></div>
+  <div class="mail-reader-panel panel">
+    <div class="mail-reader-head">
+      <button class="mini-btn" id="mailReaderClose" title="Close">×</button>
+      <span class="mail-reader-subject" id="mailReaderSubject"></span>
+      <span class="mail-reader-actions">
+        <button class="mini-btn" id="mailReaderUnread" title="Toggle read/unread">●</button>
+        <button class="mini-btn" id="mailReaderTrash" title="Delete">🗑</button>
+        <a class="mini-btn" id="mailReaderExternal" href="#" target="_blank" title="Open in Gmail">⤢</a>
+      </span>
+    </div>
+    <div class="mail-reader-from" id="mailReaderFrom"></div>
+    <div class="mail-reader-body scrolly" id="mailReaderBody"></div>
+    <form class="mail-reply-form" id="mailReplyForm" hidden>
+      <textarea id="mailReplyText" placeholder="Type your reply…" maxlength="4000"></textarea>
+      <button type="submit">Send reply</button>
+    </form>
+    <button class="mini-btn" id="mailReaderReplyToggle">↩ Reply</button>
+  </div>
+</div>
+
+<div class="mail-reader" id="projectDetail" hidden>
+  <div class="mail-reader-backdrop" id="projectDetailBackdrop"></div>
+  <div class="mail-reader-panel panel">
+    <div class="mail-reader-head">
+      <button class="mini-btn" id="projectDetailClose" title="Close">×</button>
+      <span class="mail-reader-subject" id="projectDetailTitle"></span>
+    </div>
+    <div class="mail-reader-from" id="projectDetailMeta"></div>
+    <div class="mail-reader-body scrolly" id="projectDetailBody"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status"></div>
+<script src="hud.js"></script>
+<script type="module" src="globe.js"></script>
+</body>
+</html>

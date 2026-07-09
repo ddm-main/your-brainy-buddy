@@ -1,0 +1,232 @@
+@import "@fontsource/orbitron/400.css";
+@import "@fontsource/orbitron/600.css";
+@import "@fontsource/orbitron/700.css";
+@import "@fontsource/rajdhani/400.css";
+@import "@fontsource/rajdhani/500.css";
+@import "@fontsource/rajdhani/600.css";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+
+:root {
+  --bg-void: #050a14;
+  --bg-deep: #0a1929;
+  --bg-panel: rgba(14, 30, 52, 0.55);
+  --bg-panel-solid: #0d1f36;
+  --edge: rgba(127, 233, 255, 0.18);
+  --edge-strong: rgba(127, 233, 255, 0.4);
+  --edge-hot: #35d6ed;
+  --accent: #35d6ed;
+  --accent-soft: #7fe9ff;
+  --accent-dim: #1e4d7a;
+  --warn: #ffb84d;
+  --danger: #ff5f6d;
+  --ok: #6bffb0;
+  --jarvis-amber: #ff8a1a;
+  --jarvis-amber-hot: #ffd479;
+  --jarvis-amber-glow: rgba(255, 138, 26, 0.35);
+  --text: #d7ecf6;
+  --text-dim: #7a95ad;
+  --text-muted: #4b6379;
+
+  --font-display: "Orbitron", system-ui, sans-serif;
+  --font-hud: "Rajdhani", system-ui, sans-serif;
+  --font-body: "Inter", system-ui, sans-serif;
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  background: var(--bg-void);
+  color: var(--text);
+  font-family: var(--font-body);
+  overflow: hidden;
+}
+
+body {
+  background:
+    radial-gradient(ellipse at 20% 10%, rgba(53, 214, 237, 0.08), transparent 55%),
+    radial-gradient(ellipse at 80% 90%, rgba(53, 214, 237, 0.05), transparent 60%),
+    linear-gradient(180deg, #050a14 0%, #030812 100%);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(53, 214, 237, 0.15);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(53, 214, 237, 0.3); }
+
+button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+input, textarea { font: inherit; color: inherit; }
+
+/* ------- HUD utilities ------- */
+.hud-panel {
+  position: relative;
+  background: var(--bg-panel);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  box-shadow:
+    inset 0 0 0 1px rgba(127, 233, 255, 0.04),
+    0 20px 60px -30px rgba(0, 0, 0, 0.8),
+    0 0 40px -20px rgba(53, 214, 237, 0.25);
+  overflow: hidden;
+  transition: border-color 200ms ease, box-shadow 200ms ease, transform 200ms ease;
+}
+
+.hud-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(53, 214, 237, 0.06) 0%, transparent 30%),
+    radial-gradient(ellipse at top, rgba(53, 214, 237, 0.08), transparent 70%);
+  border-radius: inherit;
+}
+
+.hud-panel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(
+    115deg,
+    transparent 0%,
+    transparent 45%,
+    rgba(127, 233, 255, 0.06) 50%,
+    transparent 55%,
+    transparent 100%
+  );
+  background-size: 200% 200%;
+  animation: hud-shimmer 8s linear infinite;
+  opacity: 0.6;
+}
+
+@keyframes hud-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -100% 0; }
+}
+
+.hud-panel:hover { border-color: var(--edge-strong); }
+
+.hud-corner {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--edge-hot);
+  pointer-events: none;
+}
+.hud-corner.tl { top: 4px; left: 4px; border-right: none; border-bottom: none; }
+.hud-corner.tr { top: 4px; right: 4px; border-left: none; border-bottom: none; }
+.hud-corner.bl { bottom: 4px; left: 4px; border-right: none; border-top: none; }
+.hud-corner.br { bottom: 4px; right: 4px; border-left: none; border-top: none; }
+
+.h-title {
+  font-family: var(--font-hud);
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  font-size: 11px;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.h-title .h-idx {
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+}
+
+.hud-num {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+
+.hud-label {
+  font-family: var(--font-hud);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 8px currentColor;
+  animation: live-pulse 1.8s ease-in-out infinite;
+}
+.live-dot.warn { background: var(--warn); color: var(--warn); }
+.live-dot.err { background: var(--danger); color: var(--danger); }
+.live-dot.idle { background: var(--text-muted); color: var(--text-muted); animation: none; }
+
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.2); }
+}
+
+.scanlines {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 3px,
+    rgba(53, 214, 237, 0.025) 3px,
+    rgba(53, 214, 237, 0.025) 4px
+  );
+  opacity: 0.5;
+}
+
+.grid-bg {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(rgba(53, 214, 237, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(53, 214, 237, 0.035) 1px, transparent 1px);
+  background-size: 60px 60px;
+  mask-image: radial-gradient(ellipse at center, black 20%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse at center, black 20%, transparent 75%);
+}
+
+.vignette {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  background: radial-gradient(ellipse at center, transparent 40%, rgba(3, 8, 18, 0.7) 100%);
+}
+
+.focus-outline:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

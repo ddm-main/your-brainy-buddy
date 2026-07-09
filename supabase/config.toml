@@ -1,1 +1,10 @@
 project_id = "ybtaxgstmxnlwurkritg"
+
+[functions.jarvis-chat]
+verify_jwt = false
+
+[functions.jarvis-vision]
+verify_jwt = false
+
+[functions.jarvis-vision-upload]
+verify_jwt = false

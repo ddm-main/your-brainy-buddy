@@ -1,15 +1,16 @@
 # 🖥️ JARVIS Dashboard
 
-> Last updated: 2026-07-07 · regenerate with `/dashboard`
+> Last updated: 2026-07-09 · regenerate with `/dashboard`
 
 ## 🎯 Today's Focus
-- Capture your first real project with `/new-project`
+- Approve Step 2 — JARVIS Supabase schema migration plan
 - Seed an Area or two (Health, Career) to retire the "not yet reviewed" rows
 
 ## 📁 Active Projects
 | Project | Status | Next action |
 |---------|--------|-------------|
-| _none yet — create one with `/new-project`_ | | |
+| jarvis | active | approve Step 2 schema plan |
+| finance | active | reclassify "Other" transactions once |
 
 ## 🌱 Areas
 | Area | Health check |
