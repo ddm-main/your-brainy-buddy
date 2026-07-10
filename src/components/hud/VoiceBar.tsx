@@ -4,7 +4,10 @@ import { useVoice } from "@/store/voiceStore";
 import { motion, AnimatePresence } from "framer-motion";
 import { jarvisChat, abortJarvisStream } from "@/lib/jarvisChat";
 import { useContent } from "@/store/contentStore";
-import { supabase } from "@/integrations/supabase/client";
+import { speakStream, stopSpeaking } from "@/lib/tts";
+import { supabase as _supabase } from "@/integrations/supabase/client";
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const supabase: any = _supabase as any;
 import { useUi } from "@/store/uiStore";
 
 export default function VoiceBar() {
@@ -13,9 +16,11 @@ export default function VoiceBar() {
     setState, toggleContinuous, toggleTranscript, setAmplitude, setTranscript, setInterim, reset,
   } = useVoice();
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const conversationOpen = useUi((s) => s.conversationOpen);
 
   const interrupt = () => {
     abortJarvisStream();
+    stopSpeaking();
     try { window.speechSynthesis?.cancel(); } catch { /* noop */ }
     useVoice.getState().markActivity();
     useVoice.getState().interrupt();
@@ -68,7 +73,14 @@ export default function VoiceBar() {
           rafRef.current = requestAnimationFrame(tick);
         };
         tick();
-      } catch {
+      } catch (err: any) {
+        const name = err?.name ?? "";
+        const msg = name === "NotAllowedError"
+          ? "Microphone permission denied. Enable it in your browser settings."
+          : name === "NotFoundError"
+            ? "No microphone found."
+            : "Could not access the microphone.";
+        useUi.getState().push(msg, "err");
         setState("idle");
       }
     })();
@@ -83,7 +95,6 @@ export default function VoiceBar() {
   // Web Speech API — continuous listen, debounced flush → LLM → TTS
   const pendingRef = useRef<string>("");
   const flushTimerRef = useRef<number | null>(null);
-  const utterRef = useRef<SpeechSynthesisUtterance | null>(null);
 
   useEffect(() => {
     if (state !== "listening") return;
@@ -148,15 +159,14 @@ export default function VoiceBar() {
             lang: langRef.current,
             conf: finalConf / finalCount,
           });
-          if (langSamplesRef.current.length >= langCandidates.length) {
-            // Pick the winner
+          // Lock after 2 samples to avoid stutter; only rotate if the current
+          // sample came back empty/very low confidence.
+          if (langSamplesRef.current.length >= 2) {
             const best = langSamplesRef.current.reduce((a, b) => (b.conf > a.conf ? b : a));
             langRef.current = best.lang;
             langLockedRef.current = true;
             try { localStorage.setItem(LANG_KEY, best.lang); } catch { /* noop */ }
-            jarvisChat(`(system) remember preferences.language = ${best.lang}`).catch(() => {});
-          } else {
-            // Rotate to the next candidate and restart the recognizer
+          } else if ((finalConf / finalCount) < 0.2) {
             const idx = langSamplesRef.current.length % langCandidates.length;
             langRef.current = langCandidates[idx];
             try { rec.stop(); } catch { /* onend will restart with new lang */ }
@@ -195,31 +205,7 @@ export default function VoiceBar() {
   }, [state]);
 
   function speakChunked(text: string, onDone: () => void) {
-    const synth = window.speechSynthesis;
-    if (!synth) { onDone(); return; }
-    synth.cancel();
-    // Split into ~50-word phrases at sentence/clause boundaries so INTERRUPT
-    // lands within one phrase instead of the whole reply.
-    const chunks = chunkForSpeech(text, 50);
-    if (!chunks.length) { onDone(); return; }
-    const voices = synth.getVoices();
-    const preferred = voices.find((v) => /uk|british|daniel|google uk english male/i.test(v.name))
-      ?? voices.find((v) => /male/i.test(v.name))
-      ?? voices.find((v) => v.lang?.startsWith("en"));
-    let i = 0;
-    const speakNext = () => {
-      if (i >= chunks.length) { onDone(); return; }
-      if (useVoice.getState().state !== "speaking") { onDone(); return; }
-      const u = new SpeechSynthesisUtterance(chunks[i++]);
-      u.rate = 1.05;
-      u.pitch = 0.9;
-      if (preferred) u.voice = preferred;
-      u.onend = speakNext;
-      u.onerror = speakNext;
-      utterRef.current = u;
-      synth.speak(u);
-    };
-    speakNext();
+    void speakStream(text, onDone);
   }
 
   useEffect(() => {
@@ -233,6 +219,11 @@ export default function VoiceBar() {
         e.preventDefault();
         if (state === "idle") setState("listening");
         else if (state === "listening") setState("idle");
+      }
+      // ⌘/Ctrl+J → open the full conversation overlay
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "j") {
+        e.preventDefault();
+        useUi.getState().openConversation();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -279,10 +270,12 @@ export default function VoiceBar() {
     muted: "var(--danger)",
   };
 
+  if (conversationOpen) return null;
+
   return (
     <footer style={{
       borderTop: "1px solid var(--edge)",
-      background: "rgba(5, 10, 20, 0.75)",
+      background: "var(--panel-tint-strong)",
       backdropFilter: "blur(20px)",
       padding: "10px 20px",
       display: "flex", alignItems: "center", gap: 16,
@@ -319,6 +312,15 @@ export default function VoiceBar() {
         </button>
         <button onClick={interrupt} className="focus-outline" style={pillStyle(false)} title="Interrupt (Esc)">
           <Ban size={11} /> interrupt
+        </button>
+        <button
+          onClick={() => setState(state === "muted" ? "idle" : "muted")}
+          className="focus-outline"
+          style={pillStyle(state === "muted")}
+          title="Mute microphone"
+        >
+          {state === "muted" ? <MicOff size={11} /> : <Mic size={11} />}
+          {state === "muted" ? "unmute" : "mute"}
         </button>
         <button
           onClick={() => fileRef.current?.click()}
@@ -419,26 +421,6 @@ function pillStyle(active: boolean): React.CSSProperties {
     fontSize: 10, fontFamily: "var(--font-hud)", letterSpacing: "0.16em",
     textTransform: "uppercase", borderRadius: 2, transition: "all 200ms",
   };
-}
-
-function chunkForSpeech(text: string, maxWords: number): string[] {
-  const parts = text.split(/(?<=[.!?])\s+/).flatMap((s) => s.split(/(?<=[,;:])\s+/));
-  const out: string[] = [];
-  let buf = "";
-  let words = 0;
-  for (const p of parts) {
-    const pw = p.split(/\s+/).length;
-    if (words + pw > maxWords && buf) {
-      out.push(buf.trim());
-      buf = p;
-      words = pw;
-    } else {
-      buf = buf ? `${buf} ${p}` : p;
-      words += pw;
-    }
-  }
-  if (buf.trim()) out.push(buf.trim());
-  return out;
 }
 
 function Waveform({ amplitude, active }: { amplitude: number; active: boolean }) {

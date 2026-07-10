@@ -1,11 +1,16 @@
 import { cn } from "@/lib/cn";
-import type { ReactNode, HTMLAttributes } from "react";
+import { useEffect, useRef, useState, type ReactNode, type HTMLAttributes } from "react";
 
 interface HudPanelProps extends HTMLAttributes<HTMLElement> {
   title?: string;
   index?: string;
   actions?: ReactNode;
   live?: "ok" | "warn" | "err" | "idle";
+  /**
+   * When this value changes (after first render), the live-dot briefly pulses
+   * to signal a data refresh. Any stable identity works (string/number).
+   */
+  updatedKey?: string | number;
   children: ReactNode;
   bodyClass?: string;
 }
@@ -15,11 +20,22 @@ export function HudPanel({
   index,
   actions,
   live,
+  updatedKey,
   children,
   className,
   bodyClass,
   ...rest
 }: HudPanelProps) {
+  const [pinging, setPinging] = useState(false);
+  const firstRef = useRef(true);
+  useEffect(() => {
+    if (firstRef.current) { firstRef.current = false; return; }
+    if (updatedKey === undefined) return;
+    setPinging(true);
+    const t = window.setTimeout(() => setPinging(false), 500);
+    return () => window.clearTimeout(t);
+  }, [updatedKey]);
+
   return (
     <section className={cn("hud-panel flex flex-col", className)} {...rest}>
       <span className="hud-corner tl" />
@@ -38,7 +54,11 @@ export function HudPanel({
           }}
         >
           <div className="h-title">
-            {live && <span className={`live-dot ${live}`} />}
+            {live && (
+              <span
+                className={cn("live-dot", live, pinging && "hud-ping")}
+              />
+            )}
             {index && <span className="h-idx">{index}</span>}
             <span>{title}</span>
           </div>

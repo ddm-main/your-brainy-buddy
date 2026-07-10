@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
+import KineticNumber from "@/components/hud/KineticNumber";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { db, inr, type Bank, type FinancialAccount, type CreditCard, type Loan, type FinancialGoal, type Subscription, type Transaction } from "@/lib/db";
 import { useUi } from "@/store/uiStore";
@@ -73,7 +74,7 @@ function Overview() {
           {cards.map((c) => (
             <NavLink key={c.l} to={c.to} style={{ display: "block", padding: 14, border: "1px solid var(--edge)", textDecoration: "none", color: "inherit" }}>
               <div className="hud-label">{c.l}</div>
-              <div style={{ fontFamily: "var(--font-display)", fontSize: 26, color: "var(--accent)", marginTop: 4 }}>{c.v}</div>
+              <div style={{ fontFamily: "var(--font-display)", fontSize: 26, color: "var(--accent)", marginTop: 4 }}><KineticNumber value={c.v} /></div>
             </NavLink>
           ))}
         </div>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import HudPanel from "@/components/hud/HudPanel";
+import KineticNumber from "@/components/hud/KineticNumber";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { db, type EmailRow } from "@/lib/db";
 import { useUi } from "@/store/uiStore";
@@ -46,7 +47,7 @@ export default function Inbox() {
           ))}
         </div>
       </HudPanel>
-      <HudPanel title="Emails" index="LST" live="ok" bodyClass="overflow-auto">
+      <HudPanel title="Emails" index="LST" live="ok" bodyClass="overflow-auto" actions={<span className="hud-label" style={{ color: "var(--accent)" }}><KineticNumber value={items.length} /> loaded</span>}>
         {loading ? <div className="hud-label">loading…</div> :
          items.length === 0 ? <EmptyState hint="import a Gmail account or add rows to the emails table">no emails</EmptyState> :
          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>

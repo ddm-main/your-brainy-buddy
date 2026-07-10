@@ -33,7 +33,7 @@ export default function TopBar() {
         justifyContent: "space-between",
         padding: "10px 20px",
         borderBottom: "1px solid var(--edge)",
-        background: "rgba(5, 10, 20, 0.7)",
+        background: "var(--panel-tint-strong)",
         backdropFilter: "blur(20px)",
         zIndex: 10,
         gap: 20,

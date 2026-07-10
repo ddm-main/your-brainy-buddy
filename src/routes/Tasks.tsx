@@ -28,7 +28,7 @@ export default function Tasks() {
       else if (tab === "today") {
         const all = await db.tasks.listOpen(200);
         const end = new Date(); end.setHours(23, 59, 59, 999);
-        list = all.filter((t) => t.due_at && new Date(t.due_at).getTime() <= end.getTime());
+        list = all.filter((t: any) => t.due_at && new Date(t.due_at).getTime() <= end.getTime());
       } else list = await db.tasks.listOpen(200);
       setItems(list);
     } catch (e: any) {

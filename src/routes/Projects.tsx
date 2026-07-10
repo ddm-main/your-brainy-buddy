@@ -119,7 +119,7 @@ function ProjectDetail() {
   return (
     <div style={{ padding: 12, height: "100%", display: "grid", gridTemplateColumns: "1fr 380px", gap: 12, minHeight: 0 }}>
       <HudPanel
-        title={proj.name} index="PRJ" live={proj.status === "blocked" ? "warn" : "ok"}
+        title={proj.name ?? proj.title ?? "(untitled)"} index="PRJ" live={proj.status === "blocked" ? "warn" : "ok"}
         style={{ minHeight: 0 }} bodyClass="overflow-auto"
         actions={<Btn size="sm" onClick={() => nav("/projects")}>← back</Btn>}
       >

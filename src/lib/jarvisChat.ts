@@ -5,6 +5,11 @@
 import { useContent } from "@/store/contentStore";
 import { useVoice } from "@/store/voiceStore";
 import { captureAndDescribe } from "@/lib/vision";
+import { useBrain } from "@/store/brainStore";
+import { supabase as _supabase } from "@/integrations/supabase/client";
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const supabase: any = _supabase as any;
+import { runToolIntent } from "@/lib/jarvisTools";
 
 type Role = "user" | "assistant";
 type MsgPart =
@@ -14,6 +19,11 @@ export interface HistoryMessage {
   id: string;
   role: Role;
   parts: MsgPart[];
+}
+
+export interface JarvisChatOpts {
+  mode?: "text" | "voice" | "screen";
+  screenshotUrl?: string;
 }
 
 const HISTORY_CAP = 12;
@@ -43,7 +53,13 @@ export function getJarvisHistory(): ReadonlyArray<HistoryMessage> {
 }
 
 /** Send a user utterance, stream the reply, return the full assistant text. */
-export async function jarvisChat(userText: string, onDelta?: (chunk: string) => void): Promise<string> {
+export async function jarvisChat(
+  userText: string,
+  onDelta?: (chunk: string) => void,
+  opts: JarvisChatOpts = {},
+): Promise<string> {
+  const startedAt = Date.now();
+  const brain = useBrain.getState();
   const userMsg: HistoryMessage = { id: mkId(), role: "user", parts: [{ type: "text", text: userText }] };
   history.push(userMsg);
   while (history.length > HISTORY_CAP) history.shift();
@@ -66,7 +82,13 @@ export async function jarvisChat(userText: string, onDelta?: (chunk: string) => 
           Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
           apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string,
         },
-        body: JSON.stringify({ messages: history }),
+        body: JSON.stringify({
+          messages: history,
+          provider: brain.provider,
+          model: brain.model,
+          screenshotUrl: opts.screenshotUrl,
+          mode: opts.mode ?? "text",
+        }),
         signal: ctrl.signal,
       });
       if (res.ok && res.body) break;
@@ -166,6 +188,18 @@ export async function jarvisChat(userText: string, onDelta?: (chunk: string) => 
   };
   history.push(assistantMsg);
   while (history.length > HISTORY_CAP) history.shift();
+  // Persist the turn (fire-and-forget).
+  try {
+    void supabase.from("jarvis_interactions").insert({
+      user_text: userText,
+      assistant_text: full,
+      provider: brain.provider,
+      model: brain.model,
+      mode: opts.mode ?? "text",
+      latency_ms: Date.now() - startedAt,
+      screenshot_url: opts.screenshotUrl ?? null,
+    } as any);
+  } catch { /* noop */ }
   return full.trim();
 }
 
@@ -233,6 +267,18 @@ function handleToolResult(name: string | undefined, input: any, output: any) {
       case "summarize_file": {
         if (output.error) add({ type: "error", message: `Summarize failed: ${output.error}` } as any);
         else add({ type: "file", filename: input?.signed_url?.split("/").pop() ?? "file", summary: output.summary ?? "" } as any);
+        break;
+      }
+      case "navigate":
+      case "open_url":
+      case "create_task":
+      case "create_note":
+      case "add_inbox_item":
+      case "open_project":
+      case "focus_panel":
+      case "switch_brain": {
+        // Edge tool returns an intent; run it in the browser.
+        void runToolIntent(name, { action: name, ...(output ?? {}), ...(input ?? {}) });
         break;
       }
       default:

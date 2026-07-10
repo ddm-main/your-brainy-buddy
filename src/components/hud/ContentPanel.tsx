@@ -58,7 +58,7 @@ function Card({ card }: { card: ContentCard }) {
       style={{
         position: "relative",
         border: "1px solid var(--edge)",
-        background: "rgba(5, 10, 20, 0.85)",
+        background: "var(--panel-tint-heavy)",
         backdropFilter: "blur(14px)",
         padding: 10,
         fontSize: 12,

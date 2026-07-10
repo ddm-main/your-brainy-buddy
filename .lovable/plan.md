@@ -1,60 +1,49 @@
+## Goal
+Replace the current JARVIS core (overlapping tilted ring plates + fresnel sphere + satellites — reads as "clashing spheres") with a **neural network sphere**: nodes distributed on a sphere surface, connected by faint lines to nearest neighbors, gently pulsing. One coherent AI-brain silhouette, calm breathing at idle, more active when listening/thinking/speaking.
 
-# JARVIS Build Plan — 3 sequential approvals
+## What changes
+Only `src/components/core/JarvisCore.tsx`. No other files touched. Voice states, colors, and the "open conversation" pill stay identical — same store hooks, same button.
 
-You picked **Do all three in order** and **Reuse existing HUD**. I'll execute as three separate approval gates so you can course-correct between each. This plan covers **Step 1 only** — the PRD doc. Steps 2 and 3 will come back as their own plans after you approve each preceding one.
-
-## Step 1 (this plan) — Write the PRD
-
-Create the blueprint as a real doc inside the OS, following your file rules (`Projects/<name>/_overview.md`, kebab-case, ISO dates, files-are-state).
-
-**Files created:**
-
+## New composition (back → front)
 ```text
-Projects/jarvis/
-  _overview.md          # outcome, status, next actions (per your Projects rule)
-  PRD.md                # full product requirements — the blueprint, cleaned up
-  architecture.md       # 6 pillars + module map + information architecture
-  data-model.md         # entity list + relationships (prose, no SQL yet — SQL is Step 2)
-  roadmap.md            # Phase 1 → 4, MVP scope, v1 success criteria
-  homepage-spec.md      # HUD layout mapped onto the existing shell (JarvisCore, HudPanel, VoiceBar)
+1. Faint bounded halo particles (kept — subtle depth)
+2. Two thin concentric HUD rings with tick marks (kept — HUD framing)
+3. NEW: Neural sphere
+     - ~90 nodes fibonacci-distributed on a sphere (r ≈ 1.1)
+     - Lines connecting each node to its 3 nearest neighbors
+     - Nodes pulse individually (per-node phase); brighter nodes "fire"
+     - Sphere slowly rotates on Y (calm breathing)
+     - Voice state → color + pulse rate + firing frequency
+4. Soft inner glow orb at center (small, low opacity — gives the sphere a "core")
 ```
 
-**PRD.md structure** (mirrors your blueprint, tightened):
-1. Vision & product identity
-2. The 6 pillars
-3. Module-by-module spec (Home/HUD, Chat, Tasks, Inbox, Finance, Projects, Memory, Goals, Automations, Reports, Settings)
-4. JARVIS intelligence model (what it knows / watches / does)
-5. Cross-module entity model (people, vendors, banks, cards, projects, tools)
-6. Non-goals for v1
+Removed: `ReactorPlate` ×3 (the tilted overlapping rings), `Satellites`, the large fresnel `InnerCore` sphere. Those are what make it feel like "few spheres, current is a mess".
 
-**homepage-spec.md** explicitly maps blueprint sections onto files that already exist so nothing is thrown away:
+## Motion (calm — slow breathing)
+- Idle: sphere rotates ~0.05 rad/s on Y, node pulse period ~4s, ~2 nodes firing/sec.
+- Listening: rotation ×1.4, node pulse period ~2s, ~6 nodes firing/sec.
+- Processing: rotation ×2.2, firing ~12/sec, color shifts to amber.
+- Speaking: pulses sync to `voice.amplitude`, color shifts to green.
+- Muted/paused: rotation frozen, dim palette.
 
-```text
-Left column  → HudPanel "Today's Focus" + Quick Actions + Daily Brief
-Center       → JarvisCore (cyan neural brain, kept) + VoiceBar + active intelligence strip
-Right column → Inbox summary + Finance summary + Work summary panels
-Bottom       → Tasks, Projects, Recent decisions, Automations, Recent JARVIS actions
-```
+## Technical detail
+- Node positions: fibonacci sphere (deterministic, evenly spaced — no clumping).
+- Edges: precomputed once per mount by k-NN (k=3) → single `LineSegments` with additive blending.
+- Nodes: single `Points` with a custom shader; per-vertex `aSeed` + `aPhase` attributes drive independent flicker so it looks alive without rebuilding buffers each frame.
+- Firing "spark": shader adds a brief brightness bump when `sin(uTime*rate + aPhase) > threshold`.
+- Uniforms: `uTime`, `uAmp`, `uColor`, `uRate`, `uFireThreshold` — updated in one `useFrame` from `useVoice.getState()` (no re-renders, same pattern as today).
+- HUD rings + halo particles: reused unchanged so the outer framing is stable.
+- All additive blending on transparent black — no z-fighting, no depth writes.
 
-**Log & dashboard hygiene** (per your operating rules):
-- Append one line to `System/Logs/2026-07-09.md`: "created Projects/jarvis PRD pack"
-- Update `Dashboard.md` — add `jarvis` to Active Projects with next action "approve Step 2 schema plan"
-- Add a `System/Memory/` entry only if a durable decision emerges while writing (won't invent one)
+## Verify
+After the edit, load `/` and confirm:
+- Center is a single recognizable sphere made of connected nodes (not multiple overlapping rings).
+- Slow calm rotation at idle, no jitter.
+- Tapping the core → state changes → color and pulse rate change visibly.
+- "open conversation" pill still works and sits in the same place.
+- No console errors, no drop in FPS vs. current.
 
-**Nothing else changes.** No code, no schema, no HUD edits in this step.
-
-## Step 2 (next plan, after you approve Step 1) — Supabase schema
-
-I'll return with a migration plan covering the v1 tables from your blueprint: core (profiles, settings, tags, entities), productivity (tasks, notes, decisions, projects, incidents, vendors, renewals), inbox (email_accounts, emails, attachments), finance (banks, financial_accounts, credit_cards, loans, financial_goals, subscriptions, transactions, statements, finance_email_rules, reconciliation_matches), automation logs. Each `CREATE TABLE` will include GRANTs + RLS + policies in the same migration. You approve the SQL before it runs.
-
-## Step 3 (next plan, after you approve Step 2) — Phase 1 MVP build
-
-Wire the existing HUD shell to the new schema: Tasks, Notes, Inbox basic, Finance structure screens, Projects, and a working command bar on top of `VoiceBar` + `CommandPalette`. Reuses `JarvisCore`, `HudPanel`, existing routes. File-level change list will be in that plan.
-
-## Out of scope right now
-
-- Any code edits, package installs, or design changes to the current cyan brain HUD
-- Statement parsing, reconciliation engine, voice execution, automations — those are Phase 2–4
-- Email/OAuth provider wiring — that comes with Inbox module in Step 3
-
-Approve to write the PRD pack.
+## Not doing
+- Not touching `Home.tsx`, `VoiceBar`, `CommandPalette`, stores, or any panel.
+- Not adding new dependencies (three + @react-three/fiber already installed).
+- Not changing the color palette / voice-state semantics.

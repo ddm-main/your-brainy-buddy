@@ -8,3 +8,9 @@ verify_jwt = false
 
 [functions.jarvis-vision-upload]
 verify_jwt = false
+
+[functions.jarvis-tts]
+verify_jwt = false
+
+[functions.jarvis-transcribe]
+verify_jwt = false

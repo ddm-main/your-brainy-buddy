@@ -1,4 +1,6 @@
-import { supabase } from "@/integrations/supabase/client";
+import { supabase as _supabase } from "@/integrations/supabase/client";
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const supabase: any = _supabase as any;
 
 const FN_UPLOAD = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/jarvis-vision-upload`;
 const FN_VISION = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/jarvis-vision`;

@@ -8,6 +8,7 @@ import {
 import { z } from "npm:zod";
 import { corsHeaders } from "npm:@supabase/supabase-js@2/cors";
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { createOpenAICompatible } from "npm:@ai-sdk/openai-compatible";
 import { createLovableAiGatewayProvider } from "../_shared/ai-gateway.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -103,7 +104,14 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { messages }: { messages: UIMessage[] } = await req.json();
+    const body = await req.json() as {
+      messages: UIMessage[];
+      provider?: "gemini" | "openrouter";
+      model?: string;
+      screenshotUrl?: string;
+      mode?: string;
+    };
+    const { messages, provider = "gemini", model: requestedModel, screenshotUrl } = body;
     if (!Array.isArray(messages) || messages.length === 0) {
       return new Response(JSON.stringify({ error: "messages required" }), {
         status: 400,
@@ -112,6 +120,42 @@ Deno.serve(async (req) => {
     }
 
     const gateway = createLovableAiGatewayProvider(key);
+
+    // Provider routing.
+    let modelInstance: any;
+    if (provider === "openrouter") {
+      const orKey = Deno.env.get("OPENROUTER_API_KEY");
+      if (!orKey) {
+        return new Response(
+          JSON.stringify({
+            error: "OPENROUTER_API_KEY not configured. Add it in project secrets to use OpenRouter models.",
+          }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+      const openrouter = createOpenAICompatible({
+        name: "openrouter",
+        baseURL: "https://openrouter.ai/api/v1",
+        headers: {
+          Authorization: `Bearer ${orKey}`,
+          "HTTP-Referer": "https://jarvis.lovable.app",
+          "X-Title": "JARVIS",
+        },
+      });
+      modelInstance = openrouter(requestedModel ?? "openai/gpt-5");
+    } else {
+      modelInstance = gateway(requestedModel ?? "google/gemini-3-flash-preview");
+    }
+
+    // If a screenshot is attached, inject it as an image on the latest user turn.
+    if (screenshotUrl) {
+      const lastUser = [...messages].reverse().find((m) => m.role === "user");
+      if (lastUser) {
+        const parts = (lastUser as any).parts ?? [];
+        parts.push({ type: "image", image: screenshotUrl });
+        (lastUser as any).parts = parts;
+      }
+    }
 
     const tools = {
       web_search: tool({
@@ -293,12 +337,252 @@ Deno.serve(async (req) => {
           }
         },
       }),
+      navigate: tool({
+        description: "Navigate the JARVIS app to a route, e.g. '/finance', '/tasks', '/projects', '/inbox', '/notes'.",
+        inputSchema: z.object({ path: z.string() }),
+        execute: async ({ path }) => ({ action: "navigate", path }),
+      }),
+      open_url: tool({
+        description: "Open an external URL in a new browser tab.",
+        inputSchema: z.object({ url: z.string(), target: z.string().default("_blank") }),
+        execute: async ({ url, target }) => ({ action: "open_url", url, target }),
+      }),
+      create_task: tool({
+        description: "Create a task in Deepak's task list. Persists to Supabase immediately.",
+        inputSchema: z.object({
+          title: z.string(),
+          priority: z.enum(["low", "normal", "high", "urgent"]).default("normal"),
+          due_at: z.string().nullable().default(null),
+          focus: z.boolean().default(false),
+        }),
+        execute: async (input) => {
+          const db = admin();
+          const { data, error } = await db.from("tasks").insert({
+            title: input.title,
+            priority: input.priority,
+            due_at: input.due_at,
+            focus: input.focus,
+            source: "jarvis",
+          }).select("id,title").single();
+          if (error) return { error: error.message };
+          return { action: "create_task", created: true, id: data.id, ...input };
+        },
+      }),
+      create_note: tool({
+        description: "Save a note to Deepak's notes.",
+        inputSchema: z.object({ title: z.string(), content: z.string().default("") }),
+        execute: async (input) => {
+          const db = admin();
+          const { data, error } = await db.from("notes").insert({
+            title: input.title, content: input.content,
+          }).select("id").single();
+          if (error) return { error: error.message };
+          return { action: "create_note", created: true, id: data.id, ...input };
+        },
+      }),
+      complete_task: tool({
+        description: "Mark a task as done. Match by id, or by exact/partial title if id is unknown.",
+        inputSchema: z.object({
+          id: z.string().nullable().default(null),
+          title_contains: z.string().nullable().default(null),
+        }),
+        execute: async ({ id, title_contains }) => {
+          const db = admin();
+          let targetId = id;
+          if (!targetId && title_contains) {
+            const { data } = await db.from("tasks")
+              .select("id,title").ilike("title", `%${title_contains}%`)
+              .neq("status", "done").limit(1);
+            targetId = data?.[0]?.id ?? null;
+          }
+          if (!targetId) return { error: "no matching task" };
+          const { error } = await db.from("tasks")
+            .update({ status: "done" }).eq("id", targetId);
+          if (error) return { error: error.message };
+          return { completed: true, id: targetId };
+        },
+      }),
+      list_tasks: tool({
+        description: "List Deepak's open tasks, optionally filtered by focus or due soon.",
+        inputSchema: z.object({
+          focus_only: z.boolean().default(false),
+          limit: z.number().default(10),
+        }),
+        execute: async ({ focus_only, limit }) => {
+          const db = admin();
+          let q = db.from("tasks")
+            .select("id,title,priority,due_at,focus,status")
+            .neq("status", "done").neq("status", "cancelled")
+            .order("due_at", { ascending: true, nullsFirst: false })
+            .limit(limit);
+          if (focus_only) q = q.eq("focus", true);
+          const { data, error } = await q;
+          if (error) return { error: error.message };
+          return { tasks: data ?? [] };
+        },
+      }),
+      finance_summary: tool({
+        description:
+          "Snapshot of finance: current month spend/income, upcoming card/subscription dues in the next 14 days.",
+        inputSchema: z.object({}),
+        execute: async () => {
+          const db = admin();
+          const start = new Date(); start.setDate(1); start.setHours(0, 0, 0, 0);
+          const [tx, cards, subs, loans] = await Promise.all([
+            db.from("transactions").select("amount,txn_type")
+              .gte("txn_date", start.toISOString().slice(0, 10)),
+            db.from("credit_cards").select("card_name,due_day"),
+            db.from("subscriptions").select("name,amount,next_due_date"),
+            db.from("loans").select("lender_name,emi_amount,next_due_date"),
+          ]);
+          let spend = 0, income = 0;
+          for (const r of tx.data ?? []) {
+            const a = Number((r as any).amount) || 0;
+            if ((r as any).txn_type === "debit") spend += a; else income += a;
+          }
+          const now = Date.now();
+          const in14 = now + 14 * 86400_000;
+          const dueCards = (cards.data ?? []).filter((c: any) => {
+            if (c.due_day == null) return false;
+            const d = new Date(); d.setDate(c.due_day);
+            if (d.getTime() < now) d.setMonth(d.getMonth() + 1);
+            return d.getTime() <= in14;
+          }).map((c: any) => c.card_name);
+          const dueSubs = (subs.data ?? []).filter((s: any) =>
+            s.next_due_date && new Date(s.next_due_date).getTime() <= in14,
+          );
+          const dueLoans = (loans.data ?? []).filter((l: any) =>
+            l.next_due_date && new Date(l.next_due_date).getTime() <= in14,
+          );
+          return {
+            month_spend: spend, month_income: income,
+            upcoming_cards: dueCards,
+            upcoming_subscriptions: dueSubs,
+            upcoming_loans: dueLoans,
+          };
+        },
+      }),
+      add_inbox_item: tool({
+        description: "Capture something into the inbox for later processing.",
+        inputSchema: z.object({ content: z.string(), source: z.string().default("jarvis") }),
+        execute: async (input) => ({ action: "add_inbox_item", ...input }),
+      }),
+      open_project: tool({
+        description: "Open a project by slug/id.",
+        inputSchema: z.object({ slug: z.string() }),
+        execute: async ({ slug }) => ({ action: "open_project", slug }),
+      }),
+      focus_panel: tool({
+        description: "Focus a HUD panel by name.",
+        inputSchema: z.object({ name: z.string() }),
+        execute: async ({ name }) => ({ action: "focus_panel", name }),
+      }),
+      switch_brain: tool({
+        description:
+          "Switch the AI brain. provider is 'gemini' or 'openrouter'. Common models: google/gemini-2.5-pro, google/gemini-3-flash-preview, openai/gpt-5, anthropic/claude-3.5-sonnet.",
+        inputSchema: z.object({
+          provider: z.enum(["gemini", "openrouter"]),
+          model: z.string(),
+        }),
+        execute: async (input) => ({ action: "switch_brain", ...input }),
+      }),
+      search_notes: tool({
+        description: "Search Deepak's notes and decisions by keyword. Returns titles + snippets.",
+        inputSchema: z.object({ query: z.string(), limit: z.number().default(6) }),
+        execute: async ({ query, limit }) => {
+          const db = admin();
+          const [notes, decisions] = await Promise.all([
+            db.from("notes").select("id,title,content,created_at")
+              .or(`title.ilike.%${query}%,content.ilike.%${query}%`)
+              .order("created_at", { ascending: false }).limit(limit),
+            db.from("decisions").select("id,title,rationale,created_at")
+              .or(`title.ilike.%${query}%,rationale.ilike.%${query}%`)
+              .order("created_at", { ascending: false }).limit(limit),
+          ]);
+          return {
+            notes: (notes.data ?? []).map((n: any) => ({ id: n.id, title: n.title, snippet: String(n.content ?? "").slice(0, 200) })),
+            decisions: (decisions.data ?? []).map((d: any) => ({ id: d.id, title: d.title, snippet: String(d.rationale ?? "").slice(0, 200) })),
+          };
+        },
+      }),
+      list_reminders: tool({
+        description: "List Deepak's pending reminders (not yet fired).",
+        inputSchema: z.object({ limit: z.number().default(10) }),
+        execute: async ({ limit }) => {
+          const db = admin();
+          const { data, error } = await db.from("jarvis_reminders")
+            .select("id,text,fire_at,fired_at")
+            .is("fired_at", null)
+            .order("fire_at", { ascending: true })
+            .limit(limit);
+          if (error) return { error: error.message };
+          return { reminders: data ?? [] };
+        },
+      }),
+      list_upcoming_dues: tool({
+        description: "List all financial dues (credit cards, subscriptions, loans) coming up in the next N days.",
+        inputSchema: z.object({ days: z.number().default(14) }),
+        execute: async ({ days }) => {
+          const db = admin();
+          const now = Date.now();
+          const until = now + days * 86400_000;
+          const [cards, subs, loans] = await Promise.all([
+            db.from("credit_cards").select("card_name,due_day,total_due"),
+            db.from("subscriptions").select("name,amount,next_due_date,cycle"),
+            db.from("loans").select("lender_name,emi_amount,next_due_date"),
+          ]);
+          const dueCards = (cards.data ?? []).flatMap((c: any) => {
+            if (c.due_day == null) return [];
+            const d = new Date(); d.setDate(c.due_day);
+            if (d.getTime() < now) d.setMonth(d.getMonth() + 1);
+            return d.getTime() <= until ? [{ kind: "card", name: c.card_name, amount: c.total_due, date: d.toISOString().slice(0, 10) }] : [];
+          });
+          const dueSubs = (subs.data ?? []).filter((s: any) => s.next_due_date && new Date(s.next_due_date).getTime() <= until)
+            .map((s: any) => ({ kind: "subscription", name: s.name, amount: s.amount, date: s.next_due_date }));
+          const dueLoans = (loans.data ?? []).filter((l: any) => l.next_due_date && new Date(l.next_due_date).getTime() <= until)
+            .map((l: any) => ({ kind: "loan", name: l.lender_name, amount: l.emi_amount, date: l.next_due_date }));
+          const all = [...dueCards, ...dueSubs, ...dueLoans].sort((a: any, b: any) => a.date.localeCompare(b.date));
+          return { window_days: days, dues: all };
+        },
+      }),
+      add_transaction: tool({
+        description: "Log a financial transaction. txn_type is 'debit' (money out) or 'credit' (money in).",
+        inputSchema: z.object({
+          amount: z.number(),
+          txn_type: z.enum(["debit", "credit"]).default("debit"),
+          description: z.string(),
+          category: z.string().nullable().default(null),
+          txn_date: z.string().nullable().default(null),
+          merchant: z.string().nullable().default(null),
+        }),
+        execute: async (input) => {
+          const db = admin();
+          const row: any = {
+            amount: input.amount, txn_type: input.txn_type, description: input.description,
+            category: input.category, merchant: input.merchant,
+            txn_date: input.txn_date ?? new Date().toISOString().slice(0, 10),
+            source: "jarvis",
+          };
+          const { data, error } = await db.from("transactions").insert(row).select("id").single();
+          if (error) return { error: error.message };
+          return { created: true, id: data.id, ...input };
+        },
+      }),
+      complete_reminder: tool({
+        description: "Mark a reminder as fired/done by id.",
+        inputSchema: z.object({ id: z.string() }),
+        execute: async ({ id }) => {
+          const db = admin();
+          const { error } = await db.from("jarvis_reminders")
+            .update({ fired_at: new Date().toISOString() }).eq("id", id);
+          if (error) return { error: error.message };
+          return { completed: true, id };
+        },
+      }),
     };
 
-    const gatewayModel = gateway("google/gemini-3-flash-preview");
-
     const result = streamText({
-      model: gatewayModel,
+      model: modelInstance,
       system: SYSTEM_PROMPT,
       tools,
       stopWhen: stepCountIs(50),

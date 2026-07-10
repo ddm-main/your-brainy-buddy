@@ -1,13 +1,18 @@
-import { Routes, Route } from "react-router-dom";
+import { Routes, Route, useLocation, Navigate } from "react-router-dom";
 import { Suspense, lazy, useEffect } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import TopBar from "@/components/hud/TopBar";
-import VoiceBar from "@/components/hud/VoiceBar";
+import ErrorBoundary from "@/components/hud/ErrorBoundary";
+
 import CommandPalette from "@/components/hud/CommandPalette";
 import ToastLayer from "@/components/hud/ToastLayer";
 import ContentPanel from "@/components/hud/ContentPanel";
+import BootScanline from "@/components/hud/BootScanline";
 import { useContent } from "@/store/contentStore";
+import { useUi } from "@/store/uiStore";
 import { startReminderPoller } from "@/lib/reminders";
 import { runMorningBriefing } from "@/lib/briefing";
+
 
 const Home = lazy(() => import("@/routes/Home"));
 const Inbox = lazy(() => import("@/routes/Inbox"));
@@ -16,6 +21,7 @@ const Projects = lazy(() => import("@/routes/Projects"));
 const Settings = lazy(() => import("@/routes/Settings"));
 const Tasks = lazy(() => import("@/routes/Tasks"));
 const Notes = lazy(() => import("@/routes/Notes"));
+const NotFound = lazy(() => import("@/routes/NotFound"));
 
 export default function App() {
   useEffect(() => {
@@ -31,12 +37,28 @@ export default function App() {
     });
     // Ask for notification permission once, non-blocking.
     if ("Notification" in window && Notification.permission === "default") {
-      Notification.requestPermission().catch(() => {});
+      Notification.requestPermission().catch((e) => { if (import.meta.env.DEV) console.warn("[JARVIS] notification prompt:", e); });
     }
     // Fire morning briefing once per day, after a small delay.
-    const t = window.setTimeout(() => { runMorningBriefing().catch(() => {}); }, 4000);
-    return () => { stop(); window.clearTimeout(t); };
+    const t = window.setTimeout(() => {
+      runMorningBriefing().catch((e) => { if (import.meta.env.DEV) console.warn("[JARVIS] morning briefing:", e); });
+    }, 4000);
+
+    // Global hotkey: ⌘/Ctrl+J → open conversation overlay.
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.key.toLowerCase() !== "j") return;
+      const el = document.activeElement as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || el?.isContentEditable) return;
+      e.preventDefault();
+      useUi.getState().openConversation();
+    };
+    window.addEventListener("keydown", onKey);
+
+    return () => { stop(); window.clearTimeout(t); window.removeEventListener("keydown", onKey); };
   }, []);
+
 
   return (
     <>
@@ -45,25 +67,47 @@ export default function App() {
       <div style={{ position: "relative", zIndex: 2, height: "100%", display: "flex", flexDirection: "column" }}>
         <TopBar />
         <main style={{ flex: 1, minHeight: 0, position: "relative" }}>
-          <Suspense fallback={<BootFallback />}>
-            <Routes>
-              <Route path="/" element={<Home />} />
-              <Route path="/tasks" element={<Tasks />} />
-              <Route path="/notes" element={<Notes />} />
-              <Route path="/inbox" element={<Inbox />} />
-              <Route path="/finance/*" element={<Finance />} />
-              <Route path="/projects/*" element={<Projects />} />
-              <Route path="/settings" element={<Settings />} />
-              <Route path="*" element={<Home />} />
-            </Routes>
-          </Suspense>
+          <ErrorBoundary>
+            <Suspense fallback={<BootFallback />}>
+              <AnimatedRoutes />
+            </Suspense>
+          </ErrorBoundary>
         </main>
-        <VoiceBar />
       </div>
+
       <ContentPanel />
       <CommandPalette />
       <ToastLayer />
     </>
+  );
+}
+
+function AnimatedRoutes() {
+  const location = useLocation();
+  return (
+    <AnimatePresence mode="wait" initial={false}>
+      <motion.div
+        key={location.pathname}
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0, transition: { duration: 0.2, ease: [0.22, 1, 0.36, 1] } }}
+        exit={{ opacity: 0, y: -4, transition: { duration: 0.12, ease: [0.4, 0, 1, 1] } }}
+        style={{ height: "100%", position: "relative" }}
+      >
+        <BootScanline triggerKey={location.pathname} />
+        <Routes location={location}>
+
+          <Route path="/" element={<Home />} />
+          <Route path="/tasks" element={<Tasks />} />
+          <Route path="/notes" element={<Notes />} />
+          <Route path="/inbox" element={<Inbox />} />
+          <Route path="/finance/*" element={<Finance />} />
+          <Route path="/projects/*" element={<Projects />} />
+          <Route path="/settings" element={<Settings />} />
+          <Route path="/auth" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </motion.div>
+    </AnimatePresence>
   );
 }
 
