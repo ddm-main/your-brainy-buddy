@@ -101,7 +101,16 @@ export async function runGmailSync(
       })
       .eq("id", account.id);
 
-    return { ok: true, inserted, total: ids.length, q };
+    // Best-effort finance extraction over what we just pulled.
+    let extracted = { transactions: 0, statements: 0, scanned: 0 };
+    try {
+      const r = await extractFinanceForAccount(svc, account, { sinceDays: Math.max(7, Number(account.sync_period_days ?? 30)), limit: Math.max(100, Number(account.max_per_sync ?? 100)) });
+      extracted = { transactions: r.transactions, statements: r.statements, scanned: r.scanned };
+    } catch (e) {
+      console.warn("finance-extract failed:", e instanceof Error ? e.message : e);
+    }
+
+    return { ok: true, inserted, total: ids.length, q, extracted } as any;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await svc
