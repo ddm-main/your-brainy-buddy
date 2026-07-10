@@ -68,6 +68,10 @@ export async function runGmailSync(
         ? new Date(Number(meta.internalDate)).toISOString()
         : null;
 
+      const subject = h["subject"] ?? null;
+      const snippet = meta.snippet ?? null;
+      const financeRelated = isFinanceMail({ from_email: from.email, subject, snippet });
+
       const { error: insErr } = await svc.from("emails").insert({
         user_id: account.user_id,
         account_id: account.id,
@@ -76,9 +80,11 @@ export async function runGmailSync(
         thread_id: m.threadId,
         from_name: from.name,
         from_email: from.email,
-        subject: h["subject"] ?? null,
-        snippet: meta.snippet ?? null,
+        subject,
+        snippet,
         received_at: receivedAt,
+        finance_related: financeRelated,
+        category: financeRelated ? "finance" : null,
       });
       if (!insErr) inserted++;
       else if (!String(insErr.message).includes("duplicate"))
