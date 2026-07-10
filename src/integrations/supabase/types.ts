@@ -1160,6 +1160,7 @@ export type Database = {
       }
       statements: {
         Row: {
+          confidence: number | null
           created_at: string
           credit_card_id: string | null
           file_path: string | null
@@ -1170,6 +1171,7 @@ export type Database = {
           period_end: string | null
           period_start: string | null
           reconciliation_status: Database["public"]["Enums"]["reconciliation_status"]
+          source: string | null
           source_email_id: string | null
           statement_date: string | null
           statement_type: Database["public"]["Enums"]["statement_type"]
@@ -1178,6 +1180,7 @@ export type Database = {
           user_id: string
         }
         Insert: {
+          confidence?: number | null
           created_at?: string
           credit_card_id?: string | null
           file_path?: string | null
@@ -1188,6 +1191,7 @@ export type Database = {
           period_end?: string | null
           period_start?: string | null
           reconciliation_status?: Database["public"]["Enums"]["reconciliation_status"]
+          source?: string | null
           source_email_id?: string | null
           statement_date?: string | null
           statement_type: Database["public"]["Enums"]["statement_type"]
@@ -1196,6 +1200,7 @@ export type Database = {
           user_id?: string
         }
         Update: {
+          confidence?: number | null
           created_at?: string
           credit_card_id?: string | null
           file_path?: string | null
@@ -1206,6 +1211,7 @@ export type Database = {
           period_end?: string | null
           period_start?: string | null
           reconciliation_status?: Database["public"]["Enums"]["reconciliation_status"]
+          source?: string | null
           source_email_id?: string | null
           statement_date?: string | null
           statement_type?: Database["public"]["Enums"]["statement_type"]
@@ -1392,11 +1398,13 @@ export type Database = {
         Row: {
           amount: number
           category: string | null
+          confidence: number | null
           confidence_score: number | null
           created_at: string
           credit_card_id: string | null
           description: string | null
           duplicate_group_id: string | null
+          external_ref: string | null
           financial_account_id: string | null
           id: string
           is_reconciled: boolean
@@ -1414,11 +1422,13 @@ export type Database = {
         Insert: {
           amount: number
           category?: string | null
+          confidence?: number | null
           confidence_score?: number | null
           created_at?: string
           credit_card_id?: string | null
           description?: string | null
           duplicate_group_id?: string | null
+          external_ref?: string | null
           financial_account_id?: string | null
           id?: string
           is_reconciled?: boolean
@@ -1436,11 +1446,13 @@ export type Database = {
         Update: {
           amount?: number
           category?: string | null
+          confidence?: number | null
           confidence_score?: number | null
           created_at?: string
           credit_card_id?: string | null
           description?: string | null
           duplicate_group_id?: string | null
+          external_ref?: string | null
           financial_account_id?: string | null
           id?: string
           is_reconciled?: boolean
