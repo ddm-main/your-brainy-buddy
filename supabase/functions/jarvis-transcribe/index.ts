@@ -1,18 +1,26 @@
-// JARVIS speech-to-text. Accepts multipart audio, forwards to Lovable AI
-// Gateway `openai/gpt-4o-mini-transcribe`, streams SSE (transcript.text.delta
-// + transcript.text.done) back to the client.
+// JARVIS speech-to-text. Accepts multipart audio, forwards to Lovable AI Gateway.
 
-import { corsHeaders } from "npm:@supabase/supabase-js@2/cors";
+import { corsFor, preflight } from "../_shared/cors.ts";
+import { requireUserId } from "../_shared/auth.ts";
 
 const GATEWAY = "https://ai.gateway.lovable.dev/v1/audio/transcriptions";
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  const pre = preflight(req);
+  if (pre) return pre;
+  const cors = corsFor(req);
+
+  const auth = await requireUserId(req);
+  if ("error" in auth) {
+    return new Response(JSON.stringify({ error: "unauthorized" }), {
+      status: 401, headers: { ...cors, "Content-Type": "application/json" },
+    });
+  }
 
   const key = Deno.env.get("LOVABLE_API_KEY");
   if (!key) {
     return new Response(JSON.stringify({ error: "LOVABLE_API_KEY not configured" }), {
-      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 500, headers: { ...cors, "Content-Type": "application/json" },
     });
   }
 
@@ -21,12 +29,12 @@ Deno.serve(async (req) => {
     const file = inbound.get("file");
     if (!(file instanceof File) || file.size < 1024) {
       return new Response(JSON.stringify({ error: "audio file required (min 1KB)" }), {
-        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 400, headers: { ...cors, "Content-Type": "application/json" },
       });
     }
     if (file.size > 24 * 1024 * 1024) {
       return new Response(JSON.stringify({ error: "audio too large (max 24MB)" }), {
-        status: 413, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 413, headers: { ...cors, "Content-Type": "application/json" },
       });
     }
     const model = (inbound.get("model") as string) || "openai/gpt-4o-mini-transcribe";
@@ -49,20 +57,20 @@ Deno.serve(async (req) => {
       const detail = await res.text().catch(() => "");
       return new Response(
         JSON.stringify({ error: `transcription failed (${res.status})`, detail: detail.slice(0, 400) }),
-        { status: res.status, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        { status: res.status, headers: { ...cors, "Content-Type": "application/json" } },
       );
     }
 
     if (!stream) {
       const json = await res.json();
       return new Response(JSON.stringify(json), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        headers: { ...cors, "Content-Type": "application/json" },
       });
     }
 
     return new Response(res.body, {
       headers: {
-        ...corsHeaders,
+        ...cors,
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache, no-transform",
         "Connection": "keep-alive",
@@ -72,7 +80,7 @@ Deno.serve(async (req) => {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("jarvis-transcribe:", msg);
     return new Response(JSON.stringify({ error: msg }), {
-      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 500, headers: { ...cors, "Content-Type": "application/json" },
     });
   }
 });

@@ -10,6 +10,7 @@ import { supabase as _supabase } from "@/integrations/supabase/client";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const supabase: any = _supabase as any;
 import { runToolIntent } from "@/lib/jarvisTools";
+import { authHeaders } from "@/lib/authFetch";
 
 type Role = "user" | "assistant";
 type MsgPart =
@@ -79,8 +80,7 @@ export async function jarvisChat(
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-          apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string,
+          ...(await authHeaders()),
         },
         body: JSON.stringify({
           messages: history,
@@ -270,7 +270,6 @@ function handleToolResult(name: string | undefined, input: any, output: any) {
         break;
       }
       case "navigate":
-      case "open_url":
       case "create_task":
       case "create_note":
       case "add_inbox_item":

@@ -28,12 +28,8 @@ export async function runToolIntent(name: string, intent: ToolIntent): Promise<v
         useUi.getState().push(`Navigated to ${path}`, "ok");
         return;
       }
-      case "open_url": {
-        const url = String(intent.url ?? "");
-        if (!url) return;
-        window.open(url, String(intent.target ?? "_blank"));
-        return;
-      }
+      // open_url removed — external navigation disabled to close the injection exfiltration channel.
+
       case "create_task": {
         await db.tasks.create({
           title: String(intent.title ?? "Untitled task"),

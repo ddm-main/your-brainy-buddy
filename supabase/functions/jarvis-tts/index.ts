@@ -1,18 +1,27 @@
 // JARVIS text-to-speech. Streams PCM audio via SSE from Lovable AI Gateway.
-// Client (see src/lib/tts.ts) decodes deltas and schedules them on AudioContext.
 
-import { corsHeaders } from "npm:@supabase/supabase-js@2/cors";
+import { corsFor, preflight } from "../_shared/cors.ts";
+import { requireUserId } from "../_shared/auth.ts";
 
 const GATEWAY_URL = "https://ai.gateway.lovable.dev/v1/audio/speech";
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+  const pre = preflight(req);
+  if (pre) return pre;
+  const cors = corsFor(req);
+
+  const auth = await requireUserId(req);
+  if ("error" in auth) {
+    return new Response(JSON.stringify({ error: "unauthorized" }), {
+      status: 401, headers: { ...cors, "Content-Type": "application/json" },
+    });
+  }
 
   const key = Deno.env.get("LOVABLE_API_KEY");
   if (!key) {
     return new Response(
       JSON.stringify({ error: "LOVABLE_API_KEY not configured" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      { status: 500, headers: { ...cors, "Content-Type": "application/json" } },
     );
   }
 
@@ -25,7 +34,7 @@ Deno.serve(async (req) => {
     if (!text || typeof text !== "string") {
       return new Response(
         JSON.stringify({ error: "text required" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        { status: 400, headers: { ...cors, "Content-Type": "application/json" } },
       );
     }
 
@@ -52,12 +61,12 @@ Deno.serve(async (req) => {
       const detail = await upstream.text().catch(() => "");
       return new Response(
         JSON.stringify({ error: `TTS upstream ${upstream.status}: ${detail.slice(0, 200)}` }),
-        { status: upstream.status, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        { status: upstream.status, headers: { ...cors, "Content-Type": "application/json" } },
       );
     }
 
     return new Response(upstream.body, {
-      headers: { ...corsHeaders, "Content-Type": "text/event-stream" },
+      headers: { ...cors, "Content-Type": "text/event-stream" },
     });
   } catch (err) {
     if ((req as any).signal?.aborted) return new Response(null, { status: 499 });
@@ -65,7 +74,7 @@ Deno.serve(async (req) => {
     console.error("jarvis-tts error:", msg);
     return new Response(
       JSON.stringify({ error: msg }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      { status: 500, headers: { ...cors, "Content-Type": "application/json" } },
     );
   }
 });

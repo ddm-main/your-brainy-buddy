@@ -67,7 +67,7 @@ export async function speakStream(text: string, onDone?: () => void): Promise<vo
   const ctrl = new AbortController();
   currentAbort = ctrl;
   const base = import.meta.env.VITE_SUPABASE_URL as string;
-  const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
+  const { authHeaders } = await import("@/lib/authFetch");
 
   let res: Response;
   try {
@@ -75,8 +75,7 @@ export async function speakStream(text: string, onDone?: () => void): Promise<vo
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${key}`,
-        apikey: key,
+        ...(await authHeaders()),
       },
       body: JSON.stringify({ text: clean }),
       signal: ctrl.signal,

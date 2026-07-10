@@ -12,6 +12,7 @@ import { useContent } from "@/store/contentStore";
 import { useUi } from "@/store/uiStore";
 import { startReminderPoller } from "@/lib/reminders";
 import { runMorningBriefing } from "@/lib/briefing";
+import { useSession } from "@/lib/useSession";
 
 
 const Home = lazy(() => import("@/routes/Home"));
@@ -22,9 +23,15 @@ const Settings = lazy(() => import("@/routes/Settings"));
 const Tasks = lazy(() => import("@/routes/Tasks"));
 const Notes = lazy(() => import("@/routes/Notes"));
 const NotFound = lazy(() => import("@/routes/NotFound"));
+const Auth = lazy(() => import("@/routes/Auth"));
+const ResetPassword = lazy(() => import("@/routes/ResetPassword"));
+
 
 export default function App() {
+  const { session, ready } = useSession();
   useEffect(() => {
+    if (!session) return;
+
     const stop = startReminderPoller((r) => {
       useContent.getState().addCard({ type: "reminder", text: r.text, fireAt: r.fire_at } as any);
       try {
@@ -57,11 +64,30 @@ export default function App() {
     window.addEventListener("keydown", onKey);
 
     return () => { stop(); window.clearTimeout(t); window.removeEventListener("keydown", onKey); };
-  }, []);
+  }, [session]);
 
+
+  if (!ready) return <BootFallback />;
+  if (!session) {
+    const isReset = window.location.pathname === "/reset-password"
+      || window.location.hash.includes("type=recovery");
+    return (
+      <>
+        <div className="grid-bg" />
+        <div className="vignette" />
+        <div style={{ position: "relative", zIndex: 2, height: "100vh" }}>
+          <Suspense fallback={<BootFallback />}>
+            {isReset ? <ResetPassword /> : <Auth />}
+          </Suspense>
+        </div>
+        <ToastLayer />
+      </>
+    );
+  }
 
   return (
     <>
+
       <div className="grid-bg" />
       <div className="vignette" />
       <div style={{ position: "relative", zIndex: 2, height: "100%", display: "flex", flexDirection: "column" }}>
@@ -104,6 +130,7 @@ function AnimatedRoutes() {
           <Route path="/projects/*" element={<Projects />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/auth" element={<Navigate to="/" replace />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
       </motion.div>

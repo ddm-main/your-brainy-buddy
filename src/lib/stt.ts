@@ -29,10 +29,8 @@ function endpoint() {
   return `${base}/functions/v1/jarvis-transcribe`;
 }
 
-function authHeaders() {
-  const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
-  return { Authorization: `Bearer ${key}`, apikey: key };
-}
+import { authHeaders as _authHeaders } from "@/lib/authFetch";
+async function authHeaders() { return _authHeaders(); }
 
 // Downsample Float32 buffer from srcRate to dstRate.
 function downsample(input: Float32Array, srcRate: number, dstRate: number): Float32Array {
@@ -81,7 +79,7 @@ async function transcribeBlob(blob: Blob, language?: string): Promise<string> {
   form.append("file", blob, "recording.wav");
   form.append("stream", "false");
   if (language) form.append("language", language);
-  const res = await fetch(endpoint(), { method: "POST", headers: authHeaders(), body: form });
+  const res = await fetch(endpoint(), { method: "POST", headers: await authHeaders(), body: form });
   if (!res.ok) throw new Error(`transcribe failed (${res.status})`);
   const j = await res.json();
   return String(j?.text ?? "").trim();

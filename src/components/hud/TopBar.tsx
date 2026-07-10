@@ -1,5 +1,7 @@
 import { NavLink, Link, useLocation } from "react-router-dom";
-import { Bell, Command, Settings as SettingsIcon, Wifi, Zap } from "lucide-react";
+import { Bell, Command, LogOut, Settings as SettingsIcon, Wifi, Zap } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+
 import { useEffect, useState } from "react";
 import { useUi } from "@/store/uiStore";
 import { motion } from "framer-motion";
@@ -133,10 +135,19 @@ export default function TopBar() {
         <NavLink to="/settings" className="focus-outline" title="Settings" style={iconBtn as any}>
           <SettingsIcon size={14} />
         </NavLink>
+        <button
+          className="focus-outline"
+          title="Sign out"
+          onClick={() => supabase.auth.signOut()}
+          style={iconBtn}
+        >
+          <LogOut size={14} />
+        </button>
       </div>
     </header>
   );
 }
+
 
 const iconBtn = {
   display: "flex", alignItems: "center", justifyContent: "center",

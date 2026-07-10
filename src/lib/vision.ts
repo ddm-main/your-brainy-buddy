@@ -1,4 +1,5 @@
 import { supabase as _supabase } from "@/integrations/supabase/client";
+import { authHeaders } from "@/lib/authFetch";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const supabase: any = _supabase as any;
 
@@ -35,8 +36,7 @@ async function uploadJpeg(base64: string, filename: string): Promise<{ url: stri
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-      apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string,
+      ...(await authHeaders()),
     },
     body: JSON.stringify({ filename, contentType: "image/jpeg", bytesBase64: base64 }),
   });
@@ -49,8 +49,7 @@ async function analyze(imageUrl: string, kind: "screen" | "camera", question?: s
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-      apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string,
+      ...(await authHeaders()),
     },
     body: JSON.stringify({ image_url: imageUrl, kind, question }),
   });
