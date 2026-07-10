@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
+import { HudSelect } from "@/components/hud/HudSelect";
 import { db, type Project, type ProjectUpdate, relTime } from "@/lib/db";
 import { useUi } from "@/store/uiStore";
 
@@ -26,12 +27,10 @@ function ProjectsList() {
 
   return (
     <div style={{ padding: 12, height: "100%", display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
-      <HudPanel title="Projects" index="PRJ" live="ok" style={{ flexShrink: 0 }}>
-        <NewProject onCreated={(p) => { load(); nav(`/projects/${p.id}`); }} />
-      </HudPanel>
-      <HudPanel title="Active work" index="LIST" live="ok" style={{ flex: 1, minHeight: 0 }} bodyClass="overflow-auto">
+      <HudPanel title="Active work" index="LIST" live="ok" style={{ flex: 1, minHeight: 0 }} bodyClass="overflow-auto"
+        actions={<Btn size="sm" variant="primary" onClick={() => nav("/config/projects")}>+ new project</Btn>}>
         {loading ? <div className="hud-label">loading…</div> :
-         items.length === 0 ? <EmptyState hint="create one above">no projects yet</EmptyState> :
+         items.length === 0 ? <EmptyState hint="create one in Config → Projects">no projects yet</EmptyState> :
          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10 }}>
            {items.map((p) => (
              <NavLink key={p.id} to={`/projects/${p.id}`}
@@ -54,32 +53,6 @@ function ProjectsList() {
          </div>}
       </HudPanel>
     </div>
-  );
-}
-
-function NewProject({ onCreated }: { onCreated: (p: Project) => void }) {
-  const [name, setName] = useState("");
-  const [desc, setDesc] = useState("");
-  const [busy, setBusy] = useState(false);
-  const push = useUi((s) => s.push);
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name.trim()) return;
-    setBusy(true);
-    try {
-      const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-      const p = await db.projects.create({ name: name.trim(), description: desc.trim() || undefined, slug });
-      await db.actions.log("project.create", name.trim(), "projects");
-      setName(""); setDesc("");
-      onCreated(p);
-    } catch (err: any) { push(err?.message, "err"); } finally { setBusy(false); }
-  };
-  return (
-    <form onSubmit={submit} style={{ display: "grid", gridTemplateColumns: "1fr 2fr auto", gap: 8, alignItems: "end" }}>
-      <div><label style={labelStyle}>name</label><input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. CRM App" style={{ ...inputStyle, width: "100%" }} /></div>
-      <div><label style={labelStyle}>description</label><input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="one-line outcome" style={{ ...inputStyle, width: "100%" }} /></div>
-      <Btn type="submit" variant="primary" disabled={busy || !name.trim()}>{busy ? "…" : "+ create"}</Btn>
-    </form>
   );
 }
 
@@ -126,13 +99,16 @@ function ProjectDetail() {
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <label style={labelStyle}>status</label>
-            <select value={proj.status} onChange={(e) => save({ status: e.target.value as Project["status"] })} style={inputStyle}>
-              {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
+            <div style={{ minWidth: 140 }}>
+              <HudSelect value={proj.status} onChange={(v) => save({ status: v as Project["status"] })} options={STATUSES.map((s) => ({ value: s, label: s }))} />
+            </div>
             <label style={labelStyle}>priority</label>
-            <select value={proj.priority} onChange={(e) => save({ priority: e.target.value as Project["priority"] })} style={inputStyle}>
-              <option value="low">low</option><option value="normal">normal</option><option value="high">high</option><option value="urgent">urgent</option>
-            </select>
+            <div style={{ minWidth: 140 }}>
+              <HudSelect value={proj.priority} onChange={(v) => save({ priority: v as Project["priority"] })} options={[
+                { value: "low", label: "low" }, { value: "normal", label: "normal" },
+                { value: "high", label: "high" }, { value: "urgent", label: "urgent" },
+              ]} />
+            </div>
           </div>
           <div>
             <label style={labelStyle}>description</label>

@@ -1,204 +1,238 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type KeyboardEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { MessageSquare } from "lucide-react";
 import HudPanel from "@/components/hud/HudPanel";
 import KineticNumber from "@/components/hud/KineticNumber";
-import { Suspense, lazy } from "react";
-import { useVoice } from "@/store/voiceStore";
 import { useUi } from "@/store/uiStore";
-import { db, inr, relTime, type Task, type EmailRow, type JarvisAction } from "@/lib/db";
+import { useVoice } from "@/store/voiceStore";
+import { db, inr, relTime, type Task, type EmailRow } from "@/lib/db";
 
-const JarvisCore = lazy(() => import("@/components/core/JarvisCore"));
 import VoiceBar from "@/components/hud/VoiceBar";
+import JarvisCore from "@/components/core/JarvisCore";
 import JarvisConversation from "@/components/core/JarvisConversation";
 import { registerNavigator } from "@/lib/jarvisTools";
 
-
 const gridStagger = {
   hidden: {},
-  show: { transition: { staggerChildren: 0.035, delayChildren: 0.04 } },
+  show: { transition: { staggerChildren: 0.05, delayChildren: 0.05 } },
 };
 const cellIn = {
   hidden: { opacity: 0, y: 8 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.22, ease: [0.22, 1, 0.36, 1] as [number, number, number, number] } },
+  show: { opacity: 1, y: 0, transition: { duration: 0.28, ease: [0.22, 1, 0.36, 1] as [number, number, number, number] } },
 };
 
 export default function Home() {
   const nav = useNavigate();
   useEffect(() => { registerNavigator((p) => nav(p)); }, [nav]);
+
   return (
     <motion.div className="home-grid" variants={gridStagger} initial="hidden" animate="show">
-      {/* LEFT COLUMN */}
-      <motion.div variants={cellIn} style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
-        <HudPanel title="Today's Focus" index="01" live="ok" style={{ flex: 1.2 }}>
-          <FocusPanelBody />
-        </HudPanel>
-        <HudPanel title="Alerts & Follow-ups" index="02" live="warn" style={{ flex: 1 }}>
-          <AlertsPanelBody />
-        </HudPanel>
-        <HudPanel title="Next Up" index="03" live="ok" style={{ flex: 1 }}>
-          <NextUpBody />
+      <motion.div variants={cellIn} className="home-cell home-col-left home-row-1">
+        <HudPanel title="Mission Control" index="01" live="ok">
+          <MissionControlBody />
         </HudPanel>
       </motion.div>
 
-      {/* CENTER */}
-      <motion.div variants={cellIn} style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
+      <motion.div variants={cellIn} className="home-cell home-col-left home-row-2">
+        <HudPanel title="Daily Brief" index="02" live="ok">
+          <BriefWithStatsBody />
+        </HudPanel>
+      </motion.div>
+
+      <motion.div variants={cellIn} className="home-core-wrap">
         <CorePanel />
+      </motion.div>
+
+      <motion.div variants={cellIn} className="home-cell home-col-right home-row-1">
+        <HudPanel title="Signal" index="03" live="warn">
+          <SignalBody />
+        </HudPanel>
+      </motion.div>
+
+      <motion.div variants={cellIn} className="home-cell home-col-right home-row-2">
+        <HudPanel title="Pulse" index="04" live="ok">
+          <PulseBody />
+        </HudPanel>
+      </motion.div>
+
+      <div className="home-deck">
         <VoiceBar />
-      </motion.div>
+      </div>
 
-      {/* RIGHT COLUMN */}
-      <motion.div variants={cellIn} style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
-        <HudPanel title="Inbox Pulse" index="04" live="ok" style={{ flex: 1 }}>
-          <InboxPulseBody />
-        </HudPanel>
-        <HudPanel title="Finance Pulse" index="05" live="ok" style={{ flex: 1.1 }}>
-          <FinancePulseBody />
-        </HudPanel>
-        <HudPanel title="Reminders & Actions" index="06" live="ok" style={{ flex: 1 }}>
-          <RemindersActionsBody />
-        </HudPanel>
-      </motion.div>
-
-      {/* BOTTOM RAIL */}
-      <motion.div variants={cellIn} style={{ gridColumn: "1 / -1" }}>
-        <HudPanel title="Activity Feed" index="07" live="ok">
-          <ActivityBody />
-        </HudPanel>
-      </motion.div>
       <JarvisConversation />
     </motion.div>
   );
 }
 
-
-
-function CoreFallback() {
-  return (
-    <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--accent)" }}>
-      <span className="hud-label">initialising core…</span>
-    </div>
-  );
-}
-
+/* ---------- Center: JARVIS Core (transparent, no panel) ---------- */
 function CorePanel() {
-  const state = useVoice((s) => s.state);
-  const setState = useVoice((s) => s.setState);
-  const active = state === "listening" || state === "processing" || state === "speaking";
+  const openConversation = useUi((s) => s.openConversation);
+  const voiceState = useVoice((s) => s.state);
+  const setVoiceState = useVoice((s) => s.setState);
 
-  const toggle = () => {
-    if (state === "listening" || state === "speaking" || state === "processing") {
-      try { window.speechSynthesis?.cancel(); } catch { /* noop */ }
-      setState("idle");
-    } else {
-      setState("listening");
-    }
+  const toggleListen = () => {
+    setVoiceState(voiceState === "listening" ? "idle" : "listening");
+  };
+  const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === " " || e.key === "Enter") { e.preventDefault(); toggleListen(); }
   };
 
   return (
-    <div
-      style={{ flex: 1, position: "relative", overflow: "hidden", cursor: "pointer", background: "transparent" }}
-      role="button" tabIndex={0}
-      aria-label={active ? "Stop talking to JARVIS" : "Talk to JARVIS"}
-      onClick={toggle}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } }}
-    >
-      <div style={{ position: "absolute", top: 12, left: 16, zIndex: 2, pointerEvents: "none" }}>
-        <div className="h-title">
-          <span className="live-dot" /><span className="h-idx">CORE</span> J.A.R.V.I.S · {active ? state.toUpperCase() : "Tap to talk"}
-        </div>
-      </div>
-      <div style={{ position: "absolute", top: 12, right: 16, zIndex: 2, textAlign: "right", pointerEvents: "none" }}>
-        <div style={{ fontFamily: "var(--font-display)", fontSize: 22, color: "var(--accent-soft)", letterSpacing: "0.12em" }}>
-          {new Date().toLocaleDateString([], { day: "2-digit" })}
-          <span style={{ color: "var(--text-dim)", fontSize: 12, marginLeft: 6 }}>
-            {new Date().toLocaleDateString([], { month: "short" }).toUpperCase()}
-          </span>
-        </div>
-        <div className="hud-label" style={{ marginTop: 2 }}>
-          {new Date().toLocaleDateString([], { weekday: "long" })}
-        </div>
-      </div>
-      <Suspense fallback={<CoreFallback />}>
-        <JarvisCore />
-      </Suspense>
-      <button
-        onClick={(e) => { e.stopPropagation(); useUi.getState().openConversation(); }}
-        onKeyDown={(e) => e.stopPropagation()}
-        className="focus-outline"
-        aria-label="Open conversation"
-        title="Open conversation (⌘/Ctrl+J)"
-        style={{
-          position: "absolute", bottom: 60, right: 16, zIndex: 4,
-          display: "flex", alignItems: "center", gap: 6,
-          padding: "6px 12px", cursor: "pointer",
-          border: "1px solid var(--edge-strong)",
-          background: "var(--accent-tint)",
-          color: "var(--accent)",
-          fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.16em",
-          textTransform: "uppercase", borderRadius: "var(--radius-hud)",
-          backdropFilter: "blur(10px)",
-          transition: "border-color 120ms ease, transform 60ms ease",
-        }}
+    <div className="home-core">
+      <div
+        className="home-core-stage"
+        role="button"
+        tabIndex={0}
+        aria-label="Toggle listening"
+        onClick={toggleListen}
+        onKeyDown={onKey}
       >
-        <MessageSquare size={11} /> converse
+        <JarvisCore />
+      </div>
+      <div className="home-core-tl h-title">
+        <span className="live-dot" />
+        <span className="h-idx">CORE</span>
+        <span>J.A.R.V.I.S · Tap to talk</span>
+      </div>
+      <div className="home-core-tr">
+        <DateChip />
+      </div>
+      <button
+        type="button"
+        className="home-core-br focus-outline"
+        onClick={openConversation}
+        aria-label="Open conversation"
+      >
+        converse →
       </button>
-
-      <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", top: 56, left: 16, right: 16, zIndex: 3 }}>
-        <BriefPanelBody />
-      </div>
-      <div onClick={(e) => e.stopPropagation()} style={{ position: "relative", zIndex: 3 }}>
-        <StatsStrip />
-      </div>
     </div>
   );
 }
 
-function NextUpBody() {
+/* ---------- Header chip ---------- */
+function DateChip() {
+  const d = new Date();
+  return (
+    <div className="date-chip">
+      <span className="date-chip-day">{d.toLocaleDateString([], { day: "2-digit" })}</span>
+      <span className="date-chip-mon">{d.toLocaleDateString([], { month: "short" }).toUpperCase()}</span>
+      <span className="date-chip-wk">{d.toLocaleDateString([], { weekday: "short" }).toUpperCase()}</span>
+    </div>
+  );
+}
+
+/* ---------- 01 Mission Control (Focus + Next 7 days) ---------- */
+function MissionControlBody() {
   const nav = useNavigate();
-  const [items, setItems] = useState<Task[]>([]);
+  const [focus, setFocus] = useState<Task[]>([]);
+  const [next7, setNext7] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
+
   useEffect(() => {
     (async () => {
       try {
-        const all = await db.tasks.listOpen(50);
+        let f = await db.tasks.focus(6);
+        const open = await db.tasks.listOpen(80);
+        if (f.length === 0) f = open.slice(0, 6);
         const now = Date.now();
         const soon = now + 7 * 24 * 60 * 60 * 1000;
-        const upcoming = all
-          .filter((t: any) => t.due_at && new Date(t.due_at).getTime() >= now && new Date(t.due_at).getTime() <= soon)
-          .slice(0, 6);
-        setItems(upcoming);
+        const focusIds = new Set(f.map((x: Task) => x.id));
+        const upcoming = open
+          .filter((t: Task) => !!t.due_at && new Date(t.due_at as string).getTime() >= now && new Date(t.due_at as string).getTime() <= soon)
+          .filter((t: Task) => !focusIds.has(t.id))
+          .slice(0, 4);
+        setFocus(f);
+        setNext7(upcoming);
       } finally { setLoading(false); }
     })();
   }, []);
+
+  const toggle = async (t: Task) => {
+    const next: Task["status"] = t.status === "done" ? "todo" : "done";
+    await db.tasks.setStatus(t.id, next);
+    setFocus((cur) => cur.map((x) => x.id === t.id ? { ...x, status: next } : x));
+  };
+
   if (loading) return <div className="hud-label" style={{ padding: 8 }}>loading…</div>;
-  if (items.length === 0) return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: 4 }}>
-      <div className="hud-label" style={{ padding: 8, color: "var(--text-muted)" }}>nothing scheduled in the next 7 days</div>
-      <button onClick={() => nav("/tasks")} className="hud-label focus-outline" style={{ border: "1px solid var(--edge)", padding: "6px 10px", color: "var(--accent)" }}>
-        + schedule a task →
-      </button>
-    </div>
-  );
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {items.map((t) => {
-        const when = t.due_at ? new Date(t.due_at).toLocaleDateString([], { weekday: "short", day: "2-digit", month: "short" }) : "";
-        return (
-          <div key={t.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 10px", border: "1px solid var(--edge)", fontSize: 12, gap: 8 }}>
-            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}</span>
-            <span className="hud-label" style={{ color: "var(--accent-soft)" }}>{when}</span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
+      <div>
+        <div className="section-label">TODAY'S FOCUS</div>
+        {focus.length === 0 ? (
+          <div className="hud-label empty-line">no focus items yet</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+            {focus.map((t, i) => {
+              const done = t.status === "done";
+              return (
+                <motion.button
+                  key={t.id}
+                  initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.03 }}
+                  onClick={() => toggle(t)}
+                  className="focus-row"
+                  data-done={done ? "1" : "0"}
+                  data-prio={t.priority ?? "normal"}
+                >
+                  <span className="focus-check" data-done={done ? "1" : "0"} />
+                  <span className="focus-title">{t.title}</span>
+                  {t.priority === "urgent" && <span className="prio-tag err">URGENT</span>}
+                  {t.priority === "high" && <span className="prio-tag warn">HIGH</span>}
+                </motion.button>
+              );
+            })}
           </div>
-        );
-      })}
+        )}
+      </div>
+
+      {next7.length > 0 && (
+        <div>
+          <div className="section-label">NEXT 7 DAYS</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+            {next7.map((t) => {
+              const when = t.due_at ? new Date(t.due_at).toLocaleDateString([], { weekday: "short", day: "2-digit", month: "short" }) : "";
+              return (
+                <div key={t.id} className="next-row">
+                  <span className="next-title">{t.title}</span>
+                  <span className="hud-label" style={{ color: "var(--accent-soft)" }}>{when}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div style={{ marginTop: "auto" }}>
+        <button onClick={() => nav("/tasks")} className="hud-inline-cta focus-outline">
+          + add task →
+        </button>
+      </div>
     </div>
   );
 }
 
-function StatsStrip() {
+/* ---------- 02 Daily Brief + stats ---------- */
+function BriefWithStatsBody() {
+  const [brief, setBrief] = useState<{ assistant: string; at: string } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
   const [stats, setStats] = useState({ projects: 0, tasks: 0, unread: 0, actions: 0 });
+
+  const loadBrief = async () => {
+    try {
+      const mod = await import("@/integrations/supabase/client");
+      const { data } = await (mod.supabase as any)
+        .from("jarvis_interactions")
+        .select("assistant_text,created_at")
+        .order("created_at", { ascending: false })
+        .limit(1);
+      const row = (data as any)?.[0];
+      setBrief(row?.assistant_text ? { assistant: row.assistant_text, at: row.created_at } : null);
+    } finally { setLoading(false); }
+  };
+
   useEffect(() => {
+    loadBrief();
     (async () => {
       try {
         const [p, t, ic, ac] = await Promise.all([
@@ -214,123 +248,8 @@ function StatsStrip() {
           actions: ac.length,
         });
       } catch (e: any) { useUi.getState().push(`Stats failed: ${e?.message ?? "error"}`, "err"); }
-
     })();
   }, []);
-  const items = [
-    { v: stats.projects, l: "projects" },
-    { v: stats.tasks, l: "open tasks" },
-    { v: stats.actions, l: "actions" },
-    { v: stats.unread, l: "emails" },
-  ];
-  return (
-    <div style={{
-      position: "absolute", bottom: 14, left: 0, right: 0, zIndex: 2,
-      display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8,
-      padding: "0 20px",
-    }}>
-      {items.map((s, i) => (
-        <motion.div
-          key={s.l}
-          initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 + i * 0.06 }}
-          style={{
-            padding: "10px 14px", border: "1px solid var(--edge)",
-            background: "var(--panel-tint)", backdropFilter: "blur(10px)",
-            textAlign: "center", position: "relative",
-          }}
-        >
-          <span className="hud-corner tl" /><span className="hud-corner br" />
-          <div style={{ fontFamily: "var(--font-display)", fontSize: 24, color: "var(--accent)", lineHeight: 1 }}>
-            <KineticNumber value={s.v} />
-          </div>
-          <div className="hud-label" style={{ marginTop: 4 }}>{s.l}</div>
-        </motion.div>
-      ))}
-    </div>
-  );
-}
-
-function FocusPanelBody() {
-  const nav = useNavigate();
-  const [items, setItems] = useState<Task[]>([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    (async () => {
-      try {
-        let list = await db.tasks.focus(7);
-        if (list.length === 0) {
-          // fallback: show soonest-due open tasks
-          list = (await db.tasks.listOpen(7));
-        }
-        setItems(list);
-      } finally { setLoading(false); }
-    })();
-  }, []);
-  const toggle = async (t: Task) => {
-    const next: Task["status"] = t.status === "done" ? "todo" : "done";
-    await db.tasks.setStatus(t.id, next);
-    setItems((cur) => cur.map((x) => x.id === t.id ? { ...x, status: next } : x));
-  };
-  if (loading) return <div className="hud-label" style={{ padding: 8 }}>loading…</div>;
-  if (items.length === 0) return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: 4 }}>
-      <div className="hud-label" style={{ padding: 8, color: "var(--text-muted)" }}>no focus items yet</div>
-      <button onClick={() => nav("/tasks")} className="hud-label focus-outline" style={{ border: "1px solid var(--edge)", padding: "6px 10px", color: "var(--accent)" }}>
-        + add first task →
-      </button>
-    </div>
-  );
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {items.map((t, i) => {
-        const done = t.status === "done";
-        return (
-          <motion.button
-            key={t.id}
-            initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.04 }}
-            onClick={() => toggle(t)}
-            style={{
-              display: "flex", alignItems: "center", gap: 10, textAlign: "left",
-              padding: "8px 10px", border: "1px solid var(--edge)",
-              background: done ? "rgba(107, 255, 176, 0.04)" : "transparent",
-              fontSize: 12, color: done ? "var(--text-muted)" : "var(--text)",
-              textDecoration: done ? "line-through" : "none",
-              cursor: "pointer",
-            }}
-          >
-            <span style={{
-              width: 12, height: 12, flexShrink: 0,
-              border: `1px solid ${done ? "var(--ok)" : "var(--edge-strong)"}`,
-              background: done ? "var(--ok)" : "transparent",
-            }} />
-            <span style={{ flex: 1 }}>{t.title}</span>
-            {t.priority === "urgent" && <span style={{ color: "var(--danger)", fontSize: 9 }}>URGENT</span>}
-            {t.priority === "high" && <span style={{ color: "var(--warn)", fontSize: 9 }}>HIGH</span>}
-          </motion.button>
-        );
-      })}
-    </div>
-  );
-}
-
-function BriefPanelBody() {
-  const [loading, setLoading] = useState(true);
-  const [running, setRunning] = useState(false);
-  const [brief, setBrief] = useState<{ assistant: string; at: string } | null>(null);
-
-  const load = async () => {
-    try {
-      const mod = await import("@/integrations/supabase/client");
-      const { data } = await (mod.supabase as any)
-        .from("jarvis_interactions")
-        .select("assistant_text,created_at")
-        .order("created_at", { ascending: false })
-        .limit(1);
-      const row = (data as any)?.[0];
-      setBrief(row?.assistant_text ? { assistant: row.assistant_text, at: row.created_at } : null);
-    } finally { setLoading(false); }
-  };
-  useEffect(() => { load(); }, []);
 
   const run = async () => {
     setRunning(true);
@@ -339,51 +258,70 @@ function BriefPanelBody() {
       const hour = new Date().getHours();
       const greet = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
       await jarvisChat(`${greet}, JARVIS. Give me a crisp 3-line briefing: 1) top priority today, 2) one alert I should act on, 3) one uplifting note. No fluff.`);
-      await load();
+      await loadBrief();
     } catch (e: any) { useUi.getState().push(`Briefing failed: ${e?.message ?? "error"}`, "err"); }
-
     finally { setRunning(false); }
   };
 
-  if (loading) return <div className="hud-label" style={{ padding: 8 }}>loading…</div>;
+  const tiles = [
+    { v: stats.projects, l: "projects" },
+    { v: stats.tasks, l: "open tasks" },
+    { v: stats.unread, l: "emails" },
+    { v: stats.actions, l: "actions" },
+  ];
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {brief ? (
-        <>
-          <div style={{ fontSize: 11, color: "var(--text)", lineHeight: 1.55, padding: 8, border: "1px solid var(--edge)", background: "rgba(53,214,237,0.03)", whiteSpace: "pre-wrap" }}>
-            {brief.assistant.length > 320 ? brief.assistant.slice(0, 320) + "…" : brief.assistant}
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span className="hud-label">{relTime(brief.at)} ago</span>
-            <button onClick={run} disabled={running} className="hud-label" style={{ color: "var(--accent)", padding: "3px 8px", border: "1px solid var(--edge)", cursor: "pointer", background: "transparent" }}>
-              {running ? "briefing…" : "refresh →"}
-            </button>
-          </div>
-        </>
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
+      {loading ? (
+        <div className="hud-label" style={{ padding: 8 }}>loading brief…</div>
+      ) : brief ? (
+        <div className="brief-text">
+          {brief.assistant.length > 380 ? brief.assistant.slice(0, 380) + "…" : brief.assistant}
+        </div>
       ) : (
-        <button onClick={run} disabled={running} className="hud-label focus-outline" style={{ border: "1px solid var(--edge)", padding: "10px 12px", color: "var(--accent)", cursor: "pointer", background: "transparent" }}>
-          {running ? "· briefing in progress ·" : "+ run morning briefing"}
-        </button>
+        <div className="brief-empty">no briefing yet — run one to sync with JARVIS</div>
       )}
+
+      <div className="brief-tiles">
+        {tiles.map((s) => (
+          <div key={s.l} className="brief-tile">
+            <span className="hud-corner tl" /><span className="hud-corner br" />
+            <div className="brief-tile-num"><KineticNumber value={s.v} /></div>
+            <div className="hud-label" style={{ marginTop: 4 }}>{s.l}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ marginTop: "auto", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <span className="hud-label">
+          {brief ? `updated ${relTime(brief.at)} ago` : "· awaiting sync ·"}
+        </span>
+        <button onClick={run} disabled={running} className="hud-inline-cta focus-outline">
+          {running ? "briefing…" : brief ? "refresh →" : "+ run morning briefing"}
+        </button>
+      </div>
     </div>
   );
 }
 
-function AlertsPanelBody() {
+/* ---------- 03 Signal (alerts + reminders) ---------- */
+function SignalBody() {
   const nav = useNavigate();
-  const [state, setState] = useState<{
-    overdue: number; important: number; blocked: number; dues: number;
-  }>({ overdue: 0, important: 0, blocked: 0, dues: 0 });
+  const [state, setState] = useState<{ overdue: number; important: number; blocked: number; dues: number }>({
+    overdue: 0, important: 0, blocked: 0, dues: 0,
+  });
+  const [reminders, setReminders] = useState<{ id: string; text: string; fire_at: string }[]>([]);
 
   useEffect(() => {
     (async () => {
       try {
-        const [openTasks, projects, ic, subs, cards] = await Promise.all([
+        const [openTasks, projects, ic, subs, cards, rs] = await Promise.all([
           db.tasks.listOpen(200),
           db.projects.list(),
           db.emails.counts(),
           db.subscriptions.list(),
           db.cards.list(),
+          db.reminders.list(),
         ]);
         const now = Date.now();
         const soon = now + 7 * 24 * 60 * 60 * 1000;
@@ -397,209 +335,133 @@ function AlertsPanelBody() {
           return d.getTime() < soon;
         }).length;
         setState({ overdue, important: ic.important, blocked, dues: upcomingSubs + upcomingCards });
-      } catch (e: any) { useUi.getState().push(`Alerts failed: ${e?.message ?? "error"}`, "err"); }
-
+        setReminders(
+          rs.filter((r: any) => !r.fired && r.fire_at && new Date(r.fire_at).getTime() >= now - 60_000).slice(0, 2),
+        );
+      } catch (e: any) { useUi.getState().push(`Signal failed: ${e?.message ?? "error"}`, "err"); }
     })();
   }, []);
 
-  const rows: { k: "err" | "warn" | "idle"; n: number; label: string; a: string; to: string }[] = [
-    { k: state.overdue > 0 ? "err" : "idle", n: state.overdue, label: `overdue task${state.overdue === 1 ? "" : "s"}`, a: "open", to: "/tasks" },
-    { k: state.important > 0 ? "warn" : "idle", n: state.important, label: `important email${state.important === 1 ? "" : "s"}`, a: "inbox", to: "/inbox" },
-    { k: state.blocked > 0 ? "warn" : "idle", n: state.blocked, label: `blocked project${state.blocked === 1 ? "" : "s"}`, a: "review", to: "/projects" },
-    { k: state.dues > 0 ? "warn" : "idle", n: state.dues, label: `finance due${state.dues === 1 ? "" : "s"} in 7 days`, a: "finance", to: "/finance" },
+  const rows: { sev: "err" | "warn" | "ok"; n: number; label: string; a: string; to: string }[] = [
+    { sev: state.overdue > 0 ? "err" : "ok", n: state.overdue, label: `overdue task${state.overdue === 1 ? "" : "s"}`, a: "open", to: "/tasks" },
+    { sev: state.important > 0 ? "warn" : "ok", n: state.important, label: `important email${state.important === 1 ? "" : "s"}`, a: "inbox", to: "/inbox" },
+    { sev: state.blocked > 0 ? "warn" : "ok", n: state.blocked, label: `blocked project${state.blocked === 1 ? "" : "s"}`, a: "review", to: "/projects" },
+    { sev: state.dues > 0 ? "warn" : "ok", n: state.dues, label: `finance due${state.dues === 1 ? "" : "s"} in 7d`, a: "finance", to: "/finance" },
   ];
   const allClear = rows.every((r) => r.n === 0);
-  if (allClear) {
-    return (
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", border: "1px solid var(--edge)", fontSize: 12 }}>
-        <span className="live-dot" style={{ background: "var(--ok)", color: "var(--ok)" }} />
-        <span style={{ color: "var(--text)" }}>all systems nominal</span>
-      </div>
-    );
-  }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {rows.map((a, i) => (
-        <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 10px", border: "1px solid var(--edge)", gap: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-            <span className={`live-dot ${a.k}`} />
-            <span style={{ fontFamily: "var(--font-display)", color: a.k === "err" ? "var(--danger)" : a.k === "warn" ? "var(--warn)" : "var(--text-dim)", minWidth: 20, display: "inline-block" }}>
-              <KineticNumber value={a.n} />
-            </span>
-            {a.label}
-          </div>
-          <button onClick={() => nav(a.to)} className="hud-label" style={{ color: "var(--accent)", padding: "3px 8px", border: "1px solid var(--edge)" }}>
-            {a.a} →
-          </button>
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%" }}>
+      {allClear ? (
+        <div className="signal-nominal">
+          <span className="live-dot" />
+          <span>all systems nominal</span>
         </div>
-      ))}
-    </div>
-  );
-}
-
-
-function InboxPulseBody() {
-  const nav = useNavigate();
-  const [counts, setCounts] = useState({ unread: 0, important: 0, needsReply: 0 });
-  const [items, setItems] = useState<EmailRow[]>([]);
-  useEffect(() => {
-    (async () => {
-      try {
-        const [c, list] = await Promise.all([db.emails.counts(), db.emails.list(undefined, 5)]);
-        setCounts(c);
-        setItems(list);
-      } catch (e: any) { useUi.getState().push(`Inbox failed: ${e?.message ?? "error"}`, "err"); }
-
-    })();
-  }, []);
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
-        {[{ n: counts.unread, l: "total" }, { n: counts.important, l: "important" }, { n: counts.needsReply, l: "needs reply" }].map((c) => (
-          <div key={c.l} style={{ padding: "8px 6px", textAlign: "center", border: "1px solid var(--edge)" }}>
-            <div style={{ fontFamily: "var(--font-display)", fontSize: 18, color: "var(--accent)" }}><KineticNumber value={c.n} /></div>
-            <div className="hud-label">{c.l}</div>
-          </div>
-        ))}
-      </div>
-      {items.length === 0 ? (
-        <button onClick={() => nav("/inbox")} className="hud-label focus-outline" style={{ border: "1px solid var(--edge)", padding: "8px 10px", color: "var(--text-muted)" }}>
-          no emails yet — connect an account →
-        </button>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {items.map((i) => (
-            <button key={i.id} onClick={() => nav("/inbox")} style={{ textAlign: "left", padding: "6px 8px", borderLeft: "2px solid var(--edge-strong)", fontSize: 11, background: "transparent", cursor: "pointer" }}>
-              <div style={{ color: "var(--accent-soft)", fontFamily: "var(--font-hud)", letterSpacing: "0.08em" }}>{i.from_name ?? i.from_email ?? "unknown"}</div>
-              <div style={{ color: "var(--text)", opacity: 0.85, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{i.subject ?? "(no subject)"}</div>
-            </button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {rows.filter((r) => r.n > 0).map((r, i) => (
+            <div key={i} className="signal-row" data-sev={r.sev}>
+              <span className={`live-dot ${r.sev === "err" ? "err" : r.sev === "warn" ? "warn" : ""}`} />
+              <span className="signal-num"><KineticNumber value={r.n} /></span>
+              <span className="signal-label">{r.label}</span>
+              <button onClick={() => nav(r.to)} className="hud-label signal-cta">{r.a} →</button>
+            </div>
           ))}
+        </div>
+      )}
+
+      {reminders.length > 0 && (
+        <div>
+          <div className="section-label">REMINDERS</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+            {reminders.map((r) => (
+              <div key={r.id} className="reminder-row">
+                <span className="live-dot warn" />
+                <span className="reminder-text">{r.text}</span>
+                <span className="hud-label" style={{ color: "var(--text-dim)" }}>{relTime(r.fire_at)}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-function FinancePulseBody() {
+/* ---------- 04 Pulse (Finance + Inbox merged) ---------- */
+function PulseBody() {
   const nav = useNavigate();
-  const [state, setState] = useState<{ spend: number; income: number; cardsDue: number; subsDue: number }>({ spend: 0, income: 0, cardsDue: 0, subsDue: 0 });
+  const [fin, setFin] = useState<{ spend: number; income: number; subsDue: number }>({ spend: 0, income: 0, subsDue: 0 });
+  const [ic, setIc] = useState({ unread: 0, important: 0, needsReply: 0 });
+  const [topMail, setTopMail] = useState<EmailRow[]>([]);
+
   useEffect(() => {
     (async () => {
       try {
-        const [m, subs] = await Promise.all([db.transactions.monthSummary(), db.subscriptions.list()]);
+        const [m, subs, counts, list] = await Promise.all([
+          db.transactions.monthSummary(),
+          db.subscriptions.list(),
+          db.emails.counts(),
+          db.emails.list(undefined, 3),
+        ]);
         const now = Date.now();
         const soon = now + 7 * 24 * 60 * 60 * 1000;
         const subsDue = subs.filter((s: any) => s.next_due_date && new Date(s.next_due_date).getTime() < soon).length;
-        setState({ ...m, cardsDue: 0, subsDue });
-      } catch (e: any) { useUi.getState().push(`Finance failed: ${e?.message ?? "error"}`, "err"); }
-
+        setFin({ spend: m.spend, income: m.income, subsDue });
+        setIc(counts);
+        setTopMail(list);
+      } catch (e: any) { useUi.getState().push(`Pulse failed: ${e?.message ?? "error"}`, "err"); }
     })();
   }, []);
-  const net = state.income - state.spend;
+
+  const net = fin.income - fin.spend;
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10, cursor: "pointer" }} onClick={() => nav("/finance")}>
-      <div style={{ padding: "10px 12px", border: "1px solid var(--edge)", background: "rgba(53, 214, 237, 0.04)" }}>
-        <div className="hud-label">this month net</div>
-        <div style={{ fontFamily: "var(--font-display)", fontSize: 22, color: net >= 0 ? "var(--accent-soft)" : "var(--danger)" }}>
-          {inr(net)}
+    <div className="pulse-grid">
+      <button className="pulse-cluster" onClick={() => nav("/finance")} aria-label="Open finance">
+        <div className="section-label">FINANCE</div>
+        <div className="pulse-net" data-neg={net < 0 ? "1" : "0"}>
+          <div className="hud-label">this month net</div>
+          <div className="pulse-net-val">{inr(net)}</div>
+          <div className="pulse-net-sub">{inr(fin.income)} in · {inr(fin.spend)} out</div>
         </div>
-        <div style={{ fontSize: 10, color: "var(--text-dim)" }}>{inr(state.income)} in · {inr(state.spend)} out</div>
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-        <div style={{ padding: 8, border: "1px solid var(--edge)" }}>
-          <div className="hud-label">this month spend</div>
-          <div style={{ fontFamily: "var(--font-display)", color: "var(--text)", fontSize: 15 }}>{inr(state.spend)}</div>
-        </div>
-        <div style={{ padding: 8, border: "1px solid var(--edge)" }}>
-          <div className="hud-label">subs due (7d)</div>
-          <div style={{ fontFamily: "var(--font-display)", color: state.subsDue > 0 ? "var(--warn)" : "var(--text)", fontSize: 15 }}>
-            <KineticNumber value={state.subsDue} />
+        <div className="pulse-mini-grid">
+          <div className="pulse-mini">
+            <div className="hud-label">spend</div>
+            <div className="pulse-mini-val">{inr(fin.spend)}</div>
+          </div>
+          <div className="pulse-mini">
+            <div className="hud-label">subs 7d</div>
+            <div className="pulse-mini-val" style={{ color: fin.subsDue > 0 ? "var(--warn)" : "var(--text)" }}>
+              <KineticNumber value={fin.subsDue} />
+            </div>
           </div>
         </div>
+      </button>
 
-      </div>
-    </div>
-  );
-}
-
-function RemindersActionsBody() {
-  const [reminders, setReminders] = useState<{ id: string; text: string; fire_at: string; fired: boolean | null }[]>([]);
-  const [actions, setActions] = useState<JarvisAction[]>([]);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    (async () => {
-      try {
-        const [rs, ac] = await Promise.all([db.reminders.list(), db.actions.recent(5)]);
-        const now = Date.now();
-        setReminders(
-          rs
-            .filter((r: any) => !r.fired && r.fire_at && new Date(r.fire_at).getTime() >= now - 60_000)
-            .slice(0, 4),
-        );
-        setActions(ac);
-      } catch (e: any) { useUi.getState().push(`Reminders failed: ${e?.message ?? "error"}`, "err"); }
-
-      finally { setLoading(false); }
-    })();
-  }, []);
-  if (loading) return <div className="hud-label" style={{ padding: 8 }}>loading…</div>;
-  if (reminders.length === 0 && actions.length === 0) {
-    return <div className="hud-label" style={{ padding: 8, color: "var(--text-muted)" }}>no reminders or actions yet</div>;
-  }
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      {reminders.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <div className="hud-label" style={{ color: "var(--accent-soft)" }}>upcoming</div>
-          {reminders.map((r) => (
-            <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", border: "1px solid var(--edge)", fontSize: 11 }}>
-              <span className="live-dot warn" />
-              <span style={{ flex: 1, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.text}</span>
-              <span className="hud-label" style={{ color: "var(--text-dim)" }}>{relTime(r.fire_at)}</span>
+      <button className="pulse-cluster with-divider" onClick={() => nav("/inbox")} aria-label="Open inbox">
+        <div className="section-label">INBOX</div>
+        <div className="pulse-mini-grid" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
+          {[{ n: ic.unread, l: "total" }, { n: ic.important, l: "important" }, { n: ic.needsReply, l: "reply" }].map((c) => (
+            <div key={c.l} className="pulse-mini">
+              <div className="hud-label">{c.l}</div>
+              <div className="pulse-mini-val" style={{ color: "var(--accent)" }}><KineticNumber value={c.n} /></div>
             </div>
           ))}
         </div>
-      )}
-      {actions.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <div className="hud-label" style={{ color: "var(--accent-soft)" }}>recent actions</div>
-          {actions.map((a) => (
-            <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", fontSize: 11 }}>
-              <span className={`live-dot ${a.status === "success" ? "" : a.status === "error" ? "err" : "idle"}`} />
-              <span style={{ flex: 1, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {a.command_text ?? a.action_type}
-              </span>
-              <span className="hud-label" style={{ color: "var(--text-dim)" }}>{relTime(a.created_at)}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ActivityBody() {
-  const [events, setEvents] = useState<JarvisAction[]>([]);
-  useEffect(() => {
-    (async () => {
-      try { setEvents(await db.actions.recent(8)); }
-      catch (e: any) { useUi.getState().push(`Activity failed: ${e?.message ?? "error"}`, "err"); }
-
-    })();
-  }, []);
-  if (events.length === 0) {
-    return <div className="hud-label" style={{ padding: 8, color: "var(--text-muted)" }}>no activity yet — actions log as you use JARVIS</div>;
-  }
-  return (
-    <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
-      {events.map((e) => (
-        <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11 }}>
-          <span className={`live-dot ${e.status === "success" ? "" : e.status === "error" ? "err" : "idle"}`} />
-          <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-display)", minWidth: 50 }}>{relTime(e.created_at)}</span>
-          <span>{e.command_text ?? e.action_type}{e.target_module ? ` · ${e.target_module}` : ""}</span>
-        </div>
-      ))}
+        {topMail.length === 0 ? (
+          <div className="hud-label empty-line">no emails — connect an account →</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+            {topMail.map((i) => (
+              <div key={i.id} className="mail-row">
+                <div className="mail-from">{i.from_name ?? i.from_email ?? "unknown"}</div>
+                <div className="mail-subj">{i.subject ?? "(no subject)"}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </button>
     </div>
   );
 }

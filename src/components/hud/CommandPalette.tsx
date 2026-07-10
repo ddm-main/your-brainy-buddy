@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { useUi } from "@/store/uiStore";
-import { Command as CmdIcon, Mail, Wallet, Home, ListChecks, Scan, Sparkles, Settings, StickyNote, CheckSquare } from "lucide-react";
+import { Command as CmdIcon, Mail, Wallet, Home, ListChecks, Scan, Sparkles, SlidersHorizontal } from "lucide-react";
 
 type Cmd = { id: string; label: string; hint?: string; icon: any; run: () => void };
 
@@ -31,7 +31,7 @@ export default function CommandPalette() {
     { id: "inbox", label: "Open Inbox Command Center", hint: "email workspace", icon: Mail, run: () => nav("/inbox") },
     { id: "finance", label: "Open Finance", hint: "accounts, transactions, statements", icon: Wallet, run: () => nav("/finance") },
     { id: "projects", label: "Open Projects", hint: "active work", icon: ListChecks, run: () => nav("/projects") },
-    { id: "settings", label: "Open Settings", hint: "connections, memory", icon: Settings, run: () => nav("/settings") },
+    { id: "config", label: "Open Config", hint: "connections, entities, memory", icon: SlidersHorizontal, run: () => nav("/config") },
     { id: "scan", label: "Scan bank mail now", hint: "finance ingestion", icon: Scan, run: () => { fetch("/api/finance/scan", { method: "POST" }); push("Bank mail scan queued", "ok"); } },
     { id: "brief", label: "Brief me", hint: "read the morning briefing", icon: Sparkles, run: () => push("Briefing initiated", "ok") },
   ], [nav, push]);

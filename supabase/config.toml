@@ -14,3 +14,15 @@ verify_jwt = true
 
 [functions.jarvis-transcribe]
 verify_jwt = true
+
+[functions.gmail-oauth-start]
+verify_jwt = true
+
+[functions.gmail-oauth-callback]
+verify_jwt = false
+
+[functions.gmail-sync]
+verify_jwt = true
+
+[functions.gmail-message]
+verify_jwt = true

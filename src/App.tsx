@@ -8,6 +8,7 @@ import CommandPalette from "@/components/hud/CommandPalette";
 import ToastLayer from "@/components/hud/ToastLayer";
 import ContentPanel from "@/components/hud/ContentPanel";
 import BootScanline from "@/components/hud/BootScanline";
+import AmbientLayer from "@/components/hud/AmbientLayer";
 import { useContent } from "@/store/contentStore";
 import { useUi } from "@/store/uiStore";
 import { startReminderPoller } from "@/lib/reminders";
@@ -19,7 +20,7 @@ const Home = lazy(() => import("@/routes/Home"));
 const Inbox = lazy(() => import("@/routes/Inbox"));
 const Finance = lazy(() => import("@/routes/Finance"));
 const Projects = lazy(() => import("@/routes/Projects"));
-const Settings = lazy(() => import("@/routes/Settings"));
+const Config = lazy(() => import("@/routes/Config"));
 const Tasks = lazy(() => import("@/routes/Tasks"));
 const Notes = lazy(() => import("@/routes/Notes"));
 const NotFound = lazy(() => import("@/routes/NotFound"));
@@ -88,6 +89,7 @@ export default function App() {
   return (
     <>
 
+      <AmbientLayer />
       <div className="grid-bg" />
       <div className="vignette" />
       <div style={{ position: "relative", zIndex: 2, height: "100%", display: "flex", flexDirection: "column" }}>
@@ -128,7 +130,8 @@ function AnimatedRoutes() {
           <Route path="/inbox" element={<Inbox />} />
           <Route path="/finance/*" element={<Finance />} />
           <Route path="/projects/*" element={<Projects />} />
-          <Route path="/settings" element={<Settings />} />
+          <Route path="/config/*" element={<Config />} />
+          <Route path="/settings" element={<Navigate to="/config" replace />} />
           <Route path="/auth" element={<Navigate to="/" replace />} />
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="*" element={<NotFound />} />

@@ -1,9 +1,13 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
 import KineticNumber from "@/components/hud/KineticNumber";
-import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
+import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
 import { db, type EmailRow } from "@/lib/db";
+import { gmail } from "@/lib/gmail";
 import { useUi } from "@/store/uiStore";
+import { RefreshCw } from "lucide-react";
+
 
 const CATS: { key: EmailRow["category"] | "all"; label: string }[] = [
   { key: "all", label: "All" },
@@ -20,7 +24,9 @@ export default function Inbox() {
   const [items, setItems] = useState<EmailRow[]>([]);
   const [selected, setSelected] = useState<EmailRow | null>(null);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const push = useUi((s) => s.push);
+  const navigate = useNavigate();
 
   const load = async () => {
     setLoading(true);
@@ -31,7 +37,52 @@ export default function Inbox() {
     } catch (e: any) { push(e?.message, "err"); }
     finally { setLoading(false); }
   };
+
+  const syncAll = async (silent = false) => {
+    setSyncing(true);
+    try {
+      const accts = await db.emailAccounts.list();
+      const gmails = accts.filter((a: any) => a.provider === "gmail" && a.connected_at);
+      if (gmails.length === 0) { if (!silent) push("No connected Gmail accounts", "warn" as any); return; }
+      let totalNew = 0;
+      for (const a of gmails) {
+        try { const r = await gmail.sync(a.id); totalNew += r.inserted; }
+        catch (e: any) { if (!silent) push(`${a.email_address}: ${e?.message}`, "err"); }
+      }
+      if (totalNew > 0 || !silent) push(`Synced (${totalNew} new)`, "ok");
+      await load();
+    } finally { setSyncing(false); }
+  };
+
   useEffect(() => { setSelected(null); load(); }, [tab]);
+
+  // Auto-sync on mount if any account is stale (>5 min) or never synced.
+  useEffect(() => {
+    (async () => {
+      try {
+        const accts = await db.emailAccounts.list();
+        const stale = accts.some((a: any) => a.provider === "gmail" && a.connected_at && (
+          !a.last_synced_at || (Date.now() - new Date(a.last_synced_at).getTime()) > 5 * 60 * 1000
+        ));
+        if (stale) syncAll(true);
+      } catch { /* noop */ }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Lazy-load body when a message with no body is selected.
+  useEffect(() => {
+    if (!selected || selected.body_text || selected.body_html) return;
+    if (selected.provider !== "gmail" && !selected.external_email_id) return;
+    (async () => {
+      try {
+        const r = await gmail.message(selected.id);
+        setSelected((s) => (s && s.id === selected.id ? { ...s, body_text: r.body_text, body_html: r.body_html } : s));
+        setItems((list) => list.map((e) => e.id === selected.id ? { ...e, body_text: r.body_text, body_html: r.body_html } : e));
+      } catch (e: any) { push(e?.message, "err"); }
+    })();
+  }, [selected?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
 
   return (
     <div style={{ padding: 12, height: "100%", display: "grid", gridTemplateColumns: "220px 1fr 1.4fr", gap: 12, minHeight: 0 }}>
@@ -47,9 +98,22 @@ export default function Inbox() {
           ))}
         </div>
       </HudPanel>
-      <HudPanel title="Emails" index="LST" live="ok" bodyClass="overflow-auto" actions={<span className="hud-label" style={{ color: "var(--accent)" }}><KineticNumber value={items.length} /> loaded</span>}>
+      <HudPanel title="Emails" index="LST" live="ok" bodyClass="overflow-auto" actions={
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Btn size="sm" onClick={() => syncAll(false)} disabled={syncing}><RefreshCw size={11} style={{ marginRight: 4 }} />{syncing ? "syncing…" : "sync"}</Btn>
+          <Btn size="sm" variant="primary" onClick={() => navigate("/config/email")}>+ add email account</Btn>
+          <span className="hud-label" style={{ color: "var(--accent)" }}><KineticNumber value={items.length} /> loaded</span>
+        </div>
+      }>
         {loading ? <div className="hud-label">loading…</div> :
-         items.length === 0 ? <EmptyState hint="import a Gmail account or add rows to the emails table">no emails</EmptyState> :
+         items.length === 0 ? (
+           <EmptyState hint="connect an inbox to start syncing mail">
+             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
+               <span>no emails</span>
+               <Btn size="sm" variant="primary" onClick={() => navigate("/config/email")}>+ add email account</Btn>
+             </div>
+           </EmptyState>
+         ) :
          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
            {items.map((e) => (
              <button key={e.id} onClick={() => setSelected(e)}

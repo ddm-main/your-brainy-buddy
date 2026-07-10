@@ -189,30 +189,60 @@ export type Database = {
       }
       email_accounts: {
         Row: {
+          access_token: string | null
+          connected_at: string | null
           created_at: string
           email_address: string
+          google_sub: string | null
+          history_id: string | null
           id: string
           is_active: boolean
+          last_error: string | null
+          last_synced_at: string | null
           provider: string | null
           purpose: Database["public"]["Enums"]["email_purpose"]
+          refresh_token: string | null
+          scopes: string | null
+          sync_status: string | null
+          token_expires_at: string | null
           user_id: string
         }
         Insert: {
+          access_token?: string | null
+          connected_at?: string | null
           created_at?: string
           email_address: string
+          google_sub?: string | null
+          history_id?: string | null
           id?: string
           is_active?: boolean
+          last_error?: string | null
+          last_synced_at?: string | null
           provider?: string | null
           purpose?: Database["public"]["Enums"]["email_purpose"]
+          refresh_token?: string | null
+          scopes?: string | null
+          sync_status?: string | null
+          token_expires_at?: string | null
           user_id?: string
         }
         Update: {
+          access_token?: string | null
+          connected_at?: string | null
           created_at?: string
           email_address?: string
+          google_sub?: string | null
+          history_id?: string | null
           id?: string
           is_active?: boolean
+          last_error?: string | null
+          last_synced_at?: string | null
           provider?: string | null
           purpose?: Database["public"]["Enums"]["email_purpose"]
+          refresh_token?: string | null
+          scopes?: string | null
+          sync_status?: string | null
+          token_expires_at?: string | null
           user_id?: string
         }
         Relationships: []
@@ -320,8 +350,10 @@ export type Database = {
           linked_bank_id: string | null
           linked_card_id: string | null
           linked_project_id: string | null
+          provider: string | null
           received_at: string | null
           requires_action: boolean
+          snippet: string | null
           subject: string | null
           thread_id: string | null
           to_json: Json | null
@@ -345,8 +377,10 @@ export type Database = {
           linked_bank_id?: string | null
           linked_card_id?: string | null
           linked_project_id?: string | null
+          provider?: string | null
           received_at?: string | null
           requires_action?: boolean
+          snippet?: string | null
           subject?: string | null
           thread_id?: string | null
           to_json?: Json | null
@@ -370,8 +404,10 @@ export type Database = {
           linked_bank_id?: string | null
           linked_card_id?: string | null
           linked_project_id?: string | null
+          provider?: string | null
           received_at?: string | null
           requires_action?: boolean
+          snippet?: string | null
           subject?: string | null
           thread_id?: string | null
           to_json?: Json | null

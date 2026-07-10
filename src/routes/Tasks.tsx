@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import HudPanel from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
+import { HudSelect } from "@/components/hud/HudSelect";
+import { HudDatePicker } from "@/components/hud/HudDatePicker";
 import { db, type Task } from "@/lib/db";
 import { useUi } from "@/store/uiStore";
 import { Trash2, Star } from "lucide-react";
@@ -91,8 +93,8 @@ export default function Tasks() {
                   <button onClick={() => toggleDone(t)} title={t.status === "done" ? "reopen" : "mark done"}
                     style={{ width: 14, height: 14, border: `1px solid ${t.status === "done" ? "var(--ok)" : "var(--edge-strong)"}`, background: t.status === "done" ? "var(--ok)" : "transparent" }} />
                   <div>
-                    <div style={{ fontSize: 13, color: t.status === "done" ? "var(--text-muted)" : "var(--text)", textDecoration: t.status === "done" ? "line-through" : "none" }}>{t.title}</div>
-                    {t.description && <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t.description}</div>}
+                    <div style={{ fontSize: 13, fontFamily: "var(--font-hud)", letterSpacing: "0.04em", color: t.status === "done" ? "var(--text-muted)" : "var(--text)", textDecoration: t.status === "done" ? "line-through" : "none" }}>{t.title}</div>
+                    {t.description && <div style={{ fontSize: 11, fontFamily: "var(--font-hud)", letterSpacing: "0.04em", color: "var(--text-dim)" }}>{t.description}</div>}
                     <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
                       {t.priority !== "normal" && <Chip tone={t.priority === "urgent" ? "err" : t.priority === "high" ? "warn" : "neutral"}>{t.priority}</Chip>}
                       {t.due_at && <Chip>{new Date(t.due_at).toLocaleDateString()}</Chip>}
@@ -153,16 +155,21 @@ function QuickAdd({ onCreated }: { onCreated: () => void }) {
       </div>
       <div>
         <label style={labelStyle}>priority</label>
-        <select value={priority} onChange={(e) => setPriority(e.target.value as Task["priority"])} style={inputStyle}>
-          <option value="low">low</option>
-          <option value="normal">normal</option>
-          <option value="high">high</option>
-          <option value="urgent">urgent</option>
-        </select>
+        <HudSelect
+          value={priority}
+          onChange={(v) => setPriority(v as Task["priority"])}
+          options={[
+            { value: "low", label: "low" },
+            { value: "normal", label: "normal" },
+            { value: "high", label: "high" },
+            { value: "urgent", label: "urgent" },
+          ]}
+          style={{ minWidth: 120 }}
+        />
       </div>
       <div>
         <label style={labelStyle}>due</label>
-        <input type="date" value={due} onChange={(e) => setDue(e.target.value)} style={inputStyle} />
+        <HudDatePicker value={due} onChange={setDue} style={{ minWidth: 140 }} />
       </div>
       <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-hud)", textTransform: "uppercase", letterSpacing: "0.14em", cursor: "pointer" }}>
         <input type="checkbox" checked={focus} onChange={(e) => setFocus(e.target.checked)} /> focus

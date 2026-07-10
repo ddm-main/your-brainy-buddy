@@ -67,10 +67,8 @@ function Scene() {
     <>
       <Parallax />
       <Starfield />
-      <FogHalo />
-      <RimGlow />
       <NeuralSphere />
-      <IrisCore />
+      <BrainCluster />
     </>
   );
 }
@@ -326,87 +324,230 @@ function NeuralSphere() {
   );
 }
 
-/* ---------- Iris core: three shared-breath layers + flat equator ring ---------- */
-function IrisCore() {
-  const hazeRef = useRef<THREE.Mesh>(null!);
-  const shellRef = useRef<THREE.Mesh>(null!);
-  const hotRef = useRef<THREE.Mesh>(null!);
-  const ringRef = useRef<THREE.Mesh>(null!);
-  const ringMat = useRef<THREE.MeshBasicMaterial>(null!);
+/* ---------- Brain cluster: neurons + firing synapses inside the shell ---------- */
+function BrainCluster() {
+  const grpRef = useRef<THREE.Group>(null!);
+  const heartRef = useRef<THREE.Mesh>(null!);
 
-  const shared = useMemo(() => ({
+  const built = useMemo(() => {
+    const N = 260;
+    // ellipsoidal brain-ish volume — sized to fill the outer shell
+    const pts: THREE.Vector3[] = [];
+    const rx = 0.98, ry = 0.86, rz = 0.92;
+    let seed = 1;
+    const rand = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+    while (pts.length < N) {
+      const x = rand() * 2 - 1;
+      const y = rand() * 2 - 1;
+      const z = rand() * 2 - 1;
+      if (x * x + y * y + z * z > 1) continue;
+      // bias toward shell for more brain-like density
+      const r = Math.pow(rand(), 0.35);
+      const len = Math.sqrt(x * x + y * y + z * z) || 1;
+      pts.push(new THREE.Vector3(
+        (x / len) * r * rx + (rand() - 0.5) * 0.06,
+        (y / len) * r * ry + (rand() - 0.5) * 0.06,
+        (z / len) * r * rz + (rand() - 0.5) * 0.06,
+      ));
+    }
+
+    const nodePos = new Float32Array(N * 3);
+    const nodeSeed = new Float32Array(N);
+    const nodePhase = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      nodePos[i * 3] = pts[i].x; nodePos[i * 3 + 1] = pts[i].y; nodePos[i * 3 + 2] = pts[i].z;
+      nodeSeed[i] = Math.random();
+      nodePhase[i] = Math.random() * Math.PI * 2;
+    }
+
+    // kNN=3 synapse edges
+    const edges = knnEdges(pts, 3);
+
+    const n = edges.length;
+    const edgePos = new Float32Array(n * 2 * 3);
+    const edgeT = new Float32Array(n * 2);
+    const edgeSeed = new Float32Array(n * 2);
+    for (let i = 0; i < n; i++) {
+      const [a, b] = edges[i];
+      const A = pts[a], B = pts[b];
+      edgePos[i * 6] = A.x; edgePos[i * 6 + 1] = A.y; edgePos[i * 6 + 2] = A.z;
+      edgePos[i * 6 + 3] = B.x; edgePos[i * 6 + 4] = B.y; edgePos[i * 6 + 5] = B.z;
+      edgeT[i * 2] = 0; edgeT[i * 2 + 1] = 1;
+      const s = Math.random();
+      edgeSeed[i * 2] = s; edgeSeed[i * 2 + 1] = s;
+    }
+
+    return { nodePos, nodeSeed, nodePhase, edgePos, edgeT, edgeSeed };
+  }, []);
+
+  const nodeU = useMemo(() => ({
     uTime:  { value: 0 },
     uAmp:   { value: 0 },
     uColor: { value: COLORS.idle.clone() },
+    uRate:  { value: 1.4 },
+    uFire:  { value: 0.2 },
+  }), []);
+
+  const edgeU = useMemo(() => ({
+    uTime:  { value: 0 },
+    uColor: { value: COLORS.idle.clone() },
+    uSpeed: { value: 0.5 },
+    uAmp:   { value: 0 },
+  }), []);
+
+  const heartU = useMemo(() => ({
+    uTime:  { value: 0 },
+    uColor: { value: COLORS.idle.clone() },
+    uAmp:   { value: 0 },
   }), []);
 
   useFrame((_, dt) => {
     const v = useVoice.getState();
-    shared.uTime.value += dt;
-    shared.uAmp.value += (v.amplitude - shared.uAmp.value) * Math.min(1, dt * 6);
-    shared.uColor.value.lerp(COLORS[v.state] ?? COLORS.idle, Math.min(1, dt * 3));
-    // shared breath — all layers scale together, keeping ratios fixed
+    const target = COLORS[v.state] ?? COLORS.idle;
+
+    let rot = 0.08, rate = 1.4, fire = 0.2, speed = 0.5;
+    if (v.state === "listening")  { rot = 0.10; rate = 2.6; fire = 0.5; speed = 0.85; }
+    if (v.state === "processing") { rot = 0.15; rate = 3.4; fire = 0.9; speed = 1.2; }
+    if (v.state === "speaking")   { rot = 0.09; rate = 2.2; fire = 0.6 + v.amplitude * 0.4; speed = 0.8 + v.amplitude * 0.5; }
+    if (v.state === "muted" || v.state === "paused") { rot = 0.0; rate = 0.5; fire = 0.05; speed = 0.08; }
+
     const breathHz = v.state === "listening" ? 0.4 : v.state === "processing" ? 0.55 : 0.25;
-    const breath = 1.0 + Math.sin(shared.uTime.value * breathHz * 2.0 * Math.PI) * 0.03 + v.amplitude * 0.06;
-    if (hazeRef.current)  hazeRef.current.scale.setScalar(breath);
-    if (shellRef.current) shellRef.current.scale.setScalar(breath);
-    if (hotRef.current)   hotRef.current.scale.setScalar(breath);
-    if (ringRef.current) {
-      const spd = v.state === "processing" ? 1.6 : v.state === "listening" ? 1.0 : 0.5;
-      ringRef.current.rotation.z += dt * spd;
-      ringRef.current.scale.setScalar(breath);
+    const breath = 1.0 + Math.sin(nodeU.uTime.value * breathHz * 2.0 * Math.PI) * 0.03 + v.amplitude * 0.06;
+
+    if (grpRef.current) {
+      grpRef.current.rotation.y += dt * rot;
+      grpRef.current.rotation.x = Math.sin(nodeU.uTime.value * 0.15) * 0.10;
+      grpRef.current.scale.setScalar(breath);
     }
-    if (ringMat.current) ringMat.current.color.lerp(COLORS[v.state] ?? COLORS.idle, Math.min(1, dt * 3));
+
+    nodeU.uTime.value += dt;
+    nodeU.uAmp.value += (v.amplitude - nodeU.uAmp.value) * Math.min(1, dt * 6);
+    nodeU.uColor.value.lerp(target, Math.min(1, dt * 3));
+    nodeU.uRate.value += (rate - nodeU.uRate.value) * Math.min(1, dt * 2);
+    nodeU.uFire.value += (fire - nodeU.uFire.value) * Math.min(1, dt * 2);
+
+    edgeU.uTime.value = nodeU.uTime.value;
+    edgeU.uColor.value.copy(nodeU.uColor.value);
+    edgeU.uAmp.value = nodeU.uAmp.value;
+    edgeU.uSpeed.value += (speed - edgeU.uSpeed.value) * Math.min(1, dt * 2);
+
+    heartU.uTime.value = nodeU.uTime.value;
+    heartU.uColor.value.copy(nodeU.uColor.value);
+    heartU.uAmp.value = nodeU.uAmp.value;
   });
 
-  const fresVert = `varying vec3 vN; varying vec3 vV;
-    void main() { vec4 mv=modelViewMatrix*vec4(position,1.0); vN=normalize(normalMatrix*normal); vV=normalize(-mv.xyz); gl_Position=projectionMatrix*mv; }`;
-
   return (
-    <group>
-      {/* Outer haze */}
-      <mesh ref={hazeRef}>
-        <sphereGeometry args={[0.40, 32, 32]} />
+    <group ref={grpRef}>
+      {/* Synapse edges with traveling pulses */}
+      <lineSegments>
+        <bufferGeometry>
+          <bufferAttribute attach="attributes-position" count={built.edgePos.length / 3} array={built.edgePos} itemSize={3} args={[built.edgePos, 3]} />
+          <bufferAttribute attach="attributes-aT" count={built.edgeT.length} array={built.edgeT} itemSize={1} args={[built.edgeT, 1]} />
+          <bufferAttribute attach="attributes-aSeed" count={built.edgeSeed.length} array={built.edgeSeed} itemSize={1} args={[built.edgeSeed, 1]} />
+        </bufferGeometry>
         <shaderMaterial
-          uniforms={shared}
+          uniforms={edgeU}
           transparent depthWrite={false} blending={THREE.AdditiveBlending}
-          vertexShader={fresVert}
+          vertexShader={`
+            attribute float aT;
+            attribute float aSeed;
+            uniform float uTime;
+            uniform float uSpeed;
+            varying float vPulse;
+            varying float vDepth;
+            void main() {
+              float head = fract(uTime * uSpeed + aSeed);
+              float back = aT - head;
+              if (back > 0.5) back -= 1.0;
+              if (back < -0.5) back += 1.0;
+              float dist = abs(back);
+              vPulse = smoothstep(0.14, 0.0, dist) + smoothstep(0.32, 0.05, dist) * 0.30;
+              vec4 mv = modelViewMatrix * vec4(position, 1.0);
+              vDepth = -mv.z;
+              gl_Position = projectionMatrix * mv;
+            }
+          `}
+          fragmentShader={`
+            uniform vec3 uColor;
+            uniform float uAmp;
+            varying float vPulse;
+            varying float vDepth;
+            void main() {
+              float depthFade = smoothstep(7.0, 5.2, vDepth);
+              float base = 0.16 + uAmp * 0.22;
+              float bright = base + vPulse * 1.8;
+              vec3 col = mix(uColor, vec3(1.0), min(vPulse, 1.0) * 0.85);
+              gl_FragColor = vec4(col, bright * (0.20 + 0.80 * depthFade));
+            }
+          `}
+        />
+      </lineSegments>
+
+      {/* Neuron point cloud */}
+      <points>
+        <bufferGeometry>
+          <bufferAttribute attach="attributes-position" count={built.nodePos.length / 3} array={built.nodePos} itemSize={3} args={[built.nodePos, 3]} />
+          <bufferAttribute attach="attributes-aSeed" count={built.nodeSeed.length} array={built.nodeSeed} itemSize={1} args={[built.nodeSeed, 1]} />
+          <bufferAttribute attach="attributes-aPhase" count={built.nodePhase.length} array={built.nodePhase} itemSize={1} args={[built.nodePhase, 1]} />
+        </bufferGeometry>
+        <shaderMaterial
+          uniforms={nodeU}
+          transparent depthWrite={false} blending={THREE.AdditiveBlending}
+          vertexShader={`
+            attribute float aSeed;
+            attribute float aPhase;
+            uniform float uTime;
+            uniform float uAmp;
+            uniform float uRate;
+            uniform float uFire;
+            varying float vBright;
+            varying float vDepth;
+            void main() {
+              float t = uTime * uRate + aPhase;
+              float base = 0.5 + 0.5 * (0.5 + 0.5 * sin(t));
+              float spark = smoothstep(0.88, 1.0, sin(t * 0.7 + aSeed * 6.28));
+              vBright = base + spark * uFire * 2.0 + uAmp * 0.4;
+              vec4 mv = modelViewMatrix * vec4(position, 1.0);
+              vDepth = -mv.z;
+              gl_PointSize = (2.6 + vBright * 4.2) * (2.6 / -mv.z);
+              gl_Position = projectionMatrix * mv;
+            }
+          `}
+          fragmentShader={`
+            uniform vec3 uColor;
+            varying float vBright;
+            varying float vDepth;
+            void main() {
+              vec2 c = gl_PointCoord - 0.5;
+              float d = length(c);
+              if (d > 0.5) discard;
+              float soft = smoothstep(0.5, 0.0, d);
+              float depthFade = smoothstep(7.0, 5.2, vDepth);
+              vec3 col = mix(uColor, vec3(1.0), min(vBright * 0.55, 0.85));
+              float a = soft * min(vBright, 1.5) * (0.25 + 0.75 * depthFade);
+              gl_FragColor = vec4(col, a);
+            }
+          `}
+        />
+      </points>
+
+      {/* Faint central heart */}
+      <mesh ref={heartRef}>
+        <sphereGeometry args={[0.14, 24, 24]} />
+        <shaderMaterial
+          uniforms={heartU}
+          transparent depthWrite={false} blending={THREE.AdditiveBlending}
+          vertexShader={`varying vec3 vN; varying vec3 vV;
+            void main() { vec4 mv=modelViewMatrix*vec4(position,1.0); vN=normalize(normalMatrix*normal); vV=normalize(-mv.xyz); gl_Position=projectionMatrix*mv; }`}
           fragmentShader={`uniform vec3 uColor; uniform float uTime; uniform float uAmp; varying vec3 vN; varying vec3 vV;
-            void main() { float f=pow(1.0-max(dot(vN,vV),0.0),2.0); float p=0.85+0.15*sin(uTime*1.6);
-              vec3 c=mix(vec3(1.0),uColor,f); gl_FragColor=vec4(c,(0.20+f*0.45)*p*(0.85+uAmp*0.5)); }`}
+            void main() { float f=pow(1.0-max(dot(vN,vV),0.0),1.6); float p=0.85+0.15*sin(uTime*1.8);
+              vec3 c=mix(vec3(1.0),uColor,f); gl_FragColor=vec4(c,(0.20+f*0.30)*p*(0.85+uAmp*0.5)); }`}
         />
-      </mesh>
-      {/* Color fresnel shell */}
-      <mesh ref={shellRef}>
-        <sphereGeometry args={[0.26, 32, 32]} />
-        <shaderMaterial
-          uniforms={shared}
-          transparent depthWrite={false} blending={THREE.AdditiveBlending}
-          vertexShader={fresVert}
-          fragmentShader={`uniform vec3 uColor; uniform float uAmp; varying vec3 vN; varying vec3 vV;
-            void main() { float f=pow(1.0-max(dot(vN,vV),0.0),2.0); vec3 c=mix(vec3(1.0),uColor,f);
-              gl_FragColor=vec4(c,(0.35+f*0.65)*(0.85+uAmp*0.5)); }`}
-        />
-      </mesh>
-      {/* Hot white core */}
-      <mesh ref={hotRef}>
-        <sphereGeometry args={[0.10, 24, 24]} />
-        <shaderMaterial
-          uniforms={shared}
-          transparent depthWrite={false} blending={THREE.AdditiveBlending}
-          vertexShader={fresVert}
-          fragmentShader={`varying vec3 vN; varying vec3 vV;
-            void main() { float f=pow(1.0-max(dot(vN,vV),0.0),1.5); gl_FragColor=vec4(vec3(1.0), 0.95-f*0.4); }`}
-        />
-      </mesh>
-      {/* Flat equator ring — spin Z only */}
-      <mesh ref={ringRef}>
-        <torusGeometry args={[0.44, 0.005, 8, 128]} />
-        <meshBasicMaterial ref={ringMat} color={COLORS.idle} transparent opacity={0.85} depthWrite={false} blending={THREE.AdditiveBlending} />
       </mesh>
     </group>
   );
 }
+
 
 /* ---------- Soft rim glow behind sphere ---------- */
 function RimGlow() {

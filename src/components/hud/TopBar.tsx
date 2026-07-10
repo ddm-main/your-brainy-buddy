@@ -1,5 +1,6 @@
 import { NavLink, Link, useLocation } from "react-router-dom";
-import { Bell, Command, LogOut, Settings as SettingsIcon, Wifi, Zap } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Bell, Command, LogOut, SlidersHorizontal, Wifi, Zap } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 
 import { useEffect, useState } from "react";
@@ -17,6 +18,7 @@ const NAV = [
 
 export default function TopBar() {
   const loc = useLocation();
+  const navigate = useNavigate();
   const togglePalette = useUi((s) => s.togglePalette);
   const [now, setNow] = useState(new Date());
   useEffect(() => {
@@ -61,9 +63,6 @@ export default function TopBar() {
         <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
           <span style={{ fontFamily: "var(--font-display)", fontWeight: 700, letterSpacing: "0.28em", fontSize: 15, color: "var(--text)" }}>
             J.A.R.V.I.S
-          </span>
-          <span className="hud-label" style={{ fontSize: 8, letterSpacing: "0.24em" }}>
-            personal ai operating system
           </span>
         </div>
       </Link>
@@ -132,9 +131,14 @@ export default function TopBar() {
         <button className="focus-outline" title="Notifications" style={iconBtn}>
           <Bell size={14} />
         </button>
-        <NavLink to="/settings" className="focus-outline" title="Settings" style={iconBtn as any}>
-          <SettingsIcon size={14} />
-        </NavLink>
+        <button
+          className="focus-outline"
+          title="Config"
+          onClick={() => navigate("/config")}
+          style={{ ...iconBtn, width: "auto", padding: "0 10px", gap: 6, fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.18em", textTransform: "uppercase" }}
+        >
+          <SlidersHorizontal size={13} /> Config
+        </button>
         <button
           className="focus-outline"
           title="Sign out"
@@ -153,6 +157,7 @@ const iconBtn = {
   display: "flex", alignItems: "center", justifyContent: "center",
   width: 28, height: 28, border: "1px solid var(--edge)",
   color: "var(--text-dim)", borderRadius: 2,
+  background: "transparent", cursor: "pointer",
 } as const;
 
 function StatusChip({ label, ok, icon }: { label: string; ok: boolean; icon: any }) {

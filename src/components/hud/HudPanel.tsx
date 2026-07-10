@@ -37,7 +37,7 @@ export function HudPanel({
   }, [updatedKey]);
 
   return (
-    <section className={cn("hud-panel flex flex-col", className)} {...rest}>
+    <section className={cn("hud-panel mounted flex flex-col", className)} {...rest}>
       <span className="hud-corner tl" />
       <span className="hud-corner tr" />
       <span className="hud-corner bl" />
