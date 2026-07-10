@@ -5,6 +5,8 @@
 import { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { ensureAccessToken, gapi, parseFrom, parseHeaders } from "./gmail.ts";
 import { buildGmailQuery } from "./finance-senders.ts";
+import { isFinanceMail } from "./finance-parsers.ts";
+import { extractFinanceForAccount } from "./finance-extract-core.ts";
 
 export type SyncResult =
   | { ok: true; paused?: false; inserted: number; total: number; q: string }
