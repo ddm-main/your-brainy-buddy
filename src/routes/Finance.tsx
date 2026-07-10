@@ -357,3 +357,50 @@ function Txns() {
     </div>
   );
 }
+
+// ---------- Statements ----------
+function Statements() {
+  const [items, setItems] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      const { data } = await (supabase as any).from("statements")
+        .select("*, credit_cards(card_name), financial_accounts(nickname), loans(lender_name)")
+        .order("statement_date", { ascending: false, nullsFirst: false })
+        .limit(200);
+      setItems(data ?? []);
+      setLoading(false);
+    })();
+  }, []);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%", minHeight: 0 }}>
+      <HudPanel title="Statements" index="STM" live="ok" style={{ flex: 1, minHeight: 0 }} bodyClass="overflow-auto">
+        {loading ? <div className="hud-label">loading…</div> :
+         items.length === 0 ? <EmptyState hint="statements auto-appear when banking mail with statement subjects is synced">no statements yet</EmptyState> :
+         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+           <thead>
+             <tr style={{ color: "var(--text-dim)", textAlign: "left", fontSize: 10, fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>date</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>type</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>linked</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>period</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>source</th>
+             </tr>
+           </thead>
+           <tbody>
+             {items.map((s: any) => (
+               <tr key={s.id} style={{ borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
+                 <td style={{ padding: "6px 8px", color: "var(--text-dim)" }}>{s.statement_date ? new Date(s.statement_date).toLocaleDateString() : "—"}</td>
+                 <td style={{ padding: "6px 8px" }}><Chip>{s.statement_type}</Chip></td>
+                 <td style={{ padding: "6px 8px", color: "var(--text)" }}>{s.credit_cards?.card_name ?? s.financial_accounts?.nickname ?? s.loans?.lender_name ?? "—"}</td>
+                 <td style={{ padding: "6px 8px", color: "var(--text-dim)" }}>{s.period_start && s.period_end ? `${s.period_start} → ${s.period_end}` : "—"}</td>
+                 <td style={{ padding: "6px 8px", color: "var(--text-dim)" }}>{s.source ?? "manual"}</td>
+               </tr>
+             ))}
+           </tbody>
+         </table>}
+      </HudPanel>
+    </div>
+  );
+}
