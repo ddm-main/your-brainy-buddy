@@ -6,7 +6,10 @@ import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/
 import { HudSelect } from "@/components/hud/HudSelect";
 import { HudDatePicker } from "@/components/hud/HudDatePicker";
 import { db, inr, type FinancialAccount, type CreditCard, type Transaction } from "@/lib/db";
-import { Trash2 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { authFetch } from "@/lib/authFetch";
+import { useUi } from "@/store/uiStore";
+import { Trash2, RefreshCw } from "lucide-react";
 
 function ConfigureCTA({ to, label }: { to: string; label: string }) {
   return (
@@ -26,6 +29,7 @@ const TABS = [
   { to: "/finance/goals", label: "Goals", key: "goals" },
   { to: "/finance/subs", label: "Subs", key: "subs" },
   { to: "/finance/txns", label: "Transactions", key: "txns" },
+  { to: "/finance/statements", label: "Statements", key: "statements" },
 ];
 
 export default function Finance() {
@@ -55,6 +59,7 @@ export default function Finance() {
         {loc.pathname.startsWith("/finance/goals") && <Goals />}
         {loc.pathname.startsWith("/finance/subs") && <Subs />}
         {loc.pathname.startsWith("/finance/txns") && <Txns />}
+        {loc.pathname.startsWith("/finance/statements") && <Statements />}
       </div>
     </div>
   );
@@ -78,9 +83,23 @@ function Overview() {
     { l: "goals", v: state.goals, to: "/finance/goals" },
     { l: "subscriptions", v: state.subs, to: "/finance/subs" },
   ];
+  const push = useUi((s) => s.push);
+  const [rescanning, setRescanning] = useState(false);
+  const rescan = async () => {
+    setRescanning(true);
+    try {
+      const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/finance-extract`;
+      const r = await authFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ since_days: 90, limit: 500 }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.error ?? r.statusText);
+      push(`Extracted ${j.transactions ?? 0} txn, ${j.statements ?? 0} stmt`, "ok");
+    } catch (e: any) { push(e?.message ?? "extract failed", "err"); }
+    finally { setRescanning(false); }
+  };
   return (
     <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12, height: "100%", minHeight: 0 }}>
-      <HudPanel title="Finance Overview" index="FIN" live="ok" bodyClass="overflow-auto">
+      <HudPanel title="Finance Overview" index="FIN" live="ok" bodyClass="overflow-auto"
+        actions={<Btn size="sm" onClick={rescan} disabled={rescanning}><RefreshCw size={11} style={{ marginRight: 4 }} />{rescanning ? "scanning…" : "re-scan email"}</Btn>}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
           {cards.map((c) => (
             <NavLink key={c.l} to={c.to} style={{ display: "block", padding: 14, border: "1px solid var(--edge)", textDecoration: "none", color: "inherit" }}>
@@ -330,6 +349,53 @@ function Txns() {
                  <td style={{ padding: "6px 8px" }}>
                    <button style={{ color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer" }} onClick={async () => { if (confirm("Delete?")) { await db.transactions.remove(t.id); load(); } }}><Trash2 size={11} /></button>
                  </td>
+               </tr>
+             ))}
+           </tbody>
+         </table>}
+      </HudPanel>
+    </div>
+  );
+}
+
+// ---------- Statements ----------
+function Statements() {
+  const [items, setItems] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      const { data } = await (supabase as any).from("statements")
+        .select("*, credit_cards(card_name), financial_accounts(nickname), loans(lender_name)")
+        .order("statement_date", { ascending: false, nullsFirst: false })
+        .limit(200);
+      setItems(data ?? []);
+      setLoading(false);
+    })();
+  }, []);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%", minHeight: 0 }}>
+      <HudPanel title="Statements" index="STM" live="ok" style={{ flex: 1, minHeight: 0 }} bodyClass="overflow-auto">
+        {loading ? <div className="hud-label">loading…</div> :
+         items.length === 0 ? <EmptyState hint="statements auto-appear when banking mail with statement subjects is synced">no statements yet</EmptyState> :
+         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+           <thead>
+             <tr style={{ color: "var(--text-dim)", textAlign: "left", fontSize: 10, fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>date</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>type</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>linked</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>period</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>source</th>
+             </tr>
+           </thead>
+           <tbody>
+             {items.map((s: any) => (
+               <tr key={s.id} style={{ borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
+                 <td style={{ padding: "6px 8px", color: "var(--text-dim)" }}>{s.statement_date ? new Date(s.statement_date).toLocaleDateString() : "—"}</td>
+                 <td style={{ padding: "6px 8px" }}><Chip>{s.statement_type}</Chip></td>
+                 <td style={{ padding: "6px 8px", color: "var(--text)" }}>{s.credit_cards?.card_name ?? s.financial_accounts?.nickname ?? s.loans?.lender_name ?? "—"}</td>
+                 <td style={{ padding: "6px 8px", color: "var(--text-dim)" }}>{s.period_start && s.period_end ? `${s.period_start} → ${s.period_end}` : "—"}</td>
+                 <td style={{ padding: "6px 8px", color: "var(--text-dim)" }}>{s.source ?? "manual"}</td>
                </tr>
              ))}
            </tbody>

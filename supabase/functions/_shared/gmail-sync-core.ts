@@ -5,6 +5,8 @@
 import { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { ensureAccessToken, gapi, parseFrom, parseHeaders } from "./gmail.ts";
 import { buildGmailQuery } from "./finance-senders.ts";
+import { isFinanceMail } from "./finance-parsers.ts";
+import { extractFinanceForAccount } from "./finance-extract-core.ts";
 
 export type SyncResult =
   | { ok: true; paused?: false; inserted: number; total: number; q: string }
@@ -66,6 +68,10 @@ export async function runGmailSync(
         ? new Date(Number(meta.internalDate)).toISOString()
         : null;
 
+      const subject = h["subject"] ?? null;
+      const snippet = meta.snippet ?? null;
+      const financeRelated = isFinanceMail({ from_email: from.email, subject, snippet });
+
       const { error: insErr } = await svc.from("emails").insert({
         user_id: account.user_id,
         account_id: account.id,
@@ -74,9 +80,11 @@ export async function runGmailSync(
         thread_id: m.threadId,
         from_name: from.name,
         from_email: from.email,
-        subject: h["subject"] ?? null,
-        snippet: meta.snippet ?? null,
+        subject,
+        snippet,
         received_at: receivedAt,
+        finance_related: financeRelated,
+        category: financeRelated ? "finance" : null,
       });
       if (!insErr) inserted++;
       else if (!String(insErr.message).includes("duplicate"))
@@ -93,7 +101,16 @@ export async function runGmailSync(
       })
       .eq("id", account.id);
 
-    return { ok: true, inserted, total: ids.length, q };
+    // Best-effort finance extraction over what we just pulled.
+    let extracted = { transactions: 0, statements: 0, scanned: 0 };
+    try {
+      const r = await extractFinanceForAccount(svc, account, { sinceDays: Math.max(7, Number(account.sync_period_days ?? 30)), limit: Math.max(100, Number(account.max_per_sync ?? 100)) });
+      extracted = { transactions: r.transactions, statements: r.statements, scanned: r.scanned };
+    } catch (e) {
+      console.warn("finance-extract failed:", e instanceof Error ? e.message : e);
+    }
+
+    return { ok: true, inserted, total: ids.length, q, extracted } as any;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await svc

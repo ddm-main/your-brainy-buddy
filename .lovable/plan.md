@@ -1,96 +1,76 @@
 ## Goal
 
-Convert `/config/email` into a multi-step hub with real per-account sync rules, fix the Config landing so it shows all sections, and add scheduled auto-sync via pg_cron.
+Stop treating banking mail as generic inbox items. On every Gmail sync, detect finance emails, extract structured records, and file them into `transactions`, `statements`, `credit_cards`, `loans`, and investment entries — auto-matched to the right bank/card/loan.
 
----
+## 1. Detect finance mail on ingest (all accounts, not just `finance_only`)
 
-## 1. Config landing (routing)
+In `_shared/gmail-sync-core.ts`, after inserting each `emails` row:
+- Check sender domain against `FINANCE_DOMAINS` (already exists) + subject regex for txn/statement/SIP/EMI/CAS/OTP-debit keywords.
+- If match → set `emails.finance_related = true` and enqueue for extraction (see §3).
 
-- Replace the `Navigate to /config/email` default in `src/routes/Config.tsx` with a **Config Home** grid.
-- New `src/routes/config/ConfigHome.tsx`: card grid for Email, Banks, Accounts, Cards, Loans, Goals, Subscriptions, Projects. Each card shows description + live count from Supabase (e.g. "3 connected"). Sidebar tabs stay for quick nav inside a section.
+This runs for every connected mailbox, so a mixed personal Gmail still gets its bank alerts picked up without forcing `finance_only`.
 
-## 2. DB migration — per-account rules
+## 2. Extraction rules (`_shared/finance-parsers.ts`, new)
 
-Single additive migration on `public.email_accounts` (all nullable / defaulted, no data loss):
+Regex-first per bank, AI-fallback for the rest. Each parser returns a normalized record + confidence.
 
-| Column | Type | Default |
-|---|---|---|
-| `sync_frequency` | text | `'manual'` |
-| `sync_period_days` | int | `30` |
-| `use_case` | text | `'general'` |
-| `finance_only` | bool | `false` |
-| `finance_sender_filter` | text | `null` |
-| `permission_level` | text | `'read'` |
-| `auto_categorize` | bool | `true` |
-| `notify_on_new` | bool | `false` |
-| `max_per_sync` | int | `100` |
-| `paused_at` | timestamptz | `null` |
+| Email pattern | Extract → target table |
+|---|---|
+| "debited/credited by INR X at MERCHANT on DATE" (HDFC/ICICI/Axis/SBI/Kotak/YES/IDFC/Amex) | `transactions` (txn_type, amount, merchant, txn_date, ref_no) |
+| UPI alerts ("VPA X paid Y", "received from Z") | `transactions` + payer/payee, category "UPI" |
+| "Your credit card statement is generated" + PDF attachment | `statements` (statement_type=`credit_card`, period, statement_date) |
+| Bank statement (monthly account statement PDF) | `statements` (statement_type=`bank`) |
+| "EMI of X debited toward loan LN…" | `transactions` (category "EMI"), update `loans.outstanding_amount` if delta given |
+| SIP confirmation / MF purchase / CAS (Motilal, CAMS, KFintech, CDSL) | `transactions` (category "investment") + `statements` (statement_type=`investment` when CAS PDF) |
+| Card bill payment success (CRED, autopay) | `transactions` credit against card |
 
-RLS unchanged (existing per-user policy already covers new columns).
+Matching to `credit_cards` / `financial_accounts` / `loans`:
+1. `finance_email_rules` (bank_id/card_id/loan_id + sender/subject/attachment patterns) — exact match wins.
+2. Fallback: last-4-digits regex in body/subject → lookup by `masked_number` suffix.
+3. Fallback: sender domain → `banks` row (single bank/card) → link.
 
-## 3. Edge function updates
+Anything below confidence threshold lands with `linked_*` null and shows in a "Needs review" list.
 
-**`gmail-sync`**
-- Load new columns. If `paused_at` set → return `{ paused: true }` and skip.
-- Build Gmail `q`: `newer_than:{sync_period_days}d in:inbox` + optional `from:(<finance domain list> [+ finance_sender_filter domains])` when `finance_only` or `use_case='finance'`.
-- Use `max_per_sync` for `maxResults` (capped at 500).
-- Finance domain list lives in `_shared/finance-senders.ts` (Chase, BoA, HDFC, ICICI, Axis, SBI, PayPal, Stripe, Razorpay, etc.).
+## 3. Extractor edge function (`finance-extract`, new)
 
-**`gmail-oauth-start`**
-- Compute scope list from `permission_level`: `read` → readonly only; `read_write` → readonly + modify. Persisted `scopes` column already captures granted scopes on callback.
+- Called at the end of `gmail-sync` and by `gmail-sync-due` for each account after its sync completes; also exposed as a standalone POST for retries.
+- Loads recent `emails` where `finance_related = true` and no matching row in `transactions.source_email_id` / `statements.source_email_id`.
+- For each: fetch full body (reuse `gmail-message`), run parsers, insert into `transactions`/`statements`. Attach PDFs via `email_attachments` (storage: new `finance-statements` bucket, service-role write).
+- Idempotent: dedupe by `(user_id, source_email_id, kind)`; safe to re-run.
 
-**`gmail-sync-due`** (new)
-- Called by cron. Selects accounts where `paused_at IS NULL`, `sync_frequency != 'manual'`, and `last_synced_at` older than the frequency interval. Invokes the same sync path for each (service-role, batched, best-effort with per-account error capture into `last_error`).
+Add columns via migration:
+- `transactions.source_email_id uuid`, `transactions.external_ref text`, `transactions.confidence numeric` (all nullable, indexed on source_email_id).
+- `statements.source_email_id` already exists; add `statements.source` text default `'email'`.
+- GRANTs preserved (columns are additive).
 
-**pg_cron**
-- Enable `pg_cron` + `pg_net`. Schedule `gmail-sync-due` every 15 minutes via `supabase--insert` (not migration, since the SQL embeds the project URL + anon key).
+## 4. UI
 
-## 4. UI — `/config/email` split
+- **Finance → Overview**: add "Auto-extracted this week" tile (count + link to Txns filtered `source='email'`).
+- **Finance → Transactions**: add filter chips `all / auto / manual / needs review`; row shows source email link when present.
+- New **Finance → Statements** tab: list `statements` rows with type, period, linked account/card, "open email" + "download PDF" actions.
+- New **Finance → Investments** sub-view under Txns (category filter = investment) with running holdings note.
+- **Inbox** stays as-is for non-finance mail; finance-tagged rows still show but with a "→ txn" quick-link if extracted.
 
-`EmailConfig.tsx` becomes a router shell for `email/*` with these sub-routes/components:
+No changes to the Inbox filtering behavior itself — the user isn't asking Inbox to hide anything, just wants Finance to reflect the data.
 
-- `email/EmailHome.tsx` — landing card grid: **Connect mailbox**, **Manage mailboxes**, **Sync rules**, **Sender filters**, **Recent activity**. Stat header: connected / syncing / errors.
-- `email/EmailAccountsList.tsx` — existing list, extracted.
-- `email/AccountRulesDrawer.tsx` — grouped rules editor:
-  - *Sync*: frequency, period, max per sync, pause toggle.
-  - *Purpose*: use case, finance-only, extra sender domains textarea.
-  - *Permissions*: read vs read+write with "requires reconnect" warning when changed.
-  - *Automation*: auto-categorize, notify on new.
-  - Live monospace preview of the composed Gmail `q`.
-  - Immediate `.update().eq('id', ...)` on change with toast.
-- `email/RecentActivity.tsx` — last sync + `last_error` per account.
+## 5. Scheduling
 
-## 5. UX polish
-
-- Keep the list rendered while refetching (no double-loader flash — mirrors Accounts/Contacts pattern).
-- Landing card grid always renders (even with zero accounts) so **Connect mailbox** is always reachable.
-- Typed-confirm delete dialog (must type the email address) replaces `confirm()`.
-- Split single reconnect button into **Reconnect** (re-run OAuth) and **Update scopes** (visible only when `permission_level` was changed since last connect).
-- `last_error` persisted (already a column) — surfaced in ErrorPanel and Recent Activity.
-- A11y: label all inputs, `n` shortcut to add mailbox, focus trap in drawer.
+- Reuse `gmail-sync-due` cron (already every 15 min): after each account sync, invoke `finance-extract` for that account. No new cron entry.
+- Manual "↻ re-extract" button on Finance → Overview to reprocess the last 90 days.
 
 ## 6. Rollout order
 
-1. Migration for new columns.
-2. Types regenerate + `src/lib/db.ts` helper for `emailAccounts.update()`.
-3. `gmail-sync` + `gmail-oauth-start` honour new fields; add `_shared/finance-senders.ts`.
-4. Config Home landing + Email sub-routes shell.
-5. Accounts list extraction + Rules drawer + Recent activity.
-6. `gmail-sync-due` function + `pg_cron` schedule (via `supabase--insert`).
+1. Migration: new columns on `transactions`/`statements` + `finance-statements` storage bucket.
+2. `_shared/finance-parsers.ts` with regex table + unit tests (`tests/financeParsers.test.ts`).
+3. Hook auto-tagging into `gmail-sync-core.ts`.
+4. `finance-extract` edge function + wire into sync flow.
+5. Finance UI: Statements tab, Txns source filter, Overview tile, Investments view.
+6. Backfill: one-off invocation of `finance-extract` with `since=90d` for existing emails.
 
 ## Technical notes
 
-- Gmail operators used server-side only: `newer_than:Nd`, `in:inbox`, `from:(a OR b)`. Client never passes raw `q`.
-- Widening `permission_level` from `read` → `read_write` requires a full reconnect; token refresh alone cannot grant new scopes. UI enforces this.
-- `pg_cron` job SQL is inserted (not migrated) because it embeds project-specific URL + anon key.
-- All new columns are additive with defaults — existing rows keep working; no code path breaks before wiring.
-
-```text
-/config
-  ├─ (index) ConfigHome  ── grid of section cards
-  └─ email/
-       ├─ (index) EmailHome        ── action cards + stats
-       ├─ accounts  EmailAccountsList
-       ├─ rules/:id AccountRulesDrawer
-       └─ activity  RecentActivity
-```
+- Regex parsers stay server-side; PDFs parsed only when text extraction is trivial (statements table stores metadata + storage path, deep PDF parsing is a later pass).
+- AI fallback uses Lovable AI Gateway (`LOVABLE_API_KEY`) with a strict JSON schema; only invoked when regex fails and email matches finance sender/subject heuristics — keeps token spend bounded.
+- Idempotency key `(user_id, source_email_id)` prevents double-inserts on re-sync.
+- `linked_bank_id` / `linked_card_id` on `emails` populated during extraction so future filters ("all HDFC card mail") are cheap.
+- No change to how OAuth scopes work; readonly is sufficient for all of this.
