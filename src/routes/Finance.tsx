@@ -6,7 +6,10 @@ import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/
 import { HudSelect } from "@/components/hud/HudSelect";
 import { HudDatePicker } from "@/components/hud/HudDatePicker";
 import { db, inr, type FinancialAccount, type CreditCard, type Transaction } from "@/lib/db";
-import { Trash2 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { authFetch } from "@/lib/authFetch";
+import { useUi } from "@/store/uiStore";
+import { Trash2, RefreshCw } from "lucide-react";
 
 function ConfigureCTA({ to, label }: { to: string; label: string }) {
   return (
@@ -26,6 +29,7 @@ const TABS = [
   { to: "/finance/goals", label: "Goals", key: "goals" },
   { to: "/finance/subs", label: "Subs", key: "subs" },
   { to: "/finance/txns", label: "Transactions", key: "txns" },
+  { to: "/finance/statements", label: "Statements", key: "statements" },
 ];
 
 export default function Finance() {
