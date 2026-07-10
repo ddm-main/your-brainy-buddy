@@ -59,6 +59,7 @@ export default function Finance() {
         {loc.pathname.startsWith("/finance/goals") && <Goals />}
         {loc.pathname.startsWith("/finance/subs") && <Subs />}
         {loc.pathname.startsWith("/finance/txns") && <Txns />}
+        {loc.pathname.startsWith("/finance/statements") && <Statements />}
       </div>
     </div>
   );
