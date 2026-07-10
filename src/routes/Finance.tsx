@@ -83,9 +83,23 @@ function Overview() {
     { l: "goals", v: state.goals, to: "/finance/goals" },
     { l: "subscriptions", v: state.subs, to: "/finance/subs" },
   ];
+  const push = useUi((s) => s.push);
+  const [rescanning, setRescanning] = useState(false);
+  const rescan = async () => {
+    setRescanning(true);
+    try {
+      const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/finance-extract`;
+      const r = await authFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ since_days: 90, limit: 500 }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.error ?? r.statusText);
+      push(`Extracted ${j.transactions ?? 0} txn, ${j.statements ?? 0} stmt`, "ok");
+    } catch (e: any) { push(e?.message ?? "extract failed", "err"); }
+    finally { setRescanning(false); }
+  };
   return (
     <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12, height: "100%", minHeight: 0 }}>
-      <HudPanel title="Finance Overview" index="FIN" live="ok" bodyClass="overflow-auto">
+      <HudPanel title="Finance Overview" index="FIN" live="ok" bodyClass="overflow-auto"
+        actions={<Btn size="sm" onClick={rescan} disabled={rescanning}><RefreshCw size={11} style={{ marginRight: 4 }} />{rescanning ? "scanning…" : "re-scan email"}</Btn>}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
           {cards.map((c) => (
             <NavLink key={c.l} to={c.to} style={{ display: "block", padding: 14, border: "1px solid var(--edge)", textDecoration: "none", color: "inherit" }}>
