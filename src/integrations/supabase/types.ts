@@ -190,59 +190,89 @@ export type Database = {
       email_accounts: {
         Row: {
           access_token: string | null
+          auto_categorize: boolean
           connected_at: string | null
           created_at: string
           email_address: string
+          finance_only: boolean
+          finance_sender_filter: string | null
           google_sub: string | null
           history_id: string | null
           id: string
           is_active: boolean
           last_error: string | null
           last_synced_at: string | null
+          max_per_sync: number
+          notify_on_new: boolean
+          paused_at: string | null
+          permission_level: string
           provider: string | null
           purpose: Database["public"]["Enums"]["email_purpose"]
           refresh_token: string | null
           scopes: string | null
+          sync_frequency: string
+          sync_period_days: number
           sync_status: string | null
           token_expires_at: string | null
+          use_case: string
           user_id: string
         }
         Insert: {
           access_token?: string | null
+          auto_categorize?: boolean
           connected_at?: string | null
           created_at?: string
           email_address: string
+          finance_only?: boolean
+          finance_sender_filter?: string | null
           google_sub?: string | null
           history_id?: string | null
           id?: string
           is_active?: boolean
           last_error?: string | null
           last_synced_at?: string | null
+          max_per_sync?: number
+          notify_on_new?: boolean
+          paused_at?: string | null
+          permission_level?: string
           provider?: string | null
           purpose?: Database["public"]["Enums"]["email_purpose"]
           refresh_token?: string | null
           scopes?: string | null
+          sync_frequency?: string
+          sync_period_days?: number
           sync_status?: string | null
           token_expires_at?: string | null
+          use_case?: string
           user_id?: string
         }
         Update: {
           access_token?: string | null
+          auto_categorize?: boolean
           connected_at?: string | null
           created_at?: string
           email_address?: string
+          finance_only?: boolean
+          finance_sender_filter?: string | null
           google_sub?: string | null
           history_id?: string | null
           id?: string
           is_active?: boolean
           last_error?: string | null
           last_synced_at?: string | null
+          max_per_sync?: number
+          notify_on_new?: boolean
+          paused_at?: string | null
+          permission_level?: string
           provider?: string | null
           purpose?: Database["public"]["Enums"]["email_purpose"]
           refresh_token?: string | null
           scopes?: string | null
+          sync_frequency?: string
+          sync_period_days?: number
           sync_status?: string | null
           token_expires_at?: string | null
+          use_case?: string
           user_id?: string
         }
         Relationships: []

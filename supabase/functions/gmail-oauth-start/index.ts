@@ -3,13 +3,17 @@ import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { signState } from "../_shared/oauth-state.ts";
 
-const SCOPES = [
+const BASE_SCOPES = [
   "openid",
   "email",
   "profile",
   "https://www.googleapis.com/auth/gmail.readonly",
-  "https://www.googleapis.com/auth/gmail.modify",
 ];
+const MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
+
+function scopesFor(level: string | null | undefined): string[] {
+  return level === "read_write" ? [...BASE_SCOPES, MODIFY_SCOPE] : BASE_SCOPES;
+}
 
 function googleAuthorizeUrl(params: Record<string, string>): string {
   const qs = Object.entries(params)
@@ -39,7 +43,11 @@ Deno.serve(async (req) => {
 
     // Confirm account belongs to caller.
     const svc = createClient(supabaseUrl, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } });
-    const { data: acct, error } = await svc.from("email_accounts").select("id, user_id, email_address").eq("id", account_id).maybeSingle();
+    const { data: acct, error } = await svc
+      .from("email_accounts")
+      .select("id, user_id, email_address, permission_level")
+      .eq("id", account_id)
+      .maybeSingle();
     if (error) throw error;
     if (!acct || acct.user_id !== auth.userId) return new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { ...cors, "Content-Type": "application/json" } });
 
@@ -51,7 +59,7 @@ Deno.serve(async (req) => {
       client_id: clientId,
       redirect_uri: redirectUri,
       response_type: "code",
-      scope: SCOPES.join(" "),
+      scope: scopesFor((acct as any).permission_level).join(" "),
       access_type: "offline",
       prompt: "consent",
       state,

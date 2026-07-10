@@ -1,7 +1,8 @@
-import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { lazy, Suspense } from "react";
 
 const EmailConfig = lazy(() => import("@/routes/config/EmailConfig"));
+const ConfigHome = lazy(() => import("@/routes/config/ConfigHome"));
 const BanksConfig = lazy(() => import("@/routes/config/BanksConfig"));
 const AccountsConfig = lazy(() => import("@/routes/config/AccountsConfig"));
 const CardsConfig = lazy(() => import("@/routes/config/CardsConfig"));
@@ -11,6 +12,7 @@ const SubscriptionsConfig = lazy(() => import("@/routes/config/SubscriptionsConf
 const ProjectsConfig = lazy(() => import("@/routes/config/ProjectsConfig"));
 
 const TABS = [
+  { to: "/config", label: "Home", exact: true },
   { to: "/config/email", label: "Email" },
   { to: "/config/banks", label: "Banks" },
   { to: "/config/accounts", label: "Accounts" },
@@ -19,7 +21,7 @@ const TABS = [
   { to: "/config/goals", label: "Goals" },
   { to: "/config/subscriptions", label: "Subscriptions" },
   { to: "/config/projects", label: "Projects" },
-];
+] as { to: string; label: string; exact?: boolean }[];
 
 export default function Config() {
   const loc = useLocation();
@@ -28,7 +30,9 @@ export default function Config() {
       <nav style={{ display: "flex", flexDirection: "column", gap: 4, borderRight: "1px solid var(--edge)", paddingRight: 8 }}>
         <div className="hud-label" style={{ padding: "4px 8px", color: "var(--accent)" }}>Config</div>
         {TABS.map((t) => {
-          const active = loc.pathname === t.to || loc.pathname.startsWith(t.to + "/");
+          const active = t.exact
+            ? loc.pathname === t.to || loc.pathname === t.to + "/"
+            : loc.pathname === t.to || loc.pathname.startsWith(t.to + "/");
           return (
             <NavLink key={t.to} to={t.to} style={{
               padding: "8px 10px", textDecoration: "none",
@@ -44,8 +48,8 @@ export default function Config() {
       <div style={{ minHeight: 0, minWidth: 0 }}>
         <Suspense fallback={<div className="hud-label">loading…</div>}>
           <Routes>
-            <Route index element={<Navigate to="/config/email" replace />} />
-            <Route path="email" element={<EmailConfig />} />
+            <Route index element={<ConfigHome />} />
+            <Route path="email/*" element={<EmailConfig />} />
             <Route path="banks" element={<BanksConfig />} />
             <Route path="accounts" element={<AccountsConfig />} />
             <Route path="cards" element={<CardsConfig />} />

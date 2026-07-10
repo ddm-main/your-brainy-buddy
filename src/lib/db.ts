@@ -209,9 +209,22 @@ export const db = {
       if (error) throw error;
       return data;
     },
+    update: async (id: string, patch: Record<string, any>) => {
+      const { data, error } = await supabase.from("email_accounts").update(patch).eq("id", id).select().single();
+      if (error) throw error;
+      return data;
+    },
     remove: async (id: string) => {
       const { error } = await supabase.from("email_accounts").delete().eq("id", id);
       if (error) throw error;
+    },
+    counts: async () => {
+      const [total, connected, errors] = await Promise.all([
+        supabase.from("email_accounts").select("id", { count: "exact", head: true }),
+        supabase.from("email_accounts").select("id", { count: "exact", head: true }).not("connected_at", "is", null),
+        supabase.from("email_accounts").select("id", { count: "exact", head: true }).eq("sync_status", "error"),
+      ]);
+      return { total: total.count ?? 0, connected: connected.count ?? 0, errors: errors.count ?? 0 };
     },
   },
 
