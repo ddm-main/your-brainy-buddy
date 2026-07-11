@@ -52,12 +52,23 @@ Open Claude Code in this folder and just talk. Or use the commands:
 
 Anything you type that's just a thought/link/task gets captured to the Inbox automatically.
 
+## Running locally
+
+```bash
+cp .env.example .env      # Supabase creds (anon key is public)
+npm ci
+npm run dev               # → http://localhost:8080
+```
+
+The two `VITE_SUPABASE_*` vars are required — without them the client boots with `undefined` credentials and every request fails. The `SUPABASE_PROJECT_REF` / `SUPABASE_ACCESS_TOKEN` vars are only needed if you want the Supabase MCP server in Claude Code to run `/sync`; the app itself doesn't read them.
+
 ## First steps
 
 1. Run `/brief` — JARVIS will notice the profile is empty and interview you.
 2. Tell it about yourself, or edit `System/Memory/profile.md` directly.
 3. Create your first project with `/new-project`.
 4. Optional: ask JARVIS to set up a scheduled morning briefing (`/schedule` in Claude Code), and `git init` this folder for versioned history of your life OS.
+
 
 ## Design principles
 
