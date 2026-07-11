@@ -2,6 +2,19 @@
 
 Markdown files in this OS are the **working copy** (what JARVIS reads/writes every session). Supabase is the **structured system of record** — queryable from anywhere, and the foundation for a future web dashboard, mobile access, or n8n automations.
 
+## Running the app locally
+
+The Vite frontend needs `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` at build time. On a fresh clone:
+
+```bash
+cp .env.example .env      # at the repo root — real project values, anon key is public
+npm ci
+npm run dev
+```
+
+That is enough to boot the HUD. The MCP env vars below (`SUPABASE_PROJECT_REF`, `SUPABASE_ACCESS_TOKEN`) are a **separate** concern — they only power the `supabase` MCP server used from Claude Code for `/sync`. The app does not read them.
+
+
 ## Architecture
 
 ```
