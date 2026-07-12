@@ -1,0 +1,1 @@
+REVOKE EXECUTE ON FUNCTION public.increment_jarvis_usage(uuid, integer, bigint, text) FROM PUBLIC, anon;
