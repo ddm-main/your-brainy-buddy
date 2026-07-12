@@ -797,6 +797,7 @@ export type Database = {
         Row: {
           created_at: string
           day: string
+          endpoint: string
           requests: number
           tokens: number
           updated_at: string
@@ -805,6 +806,7 @@ export type Database = {
         Insert: {
           created_at?: string
           day?: string
+          endpoint?: string
           requests?: number
           tokens?: number
           updated_at?: string
@@ -813,6 +815,7 @@ export type Database = {
         Update: {
           created_at?: string
           day?: string
+          endpoint?: string
           requests?: number
           tokens?: number
           updated_at?: string
@@ -1511,7 +1514,12 @@ export type Database = {
     }
     Functions: {
       increment_jarvis_usage: {
-        Args: { _requests?: number; _tokens?: number; _user_id: string }
+        Args: {
+          _endpoint?: string
+          _requests?: number
+          _tokens?: number
+          _user_id: string
+        }
         Returns: {
           requests: number
           tokens: number
