@@ -1,18 +1,12 @@
-import { Fragment, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
-import KineticNumber from "@/components/hud/KineticNumber";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { HudSelect } from "@/components/hud/HudSelect";
 import { HudDatePicker } from "@/components/hud/HudDatePicker";
-import { db, inr, type FinancialAccount, type CreditCard, type Transaction } from "@/lib/db";
-import { authFetch } from "@/lib/authFetch";
-import { calcEmi, calcPrincipalFromEmi, roundCurrency } from "@/lib/loanCalc";
-import { calcCreditUtilization, generateAmortizationSchedule } from "@/lib/financeMetrics";
-import { runReconciliation } from "@/lib/reconciliation";
-import { useFinanceSnapshot } from "@/lib/useFinanceSnapshot";
+import { db, inr } from "@/lib/db";
+import { calcCreditUtilization } from "@/lib/financeMetrics";
 import { useUi } from "@/store/uiStore";
-import { Trash2, RefreshCw } from "lucide-react";
 import { ConfigureCTA, utilTone } from "./_shared";
 
 // ---------- Cards ----------
@@ -45,6 +39,7 @@ export default function Cards() {
       card_name: c.card_name ?? "", bank_id: c.bank_id ?? "", masked_number: c.masked_number ?? "",
       billing_day: c.billing_day ?? "", due_day: c.due_day ?? "", limit_amount: c.limit_amount ?? "",
       autopay: !!c.autopay, notes: c.notes ?? "",
+      reward_type: c.reward_type ?? "", reward_rate_pct: c.reward_rate_pct ?? "",
     });
     setPayment({ account_id: "", amount: "", date: new Date().toISOString().slice(0, 10) });
   };
@@ -57,6 +52,7 @@ export default function Cards() {
         card_name: edit.card_name.trim(), bank_id: edit.bank_id || null, masked_number: edit.masked_number || null,
         billing_day: edit.billing_day ? Number(edit.billing_day) : null, due_day: edit.due_day ? Number(edit.due_day) : null,
         limit_amount: edit.limit_amount ? Number(edit.limit_amount) : null, autopay: !!edit.autopay, notes: edit.notes || null,
+        reward_type: edit.reward_type || null, reward_rate_pct: edit.reward_rate_pct ? Number(edit.reward_rate_pct) : null,
       });
       push("Saved", "ok");
       setOpenId(null);
@@ -99,6 +95,7 @@ export default function Cards() {
                  <div style={{ fontFamily: "var(--font-display)", fontSize: 15 }}>{c.card_name}</div>
                  {c.banks?.name && <Chip>{c.banks.name}</Chip>}
                  {utilFor(c.id) != null && <Chip tone={utilTone(utilFor(c.id))}>{utilFor(c.id)}% used</Chip>}
+                 {c.reward_type && <Chip tone="ok">{c.reward_rate_pct}% {c.reward_type}</Chip>}
                  <NavLink to={`/finance/cards/${c.id}`} onClick={(e) => e.stopPropagation()}
                    style={{ marginLeft: "auto", fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.18em", textTransform: "uppercase", color: "var(--accent)", textDecoration: "none" }}>
                    details →
@@ -118,6 +115,12 @@ export default function Cards() {
                      <div><label style={labelStyle}>limit</label><input type="number" value={edit.limit_amount} onChange={(e) => setEdit({ ...edit, limit_amount: e.target.value })} style={{ ...inputStyle, width: "100%" }} /></div>
                      <div><label style={labelStyle}>bill day</label><input type="number" min={1} max={31} value={edit.billing_day} onChange={(e) => setEdit({ ...edit, billing_day: e.target.value })} style={{ ...inputStyle, width: "100%" }} /></div>
                      <div><label style={labelStyle}>due day</label><input type="number" min={1} max={31} value={edit.due_day} onChange={(e) => setEdit({ ...edit, due_day: e.target.value })} style={{ ...inputStyle, width: "100%" }} /></div>
+                     <div><label style={labelStyle}>reward type</label>
+                       <HudSelect value={edit.reward_type} onChange={(v) => setEdit({ ...edit, reward_type: v })} placeholder="—" options={[
+                         { value: "cashback", label: "cashback" }, { value: "points", label: "points" }, { value: "miles", label: "miles" },
+                       ]} />
+                     </div>
+                     <div><label style={labelStyle}>reward rate %</label><input type="number" step="0.01" value={edit.reward_rate_pct} onChange={(e) => setEdit({ ...edit, reward_rate_pct: e.target.value })} style={{ ...inputStyle, width: "100%" }} /></div>
                    </div>
                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                      <input type="checkbox" checked={!!edit.autopay} onChange={(e) => setEdit({ ...edit, autopay: e.target.checked })} />

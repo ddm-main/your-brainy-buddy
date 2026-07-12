@@ -8,11 +8,13 @@ import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { encryptStatementPassword } from "../_shared/crypto.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
+import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
 
 const TABLES: Record<string, string> = {
   card: "credit_cards",
   account: "financial_accounts",
 };
+const passwordLimiter = createSlidingWindowLimiter(10, 60_000);
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -26,6 +28,13 @@ Deno.serve(async (req) => {
     });
   }
   const uid = auth.userId;
+
+  const rl = passwordLimiter.check(uid);
+  if (!rl.ok) {
+    return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) },
+    });
+  }
 
   try {
     const { target_type, target_id, password } = await req.json();

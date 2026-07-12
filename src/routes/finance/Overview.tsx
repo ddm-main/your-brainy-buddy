@@ -1,19 +1,16 @@
-import { Fragment, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
 import KineticNumber from "@/components/hud/KineticNumber";
-import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
-import { HudSelect } from "@/components/hud/HudSelect";
-import { HudDatePicker } from "@/components/hud/HudDatePicker";
-import { db, inr, type FinancialAccount, type CreditCard, type Transaction } from "@/lib/db";
-import { authFetch } from "@/lib/authFetch";
-import { calcEmi, calcPrincipalFromEmi, roundCurrency } from "@/lib/loanCalc";
-import { calcCreditUtilization, generateAmortizationSchedule } from "@/lib/financeMetrics";
+import { Btn, Chip } from "@/components/hud/HudControls";
+import { db, inr } from "@/lib/db";
 import { runReconciliation } from "@/lib/reconciliation";
 import { useFinanceSnapshot } from "@/lib/useFinanceSnapshot";
 import { useUi } from "@/store/uiStore";
-import { Trash2, RefreshCw } from "lucide-react";
-import { ConfigureCTA, utilTone } from "./_shared";
+import { RefreshCw } from "lucide-react";
+import { utilTone, ScoreBar } from "./_shared";
+import { calcGainLoss } from "@/lib/investmentCalc";
+import { HudLineChart } from "@/components/hud/HudChart";
 
 // ---------- Overview ----------
 function daysSince(iso: string): number {
@@ -24,33 +21,42 @@ function daysSince(iso: string): number {
 function alertTone(type: string): "warn" | "err" {
   return type === "amount_mismatch" ? "err" : "warn";
 }
-function ScoreBar({ pct }: { pct: number }) {
-  return (
-    <div style={{ height: 4, background: "rgba(53,214,237,0.1)", marginTop: 4 }}>
-      <div style={{ width: `${Math.max(0, Math.min(100, pct))}%`, height: "100%", background: "var(--accent)", boxShadow: "0 0 6px var(--accent)" }} />
-    </div>
-  );
-}
 
 export default function Overview() {
   const push = useUi((s) => s.push);
   const {
-    state, categories, dues, accounts, cards, loans, goals, subs,
-    cardStatements, alerts, setAlerts, netWorth, utilization, health, refresh,
+    state, categories, accounts, loans, subs,
+    alerts, setAlerts, netWorth, utilization, health, refresh,
     trend, upcomingBills, upcomingBillsTotal, goalProjections, insights,
   } = useFinanceSnapshot();
   const [aiTake, setAiTake] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
+  const [aiPeriod, setAiPeriod] = useState<"day" | "week" | "month" | "brief" | null>(null);
   const [rescanning, setRescanning] = useState(false);
   const [reconciling, setReconciling] = useState(false);
+  const [investments, setInvestments] = useState({ totalValue: 0, totalInvested: 0, count: 0 });
+  const [budgets, setBudgets] = useState<{ category: string; monthly_limit: number; spent: number }[]>([]);
+
+  useEffect(() => {
+    db.investmentHoldings.summary().then(setInvestments).catch(() => {});
+    db.budgets.list().then(async (list) => {
+      const withSpend = await Promise.all(list.map(async (b: any) => ({
+        category: b.category, monthly_limit: Number(b.monthly_limit) || 0,
+        spent: await db.budgets.spentThisMonth(b.category),
+      })));
+      setBudgets(withSpend);
+    }).catch(() => {});
+  }, []);
 
   const cardTiles = [
     { l: "accounts", v: state.accounts, to: "/finance/accounts" },
     { l: "credit cards", v: state.cards, to: "/finance/cards" },
     { l: "loans", v: state.loans, to: "/finance/loans" },
+    { l: "investments", v: investments.count, to: "/finance/investments" },
     { l: "goals", v: state.goals, to: "/finance/goals" },
     { l: "subscriptions", v: state.subs, to: "/finance/subs" },
   ];
+  const budgetsOverLimit = budgets.filter((b) => b.spent > b.monthly_limit).length;
 
   // Reconciliation runs after every rescan (own try/catch — a reconciliation
   // failure must never clobber the rescan's own success toast) plus on its
@@ -67,10 +73,7 @@ export default function Overview() {
   const rescan = async () => {
     setRescanning(true);
     try {
-      const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/finance-extract`;
-      const r = await authFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ since_days: 90, limit: 500 }) });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j?.error ?? r.statusText);
+      const j = await db.finance.extract({ since_days: 90, limit: 500 });
       push(`Extracted ${j.transactions ?? 0} txn, ${j.statements ?? 0} stmt`, "ok");
       await refresh();
       await checkForIssues(true);
@@ -93,13 +96,35 @@ export default function Overview() {
 
   const staleBalance = accounts.some((a: any) => a.current_balance != null && (!a.current_balance_as_of || daysSince(a.current_balance_as_of) > 30));
 
-  const getAiTake = async () => {
+  // period=undefined -> the original health-score "biggest lever" take;
+  // period="day"|"week"|"month" -> a spend/income/merchant digest for that
+  // window; period="brief" -> the Personalized Brief (portfolio, upcoming
+  // obligations, budget status, health score — zero external market data,
+  // entirely derived from the user's own rows per the Round 6 decision to
+  // skip the Daily Market Brief this round). All share the same
+  // jarvisChat() call path and aiTake display area.
+  const getAiTake = async (period?: "day" | "week" | "month" | "brief") => {
     setAiLoading(true);
     setAiTake("");
+    setAiPeriod(period ?? null);
     try {
       const { jarvisChat } = await import("@/lib/jarvisChat");
       const breakdown = health.components.map((c) => `${c.label} ${c.score}/${c.max} (${c.detail})`).join("; ");
-      const prompt = `My financial health score is ${health.score}/100 — breakdown: ${breakdown}. Net worth ₹${Math.round(netWorth.netWorth)}. This month: income ₹${Math.round(state.income)}, spend ₹${Math.round(state.spend)}. In 2-3 sentences: what's the single biggest lever to improve this, and one thing that's already going well? No fluff.`;
+      let prompt = `My financial health score is ${health.score}/100 — breakdown: ${breakdown}. Net worth ₹${Math.round(netWorth.netWorth)}.`;
+      if (period === "brief") {
+        const { gain, gainPct } = calcGainLoss(investments.totalValue, investments.totalInvested);
+        const overBudget = budgets.filter((b) => b.spent > b.monthly_limit).map((b) => b.category).join(", ") || "none";
+        const bills = upcomingBills.slice(0, 5).map((b: any) => `${b.label ?? b.name ?? "bill"} ${b.due_date ?? b.next_due_date ?? ""}`).join("; ") || "none";
+        prompt += ` Investment portfolio: ₹${Math.round(investments.totalValue)} (${gainPct != null ? `${gainPct >= 0 ? "+" : ""}${gainPct.toFixed(1)}%` : "no gain data"}, ${gain >= 0 ? "up" : "down"} ₹${Math.round(Math.abs(gain))}). Upcoming bills/EMIs: ${bills}. Budget categories over limit this month: ${overBudget}.`;
+        prompt += " Write a short 'good morning' personal financial brief in 4-5 sentences: portfolio status, what needs attention (bills/budget), and one recommendation. No fluff, no external market commentary — only my own numbers.";
+      } else if (period) {
+        const summary = await db.transactions.periodSummary(period);
+        const merchants = summary.topMerchants.map((m) => `${m.merchant} ₹${Math.round(m.amount)}`).join(", ") || "none";
+        const categories = summary.topCategories.map((c) => `${c.category} ₹${Math.round(c.amount)}`).join(", ") || "none";
+        prompt += ` This ${period}: spend ₹${Math.round(summary.spend)}, income ₹${Math.round(summary.income)}. Top merchants: ${merchants}. Top categories: ${categories}. Give a crisp ${period}ly financial summary in 3-4 sentences — what stands out, any advice. No fluff.`;
+      } else {
+        prompt += ` This month: income ₹${Math.round(state.income)}, spend ₹${Math.round(state.spend)}. In 2-3 sentences: what's the single biggest lever to improve this, and one thing that's already going well? No fluff.`;
+      }
       setAiTake(await jarvisChat(prompt));
     } catch (e: any) { push(e?.message ?? "AI take failed", "err"); }
     finally { setAiLoading(false); }
@@ -131,13 +156,22 @@ export default function Overview() {
               <div><div className="hud-label">card debt</div><div style={{ fontFamily: "var(--font-display)", fontSize: 15, color: "var(--warn)" }}>{inr(netWorth.cardDebt)}</div></div>
               <div><div className="hud-label">loan debt</div><div style={{ fontFamily: "var(--font-display)", fontSize: 15, color: "var(--warn)" }}>{inr(netWorth.loanDebt)}</div></div>
               <div><div className="hud-label">tracked savings</div><div style={{ fontFamily: "var(--font-display)", fontSize: 15, color: "var(--accent)" }}>{inr(netWorth.trackedSavings)}</div></div>
+              <div><div className="hud-label">investments</div><div style={{ fontFamily: "var(--font-display)", fontSize: 15, color: "var(--ok)" }}>{inr(investments.totalValue)}</div></div>
             </div>
             <div className="hud-label" style={{ marginTop: 10 }}>assets &amp; card debt come from account balances (Accounts) and each card's latest statement — set a balance to track it</div>
           </HudPanel>
         </div>
         <div style={{ flex: "1 1 300px" }}>
           <HudPanel title="Health Score" index="HS" live="ok"
-            actions={<Btn size="sm" onClick={getAiTake} disabled={aiLoading}>{aiLoading ? "thinking…" : "get AI take"}</Btn>}>
+            actions={
+              <div style={{ display: "flex", gap: 4 }}>
+                <Btn size="sm" onClick={() => getAiTake("brief")} disabled={aiLoading}>{aiLoading && aiPeriod === "brief" ? "…" : "brief"}</Btn>
+                <Btn size="sm" onClick={() => getAiTake()} disabled={aiLoading}>{aiLoading && !aiPeriod ? "…" : "AI take"}</Btn>
+                <Btn size="sm" onClick={() => getAiTake("day")} disabled={aiLoading}>{aiLoading && aiPeriod === "day" ? "…" : "day"}</Btn>
+                <Btn size="sm" onClick={() => getAiTake("week")} disabled={aiLoading}>{aiLoading && aiPeriod === "week" ? "…" : "week"}</Btn>
+                <Btn size="sm" onClick={() => getAiTake("month")} disabled={aiLoading}>{aiLoading && aiPeriod === "month" ? "…" : "month"}</Btn>
+              </div>
+            }>
             <div style={{ fontFamily: "var(--font-display)", fontSize: 30, color: health.score >= 70 ? "var(--ok)" : health.score >= 40 ? "var(--warn)" : "var(--danger)" }}>
               {health.score}<span style={{ fontSize: 14, color: "var(--text-dim)" }}>/100</span>
             </div>
@@ -193,6 +227,25 @@ export default function Overview() {
              </div>}
           </HudPanel>
         </div>
+        <div style={{ flex: "1 1 260px" }}>
+          <HudPanel title="Budget Status" index="BDG" live={budgetsOverLimit ? "warn" : "ok"}>
+            {budgets.length === 0 ? <NavLink to="/finance/budget" className="hud-label" style={{ textDecoration: "none" }}>set up budgets →</NavLink> :
+             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+               {budgets.slice(0, 4).map((b) => {
+                 const pct = b.monthly_limit > 0 ? Math.min(100, (b.spent / b.monthly_limit) * 100) : 0;
+                 return (
+                   <div key={b.category}>
+                     <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                       <span style={{ color: "var(--text-dim)", textTransform: "capitalize" }}>{b.category}</span>
+                       <span style={{ color: b.spent > b.monthly_limit ? "var(--danger)" : "var(--text)" }}>{inr(b.spent)} / {inr(b.monthly_limit)}</span>
+                     </div>
+                     <ScoreBar pct={pct} />
+                   </div>
+                 );
+               })}
+             </div>}
+          </HudPanel>
+        </div>
         <div style={{ flex: "1.2 1 300px" }}>
           <HudPanel title="Needs Attention" index="ALT" live={alerts.length ? "warn" : "ok"}
             actions={<Btn size="sm" onClick={() => checkForIssues(false)} disabled={reconciling}>{reconciling ? "checking…" : "check for issues"}</Btn>}>
@@ -218,6 +271,12 @@ export default function Overview() {
           </HudPanel>
         </div>
       </div>
+
+      {trend?.length > 1 && (
+        <HudPanel title="Cash Flow Trend" index="CFT" live="ok">
+          <HudLineChart data={trend.map((t: any) => ({ label: t.month, value: t.net }))} height={90} />
+        </HudPanel>
+      )}
 
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
         <div style={{ flex: "1 1 300px" }}>

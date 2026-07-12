@@ -47,17 +47,21 @@ function emptyResult(overrides: Partial<PdfParseResult> = {}): PdfParseResult {
 const MAX_PAGES = 100;
 const MAX_BYTES = 20 * 1024 * 1024; // 20 MB — matches upload cap
 
-export async function parseStatementPdf(bytes: Uint8Array, password?: string): Promise<PdfParseResult> {
+export interface PdfTextResult {
+  ok: boolean;
+  text: string;
+  error?: string;
+}
+
+// Raw text extraction, factored out so non-bank-statement PDFs (e.g. Groww's
+// mutual fund transaction statement, see finance-import-groww) can reuse the
+// same pdfjs plumbing without going through the bank-specific regex parsing
+// below.
+export async function extractPdfText(bytes: Uint8Array, password?: string): Promise<PdfTextResult> {
   try {
-    if (bytes.byteLength > MAX_BYTES) {
-      return { ok: false, period_start: null, period_end: null, statement_date: null, due_date: null,
-        total_due: null, closing_balance: null, lines: [], error: "file_too_large" };
-    }
+    if (bytes.byteLength > MAX_BYTES) return { ok: false, text: "", error: "file_too_large" };
     const doc = await getDocument({ data: bytes, password, disableWorker: true } as any).promise;
-    if (doc.numPages > MAX_PAGES) {
-      return { ok: false, period_start: null, period_end: null, statement_date: null, due_date: null,
-        total_due: null, closing_balance: null, lines: [], error: "too_many_pages" };
-    }
+    if (doc.numPages > MAX_PAGES) return { ok: false, text: "", error: "too_many_pages" };
     let fullText = "";
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i);
@@ -65,18 +69,26 @@ export async function parseStatementPdf(bytes: Uint8Array, password?: string): P
       // deno-lint-ignore no-explicit-any
       fullText += content.items.map((it: any) => it.str).join(" ") + "\n";
     }
-    return parseStatementText(fullText);
+    return { ok: true, text: fullText };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const isMissingPassword = /no password given|PasswordException.*NEED_PASSWORD/i.test(msg);
     const isWrongPassword = /incorrect password|PasswordException.*INCORRECT_PASSWORD/i.test(msg) || (/password/i.test(msg) && !isMissingPassword);
+    return { ok: false, text: "", error: isMissingPassword ? "password_required" : isWrongPassword ? "wrong_password" : msg };
+  }
+}
+
+export async function parseStatementPdf(bytes: Uint8Array, password?: string): Promise<PdfParseResult> {
+  const extracted = await extractPdfText(bytes, password);
+  if (!extracted.ok) {
     return {
       ok: false,
       period_start: null, period_end: null, statement_date: null, due_date: null,
       total_due: null, closing_balance: null, lines: [],
-      error: isMissingPassword ? "password_required" : isWrongPassword ? "wrong_password" : msg,
+      error: extracted.error,
     };
   }
+  return parseStatementText(extracted.text);
 }
 
 // ---- Date parsing: DD/MM/YYYY, DD-MM-YYYY, "01 Jun 2026" → YYYY-MM-DD ----

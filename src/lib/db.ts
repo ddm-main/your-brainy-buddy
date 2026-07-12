@@ -41,6 +41,11 @@ export type Statement = AnyRow;
 export type FinanceAlert = AnyRow;
 export type JarvisAction = AnyRow;
 export type JarvisReminder = AnyRow;
+export type InvestmentAccount = AnyRow;
+export type InvestmentHolding = AnyRow;
+export type InvestmentTransaction = AnyRow;
+export type Budget = AnyRow;
+export type InsurancePolicy = AnyRow;
 
 
 async function callEdgeFunction(name: string, body: Record<string, unknown>): Promise<any> {
@@ -50,9 +55,10 @@ async function callEdgeFunction(name: string, body: Record<string, unknown>): Pr
     r = await authFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   } catch {
     // fetch() throws a bare "Failed to fetch" TypeError for DNS/CORS/network
-    // failures, which includes hitting a Supabase Edge Function that hasn't
-    // been deployed yet — surface that plainly instead of the raw error.
-    throw new Error(`Could not reach "${name}" — it may not be deployed yet.`);
+    // failures. Keep the function slug in the console for debugging — it
+    // shouldn't reach a user-facing toast (internal implementation detail).
+    console.error(`callEdgeFunction: network failure reaching "${name}"`);
+    throw new Error("Could not reach the server — check your connection and try again.");
   }
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j?.error ?? r.statusText);
@@ -300,6 +306,17 @@ export const db = {
     setStatementPassword: async (id: string, password: string) => {
       await callEdgeFunction("finance-set-statement-password", { target_type: "account", target_id: id, password });
     },
+    // Cross-entity view for AccountDetail. Note: credit_cards has no
+    // linked_account_id in the current schema (cards relate to accounts only
+    // indirectly, via logged payments) — only loans and subscriptions have a
+    // real FK to check.
+    linked: async (accountId: string) => {
+      const [loans, subs] = await Promise.all([
+        supabase.from("loans").select("*").eq("linked_account_id", accountId),
+        supabase.from("subscriptions").select("*").eq("linked_account_id", accountId),
+      ]);
+      return { loans: loans.data ?? [], subs: subs.data ?? [] };
+    },
   },
   cards: {
     list: async () => (await supabase.from("credit_cards").select("*, banks(name)").order("card_name")).data ?? [],
@@ -376,7 +393,193 @@ export const db = {
       const { error } = await supabase.from("financial_goals").delete().eq("id", id);
       if (error) throw error;
     },
+    contributions: {
+      list: async (goalId: string) => {
+        const { data, error } = await supabase.from("goal_contributions")
+          .select("*").eq("goal_id", goalId).order("contributed_at", { ascending: false });
+        if (error) throw error;
+        return data ?? [];
+      },
+      // Single insert — the goal_contribution_bump trigger (migration
+      // 20260712140200) atomically adds `amount` onto financial_goals
+      // .current_amount in the same transaction, so this never needs a
+      // separate current_amount update from the client.
+      create: async (goalId: string, amount: number, note?: string, contributed_at?: string) => {
+        const { data, error } = await supabase.from("goal_contributions")
+          .insert({ goal_id: goalId, amount, note: note || null, ...(contributed_at ? { contributed_at } : {}) })
+          .select().single();
+        if (error) throw error;
+        return data;
+      },
+    },
+    milestones: {
+      list: async (goalId: string) => {
+        const { data, error } = await supabase.from("goal_milestones")
+          .select("*").eq("goal_id", goalId).order("target_amount");
+        if (error) throw error;
+        return data ?? [];
+      },
+      create: async (goalId: string, title: string, target_amount: number) => {
+        const { data, error } = await supabase.from("goal_milestones")
+          .insert({ goal_id: goalId, title, target_amount }).select().single();
+        if (error) throw error;
+        return data;
+      },
+      remove: async (id: string) => {
+        const { error } = await supabase.from("goal_milestones").delete().eq("id", id);
+        if (error) throw error;
+      },
+    },
   },
+  // ---------- Investments ----------
+  investmentAccounts: {
+    list: async () => (await supabase.from("investment_accounts").select("*").order("account_name")).data ?? [],
+    create: async (a: { provider?: string; account_name: string; account_number_masked?: string; notes?: string }) => {
+      const { data, error } = await supabase.from("investment_accounts").insert(a).select().single();
+      if (error) throw error;
+      return data;
+    },
+    update: async (id: string, patch: Partial<InvestmentAccount>) => {
+      const { error } = await supabase.from("investment_accounts").update(patch).eq("id", id);
+      if (error) throw error;
+    },
+    remove: async (id: string) => {
+      const { error } = await supabase.from("investment_accounts").delete().eq("id", id);
+      if (error) throw error;
+    },
+  },
+  investmentHoldings: {
+    list: async (opts: { assetTypes?: string[]; watchlistOnly?: boolean } = {}) => {
+      let q = supabase.from("investment_holdings").select("*, investment_accounts(account_name)").order("name");
+      if (opts.assetTypes?.length) q = q.in("asset_type", opts.assetTypes);
+      if (opts.watchlistOnly) q = q.eq("is_watchlist", true);
+      const { data, error } = await q;
+      if (error) throw error;
+      return data ?? [];
+    },
+    get: async (id: string) => {
+      const { data, error } = await supabase.from("investment_holdings").select("*, investment_accounts(account_name)").eq("id", id).single();
+      if (error) throw error;
+      return data;
+    },
+    create: async (h: Partial<InvestmentHolding> & { asset_type: string; name: string }) => {
+      const { data, error } = await supabase.from("investment_holdings").insert(h).select().single();
+      if (error) throw error;
+      return data;
+    },
+    update: async (id: string, patch: Partial<InvestmentHolding>) => {
+      const { error } = await supabase.from("investment_holdings").update(patch).eq("id", id);
+      if (error) throw error;
+    },
+    remove: async (id: string) => {
+      const { error } = await supabase.from("investment_holdings").delete().eq("id", id);
+      if (error) throw error;
+    },
+    // Current value summed by asset_type — feeds Overview's net worth and
+    // Investments' allocation view from one query.
+    summary: async () => {
+      const { data, error } = await supabase.from("investment_holdings").select("asset_type, current_value, invested_amount");
+      if (error) throw error;
+      const rows = data ?? [];
+      const totalValue = rows.reduce((sum: number, r: any) => sum + (Number(r.current_value) || 0), 0);
+      const totalInvested = rows.reduce((sum: number, r: any) => sum + (Number(r.invested_amount) || 0), 0);
+      return { totalValue, totalInvested, count: rows.length };
+    },
+  },
+  investmentTransactions: {
+    list: async (holdingId: string) => {
+      const { data, error } = await supabase.from("investment_transactions")
+        .select("*").eq("holding_id", holdingId).order("txn_date", { ascending: false });
+      if (error) throw error;
+      return data ?? [];
+    },
+    create: async (t: { holding_id: string; txn_type: string; txn_date: string; units?: number | null; price?: number | null; amount: number; source?: string }) => {
+      const { data, error } = await supabase.from("investment_transactions").insert(t).select().single();
+      if (error) throw error;
+      return data;
+    },
+    remove: async (id: string) => {
+      const { error } = await supabase.from("investment_transactions").delete().eq("id", id);
+      if (error) throw error;
+    },
+  },
+  financeSettings: {
+    get: async () => {
+      const { data, error } = await supabase.from("user_finance_settings").select("*").maybeSingle();
+      if (error) throw error;
+      return data ?? { enabled_asset_types: ["mutual_fund", "stock"] };
+    },
+    // Upsert-by-user pattern: one settings row per user, created on first save.
+    setEnabledAssetTypes: async (types: string[]) => {
+      const { data: existing } = await supabase.from("user_finance_settings").select("id").maybeSingle();
+      if (existing) {
+        const { error } = await supabase.from("user_finance_settings").update({ enabled_asset_types: types, updated_at: new Date().toISOString() }).eq("id", existing.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from("user_finance_settings").insert({ enabled_asset_types: types });
+        if (error) throw error;
+      }
+    },
+  },
+  navSync: {
+    // Fetches AMFI's public NAV feed server-side, upserts investment_nav_cache,
+    // re-prices matching holdings by symbol_or_scheme_code.
+    sync: async () => callEdgeFunction("finance-sync-nav", {}),
+  },
+  growwImport: {
+    // PDF (Groww's Profile -> Reports transaction statement) or CSV, parsed
+    // server-side and returned as staged rows for the user to confirm before
+    // insert (mirrors finance-upload-statement's parse-then-confirm flow).
+    parse: async (params: { filename: string; bytesBase64?: string; csvText?: string; investment_account_id?: string | null }) => {
+      return callEdgeFunction("finance-import-groww", params);
+    },
+  },
+
+  // ---------- Budget ----------
+  budgets: {
+    list: async () => (await supabase.from("budgets").select("*").order("category")).data ?? [],
+    create: async (b: { category: string; monthly_limit: number; rollover?: boolean; notes?: string }) => {
+      const { data, error } = await supabase.from("budgets").insert(b).select().single();
+      if (error) throw error;
+      return data;
+    },
+    update: async (id: string, patch: Partial<Budget>) => {
+      const { error } = await supabase.from("budgets").update(patch).eq("id", id);
+      if (error) throw error;
+    },
+    remove: async (id: string) => {
+      const { error } = await supabase.from("budgets").delete().eq("id", id);
+      if (error) throw error;
+    },
+    // Actual debit spend this month for one category — compared against
+    // budgets.monthly_limit client-side, never stored (see migration comment).
+    spentThisMonth: async (category: string) => {
+      const start = new Date(); start.setDate(1); start.setHours(0, 0, 0, 0);
+      const { data } = await supabase.from("transactions")
+        .select("amount").eq("txn_type", "debit").eq("category", category)
+        .gte("txn_date", start.toISOString().slice(0, 10));
+      return (data ?? []).reduce((sum: number, r: any) => sum + (Number(r.amount) || 0), 0);
+    },
+  },
+
+  // ---------- Insurance ----------
+  insurancePolicies: {
+    list: async () => (await supabase.from("insurance_policies").select("*, financial_accounts(nickname)").order("renewal_date")).data ?? [],
+    create: async (p: Partial<InsurancePolicy> & { policy_type: string }) => {
+      const { data, error } = await supabase.from("insurance_policies").insert(p).select().single();
+      if (error) throw error;
+      return data;
+    },
+    update: async (id: string, patch: Partial<InsurancePolicy>) => {
+      const { error } = await supabase.from("insurance_policies").update(patch).eq("id", id);
+      if (error) throw error;
+    },
+    remove: async (id: string) => {
+      const { error } = await supabase.from("insurance_policies").delete().eq("id", id);
+      if (error) throw error;
+    },
+  },
+
   subscriptions: {
     list: async () => (await supabase.from("subscriptions").select("*, financial_accounts(nickname), credit_cards(card_name)").order("next_due_date")).data ?? [],
     create: async (s: { name: string; category?: string; amount?: number; billing_cycle?: string; next_due_date?: string; linked_account_id?: string | null; linked_card_id?: string | null }) => {
@@ -401,7 +604,7 @@ export const db = {
       if (error) throw error;
       return data ?? [];
     },
-    create: async (t: { txn_date: string; amount: number; txn_type: Transaction["txn_type"]; merchant?: string; description?: string; category?: string; financial_account_id?: string | null; credit_card_id?: string | null; loan_id?: string | null; source?: Transaction["source"] }) => {
+    create: async (t: { txn_date: string; amount: number; txn_type: Transaction["txn_type"]; merchant?: string; description?: string; category?: string; financial_account_id?: string | null; credit_card_id?: string | null; loan_id?: string | null; source?: Transaction["source"]; payment_mode?: string | null; reference_number?: string | null; is_prepayment?: boolean }) => {
       const { data, error } = await supabase.from("transactions").insert(t).select().single();
       if (error) throw error;
       return data;
@@ -473,6 +676,39 @@ export const db = {
         .map(([category, amount]) => ({ category, amount }))
         .sort((a, b) => b.amount - a.amount)
         .slice(0, limit);
+    },
+    // Spend/income + top merchants/categories for a fixed window — feeds the
+    // Overview "AI financial summary" (day/week/month) prompt.
+    periodSummary: async (period: "day" | "week" | "month") => {
+      const start = new Date();
+      if (period === "day") {
+        start.setHours(0, 0, 0, 0);
+      } else if (period === "week") {
+        start.setDate(start.getDate() - 7); start.setHours(0, 0, 0, 0);
+      } else {
+        start.setDate(1); start.setHours(0, 0, 0, 0);
+      }
+      const { data } = await supabase.from("transactions")
+        .select("amount, txn_type, merchant, category")
+        .gte("txn_date", start.toISOString().slice(0, 10));
+      let spend = 0, income = 0;
+      const byMerchant = new Map<string, number>();
+      const byCategory = new Map<string, number>();
+      for (const r of data ?? []) {
+        const amt = Number(r.amount) || 0;
+        if (r.txn_type === "debit") {
+          spend += amt;
+          const m = r.merchant?.trim() || "unknown";
+          byMerchant.set(m, (byMerchant.get(m) ?? 0) + amt);
+          const c = r.category?.trim() || "uncategorized";
+          byCategory.set(c, (byCategory.get(c) ?? 0) + amt);
+        } else {
+          income += amt;
+        }
+      }
+      const topMerchants = [...byMerchant.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([merchant, amount]) => ({ merchant, amount }));
+      const topCategories = [...byCategory.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([category, amount]) => ({ category, amount }));
+      return { period, spend, income, topMerchants, topCategories };
     },
     // Debit transactions on a linked account/card within +-windowDays of
     // centerDate — reconciliation.ts's only read against this table.
@@ -571,6 +807,13 @@ export const db = {
     },
     summarize: async (id: string) => {
       return callEdgeFunction("finance-summarize-statement", { statement_id: id });
+    },
+  },
+
+  // ---------- Finance sync ----------
+  finance: {
+    extract: async (opts: { since_days?: number; limit?: number; account_id?: string } = {}) => {
+      return callEdgeFunction("finance-extract", opts);
     },
   },
 

@@ -10,9 +10,12 @@ import { parseStatementPdf } from "../_shared/statement-pdf.ts";
 import { applyParsedStatementResult } from "../_shared/finance-extract-core.ts";
 import { decryptStatementPassword, type StatementPasswordRule } from "../_shared/crypto.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
+import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
 
 const STATEMENT_BUCKET = "statement-pdfs";
 const MAX_BYTES = 20 * 1024 * 1024; // 20 MB — statements are bigger than the 8MB image cap elsewhere
+const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d]; // "%PDF-"
+const uploadLimiter = createSlidingWindowLimiter(10, 60_000);
 
 function safeName(filename: string): string {
   return filename.replace(/[^\w.\-]/g, "_").slice(0, 80);
@@ -30,6 +33,13 @@ Deno.serve(async (req) => {
     });
   }
   const uid = auth.userId;
+
+  const rl = uploadLimiter.check(uid);
+  if (!rl.ok) {
+    return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) },
+    });
+  }
 
   try {
     const { statement_type, credit_card_id, financial_account_id, loan_id, filename, contentType, bytesBase64, password } = await req.json();
@@ -81,6 +91,15 @@ Deno.serve(async (req) => {
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
+    // Magic-byte check — contentType/filename are caller-supplied and easy to
+    // spoof; verify the actual bytes look like a PDF before hashing/inserting
+    // a row for them.
+    if (!PDF_MAGIC.every((b, i) => bytes[i] === b)) {
+      return new Response(JSON.stringify({ error: "file does not appear to be a valid PDF" }), {
+        status: 400, headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
+
     // Content-hash dedupe: the same PDF re-uploaded should return the
     // existing statement row instead of silently creating a duplicate that
     // would then re-parse and re-insert every transaction.
@@ -107,10 +126,14 @@ Deno.serve(async (req) => {
     }).select("id").single();
     if (stErr) throw stErr;
 
+    // upsert:false — storagePath already embeds the freshly-inserted
+    // statement.id, and the content-hash dedupe above already short-circuits
+    // true re-uploads, so a collision here would mean something unexpected
+    // reused a path; fail loudly instead of silently overwriting bytes.
     const storagePath = `${uid}/manual/${statement.id}-${safeName(filename)}`;
     const { error: upErr } = await supabase.storage.from(STATEMENT_BUCKET).upload(storagePath, bytes, {
       contentType: "application/pdf",
-      upsert: true,
+      upsert: false,
     });
     if (upErr) throw upErr;
 

@@ -41,3 +41,15 @@ verify_jwt = true
 
 [functions.finance-upload-statement]
 verify_jwt = true
+
+[functions.finance-extract]
+verify_jwt = true
+
+[functions.finance-summarize-statement]
+verify_jwt = true
+
+[functions.finance-sync-nav]
+verify_jwt = true
+
+[functions.finance-import-groww]
+verify_jwt = true

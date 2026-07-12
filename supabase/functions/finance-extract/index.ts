@@ -6,6 +6,9 @@ import { requireUserId } from "../_shared/auth.ts";
 import { svcClient } from "../_shared/gmail.ts";
 import { extractFinanceForAccount } from "../_shared/finance-extract-core.ts";
 import { sanitizeError, sanitizedErrorResponse } from "../_shared/errors.ts";
+import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
+
+const extractLimiter = createSlidingWindowLimiter(5, 60_000);
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -13,6 +16,13 @@ Deno.serve(async (req) => {
   const cors = corsFor(req);
   const auth = await requireUserId(req);
   if ("error" in auth) return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401, headers: { ...cors, "Content-Type": "application/json" } });
+
+  const rl = extractLimiter.check(auth.userId);
+  if (!rl.ok) {
+    return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) },
+    });
+  }
 
   try {
     const { account_id, since_days, limit } = await req.json().catch(() => ({}));

@@ -20,7 +20,7 @@ export default function Txns() {
   const [statements, setStatements] = useState<any[]>([]);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [reconciling, setReconciling] = useState(false);
-  const [f, setF] = useState({ txn_date: new Date().toISOString().slice(0, 10), amount: "", txn_type: "debit" as Transaction["txn_type"], merchant: "", category: "", account_id: "", card_id: "" });
+  const [f, setF] = useState({ txn_date: new Date().toISOString().slice(0, 10), amount: "", txn_type: "debit" as Transaction["txn_type"], merchant: "", category: "", account_id: "", card_id: "", payment_mode: "", reference_number: "" });
   const [linkId, setLinkId] = useState<string | null>(null);
   const [linkStatementId, setLinkStatementId] = useState("");
   const [linking, setLinking] = useState(false);
@@ -77,9 +77,9 @@ export default function Txns() {
       txn_date: f.txn_date, amount: Number(f.amount), txn_type: f.txn_type,
       merchant: f.merchant || undefined, category: f.category || undefined,
       financial_account_id: f.account_id || null, credit_card_id: f.card_id || null,
-      source: "manual",
+      source: "manual", payment_mode: f.payment_mode || null, reference_number: f.reference_number || null,
     });
-    setF({ ...f, amount: "", merchant: "", category: "" });
+    setF({ ...f, amount: "", merchant: "", category: "", payment_mode: "", reference_number: "" });
     load();
   };
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setF({ ...f, [k]: e.target.value as any });
@@ -154,6 +154,15 @@ export default function Txns() {
           </div>
           <Btn type="submit" variant="primary" disabled={!f.amount}>+ log</Btn>
         </form>
+        <div style={{ display: "flex", gap: 8, alignItems: "end", marginTop: 8 }}>
+          <div style={{ minWidth: 140 }}><label style={labelStyle}>payment mode</label>
+            <HudSelect value={f.payment_mode} onChange={(v) => setF({ ...f, payment_mode: v })} placeholder="—" options={[
+              { value: "upi", label: "UPI" }, { value: "neft", label: "NEFT" }, { value: "imps", label: "IMPS" },
+              { value: "card", label: "Card" }, { value: "cash", label: "Cash" }, { value: "cheque", label: "Cheque" }, { value: "other", label: "Other" },
+            ]} />
+          </div>
+          <div><label style={labelStyle}>ref #</label><input value={f.reference_number} onChange={set("reference_number")} placeholder="UTR / txn id" style={{ ...inputStyle, width: 160 }} /></div>
+        </div>
       </HudPanel>
       <HudPanel title="Filters" index="F" live="ok" style={{ flexShrink: 0 }}>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1.5fr 1fr 1fr auto auto", gap: 8, alignItems: "end" }}>
@@ -198,6 +207,8 @@ export default function Txns() {
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>category</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>account</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>source</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>mode</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>ref #</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>rec</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>amount</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }} />
@@ -224,6 +235,8 @@ export default function Txns() {
                    </td>
                    <td style={{ padding: "6px 8px", color: "var(--text-dim)" }}>{t.financial_accounts?.nickname ?? t.credit_cards?.card_name ?? "—"}</td>
                    <td style={{ padding: "6px 8px" }}><Chip tone={sourceTone(t.source)}>{t.source ?? "manual"}</Chip></td>
+                   <td style={{ padding: "6px 8px", color: "var(--text-dim)" }}>{t.payment_mode ?? "—"}</td>
+                   <td style={{ padding: "6px 8px", color: "var(--text-dim)" }}>{t.reference_number ?? "—"}</td>
                    <td style={{ padding: "6px 8px" }}>
                      <button title={t.is_reconciled ? "reconciled — click to unmark" : "mark reconciled"} onClick={() => toggleReconciled(t)}
                        style={{ background: "none", border: "1px solid var(--edge)", cursor: "pointer", padding: "2px 4px", borderRadius: 3,
@@ -253,7 +266,7 @@ export default function Txns() {
                  </tr>
                  {linkId === t.id && (
                    <tr>
-                     <td colSpan={8} style={{ padding: "8px", background: "rgba(53,214,237,0.03)", borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
+                     <td colSpan={10} style={{ padding: "8px", background: "rgba(53,214,237,0.03)", borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
                        <div style={{ display: "flex", gap: 6, alignItems: "end" }}>
                          <div style={{ minWidth: 220 }}>
                            <label style={labelStyle}>link to statement</label>

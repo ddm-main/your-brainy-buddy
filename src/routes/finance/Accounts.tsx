@@ -1,19 +1,11 @@
-import { Fragment, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
-import KineticNumber from "@/components/hud/KineticNumber";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { HudSelect } from "@/components/hud/HudSelect";
-import { HudDatePicker } from "@/components/hud/HudDatePicker";
-import { db, inr, type FinancialAccount, type CreditCard, type Transaction } from "@/lib/db";
-import { authFetch } from "@/lib/authFetch";
-import { calcEmi, calcPrincipalFromEmi, roundCurrency } from "@/lib/loanCalc";
-import { calcCreditUtilization, generateAmortizationSchedule } from "@/lib/financeMetrics";
-import { runReconciliation } from "@/lib/reconciliation";
-import { useFinanceSnapshot } from "@/lib/useFinanceSnapshot";
+import { db, inr } from "@/lib/db";
 import { useUi } from "@/store/uiStore";
-import { Trash2, RefreshCw } from "lucide-react";
-import { ConfigureCTA, utilTone } from "./_shared";
+import { ConfigureCTA } from "./_shared";
 
 // ---------- Accounts ----------
 export default function Accounts() {
@@ -80,6 +72,10 @@ export default function Accounts() {
                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                  <div style={{ fontFamily: "var(--font-display)", fontSize: 15 }}>{a.nickname}</div>
                  {a.account_type && <Chip>{a.account_type}</Chip>}
+                 <NavLink to={`/finance/accounts/${a.id}`} onClick={(e) => e.stopPropagation()}
+                   style={{ marginLeft: "auto", fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.18em", textTransform: "uppercase", color: "var(--accent)", textDecoration: "none" }}>
+                   details →
+                 </NavLink>
                </div>
                <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
                  {a.banks?.name ?? "no bank"} {a.masked_number ? `· ${a.masked_number}` : ""}

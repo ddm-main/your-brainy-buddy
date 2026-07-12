@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, useNavigate, useParams } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
-import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
+import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { db, inr } from "@/lib/db";
 import { calcEmi, roundCurrency } from "@/lib/loanCalc";
-import { generateAmortizationSchedule } from "@/lib/financeMetrics";
+import { generateAmortizationSchedule, calcPrepaymentImpact, calcForeclosureQuote } from "@/lib/financeMetrics";
+import { HudSelect } from "@/components/hud/HudSelect";
+import { HudDatePicker } from "@/components/hud/HudDatePicker";
 import { useUi } from "@/store/uiStore";
 
 /** Loan detail — amortization schedule, EMI math, and auto-EMI-tagged
@@ -17,17 +19,24 @@ export default function LoanDetail() {
   const push = useUi((s) => s.push);
   const [loan, setLoan] = useState<any>(null);
   const [payments, setPayments] = useState<any[]>([]);
+  const [accounts, setAccounts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [prepayAmount, setPrepayAmount] = useState("");
+  const [prepayMode, setPrepayMode] = useState<"reduce_tenure" | "reduce_emi">("reduce_tenure");
+  const [prepayAccountId, setPrepayAccountId] = useState("");
+  const [prepayDate, setPrepayDate] = useState(new Date().toISOString().slice(0, 10));
+  const [loggingPrepay, setLoggingPrepay] = useState(false);
 
   useEffect(() => {
     if (!id) return;
     let alive = true;
     (async () => {
       try {
-        const [all, pays] = await Promise.all([db.loans.list(), db.loans.payments(id)]);
+        const [all, pays, accts] = await Promise.all([db.loans.list(), db.loans.payments(id), db.accounts.list()]);
         if (!alive) return;
         setLoan(all.find((l: any) => l.id === id) ?? null);
         setPayments(pays);
+        setAccounts(accts);
       } catch (e: any) {
         if (alive) push(e?.message ?? "failed to load loan", "err");
       } finally {
@@ -61,6 +70,51 @@ export default function LoanDetail() {
     const tol = emiTarget * 0.01;
     return new Set(payments.filter((p) => Math.abs((Number(p.amount) || 0) - emiTarget) <= tol).map((p) => p.id));
   }, [payments, emiTarget]);
+
+  // No explicit "months elapsed" field exists on a loan — derive remaining
+  // months by finding which row of the ORIGINAL schedule has a balance
+  // closest to today's actual outstanding_amount.
+  const remainingMonths = useMemo(() => {
+    if (!schedule || !loan) return null;
+    const outstanding = Number(loan.outstanding_amount) || 0;
+    if (outstanding <= 0) return 0;
+    let closest = schedule[0];
+    let minDiff = Math.abs(closest.balance - outstanding);
+    for (const row of schedule) {
+      const diff = Math.abs(row.balance - outstanding);
+      if (diff < minDiff) { minDiff = diff; closest = row; }
+    }
+    return schedule.length - closest.month + 1;
+  }, [schedule, loan]);
+
+  const prepayImpact = useMemo(() => {
+    if (!loan || !prepayAmount || !remainingMonths || remainingMonths <= 0 || !emiTarget) return null;
+    return calcPrepaymentImpact(
+      Number(loan.outstanding_amount) || 0, Number(loan.interest_rate) || 0, remainingMonths,
+      Number(prepayAmount), prepayMode, emiTarget,
+    );
+  }, [loan, prepayAmount, remainingMonths, prepayMode, emiTarget]);
+
+  const foreclosureQuote = useMemo(() => {
+    if (!loan || !remainingMonths || remainingMonths <= 0) return null;
+    return calcForeclosureQuote(Number(loan.outstanding_amount) || 0, Number(loan.interest_rate) || 0, remainingMonths);
+  }, [loan, remainingMonths]);
+
+  const logPrepayment = async () => {
+    if (!loan || !prepayAccountId || !prepayAmount) return;
+    setLoggingPrepay(true);
+    try {
+      await db.transactions.create({
+        txn_date: prepayDate, amount: Number(prepayAmount), txn_type: "debit",
+        merchant: `${loan.lender_name} prepayment`, category: "loan prepayment",
+        financial_account_id: prepayAccountId, loan_id: loan.id, source: "manual", is_prepayment: true,
+      });
+      push("Prepayment logged", "ok");
+      setPrepayAmount("");
+      setPayments(await db.loans.payments(loan.id));
+    } catch (e: any) { push(e?.message ?? "failed to log prepayment", "err"); }
+    finally { setLoggingPrepay(false); }
+  };
 
   if (loading) return <div style={{ padding: 20, color: "var(--text-dim)" }}>loading…</div>;
   if (!loan) {
@@ -142,11 +196,51 @@ export default function LoanDetail() {
                   <td style={{ padding: "6px 8px" }}>{p.txn_date}</td>
                   <td style={{ padding: "6px 8px" }}>{p.merchant ?? p.description ?? "—"}</td>
                   <td style={{ padding: "6px 8px", textAlign: "right" }}>{inr(Number(p.amount) || 0)}</td>
-                  <td style={{ padding: "6px 8px" }}>{emiHits.has(p.id) ? <Chip tone="ok">EMI</Chip> : <Chip tone="neutral">extra</Chip>}</td>
+                  <td style={{ padding: "6px 8px" }}>{p.is_prepayment ? <Chip tone="accent">prepayment</Chip> : emiHits.has(p.id) ? <Chip tone="ok">EMI</Chip> : <Chip tone="neutral">extra</Chip>}</td>
                 </tr>
               ))}
             </tbody>
           </table>}
+      </HudPanel>
+
+      <HudPanel title="Prepayment" index="PRE" live="ok">
+        {!remainingMonths || remainingMonths <= 0 ? (
+          <div className="hud-label" style={{ padding: 10 }}>loan is paid off or missing rate/tenure data</div>
+        ) : (
+          <div style={{ padding: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+            {foreclosureQuote && (
+              <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                Paying off the full {inr(Number(loan.outstanding_amount) || 0)} today instead of running the schedule to term saves <strong style={{ color: "var(--ok)" }}>{inr(foreclosureQuote.interestSavedByForeclosing)}</strong> in future interest.
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8, alignItems: "end", flexWrap: "wrap" }}>
+              <div><label style={labelStyle}>lump-sum amount</label><input type="number" value={prepayAmount} onChange={(e) => setPrepayAmount(e.target.value)} style={{ ...inputStyle, width: 140 }} /></div>
+              <div style={{ minWidth: 160 }}>
+                <label style={labelStyle}>mode</label>
+                <HudSelect value={prepayMode} onChange={(v) => setPrepayMode(v as "reduce_tenure" | "reduce_emi")} options={[
+                  { value: "reduce_tenure", label: "keep EMI, shorten tenure" },
+                  { value: "reduce_emi", label: "keep tenure, lower EMI" },
+                ]} />
+              </div>
+            </div>
+            {prepayImpact && (
+              <div style={{ padding: 8, border: "1px solid var(--edge)", fontSize: 12, display: "flex", flexDirection: "column", gap: 4 }}>
+                <div>interest saved: <strong style={{ color: "var(--ok)" }}>{inr(prepayImpact.interestSaved)}</strong></div>
+                {prepayMode === "reduce_tenure"
+                  ? <div style={{ color: "var(--text-dim)" }}>payoff in {prepayImpact.newMonthsLeft} months instead of {prepayImpact.originalMonthsLeft}</div>
+                  : <div style={{ color: "var(--text-dim)" }}>new EMI: {inr(prepayImpact.newEmi ?? 0)} (was {inr(emiTarget)})</div>}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 6, alignItems: "end", flexWrap: "wrap" }}>
+              <div style={{ minWidth: 160 }}>
+                <label style={labelStyle}>paid from</label>
+                <HudSelect value={prepayAccountId} onChange={setPrepayAccountId} placeholder="—" options={accounts.map((a: any) => ({ value: a.id, label: a.nickname }))} />
+              </div>
+              <div><label style={labelStyle}>date</label><HudDatePicker value={prepayDate} onChange={setPrepayDate} /></div>
+              <Btn size="sm" variant="primary" disabled={loggingPrepay || !prepayAccountId || !prepayAmount} onClick={logPrepayment}>{loggingPrepay ? "logging…" : "log prepayment"}</Btn>
+            </div>
+          </div>
+        )}
       </HudPanel>
 
       <HudPanel title="Amortization" index="AMR" live="ok" bodyClass="overflow-auto" style={{ flex: 1, minHeight: 0 }}>

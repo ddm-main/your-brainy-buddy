@@ -11,8 +11,10 @@ import { applyParsedStatementResult, ingestStatementAttachment } from "../_share
 import { parseStatementPdf } from "../_shared/statement-pdf.ts";
 import { decryptStatementPassword } from "../_shared/crypto.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
+import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
 
 const STATEMENT_BUCKET = "statement-pdfs";
+const retryLimiter = createSlidingWindowLimiter(20, 60_000);
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -26,6 +28,13 @@ Deno.serve(async (req) => {
     });
   }
   const uid = auth.userId;
+
+  const rl = retryLimiter.check(uid);
+  if (!rl.ok) {
+    return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) },
+    });
+  }
 
   try {
     const { statement_id, credit_card_id, financial_account_id, password } = await req.json();

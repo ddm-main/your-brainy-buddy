@@ -108,6 +108,7 @@ export default function CardDetail() {
             {card.billing_day && <div>bill day: {card.billing_day}</div>}
             {card.due_day && <div>due day: {card.due_day}</div>}
             {card.autopay && <Chip tone="ok">autopay on</Chip>}
+            {card.reward_type && <div>{card.reward_rate_pct}% {card.reward_type}</div>}
             {card.notes && <div style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>{card.notes}</div>}
           </div>
         </HudPanel>

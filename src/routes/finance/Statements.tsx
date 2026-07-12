@@ -1,19 +1,9 @@
 import { Fragment, useEffect, useState } from "react";
-import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
-import KineticNumber from "@/components/hud/KineticNumber";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { HudSelect } from "@/components/hud/HudSelect";
-import { HudDatePicker } from "@/components/hud/HudDatePicker";
-import { db, inr, type FinancialAccount, type CreditCard, type Transaction } from "@/lib/db";
-import { authFetch } from "@/lib/authFetch";
-import { calcEmi, calcPrincipalFromEmi, roundCurrency } from "@/lib/loanCalc";
-import { calcCreditUtilization, generateAmortizationSchedule } from "@/lib/financeMetrics";
-import { runReconciliation } from "@/lib/reconciliation";
-import { useFinanceSnapshot } from "@/lib/useFinanceSnapshot";
+import { db, inr } from "@/lib/db";
 import { useUi } from "@/store/uiStore";
-import { Trash2, RefreshCw } from "lucide-react";
-import { ConfigureCTA, utilTone } from "./_shared";
 
 // ---------- Statements ----------
 function statusTone(status: string | null | undefined): "neutral" | "ok" | "warn" | "err" {
@@ -45,11 +35,34 @@ export default function Statements() {
   const [filterStatus, setFilterStatus] = useState<string>("");
   const [filterType, setFilterType] = useState<string>("");
   const [summarizingId, setSummarizingId] = useState<string | null>(null);
+  const [retryingAll, setRetryingAll] = useState(false);
 
   const load = async () => {
     setLoading(true);
     try { setItems(await db.statements.list()); }
     finally { setLoading(false); }
+  };
+
+  // Statements that were never actually attempted (no linked card/account,
+  // no parse_error — e.g. created before the current pipeline existed, or
+  // stuck because no sync has re-run for that account since) sit at
+  // 'pending' forever otherwise. One button instead of clicking retry on
+  // each row individually.
+  const retryAllPending = async () => {
+    const targets = items.filter((s) => s.parse_status === "pending" || s.parse_status === "failed");
+    if (targets.length === 0) return;
+    setRetryingAll(true);
+    let parsed = 0, stillStuck = 0;
+    try {
+      for (const s of targets) {
+        try {
+          const res: any = await db.statements.retry(s.id);
+          if (res?.parse_status === "parsed") parsed++; else stillStuck++;
+        } catch { stillStuck++; }
+      }
+      push(`Retried ${targets.length} · ${parsed} parsed · ${stillStuck} still unresolved`, stillStuck ? "warn" : "ok");
+      await load();
+    } finally { setRetryingAll(false); }
   };
 
   const summarize = async (s: any) => {
@@ -156,7 +169,12 @@ export default function Statements() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%", minHeight: 0 }}>
       <HudPanel title="Statements" index="STM" live="ok" style={{ flex: 1, minHeight: 0 }} bodyClass="overflow-auto"
-        actions={<Btn size="sm" onClick={() => setShowUpload((v) => !v)}>+ upload statement</Btn>}>
+        actions={<>
+          {items.some((s) => s.parse_status === "pending" || s.parse_status === "failed") && (
+            <Btn size="sm" onClick={retryAllPending} disabled={retryingAll}>{retryingAll ? "retrying…" : "retry all pending"}</Btn>
+          )}
+          <Btn size="sm" onClick={() => setShowUpload((v) => !v)}>+ upload statement</Btn>
+        </>}>
         <div style={{ display: "flex", gap: 8, alignItems: "end", marginBottom: 10, flexWrap: "wrap" }}>
           <div style={{ minWidth: 140 }}>
             <label style={labelStyle}>status</label>
