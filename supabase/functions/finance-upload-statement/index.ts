@@ -81,6 +81,20 @@ Deno.serve(async (req) => {
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
+    // Content-hash dedupe: the same PDF re-uploaded should return the
+    // existing statement row instead of silently creating a duplicate that
+    // would then re-parse and re-insert every transaction.
+    const hashBuf = await crypto.subtle.digest("SHA-256", bytes);
+    const sha256 = Array.from(new Uint8Array(hashBuf))
+      .map((b) => b.toString(16).padStart(2, "0")).join("");
+    const { data: dup } = await supabase.from("statements")
+      .select("id, parse_status").eq("user_id", uid).eq("content_sha256", sha256).maybeSingle();
+    if (dup) {
+      return new Response(JSON.stringify({
+        ok: true, statement_id: dup.id, parse_status: dup.parse_status, duplicate: true,
+      }), { headers: { ...cors, "Content-Type": "application/json" } });
+    }
+
     const { data: statement, error: stErr } = await supabase.from("statements").insert({
       user_id: uid,
       statement_type,
@@ -89,6 +103,7 @@ Deno.serve(async (req) => {
       loan_id: loan_id ?? null,
       source: "manual",
       parse_status: "pending",
+      content_sha256: sha256,
     }).select("id").single();
     if (stErr) throw stErr;
 
@@ -102,10 +117,31 @@ Deno.serve(async (req) => {
     // Explicit user-supplied password wins; otherwise fall back to whatever
     // is stored against the linked card/account.
     let plaintextPassword: string | undefined = password || undefined;
+    let decryptFailed = false;
     if (!plaintextPassword && passwordRule) {
       try { plaintextPassword = await decryptStatementPassword(passwordRule); }
-      catch (e) { console.warn("decryptStatementPassword failed", e instanceof Error ? e.message : e); }
+      catch (e) {
+        // B3 — surface a distinct parse_error so the UI can prompt the user
+        // to re-enter their statement password instead of showing a generic
+        // "wrong password" for what is actually a broken stored rule.
+        console.error("decryptStatementPassword failed", e instanceof Error ? e.message : e);
+        decryptFailed = true;
+      }
     }
+
+    if (decryptFailed) {
+      await supabase.from("statements").update({
+        parse_status: "failed",
+        parse_error: "stored_password_unreadable",
+      }).eq("id", statement.id);
+      return new Response(JSON.stringify({
+        ok: false,
+        statement_id: statement.id,
+        parse_status: "failed",
+        parse_error: "stored_password_unreadable",
+      }), { status: 200, headers: { ...cors, "Content-Type": "application/json" } });
+    }
+
 
     const result = await parseStatementPdf(bytes, plaintextPassword);
     await applyParsedStatementResult(supabase, statement.id, uid, {
@@ -114,11 +150,15 @@ Deno.serve(async (req) => {
       loan_id: loan_id ?? null,
     }, result, storagePath);
 
-    const { data: updated } = await supabase.from("statements").select("parse_status").eq("id", statement.id).maybeSingle();
+    const { data: updated } = await supabase.from("statements")
+      .select("parse_status, parse_error").eq("id", statement.id).maybeSingle();
 
-    return new Response(JSON.stringify({ ok: true, statement_id: statement.id, parse_status: updated?.parse_status ?? null }), {
-      headers: { ...cors, "Content-Type": "application/json" },
-    });
+    return new Response(JSON.stringify({
+      ok: true,
+      statement_id: statement.id,
+      parse_status: updated?.parse_status ?? null,
+      parse_error: updated?.parse_error ?? null,
+    }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {
     return sanitizedErrorResponse(err, "Statement upload failed", "finance-upload-statement", cors);
   }

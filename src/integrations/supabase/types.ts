@@ -533,6 +533,7 @@ export type Database = {
           account_type: string | null
           bank_id: string | null
           created_at: string
+          current_balance: number | null
           id: string
           masked_number: string | null
           nickname: string
@@ -546,6 +547,7 @@ export type Database = {
           account_type?: string | null
           bank_id?: string | null
           created_at?: string
+          current_balance?: number | null
           id?: string
           masked_number?: string | null
           nickname: string
@@ -559,6 +561,7 @@ export type Database = {
           account_type?: string | null
           bank_id?: string | null
           created_at?: string
+          current_balance?: number | null
           id?: string
           masked_number?: string | null
           nickname?: string
@@ -660,33 +663,42 @@ export type Database = {
           action_type: string
           command_text: string | null
           created_at: string
+          expected_date: string | null
           id: string
           input: Json | null
+          message: string | null
           output: Json | null
           status: Database["public"]["Enums"]["jarvis_action_status"]
           target_module: string | null
+          type: string | null
           user_id: string
         }
         Insert: {
           action_type: string
           command_text?: string | null
           created_at?: string
+          expected_date?: string | null
           id?: string
           input?: Json | null
+          message?: string | null
           output?: Json | null
           status?: Database["public"]["Enums"]["jarvis_action_status"]
           target_module?: string | null
+          type?: string | null
           user_id?: string
         }
         Update: {
           action_type?: string
           command_text?: string | null
           created_at?: string
+          expected_date?: string | null
           id?: string
           input?: Json | null
+          message?: string | null
           output?: Json | null
           status?: Database["public"]["Enums"]["jarvis_action_status"]
           target_module?: string | null
+          type?: string | null
           user_id?: string
         }
         Relationships: []
@@ -1164,13 +1176,16 @@ export type Database = {
       statements: {
         Row: {
           confidence: number | null
+          content_sha256: string | null
           created_at: string
           credit_card_id: string | null
           file_path: string | null
           financial_account_id: string | null
           id: string
           loan_id: string | null
+          parse_error: string | null
           parse_status: Database["public"]["Enums"]["parse_status"]
+          parser_source: string | null
           period_end: string | null
           period_start: string | null
           reconciliation_status: Database["public"]["Enums"]["reconciliation_status"]
@@ -1178,19 +1193,23 @@ export type Database = {
           source_email_id: string | null
           statement_date: string | null
           statement_type: Database["public"]["Enums"]["statement_type"]
+          total_due: number | null
           transactions_found: number
           updated_at: string
           user_id: string
         }
         Insert: {
           confidence?: number | null
+          content_sha256?: string | null
           created_at?: string
           credit_card_id?: string | null
           file_path?: string | null
           financial_account_id?: string | null
           id?: string
           loan_id?: string | null
+          parse_error?: string | null
           parse_status?: Database["public"]["Enums"]["parse_status"]
+          parser_source?: string | null
           period_end?: string | null
           period_start?: string | null
           reconciliation_status?: Database["public"]["Enums"]["reconciliation_status"]
@@ -1198,19 +1217,23 @@ export type Database = {
           source_email_id?: string | null
           statement_date?: string | null
           statement_type: Database["public"]["Enums"]["statement_type"]
+          total_due?: number | null
           transactions_found?: number
           updated_at?: string
           user_id?: string
         }
         Update: {
           confidence?: number | null
+          content_sha256?: string | null
           created_at?: string
           credit_card_id?: string | null
           file_path?: string | null
           financial_account_id?: string | null
           id?: string
           loan_id?: string | null
+          parse_error?: string | null
           parse_status?: Database["public"]["Enums"]["parse_status"]
+          parser_source?: string | null
           period_end?: string | null
           period_start?: string | null
           reconciliation_status?: Database["public"]["Enums"]["reconciliation_status"]
@@ -1218,6 +1241,7 @@ export type Database = {
           source_email_id?: string | null
           statement_date?: string | null
           statement_type?: Database["public"]["Enums"]["statement_type"]
+          total_due?: number | null
           transactions_found?: number
           updated_at?: string
           user_id?: string
@@ -1413,6 +1437,8 @@ export type Database = {
           is_reconciled: boolean
           loan_id: string | null
           merchant: string | null
+          parser_source: string | null
+          payment_mode: string | null
           reference_number: string | null
           source: Database["public"]["Enums"]["txn_source"]
           source_email_id: string | null
@@ -1437,6 +1463,8 @@ export type Database = {
           is_reconciled?: boolean
           loan_id?: string | null
           merchant?: string | null
+          parser_source?: string | null
+          payment_mode?: string | null
           reference_number?: string | null
           source?: Database["public"]["Enums"]["txn_source"]
           source_email_id?: string | null
@@ -1461,6 +1489,8 @@ export type Database = {
           is_reconciled?: boolean
           loan_id?: string | null
           merchant?: string | null
+          parser_source?: string | null
+          payment_mode?: string | null
           reference_number?: string | null
           source?: Database["public"]["Enums"]["txn_source"]
           source_email_id?: string | null

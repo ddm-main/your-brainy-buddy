@@ -434,6 +434,30 @@ export const db = {
       }
       return { spend, income };
     },
+    // Rolling monthly spend/income for the last N months (inclusive of current
+    // month, oldest-first). Feeds the Overview cash-flow trend and health-score
+    // stability signal so both use the same numbers.
+    trend: async (months = 6) => {
+      const now = new Date();
+      const start = new Date(now.getFullYear(), now.getMonth() - (months - 1), 1);
+      const { data } = await supabase.from("transactions")
+        .select("amount, txn_type, txn_date")
+        .gte("txn_date", start.toISOString().slice(0, 10));
+      const buckets = new Map<string, { spend: number; income: number }>();
+      for (let i = 0; i < months; i++) {
+        const d = new Date(now.getFullYear(), now.getMonth() - (months - 1 - i), 1);
+        buckets.set(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`, { spend: 0, income: 0 });
+      }
+      for (const r of data ?? []) {
+        const dt = new Date(r.txn_date as string);
+        if (Number.isNaN(dt.getTime())) continue;
+        const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`;
+        const b = buckets.get(key); if (!b) continue;
+        const amt = Number(r.amount) || 0;
+        if (r.txn_type === "debit") b.spend += amt; else b.income += amt;
+      }
+      return [...buckets.entries()].map(([month, v]) => ({ month, ...v, net: v.income - v.spend }));
+    },
     categorySummary: async (limit = 6) => {
       const start = new Date(); start.setDate(1); start.setHours(0, 0, 0, 0);
       const { data } = await supabase.from("transactions")
@@ -542,8 +566,11 @@ export const db = {
       }
       return latest.slice(0, limit);
     },
-    retry: async (id: string, links?: { credit_card_id?: string | null; financial_account_id?: string | null }) => {
-      return callEdgeFunction("finance-retry-statement", { statement_id: id, ...links });
+    retry: async (id: string, links?: { credit_card_id?: string | null; financial_account_id?: string | null }, password?: string) => {
+      return callEdgeFunction("finance-retry-statement", { statement_id: id, ...links, password });
+    },
+    summarize: async (id: string) => {
+      return callEdgeFunction("finance-summarize-statement", { statement_id: id });
     },
   },
 

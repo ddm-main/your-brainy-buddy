@@ -6,26 +6,12 @@
 import { svcClient } from "../_shared/gmail.ts";
 import { runGmailSync, frequencyToMinutes } from "../_shared/gmail-sync-core.ts";
 import { sanitizeError } from "../_shared/errors.ts";
+import { verifyCronSecret } from "../_shared/http.ts";
 
 Deno.serve(async (req) => {
-  // Fail closed: this endpoint runs with service-role privileges over every
-  // account in the database and has no JWT gate (verify_jwt=false, it's a
-  // cron target). If CRON_SECRET is never configured, reject everything
-  // instead of silently allowing unauthenticated requests through.
-  const secret = Deno.env.get("CRON_SECRET");
-  if (!secret) {
-    return new Response(JSON.stringify({ error: "misconfigured — CRON_SECRET not set" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-  const provided = req.headers.get("x-cron-secret") ?? "";
-  if (provided !== secret) {
-    return new Response(JSON.stringify({ error: "forbidden" }), {
-      status: 403,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
+  const bad = await verifyCronSecret(req);
+  if (bad) return bad;
+
 
   const svc = svcClient();
   const { data: accounts, error } = await svc

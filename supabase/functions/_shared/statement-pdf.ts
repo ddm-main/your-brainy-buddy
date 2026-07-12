@@ -44,9 +44,20 @@ function emptyResult(overrides: Partial<PdfParseResult> = {}): PdfParseResult {
   };
 }
 
+const MAX_PAGES = 100;
+const MAX_BYTES = 20 * 1024 * 1024; // 20 MB — matches upload cap
+
 export async function parseStatementPdf(bytes: Uint8Array, password?: string): Promise<PdfParseResult> {
   try {
+    if (bytes.byteLength > MAX_BYTES) {
+      return { ok: false, period_start: null, period_end: null, statement_date: null, due_date: null,
+        total_due: null, closing_balance: null, lines: [], error: "file_too_large" };
+    }
     const doc = await getDocument({ data: bytes, password, disableWorker: true } as any).promise;
+    if (doc.numPages > MAX_PAGES) {
+      return { ok: false, period_start: null, period_end: null, statement_date: null, due_date: null,
+        total_due: null, closing_balance: null, lines: [], error: "too_many_pages" };
+    }
     let fullText = "";
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i);
@@ -57,12 +68,13 @@ export async function parseStatementPdf(bytes: Uint8Array, password?: string): P
     return parseStatementText(fullText);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    const isPasswordError = /password/i.test(msg);
+    const isMissingPassword = /no password given|PasswordException.*NEED_PASSWORD/i.test(msg);
+    const isWrongPassword = /incorrect password|PasswordException.*INCORRECT_PASSWORD/i.test(msg) || (/password/i.test(msg) && !isMissingPassword);
     return {
       ok: false,
       period_start: null, period_end: null, statement_date: null, due_date: null,
       total_due: null, closing_balance: null, lines: [],
-      error: isPasswordError ? "wrong_or_missing_password" : msg,
+      error: isMissingPassword ? "password_required" : isWrongPassword ? "wrong_password" : msg,
     };
   }
 }
@@ -117,8 +129,76 @@ function genericFallback(text: string): Partial<PdfParseResult> {
     statement_date: statementDateMatch ? toIsoDate(statementDateMatch[1]) : null,
     total_due: totalDueMatch ? toAmount(totalDueMatch[0]) : null,
     closing_balance: closingBalMatch ? toAmount(closingBalMatch[0]) : null,
-    lines: [],
+    lines: extractLines(text),
   };
+}
+
+// ---- Generic line-item extraction ----------------------------------------
+// Indian bank/card statement rows almost universally follow:
+//   <date>  <description...>  <amount>  [Dr|Cr|CR|DR|- |+]
+// with variable whitespace. We split the extracted page text into "sentence"
+// candidates on the date anchor, then pull description + amount + direction.
+// Anything the regex doesn't confidently match is dropped — false positives
+// here poison reconciliation, so we bias toward precision over recall.
+const LINE_DATE = /(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}\s+[A-Za-z]{3,}\s+\d{2,4})/;
+const LINE_AMT  = /([0-9]{1,3}(?:,[0-9]{2,3})*(?:\.[0-9]{2})?)\s*(Cr|CR|Dr|DR|\-|\+)?\s*$/;
+
+function normLineDate(raw: string): string | null {
+  // Handle 2-digit years by pinning to 2000+.
+  const s = raw.trim().replace(/\s+/g, " ");
+  let m = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2}|\d{4})$/);
+  if (m) {
+    const yr = m[3].length === 2 ? `20${m[3]}` : m[3];
+    return `${yr}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  }
+  m = s.match(/^(\d{1,2})\s+([A-Za-z]{3,})\s+(\d{2}|\d{4})$/);
+  if (m) {
+    const mon = MONTHS[m[2].slice(0, 3).toLowerCase()];
+    const yr = m[3].length === 2 ? `20${m[3]}` : m[3];
+    if (mon) return `${yr}-${mon}-${m[1].padStart(2, "0")}`;
+  }
+  return null;
+}
+
+export function extractLines(text: string): StatementLine[] {
+  const lines: StatementLine[] = [];
+  // Split on newlines *and* on inline date anchors so multi-txn-per-line
+  // rows (common when pdfjs collapses table cells to one string) still work.
+  const chunks = text
+    .split(/\n+/)
+    .flatMap((ln) => ln.split(new RegExp(`(?=\\s${LINE_DATE.source})`)))
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const seen = new Set<string>();
+  for (const chunk of chunks) {
+    const dm = chunk.match(new RegExp(`^${LINE_DATE.source}\\s+(.+)$`));
+    if (!dm) continue;
+    const date = normLineDate(dm[1]);
+    if (!date) continue;
+    const rest = dm[2];
+    const am = rest.match(LINE_AMT);
+    if (!am) continue;
+    const amount = Number(am[1].replace(/,/g, ""));
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+    const desc = rest.slice(0, am.index ?? rest.length).trim();
+    if (!desc || desc.length < 2) continue;
+    // Direction: explicit Cr/Dr wins; then trailing +/-, else default debit.
+    let txn_type: "debit" | "credit" = "debit";
+    if (am[2]) {
+      const d = am[2].toLowerCase();
+      if (d === "cr" || d === "+") txn_type = "credit";
+      else txn_type = "debit";
+    } else if (/\b(refund|reversal|received|credit|salary|interest paid)\b/i.test(desc)) {
+      txn_type = "credit";
+    }
+    // Dedup within a single statement (same date+amount+desc-prefix).
+    const key = `${date}|${amount}|${desc.slice(0, 40).toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    lines.push({ date, description: desc, amount, txn_type });
+  }
+  return lines;
 }
 
 // ---- Per-bank parsers ------------------------------------------------------

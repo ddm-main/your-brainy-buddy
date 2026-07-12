@@ -136,7 +136,7 @@ function AnimatedRoutes() {
           <Route path="/projects/*" element={<Projects />} />
           <Route path="/config/*" element={<Config />} />
           <Route path="/settings" element={<Navigate to="/config" replace />} />
-          <Route path="/auth" element={<Navigate to="/" replace />} />
+          <Route path="/auth" element={<Auth />} />
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="*" element={<NotFound />} />
         </Routes>

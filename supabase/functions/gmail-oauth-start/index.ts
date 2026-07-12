@@ -71,10 +71,6 @@ Deno.serve(async (req) => {
       ...(acct.email_address ? { login_hint: acct.email_address } : {}),
     });
 
-    const masked = clientId.length > 16 ? `…${clientId.slice(-24)}` : clientId;
-    console.log("gmail-oauth-start authorize url:", url.replace(clientId, masked));
-
-
     return new Response(JSON.stringify({ url }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {
     return sanitizedErrorResponse(err, "Could not start Gmail connection", "gmail-oauth-start", cors);

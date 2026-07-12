@@ -26,26 +26,6 @@ export default function Auth() {
     }
   }
 
-  async function devLogin() {
-    const devEmail = "msdeepakdon@gmail.com";
-    const devPassword = "Qwerty!23";
-    setEmail(devEmail);
-    setPassword(devPassword);
-    setErr(null);
-    setInfo(null);
-    setBusy(true);
-    try {
-      const { error } = await supabase.auth.signInWithPassword({
-        email: devEmail,
-        password: devPassword,
-      });
-      if (error) throw error;
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   return (
     <div className="auth-stage">
@@ -101,17 +81,6 @@ export default function Auth() {
           <span>{busy ? "Authenticating…" : "Sign In"}</span>
         </button>
 
-        {import.meta.env.DEV && (
-          <button
-            type="button"
-            onClick={devLogin}
-            disabled={busy}
-            className="auth-submit focus-outline"
-            style={{ opacity: 0.75, marginTop: 8 }}
-          >
-            <span>Dev sign-in (autofill)</span>
-          </button>
-        )}
 
         {err && <div className="auth-msg auth-msg-err">{err}</div>}
         {info && <div className="auth-msg auth-msg-info">{info}</div>}

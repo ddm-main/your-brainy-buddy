@@ -456,8 +456,10 @@ function SignalBody() {
 /* ---------- 04 Pulse (Finance) ---------- */
 function PulseBody() {
   const nav = useNavigate();
-  const { state, netWorth, utilization, health } = useFinanceSnapshot();
+  const { state, netWorth, utilization, health, upcomingBills, insights } = useFinanceSnapshot();
   const net = state.income - state.spend;
+  const nextBill = upcomingBills[0];
+  const topInsight = insights[0];
 
   return (
     <div className="pulse-grid">
@@ -484,6 +486,16 @@ function PulseBody() {
             </div>
           </div>
         </div>
+        {nextBill && (
+          <div className="pulse-net-sub" style={{ marginTop: 8 }}>
+            next bill · {nextBill.label} · {new Date(nextBill.dueDate).toLocaleDateString(undefined, { month: "short", day: "numeric" })}{nextBill.amount != null ? ` · ${inr(nextBill.amount)}` : ""}
+          </div>
+        )}
+        {topInsight && (
+          <div className="pulse-net-sub" style={{ marginTop: 4, color: topInsight.severity === "danger" ? "var(--danger)" : topInsight.severity === "warn" ? "var(--warn)" : "var(--text-dim)" }}>
+            ▲ {topInsight.text}
+          </div>
+        )}
       </button>
     </div>
   );

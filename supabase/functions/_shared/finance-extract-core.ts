@@ -184,6 +184,54 @@ export async function ingestStatementAttachment(
   await applyParsedStatementResult(svc, statementId, email.user_id, links, result, storagePath, attRow.id);
 }
 
+// Deterministic post-parse enrichment: normalize the raw merchant string
+// coming from a statement line, guess a category from a small keyword map,
+// and infer payment_mode from the description shape. No LLM — keeps the
+// tail of applyParsedStatementResult fast + free.
+function enrich(description: string, txnType: "debit" | "credit"): {
+  merchant: string;
+  category: string | null;
+  payment_mode: string | null;
+} {
+  const raw = description.trim();
+  // Strip common trailing card refs, city codes, POS terminal ids, and
+  // padding characters that make merchants look different across rows.
+  let merchant = raw
+    .replace(/\s+(?:POS|ATM|NEFT|IMPS|RTGS|UPI|ECOM)\b.*$/i, "")
+    .replace(/\s+X{2,}\d{2,}\b.*$/i, "")
+    .replace(/\s+\*{2,}\d{2,}\b.*$/i, "")
+    .replace(/\s+\d{6,}$/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  if (!merchant) merchant = raw;
+
+  const hay = raw.toLowerCase();
+  const CATEGORIES: Array<[RegExp, string]> = [
+    [/\b(swiggy|zomato|dominos|kfc|mcdonald|starbucks|cafe|restaurant|food)\b/, "Food & Dining"],
+    [/\b(uber|ola|rapido|indigo|vistara|air ?india|irctc|redbus|makemytrip|goibibo)\b/, "Travel"],
+    [/\b(amazon|flipkart|myntra|ajio|meesho|nykaa)\b/, "Shopping"],
+    [/\b(bigbasket|blinkit|zepto|dmart|grocery|instamart)\b/, "Groceries"],
+    [/\b(netflix|spotify|prime|hotstar|youtube|apple\.com\/bill)\b/, "Subscriptions"],
+    [/\b(bses|adani|tata power|electric|water|gas|jio|airtel|vi |vodafone|bsnl|broadband)\b/, "Utilities"],
+    [/\b(apollo|medplus|pharm|clinic|hospital|diagnostic|1mg|pharmeasy)\b/, "Health"],
+    [/\b(rent|maintenance|society|housing)\b/, "Housing"],
+    [/\b(emi|loan|installment)\b/, "EMI & Loans"],
+    [/\b(sip|mutual fund|nps|invest|zerodha|groww|upstox)\b/, "Investments"],
+    [/\b(salary|payroll|credit interest|refund|reversal|cashback)\b/, txnType === "credit" ? "Income" : "Refunds"],
+    [/\b(atm|cash withdrawal)\b/, "Cash"],
+  ];
+  const category = CATEGORIES.find(([rx]) => rx.test(hay))?.[1] ?? null;
+
+  let payment_mode: string | null = null;
+  if (/\bupi\b|@[a-z]/i.test(raw)) payment_mode = "UPI";
+  else if (/\b(neft|imps|rtgs)\b/i.test(raw)) payment_mode = "Bank Transfer";
+  else if (/\bpos\b|\bcard\b|\becom\b|\b(visa|mastercard|rupay)\b/i.test(raw)) payment_mode = "Card";
+  else if (/\batm\b|\bcash\b/i.test(raw)) payment_mode = "Cash";
+  else if (/\bauto[- ]?debit\b|\bsi\b|\bstanding instruction\b/i.test(raw)) payment_mode = "Auto-debit";
+
+  return { merchant, category, payment_mode };
+}
+
 // Shared tail of statement ingestion, reused by both the Gmail-attachment
 // path above and the manual-upload edge function (finance-upload-statement)
 // — writes the parse result onto the statements/email_attachments rows and
@@ -200,7 +248,13 @@ export async function applyParsedStatementResult(
   attachmentId?: string,
 ): Promise<void> {
   if (!result.ok) {
-    await svc.from("statements").update({ parse_status: "failed" }).eq("id", statementId);
+    // Persist the parser's error message so the UI can show a reason
+    // (e.g. "wrong_or_missing_password") instead of an opaque "failed" chip.
+    await svc.from("statements").update({
+      parse_status: "failed",
+      parse_error: result.error ?? "unknown_parse_error",
+      file_path: storagePath,
+    }).eq("id", statementId);
     if (attachmentId) await svc.from("email_attachments").update({ parse_status: "failed" }).eq("id", attachmentId);
     return;
   }
@@ -213,6 +267,7 @@ export async function applyParsedStatementResult(
     total_due: result.total_due,
     closing_balance: result.closing_balance,
     parse_status: "parsed",
+    parse_error: null, // clear any previous failure
     transactions_found: result.lines.length,
     file_path: storagePath,
   }).eq("id", statementId);
@@ -245,12 +300,15 @@ export async function applyParsedStatementResult(
         confidence_score: 0.85,
       }).eq("id", existingId);
     } else {
+      const en = enrich(line.description, line.txn_type);
       const { error: te } = await svc.from("transactions").insert({
         user_id: userId,
         txn_date: line.date,
         amount: line.amount,
         txn_type: line.txn_type,
-        merchant: line.description,
+        merchant: en.merchant,
+        category: en.category,
+        payment_mode: en.payment_mode,
         source: "statement",
         source_statement_id: statementId,
         credit_card_id: links.credit_card_id ?? null,

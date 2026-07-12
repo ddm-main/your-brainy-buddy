@@ -74,3 +74,31 @@ export async function safeFetch(
 export function bytesToText(u: Uint8Array): string {
   return new TextDecoder("utf-8").decode(u);
 }
+
+/** Constant-time CRON secret verification for edge functions that run with
+ * service-role privileges and no JWT gate. Reads CRON_SECRET from env,
+ * fails closed on misconfiguration, and returns a ready-to-return Response
+ * on failure so the caller can `if (bad) return bad;` and move on. */
+export async function verifyCronSecret(req: Request): Promise<Response | null> {
+  const secret = Deno.env.get("CRON_SECRET");
+  if (!secret) {
+    return new Response(JSON.stringify({ error: "misconfigured — CRON_SECRET not set" }), {
+      status: 500, headers: { "Content-Type": "application/json" },
+    });
+  }
+  const provided = req.headers.get("x-cron-secret") ?? "";
+  const enc = new TextEncoder();
+  const [a, b] = await Promise.all([
+    crypto.subtle.digest("SHA-256", enc.encode(provided)),
+    crypto.subtle.digest("SHA-256", enc.encode(secret)),
+  ]);
+  const av = new Uint8Array(a), bv = new Uint8Array(b);
+  let diff = av.length ^ bv.length;
+  for (let i = 0; i < av.length; i++) diff |= av[i] ^ bv[i];
+  if (diff !== 0) {
+    return new Response(JSON.stringify({ error: "forbidden" }), {
+      status: 403, headers: { "Content-Type": "application/json" },
+    });
+  }
+  return null;
+}

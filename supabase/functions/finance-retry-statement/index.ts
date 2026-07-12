@@ -7,8 +7,12 @@
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { svcClient } from "../_shared/gmail.ts";
-import { ingestStatementAttachment } from "../_shared/finance-extract-core.ts";
+import { applyParsedStatementResult, ingestStatementAttachment } from "../_shared/finance-extract-core.ts";
+import { parseStatementPdf } from "../_shared/statement-pdf.ts";
+import { decryptStatementPassword } from "../_shared/crypto.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
+
+const STATEMENT_BUCKET = "statement-pdfs";
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -24,7 +28,7 @@ Deno.serve(async (req) => {
   const uid = auth.userId;
 
   try {
-    const { statement_id, credit_card_id, financial_account_id } = await req.json();
+    const { statement_id, credit_card_id, financial_account_id, password } = await req.json();
     if (!statement_id) {
       return new Response(JSON.stringify({ error: "statement_id required" }), {
         status: 400, headers: { ...cors, "Content-Type": "application/json" },
@@ -62,37 +66,71 @@ Deno.serve(async (req) => {
       statement.financial_account_id = financial_account_id ?? null;
     }
 
-    if (!statement.source_email_id) {
-      return new Response(JSON.stringify({ error: "statement has no source email to re-fetch" }), {
+    // Two retry paths:
+    //  1. Gmail-sourced statement → re-fetch attachment via Gmail API.
+    //  2. Manually-uploaded statement → download from storage and re-parse
+    //     with a (possibly newly-supplied) password.
+    if (statement.source_email_id) {
+      const { data: email, error: emErr } = await svc.from("emails").select("*").eq("id", statement.source_email_id).eq("user_id", uid).maybeSingle();
+      if (emErr) throw emErr;
+      if (!email) {
+        return new Response(JSON.stringify({ error: "source email not found" }), {
+          status: 404, headers: { ...cors, "Content-Type": "application/json" },
+        });
+      }
+      const { data: account, error: acErr } = await svc.from("email_accounts").select("*").eq("id", email.account_id).maybeSingle();
+      if (acErr) throw acErr;
+      if (!account) {
+        return new Response(JSON.stringify({ error: "email account not found" }), {
+          status: 404, headers: { ...cors, "Content-Type": "application/json" },
+        });
+      }
+      await ingestStatementAttachment(svc, account, email, statement.id, {
+        credit_card_id: statement.credit_card_id ?? null,
+        financial_account_id: statement.financial_account_id ?? null,
+        loan_id: statement.loan_id ?? null,
+      });
+    } else if (statement.file_path) {
+      const { data: blob, error: dlErr } = await svc.storage.from(STATEMENT_BUCKET).download(statement.file_path);
+      if (dlErr || !blob) throw dlErr ?? new Error("PDF not found in storage");
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+
+      // Password resolution order: explicit override > saved rule on linked entity.
+      let pwd: string | undefined = password || undefined;
+      if (!pwd) {
+        if (statement.credit_card_id) {
+          const { data: c } = await svc.from("credit_cards").select("statement_password_rule").eq("id", statement.credit_card_id).maybeSingle();
+          if (c?.statement_password_rule) {
+            try { pwd = await decryptStatementPassword(c.statement_password_rule); } catch { /* ignore */ }
+          }
+        } else if (statement.financial_account_id) {
+          const { data: a } = await svc.from("financial_accounts").select("statement_password_rule").eq("id", statement.financial_account_id).maybeSingle();
+          if (a?.statement_password_rule) {
+            try { pwd = await decryptStatementPassword(a.statement_password_rule); } catch { /* ignore */ }
+          }
+        }
+      }
+
+      const result = await parseStatementPdf(bytes, pwd);
+      await applyParsedStatementResult(svc, statement.id, uid, {
+        credit_card_id: statement.credit_card_id ?? null,
+        financial_account_id: statement.financial_account_id ?? null,
+        loan_id: statement.loan_id ?? null,
+      }, result, statement.file_path);
+    } else {
+      return new Response(JSON.stringify({ error: "statement has no source email or stored PDF to re-parse" }), {
         status: 400, headers: { ...cors, "Content-Type": "application/json" },
       });
     }
-    const { data: email, error: emErr } = await svc.from("emails").select("*").eq("id", statement.source_email_id).eq("user_id", uid).maybeSingle();
-    if (emErr) throw emErr;
-    if (!email) {
-      return new Response(JSON.stringify({ error: "source email not found" }), {
-        status: 404, headers: { ...cors, "Content-Type": "application/json" },
-      });
-    }
-    const { data: account, error: acErr } = await svc.from("email_accounts").select("*").eq("id", email.account_id).maybeSingle();
-    if (acErr) throw acErr;
-    if (!account) {
-      return new Response(JSON.stringify({ error: "email account not found" }), {
-        status: 404, headers: { ...cors, "Content-Type": "application/json" },
-      });
-    }
 
-    await ingestStatementAttachment(svc, account, email, statement.id, {
-      credit_card_id: statement.credit_card_id ?? null,
-      financial_account_id: statement.financial_account_id ?? null,
-      loan_id: statement.loan_id ?? null,
-    });
+    const { data: updated } = await svc.from("statements")
+      .select("parse_status, parse_error").eq("id", statement_id).maybeSingle();
 
-    const { data: updated } = await svc.from("statements").select("parse_status").eq("id", statement_id).maybeSingle();
-
-    return new Response(JSON.stringify({ ok: true, parse_status: updated?.parse_status ?? null }), {
-      headers: { ...cors, "Content-Type": "application/json" },
-    });
+    return new Response(JSON.stringify({
+      ok: true,
+      parse_status: updated?.parse_status ?? null,
+      parse_error: updated?.parse_error ?? null,
+    }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {
     return sanitizedErrorResponse(err, "Statement retry failed", "finance-retry-statement", cors);
   }
