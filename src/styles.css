@@ -599,7 +599,7 @@ select:autofill {
 /* Pulse */
 .pulse-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 14px;
   height: 100%;
 }
@@ -611,7 +611,6 @@ select:autofill {
   padding: 0 4px;
   border: none;
 }
-.pulse-cluster.with-divider { border-left: 1px solid var(--edge); padding-left: 14px; }
 .pulse-net {
   padding: 10px 12px;
   border: 1px solid var(--edge);

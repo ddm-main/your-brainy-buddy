@@ -2,6 +2,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { signState } from "../_shared/oauth-state.ts";
+import { sanitizedErrorResponse } from "../_shared/errors.ts";
 
 const BASE_SCOPES = [
   "openid",
@@ -32,9 +33,13 @@ Deno.serve(async (req) => {
 
   const clientId = (Deno.env.get("GOOGLE_OAUTH_CLIENT_ID") ?? "").trim();
   const supabaseUrl = (Deno.env.get("SUPABASE_URL") ?? "").trim();
-  if (!clientId) return new Response(JSON.stringify({ error: "GOOGLE_OAUTH_CLIENT_ID not configured", hint: "Add the secret in Supabase → Edge Functions → Secrets, then redeploy." }), { status: 500, headers: { ...cors, "Content-Type": "application/json" } });
+  if (!clientId) {
+    console.error("gmail-oauth-start: GOOGLE_OAUTH_CLIENT_ID not configured. Add the secret in Supabase → Edge Functions → Secrets, then redeploy.");
+    return new Response(JSON.stringify({ error: "Gmail connection is not configured on the server." }), { status: 500, headers: { ...cors, "Content-Type": "application/json" } });
+  }
   if (!clientId.endsWith(".apps.googleusercontent.com")) {
-    return new Response(JSON.stringify({ error: "GOOGLE_OAUTH_CLIENT_ID looks malformed", hint: "The value must end in .apps.googleusercontent.com and contain no whitespace. Re-paste it in Supabase secrets." }), { status: 500, headers: { ...cors, "Content-Type": "application/json" } });
+    console.error("gmail-oauth-start: GOOGLE_OAUTH_CLIENT_ID looks malformed (must end in .apps.googleusercontent.com, no whitespace). Re-paste it in Supabase secrets.");
+    return new Response(JSON.stringify({ error: "Gmail connection is misconfigured on the server." }), { status: 500, headers: { ...cors, "Content-Type": "application/json" } });
   }
 
   try {
@@ -72,8 +77,6 @@ Deno.serve(async (req) => {
 
     return new Response(JSON.stringify({ url }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("gmail-oauth-start:", msg);
-    return new Response(JSON.stringify({ error: msg }), { status: 500, headers: { ...cors, "Content-Type": "application/json" } });
+    return sanitizedErrorResponse(err, "Could not start Gmail connection", "gmail-oauth-start", cors);
   }
 });

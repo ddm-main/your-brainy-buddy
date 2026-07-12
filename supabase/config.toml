@@ -29,3 +29,15 @@ verify_jwt = true
 
 [functions.gmail-sync-due]
 verify_jwt = false
+
+[functions.finance-set-statement-password]
+verify_jwt = true
+
+[functions.finance-statement-pdf-url]
+verify_jwt = true
+
+[functions.finance-retry-statement]
+verify_jwt = true
+
+[functions.finance-upload-statement]
+verify_jwt = true

@@ -5,6 +5,7 @@ import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { svcClient } from "../_shared/gmail.ts";
 import { extractFinanceForAccount } from "../_shared/finance-extract-core.ts";
+import { sanitizeError, sanitizedErrorResponse } from "../_shared/errors.ts";
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -37,13 +38,12 @@ Deno.serve(async (req) => {
         tx += r.transactions; st += r.statements; sc += r.scanned;
         results.push({ account_id: a.id, email: a.email_address, ...r });
       } catch (e) {
-        results.push({ account_id: a.id, email: a.email_address, error: e instanceof Error ? e.message : String(e) });
+        const safe = sanitizeError(e, "Finance extraction failed", `finance-extract:${a.id}`);
+        results.push({ account_id: a.id, email: a.email_address, error: safe.error });
       }
     }
     return new Response(JSON.stringify({ ok: true, transactions: tx, statements: st, scanned: sc, results }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("finance-extract:", msg);
-    return new Response(JSON.stringify({ error: msg }), { status: 500, headers: { ...cors, "Content-Type": "application/json" } });
+    return sanitizedErrorResponse(err, "Finance extraction failed", "finance-extract", cors);
   }
 });

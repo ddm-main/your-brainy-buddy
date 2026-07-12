@@ -3,23 +3,13 @@ import { lazy, Suspense } from "react";
 
 const EmailConfig = lazy(() => import("@/routes/config/EmailConfig"));
 const ConfigHome = lazy(() => import("@/routes/config/ConfigHome"));
-const BanksConfig = lazy(() => import("@/routes/config/BanksConfig"));
-const AccountsConfig = lazy(() => import("@/routes/config/AccountsConfig"));
-const CardsConfig = lazy(() => import("@/routes/config/CardsConfig"));
-const LoansConfig = lazy(() => import("@/routes/config/LoansConfig"));
-const GoalsConfig = lazy(() => import("@/routes/config/GoalsConfig"));
-const SubscriptionsConfig = lazy(() => import("@/routes/config/SubscriptionsConfig"));
+const FinanceConfig = lazy(() => import("@/routes/config/FinanceConfig"));
 const ProjectsConfig = lazy(() => import("@/routes/config/ProjectsConfig"));
 
 const TABS = [
   { to: "/config", label: "Home", exact: true },
   { to: "/config/email", label: "Email" },
-  { to: "/config/banks", label: "Banks" },
-  { to: "/config/accounts", label: "Accounts" },
-  { to: "/config/cards", label: "Cards" },
-  { to: "/config/loans", label: "Loans" },
-  { to: "/config/goals", label: "Goals" },
-  { to: "/config/subscriptions", label: "Subscriptions" },
+  { to: "/config/finance", label: "Finance" },
   { to: "/config/projects", label: "Projects" },
 ] as { to: string; label: string; exact?: boolean }[];
 
@@ -50,12 +40,7 @@ export default function Config() {
           <Routes>
             <Route index element={<ConfigHome />} />
             <Route path="email/*" element={<EmailConfig />} />
-            <Route path="banks" element={<BanksConfig />} />
-            <Route path="accounts" element={<AccountsConfig />} />
-            <Route path="cards" element={<CardsConfig />} />
-            <Route path="loans" element={<LoansConfig />} />
-            <Route path="goals" element={<GoalsConfig />} />
-            <Route path="subscriptions" element={<SubscriptionsConfig />} />
+            <Route path="finance/*" element={<FinanceConfig />} />
             <Route path="projects" element={<ProjectsConfig />} />
           </Routes>
         </Suspense>

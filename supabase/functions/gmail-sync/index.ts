@@ -2,6 +2,7 @@ import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { svcClient } from "../_shared/gmail.ts";
 import { runGmailSync } from "../_shared/gmail-sync-core.ts";
+import { sanitizedErrorResponse } from "../_shared/errors.ts";
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -23,8 +24,6 @@ Deno.serve(async (req) => {
     const result = await runGmailSync(svc, account, max);
     return new Response(JSON.stringify(result), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("gmail-sync:", msg);
-    return new Response(JSON.stringify({ error: msg }), { status: 500, headers: { ...cors, "Content-Type": "application/json" } });
+    return sanitizedErrorResponse(err, "Gmail sync failed", "gmail-sync", cors);
   }
 });

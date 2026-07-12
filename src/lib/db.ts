@@ -1,5 +1,7 @@
 import { supabase as _supabase } from "@/integrations/supabase/client";
 import type { Database } from "@/integrations/supabase/types";
+import { authFetch } from "@/lib/authFetch";
+import { toSafeError } from "@/lib/errors";
 
 /**
  * Thin typed wrappers over the JARVIS Supabase tables.
@@ -36,9 +38,26 @@ export type FinancialGoal = AnyRow;
 export type Subscription = AnyRow;
 export type Transaction = AnyRow;
 export type Statement = AnyRow;
+export type FinanceAlert = AnyRow;
 export type JarvisAction = AnyRow;
 export type JarvisReminder = AnyRow;
 
+
+async function callEdgeFunction(name: string, body: Record<string, unknown>): Promise<any> {
+  const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/${name}`;
+  let r: Response;
+  try {
+    r = await authFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  } catch {
+    // fetch() throws a bare "Failed to fetch" TypeError for DNS/CORS/network
+    // failures, which includes hitting a Supabase Edge Function that hasn't
+    // been deployed yet — surface that plainly instead of the raw error.
+    throw new Error(`Could not reach "${name}" — it may not be deployed yet.`);
+  }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j?.error ?? r.statusText);
+  return j;
+}
 
 export const db = {
   // ---------- Tasks ----------
@@ -123,17 +142,25 @@ export const db = {
 
   // ---------- Decisions ----------
   decisions: {
-    list: async (limit = 20) => {
+    list: async (limit = 50) => {
       const { data, error } = await supabase
-        .from("decisions").select("*")
+        .from("decisions").select("*, projects(name)")
         .order("decided_on", { ascending: false }).limit(limit);
       if (error) throw error;
       return data ?? [];
     },
-    create: async (d: { title: string; decision_text: string; context?: string; rationale?: string; linked_project_id?: string | null }) => {
+    create: async (d: { title: string; decision_text: string; context?: string; rationale?: string; options_considered?: string; decided_on?: string; linked_project_id?: string | null }) => {
       const { data, error } = await supabase.from("decisions").insert(d).select().single();
       if (error) throw error;
       return data;
+    },
+    update: async (id: string, patch: Partial<Decision>) => {
+      const { error } = await supabase.from("decisions").update(patch).eq("id", id);
+      if (error) throw error;
+    },
+    remove: async (id: string) => {
+      const { error } = await supabase.from("decisions").delete().eq("id", id);
+      if (error) throw error;
     },
   },
 
@@ -151,6 +178,10 @@ export const db = {
       const { data, error } = await supabase.from("projects").select("*").eq("id", id).single();
       if (error) throw error;
       return data;
+    },
+    getBySlug: async (slug: string) => {
+      const { data } = await supabase.from("projects").select("*").eq("slug", slug).maybeSingle();
+      return data ?? null;
     },
     create: async (p: { name: string; description?: string; slug?: string; status?: Project["status"] }) => {
       const { data, error } = await supabase.from("projects").insert(p).select().single();
@@ -206,12 +237,12 @@ export const db = {
     },
     create: async (a: { email_address: string; provider?: string; purpose?: EmailAccount["purpose"] }) => {
       const { data, error } = await supabase.from("email_accounts").insert(a).select().single();
-      if (error) throw error;
+      if (error) throw toSafeError(error, "Could not add that mailbox");
       return data;
     },
     update: async (id: string, patch: Record<string, any>) => {
       const { data, error } = await supabase.from("email_accounts").update(patch).eq("id", id).select().single();
-      if (error) throw error;
+      if (error) throw toSafeError(error, "Could not save mailbox settings");
       return data;
     },
     remove: async (id: string) => {
@@ -232,7 +263,13 @@ export const db = {
   banks: {
     list: async () => (await supabase.from("banks").select("*").order("name")).data ?? [],
     create: async (name: string, notes?: string) => {
-      const { data, error } = await supabase.from("banks").insert({ name, notes }).select().single();
+      const trimmed = name.trim();
+      if (!trimmed) throw new Error("Bank name is required");
+      const { data: existing } = await supabase.from("banks").select("id, name");
+      if ((existing ?? []).some((b: any) => b.name?.trim().toLowerCase() === trimmed.toLowerCase())) {
+        throw new Error(`A bank named "${trimmed}" already exists — select it from the Bank dropdown instead.`);
+      }
+      const { data, error } = await supabase.from("banks").insert({ name: trimmed, notes }).select().single();
       if (error) throw error;
       return data;
     },
@@ -240,21 +277,55 @@ export const db = {
   accounts: {
     list: async () => (await supabase.from("financial_accounts").select("*, banks(name)").order("nickname")).data ?? [],
     create: async (a: { nickname: string; account_type?: string; masked_number?: string; bank_id?: string | null; statement_cycle_day?: number | null; source_email?: string | null }) => {
-      const { data, error } = await supabase.from("financial_accounts").insert(a).select().single();
+      const nickname = a.nickname.trim();
+      const { data: existing } = await supabase.from("financial_accounts").select("id, nickname");
+      if ((existing ?? []).some((x: any) => x.nickname?.trim().toLowerCase() === nickname.toLowerCase())) {
+        throw new Error(`An account named "${nickname}" already exists`);
+      }
+      const { data, error } = await supabase.from("financial_accounts").insert({ ...a, nickname }).select().single();
       if (error) throw error;
       return data;
+    },
+    update: async (id: string, patch: Partial<FinancialAccount>) => {
+      const { error } = await supabase.from("financial_accounts").update(patch).eq("id", id);
+      if (error) throw error;
     },
     remove: async (id: string) => {
       const { error } = await supabase.from("financial_accounts").delete().eq("id", id);
       if (error) throw error;
     },
+    // Plaintext goes straight to the edge function, which encrypts it
+    // server-side (AES-256-GCM) before writing statement_password_rule.
+    // Never written directly from the browser, never read back.
+    setStatementPassword: async (id: string, password: string) => {
+      await callEdgeFunction("finance-set-statement-password", { target_type: "account", target_id: id, password });
+    },
   },
   cards: {
     list: async () => (await supabase.from("credit_cards").select("*, banks(name)").order("card_name")).data ?? [],
-    create: async (c: { card_name: string; bank_id?: string | null; masked_number?: string; billing_day?: number | null; due_day?: number | null; limit_amount?: number | null }) => {
-      const { data, error } = await supabase.from("credit_cards").insert(c).select().single();
+    create: async (c: { card_name: string; bank_id?: string | null; masked_number?: string; billing_day?: number | null; due_day?: number | null; limit_amount?: number | null; autopay?: boolean; notes?: string | null }) => {
+      const cardName = c.card_name.trim();
+      const maskedNumber = c.masked_number?.trim() || null;
+      const { data: existing } = await supabase.from("credit_cards").select("id, card_name, masked_number");
+      const dupe = (existing ?? []).find((x: any) => {
+        const sameName = x.card_name?.trim().toLowerCase() === cardName.toLowerCase();
+        const sameNumber = maskedNumber && x.masked_number && x.masked_number.trim() === maskedNumber;
+        return sameName || sameNumber;
+      });
+      if (dupe) {
+        throw new Error(
+          dupe.masked_number && maskedNumber && dupe.masked_number.trim() === maskedNumber
+            ? `A card ending in ${maskedNumber} already exists`
+            : `A card named "${cardName}" already exists`,
+        );
+      }
+      const { data, error } = await supabase.from("credit_cards").insert({ ...c, card_name: cardName, masked_number: maskedNumber ?? undefined }).select().single();
       if (error) throw error;
       return data;
+    },
+    update: async (id: string, patch: Partial<CreditCard>) => {
+      const { error } = await supabase.from("credit_cards").update(patch).eq("id", id);
+      if (error) throw error;
     },
     remove: async (id: string) => {
       const { error } = await supabase.from("credit_cards").delete().eq("id", id);
@@ -264,25 +335,42 @@ export const db = {
       const { data } = await supabase.from("credit_cards").select("*, banks(name)").order("due_day");
       return data ?? [];
     },
+    setStatementPassword: async (id: string, password: string) => {
+      await callEdgeFunction("finance-set-statement-password", { target_type: "card", target_id: id, password });
+    },
   },
   loans: {
-    list: async () => (await supabase.from("loans").select("*").order("next_due_date")).data ?? [],
-    create: async (l: { lender_name: string; loan_type?: string; principal_amount?: number; interest_rate?: number; emi_amount?: number; tenure_months?: number; start_date?: string; outstanding_amount?: number; next_due_date?: string }) => {
+    list: async () => (await supabase.from("loans").select("*, financial_accounts(nickname)").order("next_due_date")).data ?? [],
+    create: async (l: { lender_name: string; loan_type?: string; principal_amount?: number; interest_rate?: number; emi_amount?: number; tenure_months?: number; start_date?: string; outstanding_amount?: number; next_due_date?: string; linked_account_id?: string | null }) => {
       const { data, error } = await supabase.from("loans").insert(l).select().single();
       if (error) throw error;
       return data;
+    },
+    update: async (id: string, patch: Partial<Loan>) => {
+      const { error } = await supabase.from("loans").update(patch).eq("id", id);
+      if (error) throw error;
     },
     remove: async (id: string) => {
       const { error } = await supabase.from("loans").delete().eq("id", id);
       if (error) throw error;
     },
+    payments: async (loanId: string) => {
+      const { data, error } = await supabase.from("transactions")
+        .select("*").eq("loan_id", loanId).order("txn_date", { ascending: false });
+      if (error) throw error;
+      return data ?? [];
+    },
   },
   goals: {
-    list: async () => (await supabase.from("financial_goals").select("*").order("target_date")).data ?? [],
-    create: async (g: { title: string; goal_type?: string; target_amount?: number; target_date?: string; current_amount?: number }) => {
+    list: async () => (await supabase.from("financial_goals").select("*, financial_accounts(nickname)").order("target_date")).data ?? [],
+    create: async (g: { title: string; goal_type?: string; target_amount?: number; target_date?: string; current_amount?: number; linked_account_id?: string | null }) => {
       const { data, error } = await supabase.from("financial_goals").insert(g).select().single();
       if (error) throw error;
       return data;
+    },
+    update: async (id: string, patch: Partial<FinancialGoal>) => {
+      const { error } = await supabase.from("financial_goals").update(patch).eq("id", id);
+      if (error) throw error;
     },
     remove: async (id: string) => {
       const { error } = await supabase.from("financial_goals").delete().eq("id", id);
@@ -290,11 +378,15 @@ export const db = {
     },
   },
   subscriptions: {
-    list: async () => (await supabase.from("subscriptions").select("*").order("next_due_date")).data ?? [],
-    create: async (s: { name: string; category?: string; amount?: number; billing_cycle?: string; next_due_date?: string }) => {
+    list: async () => (await supabase.from("subscriptions").select("*, financial_accounts(nickname), credit_cards(card_name)").order("next_due_date")).data ?? [],
+    create: async (s: { name: string; category?: string; amount?: number; billing_cycle?: string; next_due_date?: string; linked_account_id?: string | null; linked_card_id?: string | null }) => {
       const { data, error } = await supabase.from("subscriptions").insert(s).select().single();
       if (error) throw error;
       return data;
+    },
+    update: async (id: string, patch: Partial<Subscription>) => {
+      const { error } = await supabase.from("subscriptions").update(patch).eq("id", id);
+      if (error) throw error;
     },
     remove: async (id: string) => {
       const { error } = await supabase.from("subscriptions").delete().eq("id", id);
@@ -314,9 +406,21 @@ export const db = {
       if (error) throw error;
       return data;
     },
+    update: async (id: string, patch: Partial<Transaction>) => {
+      const { error } = await supabase.from("transactions").update(patch).eq("id", id);
+      if (error) throw error;
+    },
     remove: async (id: string) => {
       const { error } = await supabase.from("transactions").delete().eq("id", id);
       if (error) throw error;
+    },
+    findPossibleDuplicate: async (params: { financial_account_id?: string | null; credit_card_id?: string | null; txn_date: string; amount: number }) => {
+      let q = supabase.from("transactions").select("id, merchant, source").eq("txn_date", params.txn_date).eq("amount", params.amount);
+      if (params.credit_card_id) q = q.eq("credit_card_id", params.credit_card_id);
+      else if (params.financial_account_id) q = q.eq("financial_account_id", params.financial_account_id);
+      else return null;
+      const { data } = await q.maybeSingle();
+      return data ?? null;
     },
     monthSummary: async () => {
       const start = new Date(); start.setDate(1); start.setHours(0, 0, 0, 0);
@@ -329,6 +433,145 @@ export const db = {
         if (r.txn_type === "debit") spend += amt; else income += amt;
       }
       return { spend, income };
+    },
+    categorySummary: async (limit = 6) => {
+      const start = new Date(); start.setDate(1); start.setHours(0, 0, 0, 0);
+      const { data } = await supabase.from("transactions")
+        .select("category, amount, txn_type")
+        .eq("txn_type", "debit")
+        .gte("txn_date", start.toISOString().slice(0, 10));
+      const byCategory = new Map<string, number>();
+      for (const r of data ?? []) {
+        const cat = r.category?.trim() || "uncategorized";
+        byCategory.set(cat, (byCategory.get(cat) ?? 0) + (Number(r.amount) || 0));
+      }
+      return [...byCategory.entries()]
+        .map(([category, amount]) => ({ category, amount }))
+        .sort((a, b) => b.amount - a.amount)
+        .slice(0, limit);
+    },
+    // Debit transactions on a linked account/card within +-windowDays of
+    // centerDate — reconciliation.ts's only read against this table.
+    findInWindow: async (params: { financial_account_id?: string | null; credit_card_id?: string | null; centerDate: string; windowDays: number }) => {
+      if (!params.financial_account_id && !params.credit_card_id) return [];
+      const center = new Date(params.centerDate);
+      const from = new Date(center); from.setDate(from.getDate() - params.windowDays);
+      const to = new Date(center); to.setDate(to.getDate() + params.windowDays);
+      let q = supabase.from("transactions").select("*").eq("txn_type", "debit")
+        .gte("txn_date", from.toISOString().slice(0, 10))
+        .lte("txn_date", to.toISOString().slice(0, 10));
+      q = params.credit_card_id ? q.eq("credit_card_id", params.credit_card_id) : q.eq("financial_account_id", params.financial_account_id);
+      const { data, error } = await q;
+      if (error) throw error;
+      return data ?? [];
+    },
+  },
+
+  statements: {
+    list: async (limit = 200) => {
+      const { data, error } = await supabase.from("statements")
+        .select("*, credit_cards(card_name), financial_accounts(nickname), loans(lender_name)")
+        .order("statement_date", { ascending: false, nullsFirst: false })
+        .limit(limit);
+      if (error) throw error;
+      return data ?? [];
+    },
+    get: async (id: string) => {
+      const { data, error } = await supabase.from("statements")
+        .select("*, credit_cards(card_name), financial_accounts(nickname), loans(lender_name)")
+        .eq("id", id).single();
+      if (error) throw error;
+      return data;
+    },
+    // Most recent card statement per credit_card_id — net worth/utilization
+    // read this as "current card debt" since cards have no balance column.
+    latestByCard: async () => {
+      const { data, error } = await supabase.from("statements")
+        .select("*").eq("statement_type", "card").not("credit_card_id", "is", null)
+        .order("statement_date", { ascending: false, nullsFirst: false });
+      if (error) throw error;
+      const latest = new Map<string, any>();
+      for (const s of data ?? []) {
+        if (!latest.has(s.credit_card_id)) latest.set(s.credit_card_id, s);
+      }
+      return latest;
+    },
+    remove: async (id: string) => {
+      const { error } = await supabase.from("statements").delete().eq("id", id);
+      if (error) throw error;
+    },
+    transactions: async (statementId: string) => {
+      const { data, error } = await supabase.from("transactions")
+        .select("*").eq("source_statement_id", statementId).order("txn_date");
+      if (error) throw error;
+      return data ?? [];
+    },
+    // Manual statement upload — for banks that never email a statement.
+    // Server-side parses + writes the same way the Gmail-attachment path does.
+    upload: async (params: {
+      statement_type: "account" | "card" | "loan";
+      credit_card_id?: string | null; financial_account_id?: string | null; loan_id?: string | null;
+      filename: string; bytesBase64: string; password?: string;
+    }) => {
+      return callEdgeFunction("finance-upload-statement", { ...params, contentType: "application/pdf" });
+    },
+    // Server-side ownership check + short-lived signed URL — the private
+    // statement-pdfs bucket has no public/anon read.
+    signedPdfUrl: async (statementId: string) => {
+      const j = await callEdgeFunction("finance-statement-pdf-url", { statement_id: statementId });
+      return j.url as string;
+    },
+    upcomingDues: async (limit = 6) => {
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const { data, error } = await supabase.from("statements")
+        .select("*, credit_cards(card_name), financial_accounts(nickname)")
+        .eq("parse_status", "parsed")
+        .not("due_date", "is", null)
+        .gte("due_date", todayIso)
+        .order("due_date", { ascending: true })
+        .limit(50);
+      if (error) throw error;
+      // Soonest-due parsed statement per card/account.
+      const seen = new Set<string>();
+      const latest: any[] = [];
+      for (const s of data ?? []) {
+        const key = s.credit_card_id ?? s.financial_account_id;
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        latest.push(s);
+      }
+      return latest.slice(0, limit);
+    },
+    retry: async (id: string, links?: { credit_card_id?: string | null; financial_account_id?: string | null }) => {
+      return callEdgeFunction("finance-retry-statement", { statement_id: id, ...links });
+    },
+  },
+
+  // ---------- Finance reconciliation alerts ----------
+  alerts: {
+    list: async (opts: { status?: "open" | "dismissed" | "resolved" } = {}) => {
+      let q = supabase.from("finance_alerts").select("*").order("expected_date", { ascending: false });
+      if (opts.status) q = q.eq("status", opts.status);
+      const { data, error } = await q;
+      if (error) throw error;
+      return data ?? [];
+    },
+    create: async (patch: Record<string, any>) => {
+      const { data, error } = await supabase.from("finance_alerts").insert(patch).select().single();
+      if (error) throw error;
+      return data;
+    },
+    update: async (id: string, patch: Record<string, any>) => {
+      const { error } = await supabase.from("finance_alerts").update(patch).eq("id", id);
+      if (error) throw error;
+    },
+    dismiss: async (id: string) => {
+      const { error } = await supabase.from("finance_alerts").update({ status: "dismissed" }).eq("id", id);
+      if (error) throw error;
+    },
+    resolve: async (id: string) => {
+      const { error } = await supabase.from("finance_alerts").update({ status: "resolved" }).eq("id", id);
+      if (error) throw error;
     },
   },
 

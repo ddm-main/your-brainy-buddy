@@ -69,3 +69,40 @@ export function extractBody(payload: any): { text: string | null; html: string |
   walk(payload);
   return { text, html };
 }
+
+export interface GmailAttachmentMeta { attachmentId: string; filename: string; mimeType: string; size: number }
+
+// Walk the message payload for parts that have both a filename and an
+// attachmentId — the analogous walk to extractBody(), but collecting real
+// attachments (statement PDFs) instead of inline text/html.
+export function listAttachments(payload: any): GmailAttachmentMeta[] {
+  const out: GmailAttachmentMeta[] = [];
+  const walk = (p: any) => {
+    if (!p) return;
+    if (p.filename && p.body?.attachmentId) {
+      out.push({
+        attachmentId: p.body.attachmentId,
+        filename: p.filename,
+        mimeType: p.mimeType ?? "",
+        size: p.body.size ?? 0,
+      });
+    }
+    if (p.parts) for (const c of p.parts) walk(c);
+  };
+  walk(payload);
+  return out;
+}
+
+function b64urlToBytes(s: string): Uint8Array {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  const bin = atob(s);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+export async function downloadAttachment(token: string, messageId: string, attachmentId: string): Promise<Uint8Array> {
+  const res = await gapi(token, `/gmail/v1/users/me/messages/${messageId}/attachments/${attachmentId}`);
+  return b64urlToBytes(res.data);
+}

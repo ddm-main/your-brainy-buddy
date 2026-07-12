@@ -2,7 +2,9 @@ import { useEffect, useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { useUi } from "@/store/uiStore";
-import { Command as CmdIcon, Mail, Wallet, Home, ListChecks, Scan, Sparkles, SlidersHorizontal } from "lucide-react";
+import { authFetch } from "@/lib/authFetch";
+import { runMorningBriefing } from "@/lib/briefing";
+import { Command as CmdIcon, Wallet, Home, ListChecks, Scan, Sparkles, SlidersHorizontal, CheckSquare, FileText, Scale } from "lucide-react";
 
 type Cmd = { id: string; label: string; hint?: string; icon: any; run: () => void };
 
@@ -28,12 +30,33 @@ export default function CommandPalette() {
 
   const commands: Cmd[] = useMemo(() => [
     { id: "home", label: "Open HUD", hint: "home", icon: Home, run: () => nav("/") },
-    { id: "inbox", label: "Open Inbox Command Center", hint: "email workspace", icon: Mail, run: () => nav("/inbox") },
+    { id: "tasks", label: "Open Tasks", hint: "quick capture, focus", icon: CheckSquare, run: () => nav("/tasks") },
+    { id: "notes", label: "Open Notes", hint: "scratchpad", icon: FileText, run: () => nav("/notes") },
+    { id: "decisions", label: "Open Decisions", hint: "the why, not just the what", icon: Scale, run: () => nav("/decisions") },
     { id: "finance", label: "Open Finance", hint: "accounts, transactions, statements", icon: Wallet, run: () => nav("/finance") },
     { id: "projects", label: "Open Projects", hint: "active work", icon: ListChecks, run: () => nav("/projects") },
     { id: "config", label: "Open Config", hint: "connections, entities, memory", icon: SlidersHorizontal, run: () => nav("/config") },
-    { id: "scan", label: "Scan bank mail now", hint: "finance ingestion", icon: Scan, run: () => { fetch("/api/finance/scan", { method: "POST" }); push("Bank mail scan queued", "ok"); } },
-    { id: "brief", label: "Brief me", hint: "read the morning briefing", icon: Sparkles, run: () => push("Briefing initiated", "ok") },
+    {
+      id: "scan", label: "Scan bank mail now", hint: "finance ingestion", icon: Scan,
+      run: async () => {
+        push("Scanning bank mail…", "info");
+        try {
+          const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/finance-extract`;
+          const r = await authFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ since_days: 90, limit: 500 }) });
+          const j = await r.json();
+          if (!r.ok) throw new Error(j?.error ?? r.statusText);
+          push(`Extracted ${j.transactions ?? 0} txn, ${j.statements ?? 0} stmt`, "ok");
+        } catch (e: any) { push(e?.message ?? "scan failed", "err"); }
+      },
+    },
+    {
+      id: "brief", label: "Brief me", hint: "run a fresh briefing", icon: Sparkles,
+      run: async () => {
+        push("Briefing…", "info");
+        try { await runMorningBriefing(true); nav("/"); }
+        catch (e: any) { push(e?.message ?? "briefing failed", "err"); }
+      },
+    },
   ], [nav, push]);
 
   const filtered = q

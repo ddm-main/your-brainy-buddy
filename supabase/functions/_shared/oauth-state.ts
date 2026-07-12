@@ -26,7 +26,13 @@ async function hmac(secret: string, data: string): Promise<string> {
   return b64url(new Uint8Array(sig));
 }
 
-const SECRET = () => Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "fallback-dev-secret";
+// Fail closed: signing/verifying OAuth state with a hardcoded fallback would
+// let anyone forge a valid state token using that publicly-known string.
+function SECRET(): string {
+  const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!key) throw new Error("SUPABASE_SERVICE_ROLE_KEY not configured — cannot sign OAuth state");
+  return key;
+}
 
 export async function signState(payload: Record<string, unknown>, ttlSec = 600): Promise<string> {
   const body = { ...payload, exp: Math.floor(Date.now() / 1000) + ttlSec };

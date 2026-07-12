@@ -3,15 +3,17 @@ import { useNavigate } from "react-router-dom";
 import { Bell, Command, LogOut, SlidersHorizontal, Wifi, Zap } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useUi } from "@/store/uiStore";
-import { motion } from "framer-motion";
+import { useAiStatus } from "@/store/aiStatusStore";
+import { useNotifications } from "@/store/notificationStore";
+import { motion, AnimatePresence } from "framer-motion";
 
 const NAV = [
   { to: "/", label: "HUD" },
   { to: "/tasks", label: "Tasks" },
   { to: "/notes", label: "Notes" },
-  { to: "/inbox", label: "Inbox" },
+  { to: "/decisions", label: "Decisions" },
   { to: "/finance", label: "Finance" },
   { to: "/projects", label: "Projects" },
 ];
@@ -25,6 +27,45 @@ export default function TopBar() {
     const t = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
+
+  // Real Supabase reachability check, not a decoration — cheap head-count
+  // query on an interval.
+  const [linkOk, setLinkOk] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const { error } = await supabase.from("banks").select("id", { head: true, count: "exact" }).limit(1);
+        if (!cancelled) setLinkOk(!error);
+      } catch {
+        if (!cancelled) setLinkOk(false);
+      }
+    };
+    check();
+    const iv = setInterval(check, 60_000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, []);
+
+  const aiOk = useAiStatus((s) => s.ok);
+
+  const notifItems = useNotifications((s) => s.items);
+  const unreadCount = useNotifications((s) => s.unreadCount);
+  const markAllRead = useNotifications((s) => s.markAllRead);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const notifRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!notifOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (notifRef.current && !notifRef.current.contains(e.target as Node)) setNotifOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [notifOpen]);
+  const toggleNotif = () => {
+    const next = !notifOpen;
+    setNotifOpen(next);
+    if (next) markAllRead();
+  };
 
   const time = now.toLocaleTimeString([], { hour12: false });
   const date = now.toLocaleDateString([], { day: "2-digit", month: "short" }).toUpperCase();
@@ -120,24 +161,57 @@ export default function TopBar() {
           <Command size={12} /> ⌘K
         </button>
 
-        <StatusChip label="link" ok icon={<Wifi size={11} />} />
-        <StatusChip label="ai" ok icon={<Zap size={11} />} />
+        <StatusChip label="link" ok={linkOk} icon={<Wifi size={11} />} />
+        <StatusChip label="ai" ok={aiOk} icon={<Zap size={11} />} />
 
         <div style={{ fontFamily: "var(--font-display)", fontSize: 13, color: "var(--accent-soft)", letterSpacing: "0.1em" }}>
           <span style={{ color: "var(--text-dim)", fontSize: 10, marginRight: 8 }}>{date}</span>
           {time}
         </div>
 
-        <button className="focus-outline" title="Notifications" style={iconBtn}>
-          <Bell size={14} />
-        </button>
+        <div ref={notifRef} style={{ position: "relative" }}>
+          <button className="focus-outline" title="Notifications" style={{ ...iconBtn, position: "relative" }} onClick={toggleNotif}>
+            <Bell size={14} />
+            {unreadCount > 0 && (
+              <span style={{
+                position: "absolute", top: 2, right: 2, width: 6, height: 6, borderRadius: "50%",
+                background: "var(--danger)", boxShadow: "0 0 4px var(--danger)",
+              }} />
+            )}
+          </button>
+          <AnimatePresence>
+            {notifOpen && (
+              <motion.div
+                initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }}
+                className="hud-panel"
+                style={{ position: "absolute", top: "calc(100% + 8px)", right: 0, width: 300, maxHeight: 360, overflow: "auto", zIndex: 50 }}
+              >
+                <span className="hud-corner tl" /><span className="hud-corner tr" />
+                <span className="hud-corner bl" /><span className="hud-corner br" />
+                <div style={{ padding: "10px 12px", borderBottom: "1px solid var(--edge)" }} className="hud-label">Notifications</div>
+                <div style={{ padding: 8 }}>
+                  {notifItems.length === 0 ? (
+                    <div className="hud-label" style={{ padding: 12, textAlign: "center" }}>no notifications</div>
+                  ) : (
+                    notifItems.map((n) => (
+                      <div key={n.id} style={{ padding: "8px 10px", borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
+                        <div style={{ fontSize: 12, color: "var(--text)" }}>{n.text}</div>
+                        <div className="hud-label" style={{ marginTop: 2, color: "var(--text-muted)" }}>{new Date(n.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
         <button
           className="focus-outline"
           title="Config"
           onClick={() => navigate("/config")}
-          style={{ ...iconBtn, width: "auto", padding: "0 10px", gap: 6, fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.18em", textTransform: "uppercase" }}
+          style={iconBtn}
         >
-          <SlidersHorizontal size={13} /> Config
+          <SlidersHorizontal size={13} />
         </button>
         <button
           className="focus-outline"

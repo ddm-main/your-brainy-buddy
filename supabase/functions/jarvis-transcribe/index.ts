@@ -1,9 +1,20 @@
 // JARVIS speech-to-text. Accepts multipart audio, forwards to Lovable AI Gateway.
 
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
+import { sanitizedErrorResponse } from "../_shared/errors.ts";
+import { createSlidingWindowLimiter, checkAndBumpDailyQuota } from "../_shared/rate-limit.ts";
 
 const GATEWAY = "https://ai.gateway.lovable.dev/v1/audio/transcriptions";
+// Must tolerate continuous-mode dictation, which polls roughly every 2.5s
+// (src/lib/stt.ts) — that alone can approach ~24 calls/min in one session.
+const transcribeLimiter = createSlidingWindowLimiter(60, 60_000);
+const TRANSCRIBE_DAILY_REQUEST_CAP = 1500;
+
+function admin() {
+  return createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } });
+}
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -14,6 +25,19 @@ Deno.serve(async (req) => {
   if ("error" in auth) {
     return new Response(JSON.stringify({ error: "unauthorized" }), {
       status: 401, headers: { ...cors, "Content-Type": "application/json" },
+    });
+  }
+
+  const rl = transcribeLimiter.check(auth.userId);
+  if (!rl.ok) {
+    return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) },
+    });
+  }
+  const quota = await checkAndBumpDailyQuota(auth.userId, { endpoint: "transcribe", requestCap: TRANSCRIBE_DAILY_REQUEST_CAP, svc: admin() });
+  if (!quota.ok) {
+    return new Response(JSON.stringify({ error: "quota_exhausted", reason: quota.reason, requests: quota.requests }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json" },
     });
   }
 
@@ -55,8 +79,9 @@ Deno.serve(async (req) => {
 
     if (!res.ok) {
       const detail = await res.text().catch(() => "");
+      console.error(`jarvis-transcribe: upstream ${res.status}:`, detail);
       return new Response(
-        JSON.stringify({ error: `transcription failed (${res.status})`, detail: detail.slice(0, 400) }),
+        JSON.stringify({ error: `Transcription service unavailable (upstream ${res.status}).` }),
         { status: res.status, headers: { ...cors, "Content-Type": "application/json" } },
       );
     }
@@ -77,10 +102,6 @@ Deno.serve(async (req) => {
       },
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("jarvis-transcribe:", msg);
-    return new Response(JSON.stringify({ error: msg }), {
-      status: 500, headers: { ...cors, "Content-Type": "application/json" },
-    });
+    return sanitizedErrorResponse(err, "Transcription failed", "jarvis-transcribe", cors);
   }
 });

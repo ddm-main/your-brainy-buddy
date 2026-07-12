@@ -16,6 +16,8 @@ import {
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { safeFetch, bytesToText } from "../_shared/http.ts";
+import { sanitizeError, sanitizedErrorResponse } from "../_shared/errors.ts";
+import { createSlidingWindowLimiter, checkAndBumpDailyQuota, addTokenUsage } from "../_shared/rate-limit.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -106,56 +108,10 @@ function admin() {
 
 // -----------------------------------------------------------------------------
 
-// --- Per-user rate limit (sliding window, in-memory) ------------------------
-const RATE_LIMIT_MAX = 20;         // requests
-const RATE_LIMIT_WINDOW_MS = 60_000; // per minute
-const rateBuckets = new Map<string, number[]>();
-function checkRateLimit(uid: string): { ok: true } | { ok: false; retryAfter: number } {
-  const now = Date.now();
-  const cutoff = now - RATE_LIMIT_WINDOW_MS;
-  const arr = (rateBuckets.get(uid) ?? []).filter((t) => t > cutoff);
-  if (arr.length >= RATE_LIMIT_MAX) {
-    const retryAfter = Math.ceil((arr[0] + RATE_LIMIT_WINDOW_MS - now) / 1000);
-    rateBuckets.set(uid, arr);
-    return { ok: false, retryAfter: Math.max(1, retryAfter) };
-  }
-  arr.push(now);
-  rateBuckets.set(uid, arr);
-  return { ok: true };
-}
-
-// --- Per-user daily quota (durable, via RPC) --------------------------------
-const DAILY_REQUEST_CAP = 500;
-const DAILY_TOKEN_CAP = 500_000;
-
-async function checkAndBumpQuota(userId: string): Promise<
-  { ok: true } | { ok: false; reason: string; requests: number; tokens: number }
-> {
-  const db = admin();
-  const { data, error } = await db.rpc("increment_jarvis_usage", {
-    _user_id: userId, _requests: 1, _tokens: 0,
-  });
-  if (error) {
-    console.error("quota rpc failed:", error.message);
-    return { ok: true }; // fail-open on infra error; rate-limit still applies
-  }
-  const row = Array.isArray(data) ? data[0] : data;
-  const requests = Number(row?.requests ?? 0);
-  const tokens = Number(row?.tokens ?? 0);
-  if (requests > DAILY_REQUEST_CAP) return { ok: false, reason: "daily_request_cap", requests, tokens };
-  if (tokens > DAILY_TOKEN_CAP)     return { ok: false, reason: "daily_token_cap", requests, tokens };
-  return { ok: true };
-}
-
-async function addTokenUsage(userId: string, tokens: number): Promise<void> {
-  if (!tokens || tokens <= 0) return;
-  const db = admin();
-  try {
-    await db.rpc("increment_jarvis_usage", { _user_id: userId, _requests: 0, _tokens: tokens });
-  } catch (e) {
-    console.error("token bump failed:", e instanceof Error ? e.message : String(e));
-  }
-}
+// --- Per-user rate limit + daily quota ---------------------------------------
+const chatLimiter = createSlidingWindowLimiter(20, 60_000);
+const CHAT_DAILY_REQUEST_CAP = 500;
+const CHAT_DAILY_TOKEN_CAP = 500_000;
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -171,7 +127,7 @@ Deno.serve(async (req) => {
   }
   const userId = auth.userId;
 
-  const rl = checkRateLimit(userId);
+  const rl = chatLimiter.check(userId);
   if (!rl.ok) {
     return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
       status: 429,
@@ -179,7 +135,7 @@ Deno.serve(async (req) => {
     });
   }
 
-  const quota = await checkAndBumpQuota(userId);
+  const quota = await checkAndBumpDailyQuota(userId, { endpoint: "chat", requestCap: CHAT_DAILY_REQUEST_CAP, tokenCap: CHAT_DAILY_TOKEN_CAP, svc: admin() });
   if (!quota.ok) {
     return new Response(JSON.stringify({ error: "quota_exhausted", reason: quota.reason, requests: quota.requests, tokens: quota.tokens }), {
       status: 429,
@@ -310,11 +266,11 @@ Deno.serve(async (req) => {
               .from("jarvis_memory")
               .update({ content, tags, updated_at: new Date().toISOString() })
               .eq("id", existing.data.id);
-            if (error) return { error: error.message };
+            if (error) return sanitizeError(error, "Saving that memory failed", "jarvis-chat:remember");
             return { updated: true, topic };
           }
           const { error } = await db.from("jarvis_memory").insert({ topic, content, tags, user_id: userId });
-          if (error) return { error: error.message };
+          if (error) return sanitizeError(error, "Saving that memory failed", "jarvis-chat:remember");
           return { created: true, topic };
         },
       }),
@@ -334,7 +290,7 @@ Deno.serve(async (req) => {
             .or(`topic.ilike.%${q}%,content.ilike.%${q}%`)
             .order("updated_at", { ascending: false })
             .limit(limit);
-          if (error) return { error: error.message };
+          if (error) return sanitizeError(error, "Memory search failed", "jarvis-chat:recall");
           return { matches: data ?? [] };
         },
       }),
@@ -351,7 +307,7 @@ Deno.serve(async (req) => {
             .insert({ text, fire_at: fire_at_iso, user_id: userId })
             .select("id,fire_at")
             .single();
-          if (error) return { error: error.message };
+          if (error) return sanitizeError(error, "Reminder scheduling failed", "jarvis-chat:set_reminder");
           return { scheduled: true, id: data.id, fire_at: data.fire_at };
         },
       }),
@@ -430,7 +386,7 @@ Deno.serve(async (req) => {
             });
             return { summary: text };
           } catch (e) {
-            return { error: e instanceof Error ? e.message : String(e) };
+            return sanitizeError(e, "File summarization failed", "jarvis-chat:summarize_file");
           }
         },
       }),
@@ -458,7 +414,7 @@ Deno.serve(async (req) => {
             source: "jarvis",
             user_id: userId,
           }).select("id,title").single();
-          if (error) return { error: error.message };
+          if (error) return sanitizeError(error, "Task creation failed", "jarvis-chat:create_task");
           return { action: "create_task", created: true, id: data.id, ...input };
         },
       }),
@@ -470,7 +426,7 @@ Deno.serve(async (req) => {
           const { data, error } = await db.from("notes").insert({
             title: input.title, content: input.content, user_id: userId,
           }).select("id").single();
-          if (error) return { error: error.message };
+          if (error) return sanitizeError(error, "Note creation failed", "jarvis-chat:create_note");
           return { action: "create_note", created: true, id: data.id, ...input };
         },
       }),
@@ -494,7 +450,7 @@ Deno.serve(async (req) => {
           if (!targetId) return { error: "no matching task" };
           const { error } = await db.from("tasks")
             .update({ status: "done" }).eq("id", targetId).eq("user_id", userId);
-          if (error) return { error: error.message };
+          if (error) return sanitizeError(error, "Could not update that task", "jarvis-chat:complete_task");
           return { completed: true, id: targetId };
         },
       }),
@@ -514,7 +470,7 @@ Deno.serve(async (req) => {
             .limit(limit);
           if (focus_only) q = q.eq("focus", true);
           const { data, error } = await q;
-          if (error) return { error: error.message };
+          if (error) return sanitizeError(error, "Loading tasks failed", "jarvis-chat:list_tasks");
           return { tasks: data ?? [] };
         },
       }),
@@ -617,7 +573,7 @@ Deno.serve(async (req) => {
             .eq("fired", false)
             .order("fire_at", { ascending: true })
             .limit(limit);
-          if (error) return { error: error.message };
+          if (error) return sanitizeError(error, "Loading reminders failed", "jarvis-chat:list_reminders");
           return { reminders: data ?? [] };
         },
       }),
@@ -667,7 +623,7 @@ Deno.serve(async (req) => {
             user_id: userId,
           };
           const { data, error } = await db.from("transactions").insert(row).select("id").single();
-          if (error) return { error: error.message };
+          if (error) return sanitizeError(error, "Logging that transaction failed", "jarvis-chat:add_transaction");
           return { created: true, id: data.id, ...input };
         },
       }),
@@ -679,7 +635,7 @@ Deno.serve(async (req) => {
           const { error } = await db.from("jarvis_reminders")
             .update({ fired: true })
             .eq("id", id).eq("user_id", userId);
-          if (error) return { error: error.message };
+          if (error) return sanitizeError(error, "Could not update that reminder", "jarvis-chat:complete_reminder");
           return { completed: true, id };
         },
       }),
@@ -693,7 +649,7 @@ Deno.serve(async (req) => {
       messages: await convertToModelMessages(messages),
       onFinish: ({ usage }) => {
         const total = Number((usage as any)?.totalTokens ?? 0);
-        if (total > 0) void addTokenUsage(userId, total);
+        if (total > 0) void addTokenUsage(admin(), userId, "chat", total);
       },
     });
 
@@ -702,11 +658,6 @@ Deno.serve(async (req) => {
       headers: withLovableAiGatewayRunIdHeaders(cors, runId),
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("jarvis-chat error:", msg);
-    return new Response(JSON.stringify({ error: msg }), {
-      status: 500,
-      headers: { ...cors, "Content-Type": "application/json" },
-    });
+    return sanitizedErrorResponse(err, "Chat request failed", "jarvis-chat", cors);
   }
 });

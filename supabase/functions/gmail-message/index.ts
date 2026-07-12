@@ -1,6 +1,7 @@
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { ensureAccessToken, extractBody, gapi, svcClient } from "../_shared/gmail.ts";
+import { sanitizedErrorResponse } from "../_shared/errors.ts";
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -27,8 +28,6 @@ Deno.serve(async (req) => {
     await svc.from("emails").update({ body_text: text, body_html: html }).eq("id", row.id);
     return new Response(JSON.stringify({ body_text: text, body_html: html }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("gmail-message:", msg);
-    return new Response(JSON.stringify({ error: msg }), { status: 500, headers: { ...cors, "Content-Type": "application/json" } });
+    return sanitizedErrorResponse(err, "Could not load that email", "gmail-message", cors);
   }
 });

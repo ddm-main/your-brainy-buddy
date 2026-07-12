@@ -13,3 +13,6 @@
 # build output.
 node_modules/
 dist/
+
+# graphify's scan output (graph.json/html, cache) — regenerable scratch, not source
+graphify-out/

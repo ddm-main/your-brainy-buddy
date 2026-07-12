@@ -1,0 +1,125 @@
+// Manually upload a bank/card statement PDF — closes the gap where a
+// statement never arrives by email (no Gmail account connected, or the bank
+// just doesn't email statements). Same parse pipeline as the Gmail path,
+// just skipping the "find it in an inbox" step.
+
+import { createClient } from "npm:@supabase/supabase-js@2";
+import { corsFor, preflight } from "../_shared/cors.ts";
+import { requireUserId } from "../_shared/auth.ts";
+import { parseStatementPdf } from "../_shared/statement-pdf.ts";
+import { applyParsedStatementResult } from "../_shared/finance-extract-core.ts";
+import { decryptStatementPassword, type StatementPasswordRule } from "../_shared/crypto.ts";
+import { sanitizedErrorResponse } from "../_shared/errors.ts";
+
+const STATEMENT_BUCKET = "statement-pdfs";
+const MAX_BYTES = 20 * 1024 * 1024; // 20 MB — statements are bigger than the 8MB image cap elsewhere
+
+function safeName(filename: string): string {
+  return filename.replace(/[^\w.\-]/g, "_").slice(0, 80);
+}
+
+Deno.serve(async (req) => {
+  const pre = preflight(req);
+  if (pre) return pre;
+  const cors = corsFor(req);
+
+  const auth = await requireUserId(req);
+  if ("error" in auth) {
+    return new Response(JSON.stringify({ error: "unauthorized" }), {
+      status: 401, headers: { ...cors, "Content-Type": "application/json" },
+    });
+  }
+  const uid = auth.userId;
+
+  try {
+    const { statement_type, credit_card_id, financial_account_id, loan_id, filename, contentType, bytesBase64, password } = await req.json();
+    if (!statement_type || !filename || !bytesBase64) {
+      return new Response(JSON.stringify({ error: "statement_type, filename, bytesBase64 required" }), {
+        status: 400, headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
+    if (!contentType || contentType !== "application/pdf") {
+      return new Response(JSON.stringify({ error: "contentType must be application/pdf" }), {
+        status: 400, headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
+    // Reject oversized payloads before fully decoding — base64 length is a
+    // safe upper-bound estimate of decoded size (actual is ~3/4 of this).
+    if (bytesBase64.length > MAX_BYTES * 1.4) {
+      return new Response(JSON.stringify({ error: `file too large (max ${MAX_BYTES} bytes)` }), {
+        status: 413, headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
+
+    const url = Deno.env.get("SUPABASE_URL")!;
+    const svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const supabase = createClient(url, svc, { auth: { persistSession: false } });
+
+    // Verify ownership of whatever entity this statement is being linked to,
+    // and fetch its stored password if present.
+    let passwordRule: StatementPasswordRule | null = null;
+    if (credit_card_id) {
+      const { data } = await supabase.from("credit_cards").select("id, statement_password_rule").eq("id", credit_card_id).eq("user_id", uid).maybeSingle();
+      if (!data) return new Response(JSON.stringify({ error: "card not found" }), { status: 404, headers: { ...cors, "Content-Type": "application/json" } });
+      passwordRule = data.statement_password_rule ?? null;
+    } else if (financial_account_id) {
+      const { data } = await supabase.from("financial_accounts").select("id, statement_password_rule").eq("id", financial_account_id).eq("user_id", uid).maybeSingle();
+      if (!data) return new Response(JSON.stringify({ error: "account not found" }), { status: 404, headers: { ...cors, "Content-Type": "application/json" } });
+      passwordRule = data.statement_password_rule ?? null;
+    } else if (loan_id) {
+      const { data } = await supabase.from("loans").select("id").eq("id", loan_id).eq("user_id", uid).maybeSingle();
+      if (!data) return new Response(JSON.stringify({ error: "loan not found" }), { status: 404, headers: { ...cors, "Content-Type": "application/json" } });
+    }
+
+    // decode base64 -> bytes
+    const binary = atob(bytesBase64);
+    if (binary.length > MAX_BYTES) {
+      return new Response(JSON.stringify({ error: `file too large (max ${MAX_BYTES} bytes)` }), {
+        status: 413, headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+    const { data: statement, error: stErr } = await supabase.from("statements").insert({
+      user_id: uid,
+      statement_type,
+      credit_card_id: credit_card_id ?? null,
+      financial_account_id: financial_account_id ?? null,
+      loan_id: loan_id ?? null,
+      source: "manual",
+      parse_status: "pending",
+    }).select("id").single();
+    if (stErr) throw stErr;
+
+    const storagePath = `${uid}/manual/${statement.id}-${safeName(filename)}`;
+    const { error: upErr } = await supabase.storage.from(STATEMENT_BUCKET).upload(storagePath, bytes, {
+      contentType: "application/pdf",
+      upsert: true,
+    });
+    if (upErr) throw upErr;
+
+    // Explicit user-supplied password wins; otherwise fall back to whatever
+    // is stored against the linked card/account.
+    let plaintextPassword: string | undefined = password || undefined;
+    if (!plaintextPassword && passwordRule) {
+      try { plaintextPassword = await decryptStatementPassword(passwordRule); }
+      catch (e) { console.warn("decryptStatementPassword failed", e instanceof Error ? e.message : e); }
+    }
+
+    const result = await parseStatementPdf(bytes, plaintextPassword);
+    await applyParsedStatementResult(supabase, statement.id, uid, {
+      credit_card_id: credit_card_id ?? null,
+      financial_account_id: financial_account_id ?? null,
+      loan_id: loan_id ?? null,
+    }, result, storagePath);
+
+    const { data: updated } = await supabase.from("statements").select("parse_status").eq("id", statement.id).maybeSingle();
+
+    return new Response(JSON.stringify({ ok: true, statement_id: statement.id, parse_status: updated?.parse_status ?? null }), {
+      headers: { ...cors, "Content-Type": "application/json" },
+    });
+  } catch (err) {
+    return sanitizedErrorResponse(err, "Statement upload failed", "finance-upload-statement", cors);
+  }
+});

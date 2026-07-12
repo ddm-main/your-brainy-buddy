@@ -1,10 +1,16 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
+import { sanitizedErrorResponse } from "../_shared/errors.ts";
+import { createSlidingWindowLimiter, checkAndBumpDailyQuota } from "../_shared/rate-limit.ts";
 
 const BUCKET = "jarvis-vision";
 const MAX_BYTES = 8 * 1024 * 1024; // 8 MB
 const ALLOWED_MIME = /^image\/(png|jpeg|webp)$/;
+// Always paired 1:1 with a jarvis-vision call from captureAndDescribe — same
+// reasoning as that endpoint's caps.
+const uploadLimiter = createSlidingWindowLimiter(20, 60_000);
+const UPLOAD_DAILY_REQUEST_CAP = 300;
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -19,6 +25,24 @@ Deno.serve(async (req) => {
   }
   const uid = auth.userId;
 
+  // Built early (not just for storage) so the same service-role client
+  // instance backs both the quota RPC below and the storage calls in the
+  // try block — no second client construction.
+  const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } });
+
+  const rl = uploadLimiter.check(uid);
+  if (!rl.ok) {
+    return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) },
+    });
+  }
+  const quota = await checkAndBumpDailyQuota(uid, { endpoint: "vision_upload", requestCap: UPLOAD_DAILY_REQUEST_CAP, svc: supabase });
+  if (!quota.ok) {
+    return new Response(JSON.stringify({ error: "quota_exhausted", reason: quota.reason, requests: quota.requests }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json" },
+    });
+  }
+
   try {
     const { filename, contentType, bytesBase64 } = await req.json();
     if (!filename || !bytesBase64) {
@@ -32,10 +56,6 @@ Deno.serve(async (req) => {
         status: 400, headers: { ...cors, "Content-Type": "application/json" },
       });
     }
-
-    const url = Deno.env.get("SUPABASE_URL")!;
-    const svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const supabase = createClient(url, svc, { auth: { persistSession: false } });
 
     // decode base64 -> bytes
     const binary = atob(bytesBase64);
@@ -65,11 +85,6 @@ Deno.serve(async (req) => {
       headers: { ...cors, "Content-Type": "application/json" },
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("jarvis-vision-upload error:", msg);
-    return new Response(JSON.stringify({ error: msg }), {
-      status: 500,
-      headers: { ...cors, "Content-Type": "application/json" },
-    });
+    return sanitizedErrorResponse(err, "Upload failed", "jarvis-vision-upload", cors);
   }
 });

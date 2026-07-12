@@ -5,7 +5,10 @@ import { db, type Note, relTime } from "@/lib/db";
 import { useUi } from "@/store/uiStore";
 import { Trash2 } from "lucide-react";
 
-const TYPES: Note["note_type"][] = ["general", "project", "meeting", "sop", "decision", "reference", "personal", "finance"];
+// "decision" intentionally excluded — decisions now have their own screen
+// (/decisions, backed by the richer `decisions` table). Existing
+// decision-typed notes still render fine, just no longer creatable here.
+const TYPES: Note["note_type"][] = ["general", "project", "meeting", "sop", "reference", "personal", "finance"];
 
 export default function Notes() {
   const [items, setItems] = useState<Note[]>([]);

@@ -30,24 +30,13 @@ export async function runToolIntent(name: string, intent: ToolIntent): Promise<v
       }
       // open_url removed — external navigation disabled to close the injection exfiltration channel.
 
-      case "create_task": {
-        await db.tasks.create({
-          title: String(intent.title ?? "Untitled task"),
-          priority: (intent.priority as any) ?? "normal",
-          due_at: (intent.due_at as any) ?? null,
-          focus: !!intent.focus,
-        });
-        useUi.getState().push(`Task created: ${intent.title}`, "ok");
-        return;
-      }
-      case "create_note": {
-        await db.notes.create({
-          title: String(intent.title ?? "Untitled note"),
-          content: String(intent.content ?? ""),
-        });
-        useUi.getState().push(`Note saved: ${intent.title}`, "ok");
-        return;
-      }
+      // create_task / create_note are handled entirely server-side (see
+      // jarvis-chat/index.ts's tool handlers) — the client only shows a
+      // confirmation toast (see jarvisChat.ts's handleToolResult). Do not
+      // add a client-side insert here; that caused duplicate rows (Round 3
+      // fix — the server tool inserted the row, and this dispatcher was
+      // also inserting a second one on every voice/chat-created task/note).
+
       case "add_inbox_item": {
         const { error } = await supabase.from("inbox_items").insert({
           content: String(intent.content ?? ""),
@@ -59,7 +48,12 @@ export async function runToolIntent(name: string, intent: ToolIntent): Promise<v
       }
       case "open_project": {
         const slug = String(intent.slug ?? "");
-        if (navigator_) navigator_(`/projects${slug ? `/${slug}` : ""}`);
+        if (!navigator_) return;
+        // ProjectDetail looks up by id, not slug — resolve it here so the
+        // link doesn't silently 404. Falls back to a raw nav if no match is
+        // found, so this never hard-fails the intent.
+        const proj = slug ? await db.projects.getBySlug(slug) : null;
+        navigator_(proj ? `/projects/${proj.id}` : `/projects${slug ? `/${slug}` : ""}`);
         return;
       }
       case "focus_panel": {

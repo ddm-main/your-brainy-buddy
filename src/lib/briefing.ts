@@ -19,9 +19,11 @@ export function markBriefingDone() {
   try { localStorage.setItem(KEY_PREFIX + today(), "1"); } catch { /* noop */ }
 }
 
-export async function runMorningBriefing() {
-  if (!shouldRunBriefing()) return;
-  markBriefingDone();
+export async function runMorningBriefing(force = false) {
+  if (!force) {
+    if (!shouldRunBriefing()) return;
+    markBriefingDone();
+  }
   const hour = new Date().getHours();
   const greet = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
   const prompt =

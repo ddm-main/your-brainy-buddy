@@ -5,17 +5,26 @@
 
 import { svcClient } from "../_shared/gmail.ts";
 import { runGmailSync, frequencyToMinutes } from "../_shared/gmail-sync-core.ts";
+import { sanitizeError } from "../_shared/errors.ts";
 
 Deno.serve(async (req) => {
+  // Fail closed: this endpoint runs with service-role privileges over every
+  // account in the database and has no JWT gate (verify_jwt=false, it's a
+  // cron target). If CRON_SECRET is never configured, reject everything
+  // instead of silently allowing unauthenticated requests through.
   const secret = Deno.env.get("CRON_SECRET");
-  if (secret) {
-    const provided = req.headers.get("x-cron-secret") ?? "";
-    if (provided !== secret) {
-      return new Response(JSON.stringify({ error: "forbidden" }), {
-        status: 403,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
+  if (!secret) {
+    return new Response(JSON.stringify({ error: "misconfigured — CRON_SECRET not set" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  const provided = req.headers.get("x-cron-secret") ?? "";
+  if (provided !== secret) {
+    return new Response(JSON.stringify({ error: "forbidden" }), {
+      status: 403,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   const svc = svcClient();
@@ -25,7 +34,8 @@ Deno.serve(async (req) => {
     .neq("sync_frequency", "manual")
     .is("paused_at", null);
   if (error) {
-    return new Response(JSON.stringify({ error: error.message }), {
+    const safe = sanitizeError(error, "Scheduled sync failed to load accounts", "gmail-sync-due");
+    return new Response(JSON.stringify(safe), {
       status: 500,
       headers: { "Content-Type": "application/json" },
     });
@@ -47,8 +57,8 @@ Deno.serve(async (req) => {
       const r = await runGmailSync(svc, a);
       results.push({ id: a.id, email: a.email_address, ...r });
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      results.push({ id: a.id, email: a.email_address, error: msg });
+      const safe = sanitizeError(e, "Scheduled sync failed", `gmail-sync-due:${a.id}`);
+      results.push({ id: a.id, email: a.email_address, error: safe.error });
     }
   }
 

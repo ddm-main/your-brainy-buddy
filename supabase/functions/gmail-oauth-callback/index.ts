@@ -46,8 +46,8 @@ Deno.serve(async (req) => {
     });
     const tok = await tokenRes.json();
     if (!tokenRes.ok) {
-      console.error("google token exchange failed:", tok);
-      return finishOAuth({ gmail_error: tok.error_description || tok.error || "token_exchange_failed" });
+      console.error("gmail-oauth-callback: token exchange failed:", tok);
+      return finishOAuth({ gmail_error: "token_exchange_failed" });
     }
 
     // Fetch userinfo to get email + sub.
@@ -76,14 +76,13 @@ Deno.serve(async (req) => {
     // Update the row the user started from.
     const { error: updErr } = await svc.from("email_accounts").update(patch).eq("id", payload.aid).eq("user_id", payload.uid);
     if (updErr) {
-      console.error("update failed:", updErr);
-      return finishOAuth({ gmail_error: updErr.message });
+      console.error("gmail-oauth-callback: update failed:", updErr);
+      return finishOAuth({ gmail_error: "save_failed" });
     }
 
     return finishOAuth({ connected: ui.email || "1" });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.error("gmail-oauth-callback:", msg);
-    return finishOAuth({ gmail_error: msg });
+    console.error("gmail-oauth-callback:", e instanceof Error ? (e.stack ?? e.message) : String(e));
+    return finishOAuth({ gmail_error: "unexpected_error" });
   }
 });

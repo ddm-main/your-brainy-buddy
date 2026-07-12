@@ -11,6 +11,7 @@ import BootScanline from "@/components/hud/BootScanline";
 import AmbientLayer from "@/components/hud/AmbientLayer";
 import { useContent } from "@/store/contentStore";
 import { useUi } from "@/store/uiStore";
+import { useNotifications } from "@/store/notificationStore";
 import { startReminderPoller } from "@/lib/reminders";
 import { runMorningBriefing } from "@/lib/briefing";
 import { useSession } from "@/lib/useSession";
@@ -23,6 +24,7 @@ const Projects = lazy(() => import("@/routes/Projects"));
 const Config = lazy(() => import("@/routes/Config"));
 const Tasks = lazy(() => import("@/routes/Tasks"));
 const Notes = lazy(() => import("@/routes/Notes"));
+const Decisions = lazy(() => import("@/routes/Decisions"));
 const NotFound = lazy(() => import("@/routes/NotFound"));
 const Auth = lazy(() => import("@/routes/Auth"));
 const ResetPassword = lazy(() => import("@/routes/ResetPassword"));
@@ -35,6 +37,7 @@ export default function App() {
 
     const stop = startReminderPoller((r) => {
       useContent.getState().addCard({ type: "reminder", text: r.text, fireAt: r.fire_at } as any);
+      useNotifications.getState().add(r.text);
       try {
         const u = new SpeechSynthesisUtterance(`Reminder, sir: ${r.text}`);
         window.speechSynthesis?.speak(u);
@@ -127,6 +130,7 @@ function AnimatedRoutes() {
           <Route path="/" element={<Home />} />
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/notes" element={<Notes />} />
+          <Route path="/decisions" element={<Decisions />} />
           <Route path="/inbox" element={<Inbox />} />
           <Route path="/finance/*" element={<Finance />} />
           <Route path="/projects/*" element={<Projects />} />

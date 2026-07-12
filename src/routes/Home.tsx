@@ -5,7 +5,8 @@ import HudPanel from "@/components/hud/HudPanel";
 import KineticNumber from "@/components/hud/KineticNumber";
 import { useUi } from "@/store/uiStore";
 import { useVoice } from "@/store/voiceStore";
-import { db, inr, relTime, type Task, type EmailRow } from "@/lib/db";
+import { db, inr, relTime, type Task } from "@/lib/db";
+import { useFinanceSnapshot } from "@/lib/useFinanceSnapshot";
 
 import VoiceBar from "@/components/hud/VoiceBar";
 import JarvisCore from "@/components/core/JarvisCore";
@@ -121,11 +122,17 @@ function DateChip() {
   );
 }
 
-/* ---------- 01 Mission Control (Focus + Next 7 days) ---------- */
+/* ---------- 01 Mission Control (Focus + Next 7 days + Finance) ---------- */
+interface DueSoonRow { label: string; date: string }
+
 function MissionControlBody() {
   const nav = useNavigate();
   const [focus, setFocus] = useState<Task[]>([]);
   const [next7, setNext7] = useState<Task[]>([]);
+  const [billsSoon, setBillsSoon] = useState<DueSoonRow[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [goalsSoon, setGoalsSoon] = useState<any[]>([]);
+  const [alertCount, setAlertCount] = useState(0);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -143,6 +150,32 @@ function MissionControlBody() {
           .slice(0, 4);
         setFocus(f);
         setNext7(upcoming);
+
+        const [loans, dues, goals, openAlerts] = await Promise.all([
+          db.loans.list(), db.statements.upcomingDues(6), db.goals.list(), db.alerts.list({ status: "open" }),
+        ]);
+        const inWindow = (iso: string | null | undefined) => {
+          if (!iso) return false;
+          const t = new Date(iso).getTime();
+          return t >= now && t <= soon;
+        };
+        const loanRows: DueSoonRow[] = loans
+          .filter((l: any) => inWindow(l.next_due_date))
+          .map((l: any) => ({ label: `EMI · ${l.lender_name} · ${inr(l.emi_amount ?? 0)}`, date: l.next_due_date }));
+        const stmtRows: DueSoonRow[] = dues
+          .filter((s: any) => inWindow(s.due_date))
+          .map((s: any) => ({
+            label: `${s.credit_cards?.card_name ?? s.financial_accounts?.nickname ?? "—"} · due ${new Date(s.due_date).toLocaleDateString([], { day: "2-digit", month: "short" })}`,
+            date: s.due_date,
+          }));
+        setBillsSoon([...loanRows, ...stmtRows].sort((a, b) => a.date.localeCompare(b.date)).slice(0, 4));
+
+        const in30 = now + 30 * 24 * 60 * 60 * 1000;
+        setGoalsSoon(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          goals.filter((g: any) => g.target_date && new Date(g.target_date).getTime() >= now && new Date(g.target_date).getTime() <= in30).slice(0, 3),
+        );
+        setAlertCount(openAlerts.length);
       } finally { setLoading(false); }
     })();
   }, []);
@@ -199,6 +232,40 @@ function MissionControlBody() {
               );
             })}
           </div>
+        </div>
+      )}
+
+      {billsSoon.length > 0 && (
+        <div>
+          <div className="section-label">BILLS &amp; EMIS DUE SOON</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+            {billsSoon.map((b, i) => (
+              <div key={i} className="next-row">
+                <span className="next-title">{b.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {goalsSoon.length > 0 && (
+        <div>
+          <div className="section-label">GOALS NEEDING ATTENTION</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+            {goalsSoon.map((g) => (
+              <div key={g.id} className="next-row">
+                <span className="next-title">{g.title}</span>
+                <span className="hud-label" style={{ color: "var(--warn)" }}>by {new Date(g.target_date).toLocaleDateString([], { day: "2-digit", month: "short" })}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {alertCount > 0 && (
+        <div className="next-row" style={{ cursor: "pointer" }} onClick={() => nav("/finance")}>
+          <span className="next-title" style={{ color: "var(--warn)" }}>{alertCount} finance alert{alertCount === 1 ? "" : "s"} need attention</span>
+          <span className="hud-label" style={{ color: "var(--accent-soft)" }}>review →</span>
         </div>
       )}
 
@@ -307,18 +374,17 @@ function BriefWithStatsBody() {
 /* ---------- 03 Signal (alerts + reminders) ---------- */
 function SignalBody() {
   const nav = useNavigate();
-  const [state, setState] = useState<{ overdue: number; important: number; blocked: number; dues: number }>({
-    overdue: 0, important: 0, blocked: 0, dues: 0,
+  const [state, setState] = useState<{ overdue: number; blocked: number; dues: number }>({
+    overdue: 0, blocked: 0, dues: 0,
   });
   const [reminders, setReminders] = useState<{ id: string; text: string; fire_at: string }[]>([]);
 
   useEffect(() => {
     (async () => {
       try {
-        const [openTasks, projects, ic, subs, cards, rs] = await Promise.all([
+        const [openTasks, projects, subs, cards, rs] = await Promise.all([
           db.tasks.listOpen(200),
           db.projects.list(),
-          db.emails.counts(),
           db.subscriptions.list(),
           db.cards.list(),
           db.reminders.list(),
@@ -334,7 +400,7 @@ function SignalBody() {
           if (d.getTime() < now) d.setMonth(d.getMonth() + 1);
           return d.getTime() < soon;
         }).length;
-        setState({ overdue, important: ic.important, blocked, dues: upcomingSubs + upcomingCards });
+        setState({ overdue, blocked, dues: upcomingSubs + upcomingCards });
         setReminders(
           rs.filter((r: any) => !r.fired && r.fire_at && new Date(r.fire_at).getTime() >= now - 60_000).slice(0, 2),
         );
@@ -344,7 +410,6 @@ function SignalBody() {
 
   const rows: { sev: "err" | "warn" | "ok"; n: number; label: string; a: string; to: string }[] = [
     { sev: state.overdue > 0 ? "err" : "ok", n: state.overdue, label: `overdue task${state.overdue === 1 ? "" : "s"}`, a: "open", to: "/tasks" },
-    { sev: state.important > 0 ? "warn" : "ok", n: state.important, label: `important email${state.important === 1 ? "" : "s"}`, a: "inbox", to: "/inbox" },
     { sev: state.blocked > 0 ? "warn" : "ok", n: state.blocked, label: `blocked project${state.blocked === 1 ? "" : "s"}`, a: "review", to: "/projects" },
     { sev: state.dues > 0 ? "warn" : "ok", n: state.dues, label: `finance due${state.dues === 1 ? "" : "s"} in 7d`, a: "finance", to: "/finance" },
   ];
@@ -388,79 +453,37 @@ function SignalBody() {
   );
 }
 
-/* ---------- 04 Pulse (Finance + Inbox merged) ---------- */
+/* ---------- 04 Pulse (Finance) ---------- */
 function PulseBody() {
   const nav = useNavigate();
-  const [fin, setFin] = useState<{ spend: number; income: number; subsDue: number }>({ spend: 0, income: 0, subsDue: 0 });
-  const [ic, setIc] = useState({ unread: 0, important: 0, needsReply: 0 });
-  const [topMail, setTopMail] = useState<EmailRow[]>([]);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const [m, subs, counts, list] = await Promise.all([
-          db.transactions.monthSummary(),
-          db.subscriptions.list(),
-          db.emails.counts(),
-          db.emails.list(undefined, 3),
-        ]);
-        const now = Date.now();
-        const soon = now + 7 * 24 * 60 * 60 * 1000;
-        const subsDue = subs.filter((s: any) => s.next_due_date && new Date(s.next_due_date).getTime() < soon).length;
-        setFin({ spend: m.spend, income: m.income, subsDue });
-        setIc(counts);
-        setTopMail(list);
-      } catch (e: any) { useUi.getState().push(`Pulse failed: ${e?.message ?? "error"}`, "err"); }
-    })();
-  }, []);
-
-  const net = fin.income - fin.spend;
+  const { state, netWorth, utilization, health } = useFinanceSnapshot();
+  const net = state.income - state.spend;
 
   return (
     <div className="pulse-grid">
       <button className="pulse-cluster" onClick={() => nav("/finance")} aria-label="Open finance">
         <div className="section-label">FINANCE</div>
-        <div className="pulse-net" data-neg={net < 0 ? "1" : "0"}>
-          <div className="hud-label">this month net</div>
-          <div className="pulse-net-val">{inr(net)}</div>
-          <div className="pulse-net-sub">{inr(fin.income)} in · {inr(fin.spend)} out</div>
+        <div className="pulse-net" data-neg={netWorth.netWorth < 0 ? "1" : "0"}>
+          <div className="hud-label">net worth</div>
+          <div className="pulse-net-val">{inr(netWorth.netWorth)}</div>
+          <div className="pulse-net-sub">{inr(state.income)} in · {inr(state.spend)} out this month</div>
         </div>
         <div className="pulse-mini-grid">
           <div className="pulse-mini">
-            <div className="hud-label">spend</div>
-            <div className="pulse-mini-val">{inr(fin.spend)}</div>
+            <div className="hud-label">this month net</div>
+            <div className="pulse-mini-val" style={{ color: net >= 0 ? "var(--ok)" : "var(--danger)" }}>{inr(net)}</div>
           </div>
           <div className="pulse-mini">
-            <div className="hud-label">subs 7d</div>
-            <div className="pulse-mini-val" style={{ color: fin.subsDue > 0 ? "var(--warn)" : "var(--text)" }}>
-              <KineticNumber value={fin.subsDue} />
+            <div className="hud-label">utilization</div>
+            <div className="pulse-mini-val">{utilization.aggregatePct == null ? "—" : `${utilization.aggregatePct}%`}</div>
+          </div>
+          <div className="pulse-mini">
+            <div className="hud-label">health</div>
+            <div className="pulse-mini-val" style={{ color: health.score >= 70 ? "var(--ok)" : health.score >= 40 ? "var(--warn)" : "var(--danger)" }}>
+              {health.score}<span style={{ fontSize: 10, color: "var(--text-dim)" }}>/100</span>
             </div>
           </div>
         </div>
-      </button>
-
-      <button className="pulse-cluster with-divider" onClick={() => nav("/inbox")} aria-label="Open inbox">
-        <div className="section-label">INBOX</div>
-        <div className="pulse-mini-grid" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
-          {[{ n: ic.unread, l: "total" }, { n: ic.important, l: "important" }, { n: ic.needsReply, l: "reply" }].map((c) => (
-            <div key={c.l} className="pulse-mini">
-              <div className="hud-label">{c.l}</div>
-              <div className="pulse-mini-val" style={{ color: "var(--accent)" }}><KineticNumber value={c.n} /></div>
-            </div>
-          ))}
-        </div>
-        {topMail.length === 0 ? (
-          <div className="hud-label empty-line">no emails — connect an account →</div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
-            {topMail.map((i) => (
-              <div key={i.id} className="mail-row">
-                <div className="mail-from">{i.from_name ?? i.from_email ?? "unknown"}</div>
-                <div className="mail-subj">{i.subject ?? "(no subject)"}</div>
-              </div>
-            ))}
-          </div>
-        )}
       </button>
     </div>
   );

@@ -1,9 +1,18 @@
 // JARVIS text-to-speech. Streams PCM audio via SSE from Lovable AI Gateway.
 
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
+import { sanitizedErrorResponse } from "../_shared/errors.ts";
+import { createSlidingWindowLimiter, checkAndBumpDailyQuota } from "../_shared/rate-limit.ts";
 
 const GATEWAY_URL = "https://ai.gateway.lovable.dev/v1/audio/speech";
+const ttsLimiter = createSlidingWindowLimiter(30, 60_000);
+const TTS_DAILY_REQUEST_CAP = 800;
+
+function admin() {
+  return createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } });
+}
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -14,6 +23,19 @@ Deno.serve(async (req) => {
   if ("error" in auth) {
     return new Response(JSON.stringify({ error: "unauthorized" }), {
       status: 401, headers: { ...cors, "Content-Type": "application/json" },
+    });
+  }
+
+  const rl = ttsLimiter.check(auth.userId);
+  if (!rl.ok) {
+    return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) },
+    });
+  }
+  const quota = await checkAndBumpDailyQuota(auth.userId, { endpoint: "tts", requestCap: TTS_DAILY_REQUEST_CAP, svc: admin() });
+  if (!quota.ok) {
+    return new Response(JSON.stringify({ error: "quota_exhausted", reason: quota.reason, requests: quota.requests }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json" },
     });
   }
 
@@ -59,8 +81,9 @@ Deno.serve(async (req) => {
 
     if (!upstream.ok) {
       const detail = await upstream.text().catch(() => "");
+      console.error(`jarvis-tts: upstream ${upstream.status}:`, detail);
       return new Response(
-        JSON.stringify({ error: `TTS upstream ${upstream.status}: ${detail.slice(0, 200)}` }),
+        JSON.stringify({ error: `Speech service unavailable (upstream ${upstream.status}).` }),
         { status: upstream.status, headers: { ...cors, "Content-Type": "application/json" } },
       );
     }
@@ -70,11 +93,6 @@ Deno.serve(async (req) => {
     });
   } catch (err) {
     if ((req as any).signal?.aborted) return new Response(null, { status: 499 });
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("jarvis-tts error:", msg);
-    return new Response(
-      JSON.stringify({ error: msg }),
-      { status: 500, headers: { ...cors, "Content-Type": "application/json" } },
-    );
+    return sanitizedErrorResponse(err, "Speech synthesis failed", "jarvis-tts", cors);
   }
 });

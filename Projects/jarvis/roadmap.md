@@ -1,5 +1,11 @@
 # JARVIS — Roadmap
 
+> Status as of 2026-07-12 (Round 3): Phases 1-3 are substantially built — see
+> `Projects/jarvis/audit-2026-07.md` for the precise per-item gap list, and
+> `_overview.md`'s log for what shipped in each round. Phase 4 (full
+> agent/automation layer) is largely still ahead. This file is otherwise left
+> as originally written (2026-07-09) rather than rewritten line-by-line.
+
 ## Phase 1 — Foundation (MVP)
 Goal: useful daily.
 

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
 import { supabase } from "@/integrations/supabase/client";
-import { Mail, Landmark, Wallet, CreditCard, Banknote, Target, Repeat, FolderKanban, type LucideIcon } from "lucide-react";
+import { Mail, Landmark, FolderKanban, type LucideIcon } from "lucide-react";
 
 type Card = {
   to: string;
@@ -13,14 +13,9 @@ type Card = {
 };
 
 const CARDS: Card[] = [
-  { to: "/config/email",         label: "Email",         desc: "Mailbox connections, sync rules, filters", table: "email_accounts",    icon: Mail },
-  { to: "/config/banks",         label: "Banks",         desc: "Bank list used by accounts and cards",     table: "banks",             icon: Landmark },
-  { to: "/config/accounts",      label: "Accounts",      desc: "Bank + investment accounts",                table: "financial_accounts",icon: Wallet },
-  { to: "/config/cards",         label: "Cards",         desc: "Credit cards, cycles, limits",             table: "credit_cards",      icon: CreditCard },
-  { to: "/config/loans",         label: "Loans",         desc: "Personal, home, auto loans",               table: "loans",             icon: Banknote },
-  { to: "/config/goals",         label: "Goals",         desc: "Financial targets and progress",           table: "financial_goals",   icon: Target },
-  { to: "/config/subscriptions", label: "Subscriptions", desc: "Recurring services and renewals",          table: "subscriptions",     icon: Repeat },
-  { to: "/config/projects",      label: "Projects",      desc: "Active projects and areas",                table: "projects",          icon: FolderKanban },
+  { to: "/config/email",    label: "Email",    desc: "Mailbox connections, sync rules, filters",              table: "email_accounts", icon: Mail },
+  { to: "/config/finance",  label: "Finance",  desc: "Banks, accounts, cards, loans, goals, subscriptions",   table: "",               icon: Landmark },
+  { to: "/config/projects", label: "Projects", desc: "Active projects and areas",                              table: "projects",       icon: FolderKanban },
 ];
 
 export default function ConfigHome() {
@@ -30,7 +25,7 @@ export default function ConfigHome() {
     let cancelled = false;
     (async () => {
       const entries = await Promise.all(
-        CARDS.map(async (c) => {
+        CARDS.filter((c) => c.table).map(async (c) => {
           const { count } = await supabase.from(c.table as any).select("id", { count: "exact", head: true });
           return [c.table, count ?? 0] as const;
         }),
@@ -72,7 +67,7 @@ export default function ConfigHome() {
                 <span style={{ color: "var(--accent)" }}><Icon size={16} /></span>
                 <div className="hud-label" style={{ color: "var(--accent)", fontSize: 11 }}>{c.label}</div>
                 <div style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-muted)" }}>
-                  {n === undefined ? "…" : `${n} ${n === 1 ? "entry" : "entries"}`}
+                  {!c.table ? null : n === undefined ? "…" : `${n} ${n === 1 ? "entry" : "entries"}`}
                 </div>
               </div>
               <div style={{ fontSize: 12, color: "var(--text-dim, var(--text))", lineHeight: 1.4 }}>{c.desc}</div>

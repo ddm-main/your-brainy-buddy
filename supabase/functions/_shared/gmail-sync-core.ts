@@ -7,6 +7,7 @@ import { ensureAccessToken, gapi, parseFrom, parseHeaders } from "./gmail.ts";
 import { buildGmailQuery } from "./finance-senders.ts";
 import { isFinanceMail } from "./finance-parsers.ts";
 import { extractFinanceForAccount } from "./finance-extract-core.ts";
+import { sanitizeError } from "./errors.ts";
 
 export type SyncResult =
   | { ok: true; paused?: false; inserted: number; total: number; q: string }
@@ -112,10 +113,13 @@ export async function runGmailSync(
 
     return { ok: true, inserted, total: ids.length, q, extracted } as any;
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    // Sanitize what's persisted to last_error (rendered verbatim in the UI),
+    // but re-throw the ORIGINAL error — callers' own console.error still
+    // needs full detail. Sanitize once, at the human-facing boundary.
+    const safe = sanitizeError(e, "Gmail sync failed", `gmail-sync-core:${account.id}`);
     await svc
       .from("email_accounts")
-      .update({ sync_status: "error", last_error: msg })
+      .update({ sync_status: "error", last_error: safe.error })
       .eq("id", account.id);
     throw e;
   }

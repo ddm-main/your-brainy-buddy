@@ -11,6 +11,8 @@ import { supabase as _supabase } from "@/integrations/supabase/client";
 const supabase: any = _supabase as any;
 import { runToolIntent } from "@/lib/jarvisTools";
 import { authHeaders } from "@/lib/authFetch";
+import { useAiStatus } from "@/store/aiStatusStore";
+import { useUi } from "@/store/uiStore";
 
 type Role = "user" | "assistant";
 type MsgPart =
@@ -53,8 +55,30 @@ export function getJarvisHistory(): ReadonlyArray<HistoryMessage> {
   return history;
 }
 
-/** Send a user utterance, stream the reply, return the full assistant text. */
+/** Send a user utterance, stream the reply, return the full assistant text.
+ * Thin wrapper around jarvisChatInner that updates the TopBar "AI" status
+ * chip from the real outcome — no extra network traffic, piggybacks on
+ * whatever the app is already doing. */
 export async function jarvisChat(
+  userText: string,
+  onDelta?: (chunk: string) => void,
+  opts: JarvisChatOpts = {},
+): Promise<string> {
+  try {
+    const result = await jarvisChatInner(userText, onDelta, opts);
+    useAiStatus.getState().setOk(true);
+    return result;
+  } catch (err) {
+    // A user-initiated abort ("interrupted") isn't an AI-availability
+    // failure — only flip the chip red for real connection/upstream errors.
+    if (err instanceof Error && err.message !== "interrupted") {
+      useAiStatus.getState().setOk(false);
+    }
+    throw err;
+  }
+}
+
+async function jarvisChatInner(
   userText: string,
   onDelta?: (chunk: string) => void,
   opts: JarvisChatOpts = {},
@@ -270,14 +294,29 @@ function handleToolResult(name: string | undefined, input: any, output: any) {
         break;
       }
       case "navigate":
-      case "create_task":
-      case "create_note":
       case "add_inbox_item":
       case "open_project":
       case "focus_panel":
       case "switch_brain": {
-        // Edge tool returns an intent; run it in the browser.
+        // None of these are persisted server-side — the browser performs the
+        // one-and-only side effect (navigation/UI state, or for
+        // add_inbox_item, the actual DB write).
         void runToolIntent(name, { action: name, ...(output ?? {}), ...(input ?? {}) });
+        break;
+      }
+      case "create_task":
+      case "create_note": {
+        // Server-authoritative: jarvis-chat's tool handler already inserted
+        // the row (service-role client, stamps user_id + source:"jarvis").
+        // Do NOT call runToolIntent here — that used to insert a SECOND row
+        // client-side (Round 3 fix for a silent-duplication bug). Just
+        // report what the server already committed.
+        const label = name === "create_task" ? "Task" : "Note";
+        if (output?.error) {
+          useUi.getState().push(`${label} failed — ${output.error}`, "err");
+        } else {
+          useUi.getState().push(`${label} ${name === "create_task" ? "created" : "saved"}: ${output?.title ?? input?.title ?? ""}`, "ok");
+        }
         break;
       }
       default:

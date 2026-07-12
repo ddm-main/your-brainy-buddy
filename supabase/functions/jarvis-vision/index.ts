@@ -1,7 +1,20 @@
 import { generateText } from "npm:ai";
+import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { createLovableAiGatewayProvider } from "../_shared/ai-gateway.ts";
+import { sanitizedErrorResponse } from "../_shared/errors.ts";
+import { createSlidingWindowLimiter, checkAndBumpDailyQuota } from "../_shared/rate-limit.ts";
+
+// Natural ceiling is already ~15/min from the client's 4s debounce
+// (jarvisChat.ts: Date.now() - lastVisionAt < 4000) — this backstops it
+// server-side.
+const visionLimiter = createSlidingWindowLimiter(20, 60_000);
+const VISION_DAILY_REQUEST_CAP = 300;
+
+function admin() {
+  return createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } });
+}
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -13,6 +26,19 @@ Deno.serve(async (req) => {
     return new Response(await auth.error.text(), {
       status: 401,
       headers: { ...cors, "Content-Type": "application/json" },
+    });
+  }
+
+  const rl = visionLimiter.check(auth.userId);
+  if (!rl.ok) {
+    return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) },
+    });
+  }
+  const quota = await checkAndBumpDailyQuota(auth.userId, { endpoint: "vision", requestCap: VISION_DAILY_REQUEST_CAP, svc: admin() });
+  if (!quota.ok) {
+    return new Response(JSON.stringify({ error: "quota_exhausted", reason: quota.reason, requests: quota.requests }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json" },
     });
   }
 
@@ -69,11 +95,6 @@ Deno.serve(async (req) => {
       headers: { ...cors, "Content-Type": "application/json" },
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("jarvis-vision error:", msg);
-    return new Response(JSON.stringify({ error: msg }), {
-      status: 500,
-      headers: { ...cors, "Content-Type": "application/json" },
-    });
+    return sanitizedErrorResponse(err, "Vision request failed", "jarvis-vision", cors);
   }
 });

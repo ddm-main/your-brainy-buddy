@@ -1,16 +1,30 @@
 import { useEffect, useState } from "react";
+import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { HudSelect } from "@/components/hud/HudSelect";
 import { db, type Bank } from "@/lib/db";
 import { useUi } from "@/store/uiStore";
-import { Trash2 } from "lucide-react";
+import { Trash2, KeyRound } from "lucide-react";
+
+function FinanceCTA({ to, label }: { to: string; label: string }) {
+  return (
+    <NavLink to={to} style={{
+      fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.18em",
+      textTransform: "uppercase", color: "var(--accent)", textDecoration: "none",
+      padding: "4px 8px", border: "1px solid var(--edge)",
+    }}>{label} →</NavLink>
+  );
+}
 
 export default function AccountsConfig() {
   const [banks, setBanks] = useState<Bank[]>([]);
   const [items, setItems] = useState<any[]>([]);
   const [nick, setNick] = useState(""); const [type, setType] = useState(""); const [mask, setMask] = useState("");
   const [bankId, setBankId] = useState<string>(""); const [newBank, setNewBank] = useState("");
+  const [pwEditId, setPwEditId] = useState<string | null>(null);
+  const [pwValue, setPwValue] = useState("");
+  const [pwSaving, setPwSaving] = useState(false);
   const push = useUi((s) => s.push);
   const load = async () => { setBanks(await db.banks.list()); setItems(await db.accounts.list()); };
   useEffect(() => { load(); }, []);
@@ -24,6 +38,17 @@ export default function AccountsConfig() {
       setNick(""); setType(""); setMask(""); setBankId("");
       load();
     } catch (err: any) { push(err?.message, "err"); }
+  };
+  const savePassword = async (id: string) => {
+    if (!pwValue) return;
+    setPwSaving(true);
+    try {
+      await db.accounts.setStatementPassword(id, pwValue);
+      push("Statement password saved", "ok");
+      setPwEditId(null); setPwValue("");
+      load();
+    } catch (err: any) { push(err?.message ?? "failed to save password", "err"); }
+    finally { setPwSaving(false); }
   };
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%", minHeight: 0 }}>
@@ -45,7 +70,8 @@ export default function AccountsConfig() {
           <Btn type="submit" variant="primary" disabled={!nick.trim()}>+ add</Btn>
         </form>
       </HudPanel>
-      <HudPanel title="Accounts" index="ACC" live="ok" style={{ flex: 1, minHeight: 0 }} bodyClass="overflow-auto">
+      <HudPanel title="Accounts" index="ACC" live="ok" style={{ flex: 1, minHeight: 0 }} bodyClass="overflow-auto"
+        actions={<FinanceCTA to="/finance/accounts" label="view + edit in Finance" />}>
         {items.length === 0 ? <EmptyState>no accounts yet</EmptyState> :
          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10 }}>
            {items.map((a) => (
@@ -53,11 +79,23 @@ export default function AccountsConfig() {
                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                  <div style={{ fontFamily: "var(--font-display)", fontSize: 15 }}>{a.nickname}</div>
                  {a.account_type && <Chip>{a.account_type}</Chip>}
-                 <button style={{ marginLeft: "auto", color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer" }} onClick={async () => { if (confirm("Delete?")) { await db.accounts.remove(a.id); load(); } }}><Trash2 size={13} /></button>
+                 {a.statement_password_rule && <Chip tone="ok">has password</Chip>}
+                 <button style={{ marginLeft: "auto", color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer" }} title="Set statement password" onClick={() => { setPwEditId(pwEditId === a.id ? null : a.id); setPwValue(""); }}><KeyRound size={13} /></button>
+                 <button style={{ color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer" }} onClick={async () => { if (confirm("Delete?")) { await db.accounts.remove(a.id); load(); } }}><Trash2 size={13} /></button>
                </div>
                <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
                  {a.banks?.name ?? "no bank"} {a.masked_number ? `· ${a.masked_number}` : ""}
                </div>
+               {pwEditId === a.id && (
+                 <div style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "end" }}>
+                   <div style={{ flex: 1 }}>
+                     <label style={labelStyle}>statement password</label>
+                     <input type="password" autoFocus value={pwValue} onChange={(e) => setPwValue(e.target.value)} placeholder="PDF password" style={{ ...inputStyle, width: "100%" }} />
+                   </div>
+                   <Btn size="sm" variant="primary" disabled={!pwValue || pwSaving} onClick={() => savePassword(a.id)}>{pwSaving ? "saving…" : "save"}</Btn>
+                   <Btn size="sm" onClick={() => { setPwEditId(null); setPwValue(""); }}>cancel</Btn>
+                 </div>
+               )}
              </div>
            ))}
          </div>}
