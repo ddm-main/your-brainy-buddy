@@ -65,6 +65,78 @@ export type Database = {
         }
         Relationships: []
       }
+      budgets: {
+        Row: {
+          active: boolean
+          category: string
+          created_at: string
+          id: string
+          monthly_limit: number
+          rollover: boolean
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          active?: boolean
+          category: string
+          created_at?: string
+          id?: string
+          monthly_limit: number
+          rollover?: boolean
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          active?: boolean
+          category?: string
+          created_at?: string
+          id?: string
+          monthly_limit?: number
+          rollover?: boolean
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      category_rules: {
+        Row: {
+          category: string
+          created_at: string
+          hits: number
+          id: string
+          last_used_at: string | null
+          match_type: string
+          pattern: string
+          priority: number
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          category: string
+          created_at?: string
+          hits?: number
+          id?: string
+          last_used_at?: string | null
+          match_type: string
+          pattern: string
+          priority?: number
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          category?: string
+          created_at?: string
+          hits?: number
+          id?: string
+          last_used_at?: string | null
+          match_type?: string
+          pattern?: string
+          priority?: number
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       credit_cards: {
         Row: {
           autopay: boolean
@@ -528,6 +600,66 @@ export type Database = {
           },
         ]
       }
+      finance_reports: {
+        Row: {
+          body_md: string
+          created_at: string
+          id: string
+          kind: string
+          meta: Json
+          period: string
+          user_id: string
+        }
+        Insert: {
+          body_md: string
+          created_at?: string
+          id?: string
+          kind?: string
+          meta?: Json
+          period: string
+          user_id: string
+        }
+        Update: {
+          body_md?: string
+          created_at?: string
+          id?: string
+          kind?: string
+          meta?: Json
+          period?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      finance_suggestions: {
+        Row: {
+          created_at: string
+          id: string
+          kind: string
+          payload: Json
+          status: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          kind: string
+          payload?: Json
+          status?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          kind?: string
+          payload?: Json
+          status?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       financial_accounts: {
         Row: {
           account_type: string | null
@@ -919,6 +1051,36 @@ export type Database = {
           created_at?: string
           id?: string
           source_file?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      merchant_aliases: {
+        Row: {
+          canonical: string
+          category: string | null
+          created_at: string
+          id: string
+          raw: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          canonical: string
+          category?: string | null
+          created_at?: string
+          id?: string
+          raw: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          canonical?: string
+          category?: string | null
+          created_at?: string
+          id?: string
+          raw?: string
           updated_at?: string
           user_id?: string
         }
