@@ -1,0 +1,74 @@
+{
+  "accounts": [
+    {
+      "id": "505fdaa6-83fa-4431-86c7-4be674e17ad9",
+      "type": "credit_card",
+      "name": "Axis Credit Card",
+      "institution": "Axis Bank",
+      "last4": "2605",
+      "note": "",
+      "passwordHint": "",
+      "gmailAddresses": [],
+      "statementPasswords": [],
+      "dueDate": ""
+    },
+    {
+      "id": "04068c15-6e53-45c8-ab7d-597e3db3be70",
+      "type": "bank",
+      "name": "Axis Savings",
+      "institution": "Axis Bank",
+      "last4": "",
+      "note": "",
+      "statementPasswords": []
+    }
+  ],
+  "goals": [
+    {
+      "id": "703bf568-71d2-4b7f-9f8c-b7c1d81540f5",
+      "title": "Emergency fund",
+      "target": 300000,
+      "saved": 45000,
+      "deadline": "2026-12-31"
+    }
+  ],
+  "loans": [],
+  "rules": [
+    {
+      "match": "vpa bajajpay",
+      "category": "EMI & Loans"
+    }
+  ],
+  "overrides": {
+    "19f3cff6ae86b547": "EMI & Loans",
+    "19f4092f63fa2139": "Other",
+    "19f409178ecc807b": "Other",
+    "19f3d03bb8da60d6": "Other",
+    "19f3d01ca85c21fc": "Other",
+    "19f380a76b40bcb8": "Other",
+    "19f35c6b63f869b2": "Other",
+    "19f30331b0e564aa": "Other",
+    "19f2e4e5897c7610": "Other",
+    "19f2d8d9cbb94c4a": "Other",
+    "19f2d4adc609222c": "Other",
+    "19f2c41b59c139d0": "Other",
+    "19f285e261042c22": "Other",
+    "19f25c093942bc5b": "Other",
+    "19f22f18f23fb8a0": "Other",
+    "19f216a07c499fa4": "Other",
+    "19f20ecd16f29ed0": "Other",
+    "19f1e7207a1962a9": "Other",
+    "19f1e07d7c7f642f": "Other",
+    "19f18fe344516564": "Other",
+    "19f18f8542e4b937": "Other",
+    "19f1468d8f3cde49": "Other",
+    "19f1406b3dbe173d": "Other",
+    "19f14005d22264e9": "Other",
+    "19f0e80efa8b6e49": "Other",
+    "19f0e80261aeaff1": "Other",
+    "19f0e7f093506b0c": "Other",
+    "19f0c8256b7eb92a": "Other",
+    "19f09ba1f37e895a": "Other",
+    "19f099f77e1bb1ef": "Other",
+    "19d71de079d70e32": "Other"
+  }
+}
