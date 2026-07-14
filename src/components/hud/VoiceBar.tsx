@@ -1,22 +1,31 @@
-import { useEffect, useRef } from "react";
-import { Mic, MicOff, Pause, Play, Square, Volume2, Paperclip, Ban } from "lucide-react";
-import { useVoice } from "@/store/voiceStore";
+import { useEffect, useRef, useState } from "react";
+import { Mic, MicOff, Pause, Play, Square, Volume2, Paperclip, Ban, ChevronDown } from "lucide-react";
+import { useVoice, VOICE_STYLES, type VoiceLanguage, type VoiceStyleId } from "@/store/voiceStore";
 import { motion, AnimatePresence } from "framer-motion";
 import { jarvisChat, abortJarvisStream } from "@/lib/jarvisChat";
 import { useContent } from "@/store/contentStore";
-import { speakStream, stopSpeaking } from "@/lib/tts";
+import { speakStream, stopSpeaking, primeAudio } from "@/lib/tts";
 import { supabase as _supabase } from "@/integrations/supabase/client";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const supabase: any = _supabase as any;
 import { useUi } from "@/store/uiStore";
 
+const LANG_LABEL: Record<VoiceLanguage, string> = {
+  "en-IN": "EN",
+  "hi-IN": "HI",
+  "mr-IN": "MR",
+};
+
 export default function VoiceBar() {
   const {
     state, continuous, transcript, interim, lastAnswer, amplitude, showTranscript,
+    language, voiceStyle,
     setState, toggleContinuous, toggleTranscript, setAmplitude, setTranscript, setInterim, reset,
+    setLanguage, setVoiceStyle,
   } = useVoice();
   const fileRef = useRef<HTMLInputElement | null>(null);
   const conversationOpen = useUi((s) => s.conversationOpen);
+  const [styleOpen, setStyleOpen] = useState(false);
 
   const interrupt = () => {
     abortJarvisStream();
@@ -25,17 +34,6 @@ export default function VoiceBar() {
     useVoice.getState().markActivity();
     useVoice.getState().interrupt();
   };
-
-  // Language auto-detect: cycle first 3 utterances across candidates, keep highest confidence.
-  const LANG_KEY = "jarvis.lang";
-  const langCandidates = ["en-IN", "hi-IN", "mr-IN"] as const;
-  const langRef = useRef<string>(
-    (typeof localStorage !== "undefined" && localStorage.getItem(LANG_KEY)) || "en-IN",
-  );
-  const langLockedRef = useRef<boolean>(
-    typeof localStorage !== "undefined" && !!localStorage.getItem(LANG_KEY),
-  );
-  const langSamplesRef = useRef<{ lang: string; conf: number }[]>([]);
 
   const streamRef = useRef<MediaStream | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -53,6 +51,7 @@ export default function VoiceBar() {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
         streamRef.current = stream;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const AC = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext;
         const ctx = new AC();
         const src = ctx.createMediaStreamSource(stream);
@@ -73,14 +72,15 @@ export default function VoiceBar() {
           rafRef.current = requestAnimationFrame(tick);
         };
         tick();
-      } catch (err: any) {
-        const name = err?.name ?? "";
+      } catch (err: unknown) {
+        const name = (err as { name?: string })?.name ?? "";
         const msg = name === "NotAllowedError"
           ? "Microphone permission denied. Enable it in your browser settings."
           : name === "NotFoundError"
             ? "No microphone found."
             : "Could not access the microphone.";
         useUi.getState().push(msg, "err");
+        useVoice.getState().setError(msg);
         setState("idle");
       }
     })();
@@ -92,12 +92,13 @@ export default function VoiceBar() {
     };
   }, [state, setAmplitude, setState]);
 
-  // Web Speech API — continuous listen, debounced flush → LLM → TTS
+  // Web Speech recognition — restarts when language changes.
   const pendingRef = useRef<string>("");
   const flushTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (state !== "listening") return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const SR: any = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) {
       console.warn("SpeechRecognition not supported in this browser");
@@ -106,28 +107,33 @@ export default function VoiceBar() {
     const rec = new SR();
     rec.continuous = true;
     rec.interimResults = true;
-    rec.lang = langRef.current;
+    rec.lang = language;
     let stopped = false;
+
+    const speakStyle = () => {
+      const s = VOICE_STYLES[useVoice.getState().voiceStyle];
+      return { voice: s.voice, instructions: s.instructions };
+    };
 
     const flush = async () => {
       const text = pendingRef.current.trim();
       pendingRef.current = "";
       if (!text) return;
-      try { rec.stop(); } catch {}
+      try { rec.stop(); } catch { /* noop */ }
       useVoice.getState().setState("processing");
       useVoice.getState().markActivity();
       try {
         const reply = await jarvisChat(text);
-        if (useVoice.getState().state !== "processing") return; // user interrupted
+        if (useVoice.getState().state !== "processing") return;
         useVoice.getState().setAnswer(reply);
         useVoice.getState().setState("speaking");
-        speakChunked(reply, () => {
+        void speakStream(reply, () => {
           const s = useVoice.getState();
           if (s.continuous && s.state === "speaking") s.setState("listening");
           else if (s.state === "speaking") s.setState("idle");
-        });
-      } catch (err: any) {
-        const msg = err?.message ?? "error";
+        }, speakStyle());
+      } catch (err: unknown) {
+        const msg = (err as { message?: string })?.message ?? "error";
         if (msg !== "interrupted") {
           console.error(err);
           useUi.getState().push(`JARVIS: ${msg}`, "err");
@@ -137,44 +143,20 @@ export default function VoiceBar() {
       }
     };
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     rec.onresult = (e: any) => {
       let final = "";
       let inter = "";
-      let finalConf = 0;
-      let finalCount = 0;
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const r = e.results[i];
-        if (r.isFinal) {
-          final += r[0].transcript;
-          finalConf += Number(r[0].confidence) || 0;
-          finalCount++;
-        } else inter += r[0].transcript;
+        if (r.isFinal) final += r[0].transcript;
+        else inter += r[0].transcript;
       }
       if (final) {
         pendingRef.current = (pendingRef.current + " " + final).trim();
         setTranscript(pendingRef.current);
-        // Sample confidence for language detection until locked.
-        if (!langLockedRef.current && finalCount > 0) {
-          langSamplesRef.current.push({
-            lang: langRef.current,
-            conf: finalConf / finalCount,
-          });
-          // Lock after 2 samples to avoid stutter; only rotate if the current
-          // sample came back empty/very low confidence.
-          if (langSamplesRef.current.length >= 2) {
-            const best = langSamplesRef.current.reduce((a, b) => (b.conf > a.conf ? b : a));
-            langRef.current = best.lang;
-            langLockedRef.current = true;
-            try { localStorage.setItem(LANG_KEY, best.lang); } catch { /* noop */ }
-          } else if ((finalConf / finalCount) < 0.2) {
-            const idx = langSamplesRef.current.length % langCandidates.length;
-            langRef.current = langCandidates[idx];
-            try { rec.stop(); } catch { /* onend will restart with new lang */ }
-          }
-        }
       }
       setInterim(inter);
-      // debounce: flush after 900ms of no new speech
       if (flushTimerRef.current) window.clearTimeout(flushTimerRef.current);
       if (pendingRef.current) {
         flushTimerRef.current = window.setTimeout(flush, 900);
@@ -182,45 +164,35 @@ export default function VoiceBar() {
     };
     rec.onend = () => {
       if (stopped) return;
-      // keep listening while state is "listening"
-      if (useVoice.getState().state === "listening") {
-        try { rec.lang = langRef.current; } catch { /* noop */ }
+      const s = useVoice.getState().state;
+      if (s === "listening") {
         try { rec.start(); } catch { /* noop */ }
       }
     };
-    rec.onerror = () => { /* swallow no-speech / network — onend will retry */ };
+    rec.onerror = () => { /* swallow */ };
     try { rec.start(); } catch { /* noop */ }
     return () => {
       stopped = true;
       if (flushTimerRef.current) window.clearTimeout(flushTimerRef.current);
-      try { rec.stop(); } catch {}
+      try { rec.stop(); } catch { /* noop */ }
     };
-  }, [state, setInterim, setTranscript]);
+  }, [state, language, setInterim, setTranscript]);
 
-  // Cancel any speech when user stops
   useEffect(() => {
     if (state === "idle" || state === "muted") {
-      try { window.speechSynthesis?.cancel(); } catch {}
+      try { window.speechSynthesis?.cancel(); } catch { /* noop */ }
     }
   }, [state]);
 
-  function speakChunked(text: string, onDone: () => void) {
-    void speakStream(text, onDone);
-  }
-
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        interrupt();
-        return;
-      }
+      if (e.key === "Escape") { e.preventDefault(); interrupt(); return; }
       if (e.code === "Space" && e.target === document.body) {
         e.preventDefault();
+        void primeAudio();
         if (state === "idle") setState("listening");
         else if (state === "listening") setState("idle");
       }
-      // ⌘/Ctrl+J → open the full conversation overlay
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "j") {
         e.preventDefault();
         useUi.getState().openConversation();
@@ -229,37 +201,6 @@ export default function VoiceBar() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [state, setState]);
-
-  // Idle watcher — proactive check-in after 15 min of true idle.
-  useEffect(() => {
-    const iv = window.setInterval(() => {
-      const s = useVoice.getState();
-      if (s.state !== "idle") return;
-      if (document.visibilityState !== "visible") return;
-      if (Date.now() - s.lastActivity < 15 * 60_000) return;
-      s.markActivity(); // prevent re-fire loop
-      jarvisChat("(system) 15-minute idle check-in — one short helpful nudge for Deepak, no fluff.")
-        .then((reply) => {
-          if (!reply) return;
-          useVoice.getState().setAnswer(reply);
-          useVoice.getState().setState("speaking");
-          speakChunked(reply, () => {
-            const st = useVoice.getState();
-            if (st.state === "speaking") st.setState(st.continuous ? "listening" : "idle");
-          });
-        })
-        .catch(() => { /* silent */ });
-    }, 60_000);
-    const bump = () => useVoice.getState().markActivity();
-    window.addEventListener("pointerdown", bump);
-    window.addEventListener("keydown", bump);
-    return () => {
-      window.clearInterval(iv);
-      window.removeEventListener("pointerdown", bump);
-      window.removeEventListener("keydown", bump);
-    };
-  }, []);
-
 
   const stateColor: Record<string, string> = {
     idle: "var(--text-dim)",
@@ -272,63 +213,94 @@ export default function VoiceBar() {
 
   if (conversationOpen) return null;
 
+  const currentStyle = VOICE_STYLES[voiceStyle];
+
   return (
-    <footer style={{
-      borderTop: "1px solid var(--edge)",
-      background: "var(--panel-tint-strong)",
-      backdropFilter: "blur(20px)",
-      padding: "10px 20px",
-      display: "flex", alignItems: "center", gap: 16,
-      zIndex: 10,
-    }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+    <div className="voice-dock">
+      <div className="voice-dock-row">
         <button
-          onClick={() => setState(state === "listening" ? "idle" : "listening")}
-          className="focus-outline"
-          style={{
-            width: 40, height: 40, borderRadius: "50%",
-            border: `1px solid ${state === "listening" ? "var(--accent)" : "var(--edge)"}`,
-            background: state === "listening" ? "rgba(53, 214, 237, 0.15)" : "transparent",
-            color: state === "listening" ? "var(--accent)" : "var(--text-dim)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            boxShadow: state === "listening" ? "0 0 20px rgba(53, 214, 237, 0.4)" : "none",
-            transition: "all 250ms",
+          onClick={async () => {
+            await primeAudio();
+            useVoice.getState().setError(null);
+            setState(state === "listening" ? "idle" : "listening");
           }}
+          className="focus-outline voice-mic"
+          data-active={state === "listening"}
           title={state === "listening" ? "Stop listening (Space)" : "Start listening (Space)"}
         >
-          {state === "muted" ? <MicOff size={16} /> : <Mic size={16} />}
+          {state === "muted" ? <MicOff size={14} /> : <Mic size={14} />}
         </button>
-        <button
-          onClick={toggleContinuous}
-          className="focus-outline"
-          style={pillStyle(continuous)}
-          title="Toggle continuous conversation"
-        >
-          {continuous ? <Play size={11} /> : <Pause size={11} />}
-          {continuous ? "continuous" : "push-to-talk"}
+
+        <div className="voice-chips">
+          {(Object.keys(LANG_LABEL) as VoiceLanguage[]).map((l) => (
+            <button
+              key={l}
+              onClick={() => setLanguage(l)}
+              className="voice-chip"
+              data-active={language === l}
+              title={l}
+            >
+              {LANG_LABEL[l]}
+            </button>
+          ))}
+        </div>
+
+        <div className="voice-style">
+          <button
+            onClick={() => setStyleOpen((v) => !v)}
+            className="voice-chip voice-chip-wide"
+            title="Voice style"
+          >
+            {currentStyle.label} <ChevronDown size={10} />
+          </button>
+          {styleOpen && (
+            <div className="voice-style-menu" onMouseLeave={() => setStyleOpen(false)}>
+              {(Object.keys(VOICE_STYLES) as VoiceStyleId[]).map((id) => (
+                <button
+                  key={id}
+                  onClick={() => { setVoiceStyle(id); setStyleOpen(false); }}
+                  className="voice-style-item"
+                  data-active={voiceStyle === id}
+                >
+                  {VOICE_STYLES[id].label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="voice-wave">
+          <Waveform amplitude={amplitude} active={state === "listening"} />
+        </div>
+
+        <div className="voice-state">
+          <span
+            className={`live-dot ${state === "idle" ? "idle" : state === "muted" ? "err" : ""}`}
+            style={{ color: stateColor[state], background: stateColor[state] }}
+          />
+          <span className="hud-label" style={{ color: stateColor[state], fontSize: 10 }}>{state}</span>
+        </div>
+      </div>
+
+      <div className="voice-dock-row voice-dock-row-secondary">
+        <button onClick={toggleContinuous} className="focus-outline voice-chip" data-active={continuous} title="Toggle continuous">
+          {continuous ? <Play size={10} /> : <Pause size={10} />} {continuous ? "auto" : "push"}
         </button>
-        <button onClick={reset} className="focus-outline" style={pillStyle(false)} title="Stop">
-          <Square size={11} /> stop
-        </button>
-        <button onClick={interrupt} className="focus-outline" style={pillStyle(false)} title="Interrupt (Esc)">
-          <Ban size={11} /> interrupt
-        </button>
+        <button onClick={reset} className="focus-outline voice-chip" title="Stop"><Square size={10} /> stop</button>
+        <button onClick={interrupt} className="focus-outline voice-chip" title="Interrupt (Esc)"><Ban size={10} /> stop-tts</button>
         <button
           onClick={() => setState(state === "muted" ? "idle" : "muted")}
-          className="focus-outline"
-          style={pillStyle(state === "muted")}
+          className="focus-outline voice-chip"
+          data-active={state === "muted"}
           title="Mute microphone"
         >
-          {state === "muted" ? <MicOff size={11} /> : <Mic size={11} />}
-          {state === "muted" ? "unmute" : "mute"}
+          {state === "muted" ? <MicOff size={10} /> : <Mic size={10} />} {state === "muted" ? "unmute" : "mute"}
         </button>
-        <button
-          onClick={() => fileRef.current?.click()}
-          className="focus-outline"
-          style={pillStyle(false)}
-          title="Attach file to summarize"
-        >
-          <Paperclip size={11} /> file
+        <button onClick={() => fileRef.current?.click()} className="focus-outline voice-chip" title="Attach file">
+          <Paperclip size={10} /> file
+        </button>
+        <button onClick={toggleTranscript} className="focus-outline voice-chip" data-active={showTranscript} title="Transcript">
+          <Volume2 size={10} /> log
         </button>
         <input
           ref={fileRef}
@@ -339,13 +311,12 @@ export default function VoiceBar() {
             const f = e.target.files?.[0];
             e.currentTarget.value = "";
             if (!f) return;
-            useContent.getState().addCard({ type: "file", filename: f.name, summary: "Reading…" } as any);
+            useContent.getState().addCard({ type: "file", filename: f.name, summary: "Reading…" } as never);
             try {
               if (f.type.startsWith("text/")) {
                 const text = await f.text();
                 await jarvisChat(`Please summarize this file (${f.name}):\n\n${text.slice(0, 20_000)}`);
               } else {
-                // Upload binary to signed storage, then let the summarize_file tool fetch it.
                 const bytesBase64 = await fileToBase64(f);
                 const { data, error } = await supabase.functions.invoke("jarvis-vision-upload", {
                   body: { filename: f.name, contentType: f.type || "application/octet-stream", bytesBase64 },
@@ -355,46 +326,31 @@ export default function VoiceBar() {
                   `I've uploaded a file. Call summarize_file with signed_url="${data.url}" and mime="${f.type || "application/octet-stream"}" to summarize it. Filename: ${f.name}.`,
                 );
               }
-            } catch (err: any) {
-              useUi.getState().push(`File failed: ${err?.message ?? "error"}`, "err");
-              useContent.getState().addCard({ type: "error", message: `File failed: ${err?.message ?? "error"}` } as any);
+            } catch (err: unknown) {
+              const m = (err as { message?: string })?.message ?? "error";
+              useUi.getState().push(`File failed: ${m}`, "err");
+              useContent.getState().addCard({ type: "error", message: `File failed: ${m}` } as never);
             }
           }}
         />
       </div>
 
-      <Waveform amplitude={amplitude} active={state === "listening"} />
-
-      <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 90 }}>
-        <span className={`live-dot ${state === "idle" ? "idle" : state === "muted" ? "err" : ""}`}
-          style={{ color: stateColor[state] as any, background: stateColor[state] as any }} />
-        <span className="hud-label" style={{ color: stateColor[state], fontSize: 10 }}>
-          {state}
-        </span>
-      </div>
-
-      <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
-        <AnimatePresence mode="wait">
-          {(interim || transcript || lastAnswer) && (
-            <motion.div
-              key={interim + transcript + lastAnswer}
-              initial={{ opacity: 0, y: 4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              style={{ fontSize: 12, color: "var(--text-dim)", fontFamily: "var(--font-hud)", letterSpacing: "0.04em", whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" }}
-            >
-              {interim ? <em style={{ color: "var(--accent-soft)" }}>› {interim}</em> :
-               transcript ? <span>› {transcript}</span> :
-               <span style={{ color: "var(--ok)" }}>⤺ {lastAnswer}</span>}
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-
-      <button onClick={toggleTranscript} style={pillStyle(showTranscript)} title="Transcript">
-        <Volume2 size={11} /> transcript
-      </button>
-    </footer>
+      <AnimatePresence>
+        {(interim || transcript || lastAnswer) && (
+          <motion.div
+            key={interim + transcript + lastAnswer}
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="voice-transcript"
+          >
+            {interim ? <em style={{ color: "var(--accent-soft)" }}>› {interim}</em> :
+             transcript ? <span>› {transcript}</span> :
+             <span style={{ color: "var(--ok)" }}>⤺ {lastAnswer}</span>}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }
 
@@ -411,28 +367,16 @@ function fileToBase64(f: File): Promise<string> {
   });
 }
 
-function pillStyle(active: boolean): React.CSSProperties {
-  return {
-    display: "flex", alignItems: "center", gap: 5,
-    padding: "5px 10px",
-    border: `1px solid ${active ? "var(--edge-strong)" : "var(--edge)"}`,
-    color: active ? "var(--accent)" : "var(--text-dim)",
-    background: active ? "rgba(53, 214, 237, 0.06)" : "transparent",
-    fontSize: 10, fontFamily: "var(--font-hud)", letterSpacing: "0.16em",
-    textTransform: "uppercase", borderRadius: 2, transition: "all 200ms",
-  };
-}
-
 function Waveform({ amplitude, active }: { amplitude: number; active: boolean }) {
-  const bars = 24;
+  const bars = 20;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 2, height: 24 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 2, height: 22 }}>
       {Array.from({ length: bars }).map((_, i) => {
         const base = active ? 0.15 + amplitude * (0.4 + Math.sin(i * 0.7 + Date.now() * 0.005) * 0.4) : 0.1;
         return (
           <motion.span
             key={i}
-            animate={{ height: `${Math.max(3, base * 22)}px` }}
+            animate={{ height: `${Math.max(3, base * 20)}px` }}
             transition={{ duration: 0.08 }}
             style={{
               width: 2,

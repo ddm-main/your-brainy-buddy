@@ -27,7 +27,7 @@ export interface RecurringSuggestion {
 const CADENCE_DAYS: Record<Cadence, number> = { weekly: 7, monthly: 30, quarterly: 91, yearly: 365 };
 const CADENCE_TOLERANCE: Record<Cadence, number> = { weekly: 2, monthly: 5, quarterly: 10, yearly: 20 };
 
-function normalizeMerchant(raw: string | null | undefined): string {
+export function normalizeMerchant(raw: string | null | undefined): string {
   if (!raw) return "";
   return raw.toLowerCase()
     .replace(/\b(pvt|ltd|inc|llc|india|payments?|autopay|subscription|txn|ref|upi|neft|imps)\b/g, " ")

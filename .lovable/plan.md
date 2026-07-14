@@ -1,46 +1,52 @@
-# Statements pipeline — build log
+## Plan
 
-## Shipped this pass
+### 1. Open statement PDFs inside the app
+- Replace `window.open(url, "_blank")` on the Statements page with an in-app PDF overlay/modal.
+- Reuse the signed private PDF URL but render it in an embedded viewer with:
+  - close button
+  - open/download fallback link
+  - loading/error state
+- Ensure row clicks do not accidentally expand/collapse when opening the PDF from the table or expanded row.
 
-### DB
-- No schema migration needed. Columns `parse_reason`, `parser_source`, `parser_confidence` already existed; the code just wasn't writing them.
-- Confirmed: only 1 gmail-sync cron exists (no duplicate to unschedule); 0 orphan `source_email_id IS NULL AND file_path IS NULL` statements to delete.
+### 2. Fix the current edge function syntax/runtime issue
+- Clean up `supabase/functions/finance-reparse-statements/index.ts`; the file currently has a duplicated trailing `catch`/`Deno.serve` closure after the real handler.
+- Keep the small-batch reparse behavior, but reduce the edge-worker wall-clock deadline to a safer value so it exits before resource limits.
 
-### Edge functions
-- `supabase/functions/_shared/finance-extract-core.ts` — rewritten:
-  - Every early-return in `ingestStatementAttachment` now persists `parse_error` + `parse_reason` (`gmail_payload_empty`, `attachment_download_failed`, `pdf_upload_failed`, `attachment_row_write_failed`, `attachment_row_missing`).
-  - Top-level try/catch writes `ingest_crashed` reason.
-  - "No PDF attachment" branch writes `parse_status='skipped', parse_reason='no_pdf_attachment_login_required'`.
-  - `applyParsedStatementResult` success path writes `parser_source`, `parser_confidence`, `min_due`, `parse_reason` (`parsed_with_saved_password` / `parsed_with_user_password` / `parsed_no_password`).
-  - Failure path writes human-readable `parse_reason` via `reasonForError()` map.
-  - `extractFinanceForAccount` retry branch now also picks up `skipped` rows that have no reason (backfill).
-  - New shared `purgeStatementDerivedData(svc, id, {keepStatementDate})` deletes derived txns + attachments + parsed fields, so retry is deterministic.
-  - `.limit(1)` added to dedup lookup to avoid PGRST multi-row error.
-- `supabase/functions/_shared/statement-pdf.ts` — added `min_due`, `bank`, `confidence` to `PdfParseResult`; extended `detectBank` to SBI, Yes, Kotak, AmEx; exports `detectBank`; `parseStatementText` returns bank + confidence.
-- `supabase/functions/finance-retry-statement/index.ts` — calls `purgeStatementDerivedData` before re-ingest; passes `passwordSource` (`user` / `saved` / `none`) so `parse_reason` reflects which password worked.
+### 3. Fix SBI statement parsing against the real extracted text
+- Update the SBI card parser to handle the actual PDF text shape already stored in `email_attachments.extracted_text`:
+  - labels and values split across adjacent lines, e.g. `*Total Amount Due` then `2,444.00`
+  - `Statement Date` / `Payment Due Date` values appearing in table-like rows
+  - statement period text like `for Statement Period: 02 Aug 25 to 01 Sep 25`
+  - transaction rows using `D` / `C` instead of only `Dr` / `Cr`
+  - two-digit years such as `01 Sep 25`
+- Prevent false-success rows: if due date / statement date / total due / transactions are missing, keep the row failed or low-confidence instead of marking it `parsed` with blanks.
 
-### UI
-- `src/routes/finance/Statements.tsx`:
-  - Row status cell now shows `parse_reason` under the status chip (e.g. "no PDF · login-only alert").
-  - Failure detail block shows `parse_error` (code) and `parse_reason` (human) as separate lines; password-family errors show a "provide password below" hint.
-  - Skipped `no_pdf_attachment_login_required` rows show an inline note directing user to upload.
-  - Toolbar: **retry N pending/failed** button batches through `finance-retry-statement`.
-  - Fixed dead string match `wrong_or_missing_password` → real codes `password_required` / `wrong_password` / `stored_password_unreadable`.
+### 4. Improve transaction population and categorization
+- Insert statement transactions with the raw line `description` populated, not only `merchant`.
+- Store normalized merchant text where available.
+- Expand deterministic categorization for observed merchants and common Indian card-statement text, including online shopping, food delivery, utilities, fuel, cashback/refunds, EMI/fees/charges, subscriptions, healthcare, travel, groceries, cash/ATM.
+- Preserve idempotency: re-parsing a statement should replace only that statement’s derived transactions and avoid duplicating matching email-alert transactions.
 
-### Data recovery
-- Kicked `finance-extract` for the 07statement@gmail.com account with `since_days=365` via `net.http_post` so the 19 pending + 2 unlabeled skipped rows re-flow through the fixed path and land with a real `parse_reason`.
+### 5. Add regression coverage
+- Extend `tests/statementParsers.test.ts` with a real-shape SBI fixture from the database sample:
+  - total due `2444`
+  - minimum due `200`
+  - statement date `2025-09-01`
+  - due date `2025-09-21`
+  - period `2025-08-02 → 2025-09-01`
+  - cashback credit plus debit purchase rows parsed correctly
+- Add cases for `D/C` line suffixes and label/value-split totals.
 
-## Deferred (needs real PDF samples or is nice-to-have)
+### 6. Reprocess existing bad rows after deployment
+- After code changes, use the existing small-batch “re-parse unresolved” path or temporarily target rows with `parser_source like 'sbi-card% → generic fallback'` so the 21 existing SBI rows are refreshed.
+- Validate in Supabase that parsed SBI rows now have dates, totals, and statement-derived transactions.
 
-- **Per-bank parser module tree** (`statement-parsers/{sbi-card,hdfc-card,icici-card,...}.ts`). Current `genericFallback` handles most Indian statement boilerplate; tuning per-bank regexes without real sample PDFs would only add code without accuracy gain. Register when the first real statement is available.
-- **Password-candidate helper** (try list of candidates from `jarvis_memory`, auto-save the winning one). Not blocking — user's saved password on the linked card/account already works via `resolveStatementPassword`.
-- **DROP COLUMN `statements.parse_confidence`** (duplicate of `parser_confidence`). Follow-up migration.
-- **"Re-sync mailbox" toolbar button** — user can already trigger via the Email config route.
-- **Sticky-header + fixed-max-height table scroller** — cosmetic; drawer split not requested.
-
-## Verification checklist
-
-- `SELECT parse_status, parse_reason, count(*) FROM statements GROUP BY 1,2` — every row has a non-null `parse_reason` after the recovery run.
-- Statements page shows a "retry N pending/failed" button when applicable; clicking it purges + re-ingests each row.
-- Failed rows expand to show error code + human reason on separate lines.
-- Skipped-no-PDF rows show the "upload directly" hint.
+## Technical notes
+- Main files to change:
+  - `src/routes/finance/Statements.tsx`
+  - `supabase/functions/finance-reparse-statements/index.ts`
+  - `supabase/functions/_shared/statement-parsers/sbi-card.ts`
+  - `supabase/functions/_shared/statement-parsers/generic.ts`
+  - `supabase/functions/_shared/finance-extract-core.ts`
+  - `tests/statementParsers.test.ts`
+- No schema migration is required for this pass; the needed columns already exist (`transactions.description`, `transactions.merchant_normalized`, statement parse fields, private PDF bucket path).

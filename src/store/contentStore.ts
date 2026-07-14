@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import { toUserError } from "@/lib/userError";
 
 export type ContentCard =
   | {
@@ -48,12 +47,8 @@ export const useContent = create<ContentStore>((set) => ({
   addCard: (card) => {
     const id = card.id ?? `card_${Date.now()}_${++seq}`;
     const createdAt = card.createdAt ?? Date.now();
-    // Defense in depth: sanitize error cards so raw server text can't leak.
-    const clean = (card as ContentCard).type === "error"
-      ? { ...(card as ContentCard), message: toUserError((card as any).message ?? "", "A subsystem failed.") }
-      : (card as ContentCard);
     set((s) => {
-      const next = [{ ...clean, id, createdAt }, ...s.cards];
+      const next = [{ ...(card as ContentCard), id, createdAt }, ...s.cards];
       return { cards: next.slice(0, CAP) };
     });
     return id;

@@ -8,24 +8,19 @@ import { runReconciliation } from "@/lib/reconciliation";
 import { useUi } from "@/store/uiStore";
 import { Trash2, Check, Pencil, X } from "lucide-react";
 import { sourceTone } from "./_shared";
-import { toCsv, downloadCsv } from "@/lib/csv";
-import { learnFromCorrection } from "@/lib/categorize";
-import { useSession } from "@/lib/useSession";
 
 const SUSPICIOUS_AMOUNT = 50000; // rupees — flag any single txn over this
 
 // ---------- Transactions ----------
 export default function Txns() {
   const push = useUi((s) => s.push);
-  const { session } = useSession();
-  const uid = session?.user.id;
   const [items, setItems] = useState<any[]>([]);
   const [accounts, setAccounts] = useState<FinancialAccount[]>([]);
   const [cards, setCards] = useState<CreditCard[]>([]);
   const [statements, setStatements] = useState<any[]>([]);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [reconciling, setReconciling] = useState(false);
-  const [f, setF] = useState({ txn_date: new Date().toISOString().slice(0, 10), amount: "", txn_type: "debit" as Transaction["txn_type"], merchant: "", category: "", account_id: "", card_id: "" });
+  const [f, setF] = useState({ txn_date: new Date().toISOString().slice(0, 10), amount: "", txn_type: "debit" as Transaction["txn_type"], merchant: "", category: "", account_id: "", card_id: "", payment_mode: "", reference_number: "" });
   const [linkId, setLinkId] = useState<string | null>(null);
   const [linkStatementId, setLinkStatementId] = useState("");
   const [linking, setLinking] = useState(false);
@@ -33,9 +28,6 @@ export default function Txns() {
   const [editForm, setEditForm] = useState<{ merchant: string; category: string }>({ merchant: "", category: "" });
   // filters
   const [ff, setFF] = useState({ q: "", type: "", source: "", account: "", from: "", to: "", unreconciled: false });
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [bulkCat, setBulkCat] = useState("");
-  const [bulkBusy, setBulkBusy] = useState(false);
 
   const load = async () => {
     const [t, a, c, s, al] = await Promise.all([
@@ -85,9 +77,9 @@ export default function Txns() {
       txn_date: f.txn_date, amount: Number(f.amount), txn_type: f.txn_type,
       merchant: f.merchant || undefined, category: f.category || undefined,
       financial_account_id: f.account_id || null, credit_card_id: f.card_id || null,
-      source: "manual",
+      source: "manual", payment_mode: f.payment_mode || null, reference_number: f.reference_number || null,
     });
-    setF({ ...f, amount: "", merchant: "", category: "" });
+    setF({ ...f, amount: "", merchant: "", category: "", payment_mode: "", reference_number: "" });
     load();
   };
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setF({ ...f, [k]: e.target.value as any });
@@ -114,29 +106,11 @@ export default function Txns() {
   };
   const saveEdit = async (t: any) => {
     try {
-      const catChanged = (editForm.category || null) !== (t.category ?? null);
       await db.transactions.update(t.id, { merchant: editForm.merchant || null, category: editForm.category || null } as any);
-      if (catChanged && editForm.category && uid) {
-        learnFromCorrection({ merchant: editForm.merchant || t.merchant, description: t.description }, editForm.category, uid)
-          .catch(() => { /* non-blocking */ });
-      }
       push("saved", "ok");
       setEditId(null);
       load();
     } catch (e: any) { push(e?.message ?? "save failed", "err"); }
-  };
-  const exportCsv = () => {
-    const rows = filtered.map((t: any) => ({
-      date: t.txn_date,
-      merchant: t.merchant ?? "",
-      category: t.category ?? "",
-      amount: t.amount,
-      type: t.txn_type,
-      source: t.source ?? "manual",
-      account: t.financial_accounts?.nickname ?? t.credit_cards?.card_name ?? "",
-      reconciled: t.is_reconciled ? "yes" : "no",
-    }));
-    downloadCsv(`txns-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(rows));
   };
   const toggleReconciled = async (t: any) => {
     try {
@@ -152,61 +126,6 @@ export default function Txns() {
       load();
     } catch (e: any) { push(e?.message ?? "recon failed", "err"); }
     finally { setReconciling(false); }
-  };
-
-  const toggleSel = (id: string) => setSelected((prev) => {
-    const n = new Set(prev);
-    if (n.has(id)) n.delete(id); else n.add(id);
-    return n;
-  });
-  const toggleAllSel = () => setSelected((prev) => {
-    if (prev.size === filtered.length) return new Set();
-    return new Set(filtered.map((t: any) => t.id));
-  });
-  const bulkCategorize = async () => {
-    if (!bulkCat.trim() || selected.size === 0) return;
-    setBulkBusy(true);
-    try {
-      const ids = [...selected];
-      await Promise.all(ids.map((id) => db.transactions.update(id, { category: bulkCat.trim() } as any)));
-      if (uid) {
-        // create/bump one merchant rule per unique merchant in selection
-        const touched = items.filter((t: any) => selected.has(t.id));
-        const uniqueMerchants = new Map<string, any>();
-        for (const t of touched) {
-          const key = (t.merchant ?? t.description ?? "").toLowerCase().trim();
-          if (key && !uniqueMerchants.has(key)) uniqueMerchants.set(key, t);
-        }
-        await Promise.all([...uniqueMerchants.values()].map((t) =>
-          learnFromCorrection({ merchant: t.merchant, description: t.description }, bulkCat.trim(), uid).catch(() => {}),
-        ));
-      }
-      push(`categorized ${ids.length} txns`, "ok");
-      setSelected(new Set());
-      setBulkCat("");
-      load();
-    } catch (e: any) { push(e?.message ?? "bulk failed", "err"); }
-    finally { setBulkBusy(false); }
-  };
-  const bulkDelete = async () => {
-    if (selected.size === 0 || !confirm(`Delete ${selected.size} txns?`)) return;
-    setBulkBusy(true);
-    try {
-      await Promise.all([...selected].map((id) => db.transactions.remove(id)));
-      push(`deleted ${selected.size}`, "ok");
-      setSelected(new Set()); load();
-    } catch (e: any) { push(e?.message ?? "bulk delete failed", "err"); }
-    finally { setBulkBusy(false); }
-  };
-  const bulkReconcile = async () => {
-    if (selected.size === 0) return;
-    setBulkBusy(true);
-    try {
-      await Promise.all([...selected].map((id) => db.transactions.update(id, { is_reconciled: true } as any)));
-      push(`marked ${selected.size} reconciled`, "ok");
-      setSelected(new Set()); load();
-    } catch (e: any) { push(e?.message ?? "bulk reconcile failed", "err"); }
-    finally { setBulkBusy(false); }
   };
 
   const accountOptions = [
@@ -235,6 +154,15 @@ export default function Txns() {
           </div>
           <Btn type="submit" variant="primary" disabled={!f.amount}>+ log</Btn>
         </form>
+        <div style={{ display: "flex", gap: 8, alignItems: "end", marginTop: 8 }}>
+          <div style={{ minWidth: 140 }}><label style={labelStyle}>payment mode</label>
+            <HudSelect value={f.payment_mode} onChange={(v) => setF({ ...f, payment_mode: v })} placeholder="—" options={[
+              { value: "upi", label: "UPI" }, { value: "neft", label: "NEFT" }, { value: "imps", label: "IMPS" },
+              { value: "card", label: "Card" }, { value: "cash", label: "Cash" }, { value: "cheque", label: "Cheque" }, { value: "other", label: "Other" },
+            ]} />
+          </div>
+          <div><label style={labelStyle}>ref #</label><input value={f.reference_number} onChange={set("reference_number")} placeholder="UTR / txn id" style={{ ...inputStyle, width: 160 }} /></div>
+        </div>
       </HudPanel>
       <HudPanel title="Filters" index="F" live="ok" style={{ flexShrink: 0 }}>
         <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1.5fr 1fr 1fr auto auto", gap: 8, alignItems: "end" }}>
@@ -265,35 +193,22 @@ export default function Txns() {
           <span>unreconciled debits: <b>{totals.unrec}</b></span>
           <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             {alerts.length > 0 && <Chip tone="warn">{alerts.length} open alerts</Chip>}
-            <Btn size="sm" onClick={exportCsv} disabled={filtered.length === 0}>export CSV</Btn>
             <Btn size="sm" variant="primary" onClick={runRecon} disabled={reconciling}>{reconciling ? "scanning…" : "run reconciliation"}</Btn>
           </span>
         </div>
-        {selected.size > 0 && (
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, padding: 8, border: "1px solid var(--edge-strong)", background: "rgba(53,214,237,0.05)", borderRadius: 3 }}>
-            <span style={{ fontSize: 11, color: "var(--accent)", fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>{selected.size} selected</span>
-            <input value={bulkCat} onChange={(e) => setBulkCat(e.target.value)} placeholder="new category…" style={{ ...inputStyle, width: 160 }} />
-            <Btn size="sm" variant="primary" disabled={bulkBusy || !bulkCat.trim()} onClick={bulkCategorize}>categorize</Btn>
-            <Btn size="sm" disabled={bulkBusy} onClick={bulkReconcile}>mark reconciled</Btn>
-            <Btn size="sm" disabled={bulkBusy} onClick={bulkDelete}>delete</Btn>
-            <Btn size="sm" onClick={() => setSelected(new Set())}>clear</Btn>
-          </div>
-        )}
       </HudPanel>
-
       <HudPanel title="Transactions" index="TXN" live="ok" style={{ flex: 1, minHeight: 0 }} bodyClass="overflow-auto">
         {filtered.length === 0 ? <EmptyState hint={items.length ? "adjust filters above" : "log your first one above"}>no transactions</EmptyState> :
          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
            <thead>
              <tr style={{ color: "var(--text-dim)", textAlign: "left", fontSize: 10, fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
-               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", width: 24 }}>
-                 <input type="checkbox" checked={filtered.length > 0 && selected.size === filtered.length} onChange={toggleAllSel} />
-               </th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>date</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>merchant</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>category</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>account</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>source</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>mode</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>ref #</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>rec</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>amount</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }} />
@@ -305,11 +220,7 @@ export default function Txns() {
                const suspicious = Number(t.amount) >= SUSPICIOUS_AMOUNT && t.txn_type === "debit";
                return (
                <Fragment key={t.id}>
-                  <tr style={{ borderBottom: "1px solid rgba(127,233,255,0.06)", background: selected.has(t.id) ? "rgba(53,214,237,0.08)" : (suspicious ? "rgba(255,183,77,0.05)" : undefined) }}>
-                   <td style={{ padding: "6px 8px" }}>
-                     <input type="checkbox" checked={selected.has(t.id)} onChange={() => toggleSel(t.id)} />
-                   </td>
-
+                  <tr style={{ borderBottom: "1px solid rgba(127,233,255,0.06)", background: suspicious ? "rgba(255,183,77,0.05)" : undefined }}>
                    <td style={{ padding: "6px 8px", color: "var(--text-dim)" }}>{new Date(t.txn_date).toLocaleDateString()}</td>
                    <td style={{ padding: "6px 8px", color: "var(--text)" }}>
                      {isEditing
@@ -324,6 +235,8 @@ export default function Txns() {
                    </td>
                    <td style={{ padding: "6px 8px", color: "var(--text-dim)" }}>{t.financial_accounts?.nickname ?? t.credit_cards?.card_name ?? "—"}</td>
                    <td style={{ padding: "6px 8px" }}><Chip tone={sourceTone(t.source)}>{t.source ?? "manual"}</Chip></td>
+                   <td style={{ padding: "6px 8px", color: "var(--text-dim)" }}>{t.payment_mode ?? "—"}</td>
+                   <td style={{ padding: "6px 8px", color: "var(--text-dim)" }}>{t.reference_number ?? "—"}</td>
                    <td style={{ padding: "6px 8px" }}>
                      <button title={t.is_reconciled ? "reconciled — click to unmark" : "mark reconciled"} onClick={() => toggleReconciled(t)}
                        style={{ background: "none", border: "1px solid var(--edge)", cursor: "pointer", padding: "2px 4px", borderRadius: 3,
@@ -353,7 +266,7 @@ export default function Txns() {
                  </tr>
                  {linkId === t.id && (
                    <tr>
-                     <td colSpan={9} style={{ padding: "8px", background: "rgba(53,214,237,0.03)", borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
+                     <td colSpan={10} style={{ padding: "8px", background: "rgba(53,214,237,0.03)", borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
                        <div style={{ display: "flex", gap: 6, alignItems: "end" }}>
                          <div style={{ minWidth: 220 }}>
                            <label style={labelStyle}>link to statement</label>

@@ -1,19 +1,12 @@
-import { Fragment, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
-import KineticNumber from "@/components/hud/KineticNumber";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { HudSelect } from "@/components/hud/HudSelect";
 import { HudDatePicker } from "@/components/hud/HudDatePicker";
-import { db, inr, type FinancialAccount, type CreditCard, type Transaction } from "@/lib/db";
-import { authFetch } from "@/lib/authFetch";
-import { calcEmi, calcPrincipalFromEmi, roundCurrency } from "@/lib/loanCalc";
-import { calcCreditUtilization, generateAmortizationSchedule } from "@/lib/financeMetrics";
-import { runReconciliation } from "@/lib/reconciliation";
-import { useFinanceSnapshot } from "@/lib/useFinanceSnapshot";
+import { db, inr } from "@/lib/db";
 import { useUi } from "@/store/uiStore";
-import { Trash2, RefreshCw } from "lucide-react";
-import { ConfigureCTA, utilTone } from "./_shared";
+import { ConfigureCTA } from "./_shared";
 
 // ---------- Goals ----------
 export default function Goals() {
@@ -65,12 +58,13 @@ export default function Goals() {
     load();
   };
 
+  // Insert-only — the goal_contribution_bump DB trigger adds `amount` onto
+  // current_amount atomically, so this never needs a separate update call.
   const addContribution = async (g: any) => {
     if (!contribution) return;
     setContributing(true);
     try {
-      const next = Number(g.current_amount ?? 0) + Number(contribution);
-      await db.goals.update(g.id, { current_amount: next });
+      await db.goals.contributions.create(g.id, Number(contribution));
       push(`Added ${inr(Number(contribution))}`, "ok");
       setContribution("");
       load();
@@ -91,6 +85,10 @@ export default function Goals() {
                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                    <div style={{ fontFamily: "var(--font-display)", fontSize: 15 }}>{g.title}</div>
                    {g.goal_type && <Chip>{g.goal_type}</Chip>}
+                   <NavLink to={`/finance/goals/${g.id}`} onClick={(e) => e.stopPropagation()}
+                     style={{ marginLeft: "auto", fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.18em", textTransform: "uppercase", color: "var(--accent)", textDecoration: "none" }}>
+                     details →
+                   </NavLink>
                  </div>
                  <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>{inr(g.current_amount ?? 0)} of {inr(g.target_amount ?? 0)}{g.target_date && ` · by ${new Date(g.target_date).toLocaleDateString()}`}</div>
                  <div style={{ height: 4, background: "rgba(53,214,237,0.1)", marginTop: 8 }}>

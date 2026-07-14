@@ -5,18 +5,12 @@ import { requireUserId } from "../_shared/auth.ts";
 import { createLovableAiGatewayProvider } from "../_shared/ai-gateway.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
 import { createSlidingWindowLimiter, checkAndBumpDailyQuota } from "../_shared/rate-limit.ts";
-import { z } from "npm:zod";
 
 // Natural ceiling is already ~15/min from the client's 4s debounce
 // (jarvisChat.ts: Date.now() - lastVisionAt < 4000) — this backstops it
 // server-side.
 const visionLimiter = createSlidingWindowLimiter(20, 60_000);
 const VISION_DAILY_REQUEST_CAP = 300;
-const Body = z.object({
-  image_url: z.string().url(),
-  kind: z.enum(["screen", "camera"]).optional(),
-  question: z.string().max(500).optional(),
-});
 
 function admin() {
   return createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, { auth: { persistSession: false } });
@@ -57,25 +51,24 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const parsed = Body.safeParse(await req.json().catch(() => ({})));
-    if (!parsed.success) return new Response(JSON.stringify({ error: "invalid_input", details: parsed.error.flatten() }), { status: 400, headers: { ...cors, "Content-Type": "application/json" } });
-    const { image_url, kind, question } = parsed.data;
+    const { image_url, kind, question } = await req.json();
+    if (!image_url || typeof image_url !== "string") {
+      return new Response(JSON.stringify({ error: "image_url required" }), {
+        status: 400,
+        headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
 
     // SSRF guard: allow only https URLs on our Supabase project's storage host.
     const supabaseHost = new URL(Deno.env.get("SUPABASE_URL")!).host;
-    let parsedUrl: URL;
-    try { parsedUrl = new URL(image_url); } catch {
+    let parsed: URL;
+    try { parsed = new URL(image_url); } catch {
       return new Response(JSON.stringify({ error: "invalid image_url" }), {
         status: 400, headers: { ...cors, "Content-Type": "application/json" },
       });
     }
-    if (parsedUrl.protocol !== "https:" || parsedUrl.host !== supabaseHost) {
+    if (parsed.protocol !== "https:" || parsed.host !== supabaseHost) {
       return new Response(JSON.stringify({ error: "image_url must be a signed URL on this project's storage" }), {
-        status: 400, headers: { ...cors, "Content-Type": "application/json" },
-      });
-    }
-    if (!parsedUrl.pathname.startsWith("/storage/v1/object/")) {
-      return new Response(JSON.stringify({ error: "image_url must be a storage object URL" }), {
         status: 400, headers: { ...cors, "Content-Type": "application/json" },
       });
     }
@@ -92,7 +85,7 @@ Deno.serve(async (req) => {
           role: "user",
           content: [
             { type: "text", text: prompt },
-            { type: "image", image: parsedUrl },
+            { type: "image", image: parsed },
           ],
         },
       ],

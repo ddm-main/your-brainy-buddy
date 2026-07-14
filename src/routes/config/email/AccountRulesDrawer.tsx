@@ -42,7 +42,12 @@ export default function AccountRulesDrawer({
     try {
       const updated = await db.emailAccounts.update(account.id, { [key]: value });
       onSaved(updated as EmailAccount);
-      if (key === "permission_level" && value !== account.permission_level) setPermDirty(true);
+      if (key === "permission_level") {
+        // Show the "reconnect required" hint only while the saved level
+        // differs from the mailbox's original permission_level. Reverting
+        // back or reconnecting elsewhere clears the hint on next open.
+        setPermDirty(value !== account.permission_level);
+      }
     } catch (e: any) {
       setDraft((d: any) => ({ ...d, [key]: prev }));
       push(e?.message ?? "save failed", "err");
@@ -133,8 +138,13 @@ export default function AccountRulesDrawer({
             </select>
           </Row>
           {permDirty && (
-            <div style={{ fontSize: 11, color: "var(--warn, #e0a458)", marginTop: -6 }}>
-              → reconnect required for scope change to take effect
+            <div style={{ fontSize: 11, color: "var(--warn, #e0a458)", marginTop: -6, display: "flex", gap: 8, alignItems: "center" }}>
+              <span>→ reconnect required for scope change to take effect</span>
+              <button
+                type="button"
+                onClick={() => setPermDirty(false)}
+                style={{ background: "none", border: "1px solid var(--edge)", color: "var(--text-muted)", padding: "1px 6px", cursor: "pointer", fontSize: 10 }}
+              >dismiss</button>
             </div>
           )}
         </Section>

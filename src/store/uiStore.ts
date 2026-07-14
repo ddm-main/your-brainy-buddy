@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import { toUserError } from "@/lib/userError";
 
 export type Toast = {
   id: string;
@@ -29,12 +28,7 @@ export const useUi = create<UiStore>((set, get) => ({
   toasts: [],
   push: (message, kind = "info") => {
     const id = Math.random().toString(36).slice(2);
-    // Defense in depth: sanitize error toasts so raw stack/URL/UUID leaks
-    // can never reach the panel even if a caller forgot to.
-    const safe = kind === "err" || kind === "warn"
-      ? toUserError(message ?? "", "Something went wrong")
-      : (message ?? "");
-    set({ toasts: [...get().toasts, { id, message: safe, kind }] });
+    set({ toasts: [...get().toasts, { id, message, kind }] });
     setTimeout(() => get().dismiss(id), 4000);
   },
   dismiss: (id) => set({ toasts: get().toasts.filter((t) => t.id !== id) }),

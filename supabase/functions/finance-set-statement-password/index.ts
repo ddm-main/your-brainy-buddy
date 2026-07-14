@@ -9,19 +9,12 @@ import { requireUserId } from "../_shared/auth.ts";
 import { encryptStatementPassword } from "../_shared/crypto.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
 import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
-import { z } from "npm:zod";
-
-const limiter = createSlidingWindowLimiter(20, 60_000);
-const Body = z.object({
-  target_type: z.enum(["card", "account"]),
-  target_id: z.string().uuid(),
-  password: z.string().min(1).max(256),
-});
 
 const TABLES: Record<string, string> = {
   card: "credit_cards",
   account: "financial_accounts",
 };
+const passwordLimiter = createSlidingWindowLimiter(10, 60_000);
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -35,16 +28,22 @@ Deno.serve(async (req) => {
     });
   }
   const uid = auth.userId;
-  const rl = limiter.check(uid);
-  if (!rl.ok) return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
-    status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) },
-  });
+
+  const rl = passwordLimiter.check(uid);
+  if (!rl.ok) {
+    return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) },
+    });
+  }
 
   try {
-    const parsed = Body.safeParse(await req.json().catch(() => ({})));
-    if (!parsed.success) return new Response(JSON.stringify({ error: "invalid_input", details: parsed.error.flatten() }), { status: 400, headers: { ...cors, "Content-Type": "application/json" } });
-    const { target_type, target_id, password } = parsed.data;
-    const table = TABLES[target_type];
+    const { target_type, target_id, password } = await req.json();
+    const table = TABLES[String(target_type)];
+    if (!table || !target_id || !password || typeof password !== "string") {
+      return new Response(JSON.stringify({ error: "target_type ('card'|'account'), target_id, and password are required" }), {
+        status: 400, headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
 
     const url = Deno.env.get("SUPABASE_URL")!;
     const svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;

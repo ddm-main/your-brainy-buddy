@@ -7,14 +7,8 @@ import { svcClient } from "../_shared/gmail.ts";
 import { extractFinanceForAccount } from "../_shared/finance-extract-core.ts";
 import { sanitizeError, sanitizedErrorResponse } from "../_shared/errors.ts";
 import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
-import { z } from "npm:zod";
 
-const limiter = createSlidingWindowLimiter(20, 60_000);
-const Body = z.object({
-  account_id: z.string().uuid().optional(),
-  since_days: z.number().int().min(1).max(365).optional(),
-  limit: z.number().int().min(1).max(1000).optional(),
-});
+const extractLimiter = createSlidingWindowLimiter(5, 60_000);
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -22,15 +16,16 @@ Deno.serve(async (req) => {
   const cors = corsFor(req);
   const auth = await requireUserId(req);
   if ("error" in auth) return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401, headers: { ...cors, "Content-Type": "application/json" } });
-  const rl = limiter.check(auth.userId);
-  if (!rl.ok) return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
-    status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) },
-  });
+
+  const rl = extractLimiter.check(auth.userId);
+  if (!rl.ok) {
+    return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) },
+    });
+  }
 
   try {
-    const parsed = Body.safeParse(await req.json().catch(() => ({})));
-    if (!parsed.success) return new Response(JSON.stringify({ error: "invalid_input", details: parsed.error.flatten() }), { status: 400, headers: { ...cors, "Content-Type": "application/json" } });
-    const { account_id, since_days, limit } = parsed.data;
+    const { account_id, since_days, limit } = await req.json().catch(() => ({}));
     const svc = svcClient();
 
     let accounts: any[] = [];

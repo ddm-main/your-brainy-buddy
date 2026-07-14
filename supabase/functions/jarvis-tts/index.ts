@@ -5,14 +5,8 @@ import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
 import { createSlidingWindowLimiter, checkAndBumpDailyQuota } from "../_shared/rate-limit.ts";
-import { z } from "npm:zod";
 
 const GATEWAY_URL = "https://ai.gateway.lovable.dev/v1/audio/speech";
-const Body = z.object({
-  text: z.string().min(1).max(4000),
-  voice: z.enum(["alloy", "echo", "fable", "onyx", "nova", "shimmer", "coral", "sage", "ash", "verse"]).optional(),
-  instructions: z.string().max(1000).optional(),
-});
 const ttsLimiter = createSlidingWindowLimiter(30, 60_000);
 const TTS_DAILY_REQUEST_CAP = 800;
 
@@ -54,9 +48,17 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const parsed = Body.safeParse(await req.json().catch(() => ({})));
-    if (!parsed.success) return new Response(JSON.stringify({ error: "invalid_input", details: parsed.error.flatten() }), { status: 400, headers: { ...cors, "Content-Type": "application/json" } });
-    const { text, voice = "onyx", instructions } = parsed.data;
+    const { text, voice = "onyx", instructions } = (await req.json()) as {
+      text: string;
+      voice?: string;
+      instructions?: string;
+    };
+    if (!text || typeof text !== "string") {
+      return new Response(
+        JSON.stringify({ error: "text required" }),
+        { status: 400, headers: { ...cors, "Content-Type": "application/json" } },
+      );
+    }
 
     const upstream = await fetch(GATEWAY_URL, {
       method: "POST",

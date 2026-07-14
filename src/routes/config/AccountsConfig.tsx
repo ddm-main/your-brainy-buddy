@@ -3,6 +3,7 @@ import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { HudSelect } from "@/components/hud/HudSelect";
+import BankPicker from "@/components/finance/BankPicker";
 import { db, type Bank } from "@/lib/db";
 import { useUi } from "@/store/uiStore";
 import { Trash2, KeyRound } from "lucide-react";
@@ -21,7 +22,7 @@ export default function AccountsConfig() {
   const [banks, setBanks] = useState<Bank[]>([]);
   const [items, setItems] = useState<any[]>([]);
   const [nick, setNick] = useState(""); const [type, setType] = useState(""); const [mask, setMask] = useState("");
-  const [bankId, setBankId] = useState<string>(""); const [newBank, setNewBank] = useState("");
+  const [bankId, setBankId] = useState<string>("");
   const [pwEditId, setPwEditId] = useState<string | null>(null);
   const [pwValue, setPwValue] = useState("");
   const [pwSaving, setPwSaving] = useState(false);
@@ -32,9 +33,7 @@ export default function AccountsConfig() {
     e.preventDefault();
     if (!nick.trim()) return;
     try {
-      let bId: string | null = bankId || null;
-      if (newBank.trim()) { const b = await db.banks.create(newBank.trim()); bId = b.id; setNewBank(""); }
-      await db.accounts.create({ nickname: nick.trim(), account_type: type || undefined, masked_number: mask || undefined, bank_id: bId });
+      await db.accounts.create({ nickname: nick.trim(), account_type: type || undefined, masked_number: mask || undefined, bank_id: bankId || null });
       setNick(""); setType(""); setMask(""); setBankId("");
       load();
     } catch (err: any) { push(err?.message, "err"); }
@@ -50,10 +49,11 @@ export default function AccountsConfig() {
     } catch (err: any) { push(err?.message ?? "failed to save password", "err"); }
     finally { setPwSaving(false); }
   };
+  void banks;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, height: "100%", minHeight: 0 }}>
       <HudPanel title="Add Account" index="+" live="ok" style={{ flexShrink: 0 }}>
-        <form onSubmit={submit} style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr auto", gap: 8, alignItems: "end" }}>
+        <form onSubmit={submit} style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 2fr auto", gap: 8, alignItems: "end" }}>
           <div><label style={labelStyle}>nickname</label><input value={nick} onChange={(e) => setNick(e.target.value)} placeholder="e.g. HDFC Salary" style={{ ...inputStyle, width: "100%" }} /></div>
           <div><label style={labelStyle}>type</label>
             <HudSelect value={type} onChange={setType} placeholder="—" options={[
@@ -64,9 +64,8 @@ export default function AccountsConfig() {
           </div>
           <div><label style={labelStyle}>last 4</label><input value={mask} onChange={(e) => setMask(e.target.value)} placeholder="****1234" style={{ ...inputStyle, width: "100%" }} /></div>
           <div><label style={labelStyle}>bank</label>
-            <HudSelect value={bankId} onChange={setBankId} placeholder="—" options={banks.map((b) => ({ value: b.id, label: b.name }))} />
+            <BankPicker value={bankId} onChange={(id) => setBankId(id)} />
           </div>
-          <div><label style={labelStyle}>or new bank</label><input value={newBank} onChange={(e) => setNewBank(e.target.value)} placeholder="e.g. HDFC Bank" style={{ ...inputStyle, width: "100%" }} /></div>
           <Btn type="submit" variant="primary" disabled={!nick.trim()}>+ add</Btn>
         </form>
       </HudPanel>

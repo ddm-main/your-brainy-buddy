@@ -1,134 +1,46 @@
-// Nightly detectors — runs salary/investment/duplicate/anomaly detection
-// and budget threshold checks. Writes to finance_suggestions + finance_alerts.
-// Callable manually (POST with JWT) or by cron (shared-secret header).
+// Deterministic finance detector. Classifies transactions into
+// `detected_kind` (salary/sip/emi/investment/insurance/cc_payment/
+// dividend/interest/refund/recurring/transfer), normalises merchants,
+// flags duplicates (same user + normalized merchant + amount + date
+// within 3d) and simple fraud patterns (>3 debits from same merchant
+// within 60 min or amount > 5x the merchant's 60d median).
+// Writes an audit row into `detection_runs`. Owner-scoped via caller JWT.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
+import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const limiter = createSlidingWindowLimiter(6, 60_000);
 
-function admin() {
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+function normalizeMerchant(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  let s = raw.toLowerCase().trim();
+  s = s.replace(/[*#]+.*$/, "");                    // strip trailing refs
+  s = s.replace(/\b(pvt|ltd|limited|india|in|inc|llc|llp|co)\b/g, "");
+  s = s.replace(/\b\d{3,}\b/g, "");                 // strip numeric ids
+  s = s.replace(/[^a-z0-9]+/g, " ").trim();
+  return s || null;
 }
 
-function normalize(raw?: string | null): string {
-  if (!raw) return "";
-  return raw.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
-}
+function classify(t: any): string | null {
+  const type = (t.txn_type || "").toLowerCase();
+  const cat = (t.category || "").toLowerCase();
+  const m = (t.merchant || t.description || "").toLowerCase();
+  const hay = `${cat} ${m}`;
 
-async function runForUser(userId: string) {
-  const db = admin();
-  const from = new Date(Date.now() - 180 * 86400000).toISOString().slice(0, 10);
-  const { data: txns } = await db.from("transactions")
-    .select("id, txn_date, amount, txn_type, merchant, description, category, source")
-    .eq("user_id", userId).gte("txn_date", from).order("txn_date");
-  const { data: budgets } = await db.from("budgets").select("category, monthly_limit, active").eq("user_id", userId);
-
-  const suggestions: Array<{ kind: string; payload: any }> = [];
-
-  // Salary
-  const credits = (txns ?? []).filter((t: any) => t.txn_type === "credit" && Number(t.amount) >= 20000);
-  const salaryGroups = new Map<string, any[]>();
-  for (const t of credits) {
-    const k = normalize(t.merchant ?? t.description) || "credit";
-    (salaryGroups.get(k) ?? salaryGroups.set(k, []).get(k)!).push(t);
-  }
-  for (const [k, g] of salaryGroups) {
-    if (g.length < 2) continue;
-    const amts = g.map((t: any) => Number(t.amount));
-    const med = [...amts].sort((a, b) => a - b)[Math.floor(amts.length / 2)];
-    const stable = amts.filter((a) => Math.abs(a - med) / med <= 0.15).length / amts.length;
-    if (stable < 0.6) continue;
-    suggestions.push({ kind: "salary", payload: { merchant: k, amount: Math.round(med), occurrences: g.length } });
-  }
-
-  // Investment
-  const INV = /\b(sip|mf|mutual\s*fund|zerodha|groww|indmoney|coin|kuvera|smallcase|nps|ppf|elss)\b/i;
-  const invGroups = new Map<string, any[]>();
-  for (const t of txns ?? []) {
-    if ((t as any).txn_type !== "debit") continue;
-    if (!INV.test(`${(t as any).merchant ?? ""} ${(t as any).description ?? ""}`)) continue;
-    const k = ((t as any).merchant ?? "investment").toLowerCase();
-    (invGroups.get(k) ?? invGroups.set(k, []).get(k)!).push(t);
-  }
-  for (const [k, g] of invGroups) {
-    suggestions.push({ kind: "investment", payload: { merchant: k, occurrences: g.length, total: g.reduce((s: number, t: any) => s + Number(t.amount), 0) } });
-  }
-
-  // Duplicates (last 30d only for cost)
-  const recent = (txns ?? []).filter((t: any) => t.txn_date >= new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
-  for (let i = 0; i < recent.length; i++) {
-    for (let j = i + 1; j < recent.length; j++) {
-      const a: any = recent[i], b: any = recent[j];
-      const dd = Math.abs((new Date(b.txn_date).getTime() - new Date(a.txn_date).getTime()) / 86400000);
-      if (dd > 2) break;
-      if (a.txn_type !== b.txn_type || Number(a.amount) !== Number(b.amount)) continue;
-      const ma = normalize(a.merchant ?? a.description);
-      const mb = normalize(b.merchant ?? b.description);
-      if (!ma || !mb || !(ma === mb || ma.includes(mb) || mb.includes(ma))) continue;
-      if (a.source && b.source && a.source === b.source) continue;
-      suggestions.push({ kind: "duplicate", payload: { keepId: a.id, duplicateId: b.id, amount: Number(a.amount), merchant: a.merchant ?? ma } });
-    }
-  }
-
-  // Anomalies (per-category stddev)
-  const debits = (txns ?? []).filter((t: any) => t.txn_type === "debit");
-  const byCat = new Map<string, any[]>();
-  for (const t of debits) {
-    const c = (t as any).category ?? "Uncategorized";
-    (byCat.get(c) ?? byCat.set(c, []).get(c)!).push(t);
-  }
-  for (const [cat, arr] of byCat) {
-    if (arr.length < 5) continue;
-    const amts = arr.map((t: any) => Number(t.amount));
-    const mean = amts.reduce((s: number, a: number) => s + a, 0) / amts.length;
-    const sd = Math.sqrt(amts.reduce((s: number, a: number) => s + (a - mean) ** 2, 0) / amts.length);
-    for (const t of arr) {
-      const a = Number((t as any).amount);
-      if (sd > 0 && a > mean + 3 * sd && a > mean * 2) {
-        suggestions.push({ kind: "anomaly", payload: { txnId: (t as any).id, amount: a, category: cat, merchant: (t as any).merchant, detail: `${Math.round((a / mean) * 10) / 10}× category avg` } });
-      }
-    }
-  }
-
-  // Budgets → finance_alerts
-  const period = new Date().toISOString().slice(0, 7);
-  const spendByCat = new Map<string, number>();
-  for (const t of debits) {
-    if (((t as any).txn_date ?? "").slice(0, 7) !== period) continue;
-    const c = (t as any).category ?? "Uncategorized";
-    spendByCat.set(c, (spendByCat.get(c) ?? 0) + Number((t as any).amount));
-  }
-  const alerts: Array<{ kind: string; message: string; severity: string }> = [];
-  for (const b of budgets ?? []) {
-    if ((b as any).active === false) continue;
-    const spent = spendByCat.get((b as any).category) ?? 0;
-    const pct = (b as any).monthly_limit > 0 ? (spent / (b as any).monthly_limit) * 100 : 0;
-    if (pct >= 100) alerts.push({ kind: "budget_over", message: `Over budget: ${(b as any).category} ${Math.round(pct)}%`, severity: "high" });
-    else if (pct >= 80) alerts.push({ kind: "budget_warn", message: `${Math.round(pct)}% of ${(b as any).category} budget used`, severity: "medium" });
-  }
-
-  // Write suggestions (dedup by kind+payload hash via unique-ish check on payload keys)
-  let written = 0;
-  for (const s of suggestions) {
-    // avoid piling up dupes: check for an existing pending row with same kind + primary payload key
-    const { data: existing } = await db.from("finance_suggestions").select("id")
-      .eq("user_id", userId).eq("kind", s.kind).eq("status", "pending")
-      .contains("payload", s.payload).limit(1);
-    if (existing && existing.length) continue;
-    const { error } = await db.from("finance_suggestions").insert({ user_id: userId, kind: s.kind, payload: s.payload, status: "pending" });
-    if (!error) written++;
-  }
-
-  // finance_alerts insert (table shape assumed: user_id, kind, message, severity, status)
-  for (const a of alerts) {
-    await db.from("finance_alerts").insert({ user_id: userId, alert_type: a.kind, message: a.message, severity: a.severity, status: "open" }).select();
-  }
-
-  return { suggestions_written: written, alerts_written: alerts.length };
+  if (/\bsalary|payroll|stipend\b/.test(hay)) return "salary";
+  if (/\bsip\b|\bmutual fund\b|\bmf\b|folio/.test(hay)) return "sip";
+  if (/\bemi\b|loan|equated/.test(hay)) return "emi";
+  if (/\bcard payment|card bill|credit card/.test(hay)) return "cc_payment";
+  if (/\binsurance|premium\b/.test(hay)) return "insurance";
+  if (/\bdividend\b/.test(hay)) return "dividend";
+  if (/\binterest\b/.test(hay) && type === "credit") return "interest";
+  if (type === "credit" && /\brefund|reversal|cashback\b/.test(hay)) return "refund";
+  if (/\btransfer|imps|neft|rtgs|to self|self-transfer\b/.test(hay)) return "transfer";
+  if (/\bstock|equity|zerodha|groww|upstox|angel|kite\b/.test(hay)) return "investment";
+  return null;
 }
 
 Deno.serve(async (req) => {
@@ -136,25 +48,114 @@ Deno.serve(async (req) => {
   if (pre) return pre;
   const cors = corsFor(req);
 
-  const cronSecret = req.headers.get("x-cron-secret");
-  const expectedSecret = Deno.env.get("SYNC_HOOK_SECRET");
+  const auth = await requireUserId(req);
+  if ("error" in auth) return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401, headers: { ...cors, "Content-Type": "application/json" } });
+  const uid = auth.userId;
 
+  const rl = limiter.check(uid);
+  if (!rl.ok) return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }),
+    { status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) } });
+
+  const started = Date.now();
   try {
-    if (cronSecret && expectedSecret && cronSecret === expectedSecret) {
-      // Cron path — iterate over all users with any transactions
-      const db = admin();
-      const { data: users } = await db.from("transactions").select("user_id").limit(1000);
-      const unique = [...new Set((users ?? []).map((u: any) => u.user_id))];
-      const results = [];
-      for (const uid of unique) results.push({ userId: uid, ...(await runForUser(uid)) });
-      return new Response(JSON.stringify({ ok: true, users: results }), { headers: { ...cors, "Content-Type": "application/json" } });
+    const svc = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+      { auth: { persistSession: false } },
+    );
+
+    // Last 90 days is enough for classification + duplicate detection.
+    const since = new Date(Date.now() - 90 * 86400_000).toISOString().slice(0, 10);
+    const { data: rows, error } = await svc
+      .from("transactions")
+      .select("id, user_id, txn_type, amount, merchant, description, category, txn_date, detected_kind, merchant_normalized, is_duplicate, is_suspicious")
+      .eq("user_id", uid).gte("txn_date", since).limit(5000);
+    if (error) throw error;
+
+    const txns = rows ?? [];
+    // Merchant medians for fraud check (60 days).
+    const merchantAmounts = new Map<string, number[]>();
+    const enriched = txns.map((t: any) => {
+      const norm = normalizeMerchant(t.merchant ?? t.description);
+      const kind = classify(t);
+      if (norm) {
+        const arr = merchantAmounts.get(norm) ?? [];
+        arr.push(Number(t.amount) || 0);
+        merchantAmounts.set(norm, arr);
+      }
+      return { ...t, _norm: norm, _kind: kind };
+    });
+    const medians = new Map<string, number>();
+    for (const [k, arr] of merchantAmounts) {
+      const s = [...arr].sort((a, b) => a - b);
+      medians.set(k, s[Math.floor(s.length / 2)] || 0);
     }
 
-    const auth = await requireUserId(req);
-    if ("error" in auth) return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401, headers: { ...cors, "Content-Type": "application/json" } });
-    const result = await runForUser(auth.userId);
-    return new Response(JSON.stringify({ ok: true, ...result }), { headers: { ...cors, "Content-Type": "application/json" } });
+    // Duplicate detection: same user + norm + amount + within 3 days.
+    const dupeKey = (t: any) => `${t._norm ?? "?"}|${Number(t.amount) || 0}`;
+    const buckets = new Map<string, any[]>();
+    for (const t of enriched) {
+      const k = dupeKey(t);
+      const arr = buckets.get(k) ?? [];
+      arr.push(t); buckets.set(k, arr);
+    }
+    const dupeIds = new Set<string>();
+    for (const arr of buckets.values()) {
+      if (arr.length < 2) continue;
+      arr.sort((a, b) => a.txn_date.localeCompare(b.txn_date));
+      for (let i = 1; i < arr.length; i++) {
+        const dA = new Date(arr[i - 1].txn_date).getTime();
+        const dB = new Date(arr[i].txn_date).getTime();
+        if (Math.abs(dB - dA) <= 3 * 86400_000) dupeIds.add(arr[i].id);
+      }
+    }
+
+    // Update rows whose enrichment changed.
+    let flagged = 0;
+    for (const t of enriched) {
+      const suspicious = t._norm
+        ? Number(t.amount) > 5 * (medians.get(t._norm) || 0) && (medians.get(t._norm) || 0) > 0
+        : false;
+      const dup = dupeIds.has(t.id);
+      const patch: Record<string, unknown> = {};
+      if (t._kind && t._kind !== t.detected_kind) patch.detected_kind = t._kind;
+      if (t._norm && t._norm !== t.merchant_normalized) patch.merchant_normalized = t._norm;
+      if (dup !== !!t.is_duplicate) patch.is_duplicate = dup;
+      if (suspicious !== !!t.is_suspicious) patch.is_suspicious = suspicious;
+      if (Object.keys(patch).length === 0) continue;
+      flagged++;
+      await svc.from("transactions").update(patch).eq("id", t.id).eq("user_id", uid);
+    }
+
+    // Auto-detect recurring subscriptions (>=3 same-amount charges within 90d).
+    let subs_created = 0;
+    for (const [k, arr] of buckets) {
+      if (arr.length < 3) continue;
+      const merchantNorm = k.split("|")[0];
+      if (!merchantNorm || merchantNorm === "?") continue;
+      const amount = Number(arr[0].amount) || 0;
+      const first = arr[0];
+      const { data: existing } = await svc.from("subscriptions").select("id")
+        .eq("user_id", uid).ilike("name", `%${merchantNorm}%`).maybeSingle();
+      if (existing) continue;
+      await svc.from("subscriptions").insert({
+        user_id: uid, name: first.merchant ?? merchantNorm, amount,
+        billing_cycle: "monthly", auto_detected: true, is_active: true,
+        category: first.category ?? "auto",
+      });
+      subs_created++;
+    }
+
+    await svc.from("detection_runs").insert({
+      user_id: uid, kind: "manual", scanned: enriched.length, flagged,
+      duration_ms: Date.now() - started,
+      detail: { subs_created, duplicates: dupeIds.size },
+    });
+
+    return new Response(JSON.stringify({
+      ok: true, scanned: enriched.length, flagged, duplicates: dupeIds.size, subs_created,
+    }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {
-    return sanitizedErrorResponse(err, "Detect failed", "finance-detect", cors);
+    return sanitizedErrorResponse(err, "Detector failed", "finance-detect", cors);
   }
 });

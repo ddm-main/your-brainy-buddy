@@ -3,12 +3,11 @@ import HudPanel from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { db, type EmailAccount } from "@/lib/db";
 import { gmail, GmailApiError } from "@/lib/gmail";
-import { toUserError } from "@/lib/userError";
 import { useUi } from "@/store/uiStore";
 import { Trash2, RefreshCw, Link2, Settings, X, Copy, AlertTriangle } from "lucide-react";
 import AccountRulesDrawer from "./AccountRulesDrawer";
 
-type ErrInfo = { message: string; status?: number; hint?: string };
+type ErrInfo = { message: string; status?: number; details?: string; hint?: string };
 type GmailOAuthMessage = {
   type: "gmail-oauth-result";
   connected?: string | null;
@@ -18,30 +17,6 @@ type GmailOAuthMessage = {
 
 const OAUTH_POPUP_NAME = "jarvis_gmail_oauth";
 const POPUP_FEATURES = "popup=yes,width=520,height=720,menubar=no,toolbar=no,location=yes,status=no,scrollbars=yes,resizable=yes";
-
-// Map opaque OAuth error codes to short user-safe strings. Anything else
-// gets sanitized (URLs / tokens / UUIDs stripped) and truncated.
-const GMAIL_ERROR_MAP: Record<string, string> = {
-  invalid_state: "Session expired — try connecting again.",
-  token_exchange_failed: "Google refused the sign-in. Try again.",
-  userinfo_failed: "Could not read your Google profile.",
-  save_failed: "Could not save the connection. Try again.",
-  unexpected_error: "Something went wrong. Try again.",
-  access_denied: "You cancelled the Google sign-in.",
-  admin_policy_enforced: "Your Google admin blocks this app.",
-  interaction_required: "Google needs another sign-in step. Try again.",
-  login_required: "Sign in to Google and try again.",
-};
-function friendlyGmailError(raw: string | null | undefined): string {
-  if (!raw) return "Could not connect Gmail.";
-  const key = raw.trim().toLowerCase();
-  if (GMAIL_ERROR_MAP[key]) return GMAIL_ERROR_MAP[key];
-  const safe = toUserError(raw, "Could not connect Gmail.");
-  // If sanitization stripped everything meaningful, use the fallback.
-  if (safe.length < 6) return "Could not connect Gmail.";
-  return safe;
-}
-
 
 function relTime(iso?: string | null): string {
   if (!iso) return "never";
@@ -71,6 +46,7 @@ function ErrorPanel({ err, onRetry, onDismiss, retrying }: { err: ErrInfo; onRet
       `Gmail failed: ${err.message}`,
       err.status != null ? `HTTP ${err.status}` : "",
       err.hint ? `Hint: ${err.hint}` : "",
+      err.details ? `Details: ${err.details}` : "",
     ].filter(Boolean).join("\n");
     try { await navigator.clipboard.writeText(blob); } catch {}
   };
@@ -153,25 +129,20 @@ export default function EmailAccountsList({ initialAddView = false }: { initialA
     const err = result.error ?? null;
     const aid = result.aid ?? null;
     if (connected) {
-      // Only show the address if it looks like an email; otherwise a bland ack.
-      const addr = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(connected) ? connected : "mailbox";
-      push(`Connected ${addr}`, "ok");
+      push(`Connected ${connected}`, "ok");
       if (aid) setErrors((m) => { const c = { ...m }; delete c[aid]; return c; });
       if (aid) setBusyId((id) => (id === aid ? null : id));
       setGlobalErr(null);
       load();
     }
     if (err) {
-      // Never surface raw Google/OAuth strings — map known codes, sanitize the rest.
-      const message = friendlyGmailError(err);
-      const info: ErrInfo = { message, hint: "Reconnect the mailbox to try again." };
-      push(`Gmail: ${message}`, "err");
+      const info: ErrInfo = { message: err, hint: "Google returned this OAuth error." };
+      push(`Gmail: ${err}`, "err");
       if (aid) setErrors((m) => ({ ...m, [aid]: info }));
       else setGlobalErr(info);
       if (aid) setBusyId((id) => (id === aid ? null : id));
     }
   };
-
 
   useEffect(() => {
     const onMessage = (event: MessageEvent<GmailOAuthMessage>) => {
@@ -209,12 +180,12 @@ export default function EmailAccountsList({ initialAddView = false }: { initialA
     try {
       await db.emailAccounts.create({ email_address: addr.trim(), purpose, provider });
       setAddr(""); setShowAdd(false); load();
-    } catch (err: any) { push(toUserError(err, "Could not add mailbox"), "err"); }
+    } catch (err: any) { push(err?.message, "err"); }
   };
 
   const toErrInfo = (e: any): ErrInfo => {
-    if (e instanceof GmailApiError) return { message: e.message, status: e.status, hint: e.hint };
-    return { message: toUserError(e, "Something went wrong") };
+    if (e instanceof GmailApiError) return { message: e.message, status: e.status, details: e.details, hint: e.hint };
+    return { message: e?.message ?? String(e) };
   };
 
   const connect = async (a: EmailAccount) => {
@@ -242,12 +213,23 @@ export default function EmailAccountsList({ initialAddView = false }: { initialA
     }
   };
 
+  // A reconnect is only required for real auth failures — not every synced
+  // account should carry a "reconnect" button next to Sync.
+  const needsReconnect = (a: EmailAccount): boolean => {
+    if (a.provider !== "gmail") return false;
+    if (!a.connected_at) return true;
+    if (!(a as any).refresh_token) return true;
+    const err = (a as any).last_error as string | null | undefined;
+    if (a.sync_status === "error" && err && /invalid_grant|unauthorized|insufficient[_ ]?scope|token|refresh/i.test(err)) return true;
+    return false;
+  };
+
   const sync = async (a: EmailAccount) => {
     setBusyId(a.id);
     try {
       const r: any = await gmail.sync(a.id);
       if (r?.paused) push("account is paused — resume from rules to sync", "warn" as any);
-      else push(`Synced ${r.inserted} new / ${r.total} scanned`, "ok");
+      else push(`Synced ${r?.inserted ?? 0} new / ${r?.total ?? 0} scanned`, "ok");
       setErrors((m) => { const c = { ...m }; delete c[a.id]; return c; });
       load();
     } catch (e: any) {
@@ -259,7 +241,7 @@ export default function EmailAccountsList({ initialAddView = false }: { initialA
 
   const doDelete = async (a: EmailAccount) => {
     try { await db.emailAccounts.remove(a.id); push(`Deleted ${a.email_address}`, "ok"); setDeleteFor(null); load(); }
-    catch (e: any) { push(toUserError(e, "Delete failed"), "err"); }
+    catch (e: any) { push(e?.message ?? "delete failed", "err"); }
   };
 
   const dismiss = (id: string) => setErrors((m) => { const c = { ...m }; delete c[id]; return c; });
@@ -300,11 +282,7 @@ export default function EmailAccountsList({ initialAddView = false }: { initialA
              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", border: "1px solid var(--edge)", flexWrap: "wrap" }}>
                <div style={{ fontSize: 12, color: "var(--text)", flex: 1, minWidth: 200 }}>
                  {a.email_address}
-                 {a.last_error && (
-                   <div style={{ fontSize: 10, color: "var(--warn, #e0a458)", marginTop: 2 }}>
-                     {toUserError(a.last_error, "Sync error — try again or reconnect")}
-                   </div>
-                 )}
+                 {a.last_error && <div style={{ fontSize: 10, color: "var(--warn, #e0a458)", marginTop: 2 }}>{a.last_error}</div>}
                </div>
                <Chip tone={a.purpose === "finance" ? "accent" : "neutral"}>{a.purpose}</Chip>
                <StatusChip a={a} />
@@ -316,7 +294,9 @@ export default function EmailAccountsList({ initialAddView = false }: { initialA
                {a.provider === "gmail" && a.connected_at && (
                  <>
                    <Btn size="sm" onClick={() => sync(a)} disabled={busyId === a.id}><RefreshCw size={12} style={{ marginRight: 4 }} />sync</Btn>
-                   <Btn size="sm" onClick={() => connect(a)} disabled={busyId === a.id}>reconnect</Btn>
+                   {needsReconnect(a) && (
+                     <Btn size="sm" onClick={() => connect(a)} disabled={busyId === a.id}>reconnect</Btn>
+                   )}
                  </>
                )}
                <Btn size="sm" onClick={() => setRulesFor(a)}><Settings size={12} style={{ marginRight: 4 }} />rules</Btn>

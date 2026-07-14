@@ -24,7 +24,6 @@ const Projects = lazy(() => import("@/routes/Projects"));
 const Config = lazy(() => import("@/routes/Config"));
 const Tasks = lazy(() => import("@/routes/Tasks"));
 const Notes = lazy(() => import("@/routes/Notes"));
-const Decisions = lazy(() => import("@/routes/Decisions"));
 const NotFound = lazy(() => import("@/routes/NotFound"));
 const Auth = lazy(() => import("@/routes/Auth"));
 const ResetPassword = lazy(() => import("@/routes/ResetPassword"));
@@ -80,17 +79,16 @@ export default function App() {
         <div className="grid-bg" />
         <div className="vignette" />
         <div style={{ position: "relative", zIndex: 2, height: "100vh" }}>
-          <ErrorBoundary>
-            <Suspense fallback={<BootFallback />}>
+          <Suspense fallback={<BootFallback />}>
+            <ErrorBoundary>
               {isReset ? <ResetPassword /> : <Auth />}
-            </Suspense>
-          </ErrorBoundary>
+            </ErrorBoundary>
+          </Suspense>
         </div>
         <ToastLayer />
       </>
     );
   }
-
 
   return (
     <>
@@ -133,7 +131,8 @@ function AnimatedRoutes() {
           <Route path="/" element={<Home />} />
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/notes" element={<Notes />} />
-          <Route path="/decisions" element={<Decisions />} />
+          <Route path="/workspace" element={<Navigate to="/tasks" replace />} />
+          <Route path="/decisions" element={<Navigate to="/tasks" replace />} />
           <Route path="/inbox" element={<Inbox />} />
           <Route path="/finance/*" element={<Finance />} />
           <Route path="/projects/*" element={<Projects />} />
@@ -151,8 +150,8 @@ function AnimatedRoutes() {
 function BootFallback() {
   return (
     <div style={{
-      display: "flex", alignItems: "center", justifyContent: "center",
-      height: "100%", color: "var(--accent)",
+      display: "flex", alignItems: "flex-start", justifyContent: "center",
+      minHeight: "100vh", color: "var(--accent)", paddingTop: "clamp(72px, 22vh, 180px)",
       fontFamily: "var(--font-hud)", letterSpacing: "0.3em",
       fontSize: 12, textTransform: "uppercase",
     }}>

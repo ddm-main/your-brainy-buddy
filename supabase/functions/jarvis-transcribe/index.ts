@@ -65,19 +65,6 @@ Deno.serve(async (req) => {
     const stream = ((inbound.get("stream") as string) ?? "true") === "true";
     const language = inbound.get("language") as string | null;
 
-    // Whitelist model + language to prevent forwarding arbitrary strings upstream.
-    const ALLOWED_MODELS = new Set(["openai/gpt-4o-mini-transcribe", "openai/gpt-4o-transcribe", "openai/whisper-1"]);
-    if (!ALLOWED_MODELS.has(model)) {
-      return new Response(JSON.stringify({ error: "invalid_input", details: "unsupported model" }), {
-        status: 400, headers: { ...cors, "Content-Type": "application/json" },
-      });
-    }
-    if (language && !/^[a-z]{2}(-[A-Z]{2})?$/.test(language)) {
-      return new Response(JSON.stringify({ error: "invalid_input", details: "language must be BCP-47 short code" }), {
-        status: 400, headers: { ...cors, "Content-Type": "application/json" },
-      });
-    }
-
     const upstream = new FormData();
     upstream.append("model", model);
     upstream.append("file", file, file.name || "recording.wav");

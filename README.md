@@ -26,13 +26,14 @@ E:\Claude\JARVIS
 
 ## The HUD
 
-A zero-dependency web dashboard (inspired by [agentic-os-personal](https://github.com/vivekmishraishere/agentic-os-personal)) showing focus, projects, inbox, areas, memory, and logs live from Supabase:
+A Vite + React web dashboard (inspired by [agentic-os-personal](https://github.com/vivekmishraishere/agentic-os-personal)) showing focus, projects, inbox, finance, tasks, notes, and JARVIS chat/voice live from Supabase:
 
 ```powershell
-node Apps/hud/server.mjs     # → http://localhost:3960
+npm install
+npm run dev                  # → http://localhost:8080
 ```
 
-Credentials come from `Apps/hud/.env` (gitignored; see `.env.example`). Data refreshes every 30s — run `/sync` after working in the OS to update what it shows.
+Credentials come from the root `.env` (gitignored; see `.env.example`) — set `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`. (`Apps/hud/server.mjs` is a thin launcher that just starts Vite on a given port.)
 
 ## Daily use
 

@@ -1,19 +1,14 @@
-import { Fragment, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
-import KineticNumber from "@/components/hud/KineticNumber";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { HudSelect } from "@/components/hud/HudSelect";
 import { HudDatePicker } from "@/components/hud/HudDatePicker";
-import { db, inr, type FinancialAccount, type CreditCard, type Transaction } from "@/lib/db";
-import { authFetch } from "@/lib/authFetch";
+import { db, inr } from "@/lib/db";
 import { calcEmi, calcPrincipalFromEmi, roundCurrency } from "@/lib/loanCalc";
-import { calcCreditUtilization, generateAmortizationSchedule } from "@/lib/financeMetrics";
-import { runReconciliation } from "@/lib/reconciliation";
-import { useFinanceSnapshot } from "@/lib/useFinanceSnapshot";
+import { generateAmortizationSchedule } from "@/lib/financeMetrics";
 import { useUi } from "@/store/uiStore";
-import { Trash2, RefreshCw } from "lucide-react";
-import { ConfigureCTA, utilTone, sourceTone } from "./_shared";
+import { ConfigureCTA, sourceTone } from "./_shared";
 
 // ---------- Loans ----------
 export default function Loans() {

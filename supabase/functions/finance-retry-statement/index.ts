@@ -7,22 +7,12 @@
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { svcClient } from "../_shared/gmail.ts";
-import { applyParsedStatementResult, ingestStatementAttachment, purgeStatementDerivedData } from "../_shared/finance-extract-core.ts";
-import { parseStatementPdf } from "../_shared/statement-pdf.ts";
-import { decryptStatementPassword } from "../_shared/crypto.ts";
+import { ingestStatementAttachment, parseStoredStatementPdf, purgeStatementDerived, resolveLinks } from "../_shared/finance-extract-core.ts";
+import { guessBankSlugFromSender, parseFinanceEmail } from "../_shared/finance-parsers.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
 import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
-import { z } from "npm:zod";
 
-const limiter = createSlidingWindowLimiter(10, 60_000);
-const Body = z.object({
-  statement_id: z.string().uuid(),
-  credit_card_id: z.string().uuid().nullable().optional(),
-  financial_account_id: z.string().uuid().nullable().optional(),
-  password: z.string().max(256).optional(),
-});
-
-const STATEMENT_BUCKET = "statement-pdfs";
+const retryLimiter = createSlidingWindowLimiter(20, 60_000);
 
 Deno.serve(async (req) => {
   const pre = preflight(req);
@@ -36,15 +26,21 @@ Deno.serve(async (req) => {
     });
   }
   const uid = auth.userId;
-  const rl = limiter.check(uid);
-  if (!rl.ok) return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
-    status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) },
-  });
+
+  const rl = retryLimiter.check(uid);
+  if (!rl.ok) {
+    return new Response(JSON.stringify({ error: "rate_limited", retry_after: rl.retryAfter }), {
+      status: 429, headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(rl.retryAfter) },
+    });
+  }
 
   try {
-    const parsed = Body.safeParse(await req.json().catch(() => ({})));
-    if (!parsed.success) return new Response(JSON.stringify({ error: "invalid_input", details: parsed.error.flatten() }), { status: 400, headers: { ...cors, "Content-Type": "application/json" } });
-    const { statement_id, credit_card_id, financial_account_id, password } = parsed.data;
+    const { statement_id, credit_card_id, financial_account_id, password } = await req.json();
+    if (!statement_id) {
+      return new Response(JSON.stringify({ error: "statement_id required" }), {
+        status: 400, headers: { ...cors, "Content-Type": "application/json" },
+      });
+    }
 
     const svc = svcClient();
 
@@ -77,77 +73,86 @@ Deno.serve(async (req) => {
       statement.financial_account_id = financial_account_id ?? null;
     }
 
-    // Purge all derived data (previous txns, attachment row, parsed fields)
-    // so the retry is deterministic — same as the first ingest. Preserves
-    // the source_email_id-derived statement_date for Gmail statements.
-    const keepDate = !!statement.source_email_id;
-    await purgeStatementDerivedData(svc, statement_id, { keepStatementDate: keepDate });
+    let email: any = null;
+    let account: any = null;
+    let links = {
+      credit_card_id: statement.credit_card_id ?? null,
+      financial_account_id: statement.financial_account_id ?? null,
+      loan_id: statement.loan_id ?? null,
+      linked_bank_id: statement.linked_bank_id ?? null,
+    };
 
-    // Two retry paths:
-    //  1. Gmail-sourced statement → re-fetch attachment via Gmail API.
-    //  2. Manually-uploaded statement → download from storage and re-parse
-    //     with a (possibly newly-supplied) password.
     if (statement.source_email_id) {
-      const { data: email, error: emErr } = await svc.from("emails").select("*").eq("id", statement.source_email_id).eq("user_id", uid).maybeSingle();
+      const { data: emailRow, error: emErr } = await svc.from("emails").select("*").eq("id", statement.source_email_id).eq("user_id", uid).maybeSingle();
       if (emErr) throw emErr;
-      if (!email) {
+      if (!emailRow) {
         return new Response(JSON.stringify({ error: "source email not found" }), {
           status: 404, headers: { ...cors, "Content-Type": "application/json" },
         });
       }
-      const { data: account, error: acErr } = await svc.from("email_accounts").select("*").eq("id", email.account_id).maybeSingle();
+      email = emailRow;
+      const { data: accountRow, error: acErr } = await svc.from("email_accounts").select("*").eq("id", email.account_id).maybeSingle();
       if (acErr) throw acErr;
-      if (!account) {
+      if (!accountRow) {
         return new Response(JSON.stringify({ error: "email account not found" }), {
           status: 404, headers: { ...cors, "Content-Type": "application/json" },
         });
       }
-      await ingestStatementAttachment(svc, account, email, statement.id, {
-        credit_card_id: statement.credit_card_id ?? null,
-        financial_account_id: statement.financial_account_id ?? null,
-        loan_id: statement.loan_id ?? null,
-      });
-    } else if (statement.file_path) {
-      const { data: blob, error: dlErr } = await svc.storage.from(STATEMENT_BUCKET).download(statement.file_path);
-      if (dlErr || !blob) throw dlErr ?? new Error("PDF not found in storage");
-      const bytes = new Uint8Array(await blob.arrayBuffer());
+      account = accountRow;
+      const parsed = parseFinanceEmail({ ...email, body_text: email.body_text ?? email.snippet });
+      links = parsed?.kind === "statement"
+        ? await resolveLinks(svc, uid, parsed, email)
+        : {
+          credit_card_id: statement.credit_card_id ?? null,
+          financial_account_id: statement.financial_account_id ?? null,
+          loan_id: statement.loan_id ?? null,
+          linked_bank_id: statement.linked_bank_id ?? null,
+        };
+      await svc.from("statements").update({
+        credit_card_id: links.credit_card_id ?? statement.credit_card_id ?? null,
+        financial_account_id: links.financial_account_id ?? statement.financial_account_id ?? null,
+        loan_id: links.loan_id ?? statement.loan_id ?? null,
+        linked_bank_id: links.linked_bank_id ?? statement.linked_bank_id ?? null,
+      }).eq("id", statement.id);
 
-      // Password resolution order: explicit override > saved rule on linked entity.
-      let pwd: string | undefined = password || undefined;
-      let pwdSource: "user" | "saved" | "none" = password ? "user" : "none";
-      if (!pwd) {
-        if (statement.credit_card_id) {
-          const { data: c } = await svc.from("credit_cards").select("statement_password_rule").eq("id", statement.credit_card_id).maybeSingle();
-          if (c?.statement_password_rule) {
-            try { pwd = await decryptStatementPassword(c.statement_password_rule); pwdSource = "saved"; } catch { /* ignore */ }
-          }
-        } else if (statement.financial_account_id) {
-          const { data: a } = await svc.from("financial_accounts").select("statement_password_rule").eq("id", statement.financial_account_id).maybeSingle();
-          if (a?.statement_password_rule) {
-            try { pwd = await decryptStatementPassword(a.statement_password_rule); pwdSource = "saved"; } catch { /* ignore */ }
-          }
-        }
+      const handledStored = await parseStoredStatementPdf(svc, statement.id, uid, links, {
+        statementFilePath: statement.file_path ?? null,
+        password: password ?? null,
+        statement_type: (statement.statement_type as any) ?? null,
+        bank_slug: guessBankSlugFromSender(email.from_email),
+        subject: email.subject ?? null,
+        sender: email.from_email ?? null,
+      });
+      if (!handledStored) {
+        // Retry === fresh ingest: wipe derived fields/txns first so a prior
+        // wrong-card link or half-parsed run doesn't leak into the new result.
+        await purgeStatementDerived(svc, statement.id);
+        await ingestStatementAttachment(svc, account, email, statement.id, links, {
+          statement_type: (statement.statement_type as any) ?? null,
+          bank_slug: guessBankSlugFromSender(email.from_email),
+        });
       }
-
-      const result = await parseStatementPdf(bytes, pwd);
-      await applyParsedStatementResult(svc, statement.id, uid, {
-        credit_card_id: statement.credit_card_id ?? null,
-        financial_account_id: statement.financial_account_id ?? null,
-        loan_id: statement.loan_id ?? null,
-      }, result, statement.file_path, undefined, { passwordSource: pwdSource });
     } else {
-      return new Response(JSON.stringify({ error: "statement has no source email or stored PDF to re-parse" }), {
-        status: 400, headers: { ...cors, "Content-Type": "application/json" },
+      const handledStored = await parseStoredStatementPdf(svc, statement.id, uid, links, {
+        statementFilePath: statement.file_path ?? null,
+        password: password ?? null,
+        statement_type: (statement.statement_type as any) ?? null,
       });
+      if (!handledStored) {
+        return new Response(JSON.stringify({ error: "statement has no source email or stored PDF to re-parse" }), {
+          status: 400, headers: { ...cors, "Content-Type": "application/json" },
+        });
+      }
     }
 
     const { data: updated } = await svc.from("statements")
-      .select("parse_status, parse_error").eq("id", statement_id).maybeSingle();
+      .select("parse_status, parse_error, parse_reason").eq("id", statement_id).maybeSingle();
 
     return new Response(JSON.stringify({
       ok: true,
       parse_status: updated?.parse_status ?? null,
       parse_error: updated?.parse_error ?? null,
+      parse_reason: updated?.parse_reason ?? null,
     }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {
     return sanitizedErrorResponse(err, "Statement retry failed", "finance-retry-statement", cors);

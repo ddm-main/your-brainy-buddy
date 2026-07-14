@@ -23,6 +23,7 @@ export async function runGmailSync(
     finance_only: account.finance_only,
     use_case: account.use_case,
     finance_sender_filter: account.finance_sender_filter,
+    treat_all_as_finance: account.treat_all_as_finance,
   });
 
   if (account.paused_at) {
@@ -41,12 +42,20 @@ export async function runGmailSync(
 
   try {
     const token = await ensureAccessToken(svc, account);
-    const list = await gapi(
-      token,
-      `/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=${maxResults}`,
-    );
-    const ids: { id: string; threadId: string }[] = list.messages ?? [];
-    const latestHistoryId: string | null = list.historyId || null;
+    const ids: { id: string; threadId: string }[] = [];
+    let latestHistoryId: string | null = null;
+    let pageToken: string | null = null;
+    while (ids.length < maxResults) {
+      const pageSize = Math.min(500, maxResults - ids.length);
+      const page = await gapi(
+        token,
+        `/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=${pageSize}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""}`,
+      );
+      ids.push(...(page.messages ?? []));
+      latestHistoryId = page.historyId || latestHistoryId;
+      pageToken = page.nextPageToken ?? null;
+      if (!pageToken) break;
+    }
     let inserted = 0;
 
     for (const m of ids) {

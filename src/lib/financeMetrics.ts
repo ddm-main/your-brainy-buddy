@@ -185,3 +185,81 @@ export function generateAmortizationSchedule(principal: number, annualRatePct: n
   }
   return rows;
 }
+
+// ---------- Prepayment / foreclosure ----------
+
+export interface PrepaymentImpact {
+  originalRemainingInterest: number;
+  newRemainingInterest: number;
+  interestSaved: number;
+  originalMonthsLeft: number;
+  newMonthsLeft: number; // reduce_tenure: the new (shorter) payoff month count; reduce_emi: unchanged
+  newEmi: number | null; // reduce_emi: the new (lower) EMI; reduce_tenure: null (EMI unchanged)
+}
+
+const MAX_PREPAYMENT_MONTHS = 720; // matches loanCalc.ts's MAX_TENURE_MONTHS guard
+
+/** What a lump-sum prepayment today does to the rest of the loan — reuses
+ * generateAmortizationSchedule/calcEmi's exact reducing-balance math twice
+ * (baseline vs. post-prepayment) rather than a bespoke recurrence. Returns
+ * null on invalid input, never throws (mirrors loanCalc's convention). */
+export function calcPrepaymentImpact(
+  outstanding: number,
+  annualRatePct: number,
+  remainingMonths: number,
+  prepaymentAmount: number,
+  mode: "reduce_tenure" | "reduce_emi",
+  currentEmi: number,
+): PrepaymentImpact | null {
+  if (!Number.isFinite(prepaymentAmount) || prepaymentAmount <= 0 || prepaymentAmount >= outstanding) return null;
+  if (!Number.isFinite(currentEmi) || currentEmi <= 0) return null;
+
+  const baseline = generateAmortizationSchedule(outstanding, annualRatePct, remainingMonths);
+  if (!baseline) return null;
+  const originalRemainingInterest = roundCurrency(sum(baseline.map((r) => r.interest)));
+  const newPrincipal = outstanding - prepaymentAmount;
+
+  if (mode === "reduce_emi") {
+    const newEmi = calcEmi(newPrincipal, annualRatePct, remainingMonths);
+    const newSchedule = generateAmortizationSchedule(newPrincipal, annualRatePct, remainingMonths);
+    if (newEmi == null || !newSchedule) return null;
+    const newRemainingInterest = roundCurrency(sum(newSchedule.map((r) => r.interest)));
+    return {
+      originalRemainingInterest, newRemainingInterest,
+      interestSaved: roundCurrency(originalRemainingInterest - newRemainingInterest),
+      originalMonthsLeft: remainingMonths, newMonthsLeft: remainingMonths,
+      newEmi: roundCurrency(newEmi),
+    };
+  }
+
+  // reduce_tenure: hold the EMI fixed, replay the schedule against the
+  // reduced principal to find the new (shorter) payoff month count.
+  const r = annualRatePct / 1200;
+  let balance = newPrincipal;
+  let newRemainingInterest = 0;
+  let months = 0;
+  while (balance > 0.01 && months < MAX_PREPAYMENT_MONTHS) {
+    const interest = balance * r;
+    const principalPaid = Math.min(currentEmi - interest, balance);
+    if (principalPaid <= 0) return null; // EMI doesn't even cover interest at this balance — can't amortize
+    balance -= principalPaid;
+    newRemainingInterest += interest;
+    months++;
+  }
+  if (months >= MAX_PREPAYMENT_MONTHS) return null;
+  return {
+    originalRemainingInterest, newRemainingInterest: roundCurrency(newRemainingInterest),
+    interestSaved: roundCurrency(originalRemainingInterest - newRemainingInterest),
+    originalMonthsLeft: remainingMonths, newMonthsLeft: months,
+    newEmi: null,
+  };
+}
+
+/** Paying off the full outstanding balance today instead of running the
+ * schedule to term — the "savings" are simply all the interest that would
+ * otherwise still accrue. */
+export function calcForeclosureQuote(outstanding: number, annualRatePct: number, remainingMonths: number): { interestSavedByForeclosing: number } | null {
+  const schedule = generateAmortizationSchedule(outstanding, annualRatePct, remainingMonths);
+  if (!schedule) return null;
+  return { interestSavedByForeclosing: roundCurrency(sum(schedule.map((r) => r.interest))) };
+}
