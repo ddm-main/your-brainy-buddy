@@ -3,17 +3,16 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
+  "sideEffects": false,
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 8080",
-    "dev:api": "PORT=3960 HUD_HOST=127.0.0.1 node Apps/hud/server.mjs",
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "preview": "vite preview --host 0.0.0.0 --port 8080",
     "start": "vite --host 0.0.0.0 --port 8080",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ext .ts,.tsx",
-    "format": "prettier --write .",
-    "test": "vitest run"
+    "format": "prettier --write ."
   },
   "dependencies": {
     "@react-three/fiber": "^8.17.10",
@@ -41,15 +40,12 @@
     "@types/react-dom": "^18.3.1",
     "@types/three": "^0.170.0",
     "@vitejs/plugin-react": "^6.0.3",
-    "concurrently": "^9.1.0",
     "eslint": "^10.6.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.3",
-    "jsdom": "^29.1.1",
     "prettier": "^3.9.5",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.63.0",
-    "vite": "^8.1.4",
-    "vitest": "^4.1.10"
+    "vite": "^8.1.4"
   }
 }
