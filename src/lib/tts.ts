@@ -18,27 +18,6 @@ function getCtx(): AudioContext {
   return ctx;
 }
 
-/**
- * Prime the audio pipeline INSIDE a user gesture so autoplay policy allows
- * later streamed playback. Call from click/keydown handlers before any async
- * work. Safe to call repeatedly.
- */
-export async function primeAudio(): Promise<void> {
-  try {
-    const c = getCtx();
-    if (c.state === "suspended") { try { await c.resume(); } catch { /* noop */ } }
-    // Play a 1-sample silent buffer to fully unlock the graph on iOS/Safari.
-    const buf = c.createBuffer(1, 1, 24000);
-    const src = c.createBufferSource();
-    src.buffer = buf;
-    src.connect(c.destination);
-    src.start(0);
-    console.info("[jarvis-voice] primeAudio state=", c.state);
-  } catch (err) {
-    console.warn("[jarvis-voice] primeAudio failed", err);
-  }
-}
-
 export function stopSpeaking(): void {
   try { currentAbort?.abort(); } catch { /* noop */ }
   currentAbort = null;
@@ -53,9 +32,7 @@ export function stopSpeaking(): void {
   cb?.();
 }
 
-export interface SpeakOptions { voice?: string; instructions?: string }
-
-export async function speakStream(text: string, onDone?: () => void, opts: SpeakOptions = {}): Promise<void> {
+export async function speakStream(text: string, onDone?: () => void): Promise<void> {
   const clean = text.replace(/```[\s\S]*?```/g, " ").replace(/[#*_>`~]/g, "").trim();
   if (!clean) { onDone?.(); return; }
 
@@ -100,7 +77,7 @@ export async function speakStream(text: string, onDone?: () => void, opts: Speak
         "Content-Type": "application/json",
         ...(await authHeaders()),
       },
-      body: JSON.stringify({ text: clean, voice: opts.voice, instructions: opts.instructions }),
+      body: JSON.stringify({ text: clean }),
       signal: ctrl.signal,
     });
   } catch (err: any) {
@@ -145,14 +122,6 @@ export async function speakStream(text: string, onDone?: () => void, opts: Speak
   } catch (err: any) {
     if (err?.name === "AbortError") return;
     console.warn("[JARVIS] TTS stream error:", err);
-  }
-
-  // Zero-delta response → gateway/model produced no audio. Use browser TTS.
-  if (playhead === 0) {
-    console.warn("[jarvis-voice] TTS returned no audio deltas, using fallback");
-    currentAbort = null;
-    fallbackSpeak(clean, onDone);
-    return;
   }
 
   // Fire onDone after last scheduled chunk finishes.

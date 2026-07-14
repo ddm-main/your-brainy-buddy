@@ -35,7 +35,7 @@ export interface QuotaResult {
 }
 
 export interface DailyQuotaOptions {
-  endpoint: "chat" | "tts" | "transcribe" | "vision" | "vision_upload" | "finance_summarize";
+  endpoint: "chat" | "tts" | "transcribe" | "vision" | "vision_upload";
   requestCap: number;
   tokenCap?: number;
   svc: SupabaseClient;

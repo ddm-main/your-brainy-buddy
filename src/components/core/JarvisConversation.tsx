@@ -129,13 +129,11 @@ export default function JarvisConversation() {
       if (useVoice.getState().state !== "processing") return;
       useVoice.getState().setAnswer(full);
       useVoice.getState().setState("speaking");
-      const { VOICE_STYLES } = await import("@/store/voiceStore");
-      const st = VOICE_STYLES[useVoice.getState().voiceStyle];
       speakStream(full, () => {
         const s = useVoice.getState();
         if (s.state !== "speaking") return;
         s.setState(s.continuous ? "listening" : "idle");
-      }, { voice: st.voice, instructions: st.instructions });
+      });
       loadHistory();
     } catch (err: any) {
       const msg = err?.message ?? "error";
@@ -263,7 +261,7 @@ export default function JarvisConversation() {
     if (state === "processing") return "thinking through it…";
     if (state === "speaking") return "responding… speak or press ⎋ to interrupt";
     if (state === "muted") return "microphone muted — click listen to resume";
-    return "click LISTEN or tap the orb to speak";
+    return "click LISTEN or press ⌘/Ctrl+J to speak";
   }, [state]);
 
   if (!open) return null;

@@ -1,0 +1,1 @@
+REVOKE SELECT ON public.jarvis_usage_daily FROM anon;

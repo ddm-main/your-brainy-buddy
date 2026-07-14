@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
-import BankPicker from "@/components/finance/BankPicker";
-import { db, inr } from "@/lib/db";
+import { HudSelect } from "@/components/hud/HudSelect";
+import { db, inr, type Bank } from "@/lib/db";
 import { useUi } from "@/store/uiStore";
 import { Trash2, KeyRound } from "lucide-react";
 
@@ -18,13 +18,14 @@ function FinanceCTA({ to, label }: { to: string; label: string }) {
 }
 
 export default function CardsConfig() {
+  const [banks, setBanks] = useState<Bank[]>([]);
   const [items, setItems] = useState<any[]>([]);
   const [name, setName] = useState(""); const [mask, setMask] = useState(""); const [bill, setBill] = useState(""); const [due, setDue] = useState(""); const [limit, setLimit] = useState(""); const [bankId, setBankId] = useState(""); const [autopay, setAutopay] = useState(false);
   const [pwEditId, setPwEditId] = useState<string | null>(null);
   const [pwValue, setPwValue] = useState("");
   const [pwSaving, setPwSaving] = useState(false);
   const push = useUi((s) => s.push);
-  const load = async () => { setItems(await db.cards.list()); };
+  const load = async () => { setBanks(await db.banks.list()); setItems(await db.cards.list()); };
   useEffect(() => { load(); }, []);
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -61,7 +62,7 @@ export default function CardsConfig() {
           <div><label style={labelStyle}>due day</label><input type="number" min={1} max={31} value={due} onChange={(e) => setDue(e.target.value)} style={{ ...inputStyle, width: "100%" }} /></div>
           <div><label style={labelStyle}>limit</label><input type="number" value={limit} onChange={(e) => setLimit(e.target.value)} style={{ ...inputStyle, width: "100%" }} /></div>
           <div><label style={labelStyle}>bank</label>
-            <BankPicker value={bankId} onChange={(id) => setBankId(id)} />
+            <HudSelect value={bankId} onChange={setBankId} placeholder="—" options={banks.map((b) => ({ value: b.id, label: b.name }))} />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 6, paddingBottom: 8 }}>
             <input type="checkbox" checked={autopay} onChange={(e) => setAutopay(e.target.checked)} />

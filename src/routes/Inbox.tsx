@@ -46,7 +46,7 @@ export default function Inbox() {
       if (gmails.length === 0) { if (!silent) push("No connected Gmail accounts", "warn" as any); return; }
       let totalNew = 0;
       for (const a of gmails) {
-        try { const r = await gmail.sync(a.id); totalNew += r.inserted ?? 0; }
+        try { const r = await gmail.sync(a.id); totalNew += r.inserted; }
         catch (e: any) { if (!silent) push(`${a.email_address}: ${e?.message}`, "err"); }
       }
       if (totalNew > 0 || !silent) push(`Synced (${totalNew} new)`, "ok");

@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useUi } from "@/store/uiStore";
 import { authFetch } from "@/lib/authFetch";
 import { runMorningBriefing } from "@/lib/briefing";
-import { Command as CmdIcon, Wallet, Home, ListChecks, Scan, Sparkles, SlidersHorizontal, CheckSquare, FileText } from "lucide-react";
+import { Command as CmdIcon, Wallet, Home, ListChecks, Scan, Sparkles, SlidersHorizontal, CheckSquare, FileText, Scale } from "lucide-react";
 
 type Cmd = { id: string; label: string; hint?: string; icon: any; run: () => void };
 
@@ -30,8 +30,9 @@ export default function CommandPalette() {
 
   const commands: Cmd[] = useMemo(() => [
     { id: "home", label: "Open HUD", hint: "home", icon: Home, run: () => nav("/") },
-    { id: "tasks", label: "Open Tasks", hint: "quick capture, focus", icon: CheckSquare, run: () => nav("/workspace") },
-    { id: "notes", label: "Open Notes", hint: "scratchpad", icon: FileText, run: () => { window.location.hash = "notes"; nav("/workspace"); } },
+    { id: "tasks", label: "Open Tasks", hint: "quick capture, focus", icon: CheckSquare, run: () => nav("/tasks") },
+    { id: "notes", label: "Open Notes", hint: "scratchpad", icon: FileText, run: () => nav("/notes") },
+    { id: "decisions", label: "Open Decisions", hint: "the why, not just the what", icon: Scale, run: () => nav("/decisions") },
     { id: "finance", label: "Open Finance", hint: "accounts, transactions, statements", icon: Wallet, run: () => nav("/finance") },
     { id: "projects", label: "Open Projects", hint: "active work", icon: ListChecks, run: () => nav("/projects") },
     { id: "config", label: "Open Config", hint: "connections, entities, memory", icon: SlidersHorizontal, run: () => nav("/config") },

@@ -2,30 +2,22 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from './types';
 
-const PROJECT_SUPABASE_URL = "https://ybtaxgstmxnlwurkritg.supabase.co";
-const PROJECT_SUPABASE_PUBLISHABLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlidGF4Z3N0bXhubHd1cmtyaXRnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM0MDkzNDEsImV4cCI6MjA5ODk4NTM0MX0.TfbxLQcLT70i0ssgwzZhsUfdjZp5j8IPK6dWytiHeuI";
-
-const SUPABASE_URL =
-  (import.meta.env.VITE_SUPABASE_URL as string | undefined) || PROJECT_SUPABASE_URL;
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 // Accept either the current publishable-key name or the legacy anon-key name
 // so environments that only inject one of the two still boot instead of
 // silently white-screening on undefined credentials.
 const SUPABASE_PUBLISHABLE_KEY = (
   (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined) ??
   (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined) ??
-  PROJECT_SUPABASE_PUBLISHABLE_KEY
+  ""
 );
 
-export const supabaseConfigOk = Boolean(SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY);
-const SAFE_SUPABASE_URL = SUPABASE_URL;
-const SAFE_SUPABASE_KEY = SUPABASE_PUBLISHABLE_KEY;
-
-if (!supabaseConfigOk) {
+if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
   // eslint-disable-next-line no-console
   console.error(
     "[JARVIS] Supabase env vars missing — set VITE_SUPABASE_URL and " +
     "VITE_SUPABASE_PUBLISHABLE_KEY (or VITE_SUPABASE_ANON_KEY) in your .env. " +
-    "A safe placeholder client is active so the preview can still render.",
+    "The app will not be able to reach Supabase until this is fixed.",
   );
 }
 
@@ -57,9 +49,9 @@ function createSupabaseFetch(supabaseKey: string): typeof fetch {
 // Import the supabase client like this:
 // import { supabase } from "@/integrations/supabase/client";
 
-export const supabase = createClient<Database>(SAFE_SUPABASE_URL, SAFE_SUPABASE_KEY, {
+export const supabase = createClient<Database>(SUPABASE_URL ?? "", SUPABASE_PUBLISHABLE_KEY, {
   global: {
-    fetch: createSupabaseFetch(SAFE_SUPABASE_KEY),
+    fetch: createSupabaseFetch(SUPABASE_PUBLISHABLE_KEY),
   },
   auth: {
     storage: typeof window !== 'undefined' ? window.localStorage : undefined,

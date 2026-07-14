@@ -7,7 +7,6 @@ import { useUi } from "@/store/uiStore";
 import { useVoice } from "@/store/voiceStore";
 import { db, inr, relTime, type Task } from "@/lib/db";
 import { useFinanceSnapshot } from "@/lib/useFinanceSnapshot";
-import { primeAudio } from "@/lib/tts";
 
 import VoiceBar from "@/components/hud/VoiceBar";
 import JarvisCore from "@/components/core/JarvisCore";
@@ -43,9 +42,6 @@ export default function Home() {
 
       <motion.div variants={cellIn} className="home-core-wrap">
         <CorePanel />
-        <div className="home-core-dock">
-          <VoiceBar />
-        </div>
       </motion.div>
 
       <motion.div variants={cellIn} className="home-cell home-col-right home-row-1">
@@ -60,6 +56,10 @@ export default function Home() {
         </HudPanel>
       </motion.div>
 
+      <div className="home-deck">
+        <VoiceBar />
+      </div>
+
       <JarvisConversation />
     </motion.div>
   );
@@ -71,14 +71,11 @@ function CorePanel() {
   const voiceState = useVoice((s) => s.state);
   const setVoiceState = useVoice((s) => s.setState);
 
-  const toggleListen = async () => {
-    // Prime AudioContext INSIDE the click gesture so JARVIS's reply is
-    // audible (autoplay policy blocks resume() outside a gesture).
-    await primeAudio();
+  const toggleListen = () => {
     setVoiceState(voiceState === "listening" ? "idle" : "listening");
   };
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === " " || e.key === "Enter") { e.preventDefault(); void toggleListen(); }
+    if (e.key === " " || e.key === "Enter") { e.preventDefault(); toggleListen(); }
   };
 
   return (

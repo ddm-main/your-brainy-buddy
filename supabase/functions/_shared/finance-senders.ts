@@ -4,10 +4,10 @@
 
 export const FINANCE_DOMAINS: string[] = [
   // India
-  "hdfcbank.net", "hdfcbank.com", "emailstatements.hdfcbank.com",
-  "icicibank.com", "amazonpay.icicibank.com",
-  "axisbank.com", "airtel-axisbank.com",
-  "sbi.co.in", "onlinesbi.sbi", "alerts.sbi", "sbicard.com",
+  "hdfcbank.net", "hdfcbank.com",
+  "icicibank.com",
+  "axisbank.com",
+  "sbi.co.in", "onlinesbi.sbi", "alerts.sbi",
   "kotak.com",
   "yesbank.in",
   "idfcfirstbank.com",
@@ -16,7 +16,6 @@ export const FINANCE_DOMAINS: string[] = [
   "americanexpress.com", "aexp.com",
   "citibank.com",
   "hsbc.co.in",
-
   // US
   "chase.com",
   "bankofamerica.com",
@@ -55,14 +54,9 @@ export function buildGmailQuery(opts: {
   finance_only?: boolean | null;
   use_case?: string | null;
   finance_sender_filter?: string | null;
-  treat_all_as_finance?: boolean | null;
 }): string {
   const days = Math.max(1, Math.min(365, Number(opts.sync_period_days ?? 30)));
   const parts = [`newer_than:${days}d`, `in:inbox`];
-  // treat_all_as_finance: dedicated forwarding inbox — every message is
-  // fair game regardless of `from:`, since the visible sender is the user
-  // forwarding, not the bank.
-  if (opts.treat_all_as_finance) return parts.join(" ");
   const financeMode = !!opts.finance_only || opts.use_case === "finance";
   if (financeMode) {
     const clause = financeFromClause(opts.finance_sender_filter);

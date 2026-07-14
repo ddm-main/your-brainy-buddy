@@ -9,9 +9,9 @@
 
 import { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { ensureAccessToken, extractBody, gapi, listAttachments, downloadAttachment } from "./gmail.ts";
-import { isFinanceMail, isFinanceSender, parseFinanceEmail, guessBankSlugFromSender, unwrapForwarded, type Parsed } from "./finance-parsers.ts";
-import { parseStatementPdfWithPasswords } from "./statement-pdf.ts";
-import { decryptStatementPassword, encryptStatementPassword, type StatementPasswordRule } from "./crypto.ts";
+import { isFinanceMail, isFinanceSender, parseFinanceEmail, type Parsed } from "./finance-parsers.ts";
+import { parseStatementPdf, detectBank } from "./statement-pdf.ts";
+import { decryptStatementPassword, type StatementPasswordRule } from "./crypto.ts";
 
 const STATEMENT_BUCKET = "statement-pdfs";
 
@@ -40,10 +40,6 @@ async function fetchBody(svc: SupabaseClient, account: any, email: any): Promise
   }
 }
 
-// Fresh format=full fetch to get the message payload (needed for attachment
-// listing — the cached body_text path in fetchBody() never retains this).
-// Only called for emails already classified as a statement, so the extra
-// Gmail API round trip is rare, not per-email.
 async function fetchMessagePayload(svc: SupabaseClient, account: any, email: any): Promise<any | null> {
   if (email.provider !== "gmail" || !email.external_email_id) return null;
   try {
@@ -51,104 +47,13 @@ async function fetchMessagePayload(svc: SupabaseClient, account: any, email: any
     const msg = await gapi(token, `/gmail/v1/users/me/messages/${email.external_email_id}?format=full`);
     return msg.payload ?? null;
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.warn("fetchMessagePayload failed", msg);
-    // Bubble a distinct sentinel up so the caller can persist a diagnostic
-    // parse_error instead of silently leaving the row 'pending' forever.
-    throw new Error(`gmail_fetch_failed: ${msg}`);
+    console.warn("fetchMessagePayload failed", e instanceof Error ? e.message : e);
+    return null;
   }
 }
 
-function digitsOnly(v: string | null | undefined): string {
-  return (v ?? "").replace(/\D/g, "");
-}
-
-function suffixMatches(savedMasked: string | null | undefined, parsedLast4: string | null | undefined): boolean {
-  const saved = digitsOnly(savedMasked);
-  const parsed = digitsOnly(parsedLast4);
-  if (!saved || !parsed) return false;
-  return saved.endsWith(parsed) || parsed.endsWith(saved);
-}
-
-function normWords(v: string | null | undefined): string[] {
-  return (v ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 1 && !["your", "card", "credit", "monthly", "statement", "bank", "ltd", "the"].includes(w));
-}
-
-function bankMatches(bankName: string | null | undefined, slug: string | null): boolean {
-  if (!bankName || !slug) return false;
-  const a = bankName.toLowerCase();
-  const b = slug.toLowerCase();
-  return a.includes(b) || b.includes(a.replace(/\s+bank$/, ""));
-}
-
-function subjectTokenScore(subject: string | null | undefined, entityName: string | null | undefined): number {
-  const hay = new Set(normWords(subject));
-  return normWords(entityName).reduce((score, w) => score + (hay.has(w) ? 1 : 0), 0);
-}
-
-async function findBankId(svc: SupabaseClient, userId: string, bankSlug: string | null): Promise<string | null> {
-  if (!bankSlug) return null;
-  const { data: banks } = await svc.from("banks").select("id, name").eq("user_id", userId);
-  const match = (banks ?? []).find((b: any) => bankMatches(b.name, bankSlug));
-  return match?.id ?? null;
-}
-
-export async function resolveLinks(svc: SupabaseClient, userId: string, parsed: Parsed, email?: any) {
+async function resolveLinks(svc: SupabaseClient, userId: string, parsed: Parsed) {
   const links: { financial_account_id?: string | null; credit_card_id?: string | null; loan_id?: string | null; linked_bank_id?: string | null; linked_card_id?: string | null } = {};
-  const bankSlug = guessBankSlugFromSender(email?.from_email);
-  const linkedBankId = await findBankId(svc, userId, bankSlug);
-  if (linkedBankId) links.linked_bank_id = linkedBankId;
-
-  if (parsed.kind === "statement") {
-    const subject = email?.subject ?? "";
-    if (parsed.statement_type === "card") {
-      const { data: cards } = await svc.from("credit_cards")
-        .select("id, bank_id, card_name, masked_number, banks(name)")
-        .eq("user_id", userId);
-      let best: any = null;
-      let bestScore = 0;
-      for (const card of cards ?? []) {
-        let score = 0;
-        if (suffixMatches(card.masked_number, parsed.last4)) score += 8;
-        if (bankMatches(card.banks?.name, bankSlug)) score += 4;
-        score += subjectTokenScore(subject, card.card_name) * 2;
-        if (/cashback/i.test(subject) && /cashback/i.test(card.card_name)) score += 5;
-        if (/bpcl/i.test(subject) && /bpcl/i.test(card.card_name)) score += 5;
-        if (score > bestScore) { bestScore = score; best = card; }
-      }
-      if (best && bestScore >= 5) {
-        links.credit_card_id = best.id;
-        links.linked_card_id = best.id;
-        links.linked_bank_id = best.bank_id ?? links.linked_bank_id ?? null;
-        return links;
-      }
-    } else if (parsed.statement_type === "account") {
-      const { data: accounts } = await svc.from("financial_accounts")
-        .select("id, bank_id, nickname, masked_number, source_email, banks(name)")
-        .eq("user_id", userId);
-      let best: any = null;
-      let bestScore = 0;
-      for (const acct of accounts ?? []) {
-        let score = 0;
-        if (suffixMatches(acct.masked_number, parsed.last4)) score += 8;
-        if (bankMatches(acct.banks?.name, bankSlug)) score += 4;
-        if (acct.source_email && email?.from_email && String(email.from_email).toLowerCase().includes(String(acct.source_email).toLowerCase())) score += 4;
-        score += subjectTokenScore(subject, acct.nickname) * 2;
-        if (score > bestScore) { bestScore = score; best = acct; }
-      }
-      if (best && bestScore >= 5) {
-        links.financial_account_id = best.id;
-        links.linked_bank_id = best.bank_id ?? links.linked_bank_id ?? null;
-        return links;
-      }
-    }
-    return links;
-  }
-
   if (!parsed.last4) return links;
   const suffix = `%${parsed.last4}`;
   if (parsed.kind === "transaction" || parsed.kind === "investment") {
@@ -164,14 +69,6 @@ export async function resolveLinks(svc: SupabaseClient, userId: string, parsed: 
   return links;
 }
 
-// For a statement, links.credit_card_id / links.financial_account_id may be
-// unresolved (statement emails don't always carry a last4 the way alert
-// emails do) — so this also falls back to matching the statement's own
-// statement_type against the account/card that most recently expects a
-// statement in this period. Keep it simple for now: only decrypt when a
-// link was already resolved via last4; unresolved links mean parsing runs
-// without a password (works fine for non-protected PDFs, fails clearly with
-// wrong_or_missing_password otherwise, which is surfaced as parse_status).
 async function resolveStatementPassword(
   svc: SupabaseClient,
   userId: string,
@@ -191,95 +88,103 @@ async function resolveStatementPassword(
   }
 }
 
-// User-defined default candidates, stored in jarvis_memory under
-// topic='finance.statement_password_candidates' as a JSON array of strings.
-// Tried after the saved per-entity password but before giving up.
-export async function loadPasswordCandidates(svc: SupabaseClient, userId: string): Promise<string[]> {
-  try {
-    const { data } = await svc.from("jarvis_memory")
-      .select("content").eq("user_id", userId).eq("topic", "finance.statement_password_candidates").maybeSingle();
-    if (!data?.content) return [];
-    const parsed = JSON.parse(data.content);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((x): x is string => typeof x === "string" && x.length > 0);
-  } catch { return []; }
+function safeName(filename: string): string {
+  return filename.replace(/[^\w.\-]/g, "_").slice(0, 80);
 }
 
-// After a successful rotation, persist the winning password onto the linked
-// card/account so subsequent statements decrypt on the first attempt without
-// re-cycling the candidate list.
-export async function saveWinningPassword(
+// Marks a statement failed with an explicit error+reason. Used by every
+// early-return path in ingestStatementAttachment so the UI can always show
+// a specific reason instead of a mysterious "pending" chip.
+async function markStatementFailed(
   svc: SupabaseClient,
-  links: { financial_account_id?: string | null; credit_card_id?: string | null },
-  winning: string,
+  statementId: string,
+  error: string,
+  reason: string,
 ): Promise<void> {
-  const table = links.credit_card_id ? "credit_cards" : links.financial_account_id ? "financial_accounts" : null;
-  const id = links.credit_card_id ?? links.financial_account_id ?? null;
-  if (!table || !id) return;
   try {
-    const { data } = await svc.from(table).select("statement_password_rule").eq("id", id).maybeSingle();
-    if (data?.statement_password_rule) return; // don't overwrite an existing rule
-    const rule = await encryptStatementPassword(winning);
-    await svc.from(table).update({ statement_password_rule: rule }).eq("id", id);
+    await svc.from("statements").update({
+      parse_status: "failed",
+      parse_error: error,
+      parse_reason: reason,
+    }).eq("id", statementId);
   } catch (e) {
-    console.warn("saveWinningPassword failed", e instanceof Error ? e.message : e);
+    console.warn("markStatementFailed write failed", e instanceof Error ? e.message : e);
   }
 }
 
-function safeName(filename: string): string {
-  return filename.replace(/[^\w.\-]/g, "_").slice(0, 80);
+async function markStatementSkipped(
+  svc: SupabaseClient,
+  statementId: string,
+  reason: string,
+): Promise<void> {
+  try {
+    await svc.from("statements").update({
+      parse_status: "skipped",
+      parse_error: null,
+      parse_reason: reason,
+    }).eq("id", statementId);
+  } catch (e) {
+    console.warn("markStatementSkipped write failed", e instanceof Error ? e.message : e);
+  }
+}
+
+// Purges all derived data for a statement so a retry is deterministic:
+// same as running the ingest for the first time. Preserves the row identity,
+// its links, its source_email_id, and (for Gmail statements) its subject-
+// derived statement_date.
+export async function purgeStatementDerivedData(
+  svc: SupabaseClient,
+  statementId: string,
+  opts: { keepStatementDate?: boolean } = {},
+): Promise<void> {
+  await svc.from("transactions").delete().eq("source_statement_id", statementId);
+  await svc.from("email_attachments").delete().eq("statement_id", statementId).eq("attachment_type", "statement");
+  const patch: Record<string, unknown> = {
+    file_path: null,
+    transactions_found: 0,
+    closing_balance: null,
+    total_due: null,
+    min_due: null,
+    due_date: null,
+    period_start: null,
+    period_end: null,
+    parser_source: null,
+    parse_confidence: null,
+    parser_confidence: null,
+    parse_error: null,
+    parse_reason: null,
+    parse_status: "pending",
+    ai_summary: null,
+  };
+  if (!opts.keepStatementDate) patch.statement_date = null;
+  await svc.from("statements").update(patch).eq("id", statementId);
 }
 
 // Downloads the statement's first PDF attachment (if any), stores it in the
 // private statement-pdfs bucket, parses it (decrypting with the linked
 // card/account's stored password when available), and writes the results
-// back onto the statements row + itemized transactions. Never throws — a
-// parse failure just leaves parse_status='failed' and the sync run
-// continues with the next email.
+// back onto the statements row + itemized transactions. Never throws — every
+// failure persists a specific parse_error + parse_reason so the UI can show
+// exactly why a row is stuck.
 export async function ingestStatementAttachment(
   svc: SupabaseClient,
   account: any,
   email: any,
   statementId: string,
-  links: { financial_account_id?: string | null; credit_card_id?: string | null; loan_id?: string | null; linked_bank_id?: string | null },
-  opts: { statement_type?: "card" | "account" | "loan" | null; bank_slug?: string | null } = {},
+  links: { financial_account_id?: string | null; credit_card_id?: string | null; loan_id?: string | null },
 ): Promise<void> {
-  // Central helper: every early-exit path writes a specific parse_error +
-  // parse_reason so the UI never shows a bare "PENDING" chip again.
-  const failStatement = async (parse_error: string, parse_reason: string, status: "failed" | "pending" = "failed") => {
-    try {
-      await svc.from("statements").update({
-        parse_status: status, parse_error, parse_reason,
-      }).eq("id", statementId);
-    } catch (_) { /* swallow — nothing else we can do */ }
-  };
-
   try {
-    let payload: any = null;
-    try {
-      payload = await fetchMessagePayload(svc, account, email);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      await failStatement("gmail_fetch_failed", msg);
-      return;
-    }
+    const payload = await fetchMessagePayload(svc, account, email);
     if (!payload) {
-      // Non-gmail provider or empty payload — record it instead of dropping.
-      await failStatement("gmail_payload_empty", `provider=${email.provider ?? "unknown"} external_id=${email.external_email_id ?? "-"}`);
+      await markStatementFailed(svc, statementId, "gmail_payload_empty", "Gmail message payload could not be fetched — check email account connectivity.");
       return;
     }
 
-    const pdfAttachment = listAttachments(payload).find((a) =>
-      a.mimeType === "application/pdf" || /\.pdf$/i.test(a.filename ?? "")
-    );
+    const pdfAttachment = listAttachments(payload).find((a) => a.mimeType === "application/pdf");
     if (!pdfAttachment) {
-      // "Login to view" notifications, common for many banks. Keep the row
-      // pending so the user can manually attach a PDF from the UI.
-      await failStatement(
-        "no_pdf_attachment_login_required",
-        "No PDF attached to this email — likely a 'login to view' notification. Attach a PDF to parse.",
-        "pending",
-      );
+      // Statement email with no PDF attached (typical "login to view" alert).
+      // Not a hard failure — user can manually attach a PDF via the UI.
+      await markStatementSkipped(svc, statementId, "no_pdf_attachment_login_required");
       return;
     }
 
@@ -290,7 +195,7 @@ export async function ingestStatementAttachment(
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.warn("downloadAttachment failed", msg);
-      await failStatement("attachment_download_failed", msg);
+      await markStatementFailed(svc, statementId, "attachment_download_failed", msg.slice(0, 240));
       return;
     }
 
@@ -301,7 +206,7 @@ export async function ingestStatementAttachment(
     });
     if (upErr) {
       console.warn("statement PDF upload failed", upErr.message);
-      await failStatement("storage_upload_failed", upErr.message);
+      await markStatementFailed(svc, statementId, "pdf_upload_failed", upErr.message.slice(0, 240));
       return;
     }
 
@@ -316,89 +221,59 @@ export async function ingestStatementAttachment(
     const { data: existingAtt } = await svc.from("email_attachments")
       .select("id").eq("email_id", email.id).eq("statement_id", statementId).limit(1).maybeSingle();
 
-    let attRow: { id: string } | null;
+    let attRow: { id: string } | null = null;
     if (existingAtt) {
       const { data, error } = await svc.from("email_attachments").update(attFields).eq("id", existingAtt.id).select("id").single();
-      if (error) { await failStatement("attachment_row_update_failed", error.message); return; }
+      if (error) {
+        console.warn("email_attachments update failed", error.message);
+        await markStatementFailed(svc, statementId, "attachment_row_write_failed", error.message.slice(0, 240));
+        return;
+      }
       attRow = data;
     } else {
       const { data, error } = await svc.from("email_attachments").insert({
         user_id: email.user_id, email_id: email.id, statement_id: statementId, ...attFields,
       }).select("id").single();
-      if (error) { await failStatement("attachment_row_insert_failed", error.message); return; }
+      if (error) {
+        console.warn("email_attachments insert failed", error.message);
+        await markStatementFailed(svc, statementId, "attachment_row_write_failed", error.message.slice(0, 240));
+        return;
+      }
       attRow = data;
     }
-    if (!attRow) { await failStatement("attachment_row_missing", "no attachment row after insert"); return; }
+    if (!attRow) {
+      await markStatementFailed(svc, statementId, "attachment_row_missing", "email_attachments row was not returned after upsert.");
+      return;
+    }
 
-    // Password rotation: saved rule → user's default candidates → no-password.
-    const savedPwd = await resolveStatementPassword(svc, email.user_id, links);
-    const candidates = await loadPasswordCandidates(svc, email.user_id);
-    const ordered = [savedPwd, ...candidates].filter((x): x is string => typeof x === "string" && x.length > 0);
-    const rotation = await parseStatementPdfWithPasswords(bytes, ordered, {
-      bank_slug: opts.bank_slug ?? null,
-      statement_type: opts.statement_type ?? null,
-    });
-    // Determine which source produced the winning password (for parse_reason).
-    let pwdSource: "saved" | "candidate" | "none" | "unprotected" = "unprotected";
-    if (rotation.result.ok) {
-      if (rotation.winning_password == null) pwdSource = "unprotected";
-      else if (savedPwd && rotation.winning_password === savedPwd) pwdSource = "saved";
-      else pwdSource = "candidate";
-    } else {
-      pwdSource = "none";
-    }
-    if (rotation.result.ok && rotation.winning_password && !savedPwd) {
-      await saveWinningPassword(svc, links, rotation.winning_password);
-    }
-    await applyParsedStatementResult(
-      svc, statementId, email.user_id, links, rotation.result, storagePath, attRow.id, pwdSource,
-    );
+    const password = await resolveStatementPassword(svc, email.user_id, links);
+    const passwordSource: "saved" | "none" = password ? "saved" : "none";
+    const result = await parseStatementPdf(bytes, password);
+    await applyParsedStatementResult(svc, statementId, email.user_id, links, result, storagePath, attRow.id, { passwordSource });
   } catch (e) {
-    // Absolute backstop — should never happen, but if it does we still leave
-    // a diagnostic on the row rather than a silent 'pending'.
     const msg = e instanceof Error ? e.message : String(e);
-    console.error("ingestStatementAttachment crashed", msg);
-    await failStatement("ingest_crashed", msg);
+    console.warn("ingestStatementAttachment crashed", msg);
+    await markStatementFailed(svc, statementId, "ingest_crashed", msg.slice(0, 240));
   }
 }
 
-// Purge every derived artifact for a statement so a retry runs identically to
-// a fresh ingest — no half-written fields, no orphan transactions from a
-// prior wrong-card link, no stale attachment row pointing at a superseded
-// storage object.
-export async function purgeStatementDerived(svc: SupabaseClient, statementId: string): Promise<void> {
-  await svc.from("transactions").delete().eq("source_statement_id", statementId);
-  await svc.from("email_attachments").delete().eq("statement_id", statementId).eq("attachment_type", "statement");
-  await svc.from("statements").update({
-    file_path: null,
-    transactions_found: 0,
-    closing_balance: null,
-    total_due: null,
-    min_due: null,
-    due_date: null,
-    period_start: null,
-    period_end: null,
-    statement_date: null,
-    parser_source: null,
-    parse_confidence: null,
-    parser_confidence: null,
-    parse_error: null,
-    parse_reason: null,
-  }).eq("id", statementId);
+// Human-friendly reason for each parser error code.
+function reasonForError(err: string | undefined): string {
+  if (!err) return "unknown_parse_error";
+  if (err === "password_required") return "PDF is password-protected — provide the password and retry.";
+  if (err === "wrong_password") return "The stored password did not unlock the PDF. Update it and retry.";
+  if (err === "file_too_large") return "PDF exceeds the 20 MB parser limit.";
+  if (err === "too_many_pages") return "PDF has more than 100 pages — parser limit reached.";
+  if (err === "stored_password_unreadable") return "Stored statement password could not be decrypted. Re-enter it and retry.";
+  return err.slice(0, 240);
 }
 
-// Deterministic post-parse enrichment: normalize the raw merchant string
-// coming from a statement line, guess a category from a small keyword map,
-// and infer payment_mode from the description shape. No LLM — keeps the
-// tail of applyParsedStatementResult fast + free.
 function enrich(description: string, txnType: "debit" | "credit"): {
   merchant: string;
   category: string | null;
   payment_mode: string | null;
 } {
   const raw = description.trim();
-  // Strip common trailing card refs, city codes, POS terminal ids, and
-  // padding characters that make merchants look different across rows.
   let merchant = raw
     .replace(/\s+(?:POS|ATM|NEFT|IMPS|RTGS|UPI|ECOM)\b.*$/i, "")
     .replace(/\s+X{2,}\d{2,}\b.*$/i, "")
@@ -435,53 +310,34 @@ function enrich(description: string, txnType: "debit" | "credit"): {
   return { merchant, category, payment_mode };
 }
 
-// Shared tail of statement ingestion, reused by both the Gmail-attachment
-// path above and the manual-upload edge function (finance-upload-statement)
-// — writes the parse result onto the statements/email_attachments rows and
-// inserts itemized transactions with the same dedup-against-email-alerts
-// logic. attachmentId is optional since a manual upload may not create an
-// email_attachments row.
-export type PasswordSource = "saved" | "candidate" | "unprotected" | "none";
-
-function reasonForParseError(err: string | undefined | null): string {
-  const e = (err ?? "").toLowerCase();
-  if (!e) return "unknown_parse_error";
-  if (e.includes("password_required")) return "password_missing";
-  if (e.includes("wrong_password") || e.includes("wrong_or_missing_password")) return "password_failed";
-  if (e.includes("file_too_large")) return "pdf_too_large";
-  if (e.includes("too_many_pages")) return "pdf_too_many_pages";
-  return err ?? "unknown_parse_error";
-}
-
-function reasonForSuccess(src: PasswordSource): string {
-  switch (src) {
-    case "saved": return "parsed_with_saved_password";
-    case "candidate": return "parsed_with_user_password";
-    case "unprotected": return "parsed_no_password";
-    default: return "parsed";
-  }
-}
-
 export async function applyParsedStatementResult(
   svc: SupabaseClient,
   statementId: string,
   userId: string,
-  links: { financial_account_id?: string | null; credit_card_id?: string | null; loan_id?: string | null; linked_bank_id?: string | null },
+  links: { financial_account_id?: string | null; credit_card_id?: string | null; loan_id?: string | null },
   result: import("./statement-pdf.ts").PdfParseResult,
   storagePath: string | null,
   attachmentId?: string,
-  passwordSource: PasswordSource = "none",
+  meta: { passwordSource?: "saved" | "user" | "none" } = {},
 ): Promise<void> {
   if (!result.ok) {
     await svc.from("statements").update({
       parse_status: "failed",
       parse_error: result.error ?? "unknown_parse_error",
-      parse_reason: reasonForParseError(result.error),
+      parse_reason: reasonForError(result.error),
       file_path: storagePath,
     }).eq("id", statementId);
     if (attachmentId) await svc.from("email_attachments").update({ parse_status: "failed" }).eq("id", attachmentId);
     return;
   }
+
+  const bank = result.bank ?? null;
+  const confidence = result.confidence ?? (bank ? 0.85 : 0.5);
+  const parseReason = meta.passwordSource === "user"
+    ? "parsed_with_user_password"
+    : meta.passwordSource === "saved"
+      ? "parsed_with_saved_password"
+      : "parsed_no_password";
 
   await svc.from("statements").update({
     period_start: result.period_start,
@@ -489,19 +345,15 @@ export async function applyParsedStatementResult(
     statement_date: result.statement_date,
     due_date: result.due_date,
     total_due: result.total_due,
+    min_due: result.min_due ?? null,
     closing_balance: result.closing_balance,
     parse_status: "parsed",
     parse_error: null,
-    parse_reason: reasonForSuccess(passwordSource),
+    parse_reason: parseReason,
+    parser_source: bank,
+    parser_confidence: confidence,
     transactions_found: result.lines.length,
     file_path: storagePath,
-    parser_source: result.parser_source ?? "generic",
-    parse_confidence: result.parse_confidence ?? null,
-    parser_confidence: result.parse_confidence ?? null,
-    credit_card_id: links.credit_card_id ?? null,
-    financial_account_id: links.financial_account_id ?? null,
-    loan_id: links.loan_id ?? null,
-    linked_bank_id: links.linked_bank_id ?? null,
   }).eq("id", statementId);
   if (attachmentId) await svc.from("email_attachments").update({ parse_status: "parsed" }).eq("id", attachmentId);
 
@@ -509,10 +361,6 @@ export async function applyParsedStatementResult(
   const idVal = links.credit_card_id ?? links.financial_account_id ?? null;
 
   for (const line of result.lines) {
-    // Dedup against an already-extracted source='email' transaction for the
-    // same real-world charge (account/card + date + amount). If found,
-    // upgrade it to source='statement' rather than inserting a duplicate —
-    // the statement line is the more authoritative record.
     let existingId: string | null = null;
     if (idCol && idVal) {
       const { data: existing } = await svc.from("transactions")
@@ -521,6 +369,7 @@ export async function applyParsedStatementResult(
         .eq(idCol, idVal)
         .eq("txn_date", line.date)
         .eq("amount", line.amount)
+        .limit(1)
         .maybeSingle();
       if (existing) existingId = existing.id;
     }
@@ -553,6 +402,9 @@ export async function applyParsedStatementResult(
   }
 }
 
+// Re-export for callers that want to detect the bank from PDF text.
+export { detectBank };
+
 export async function extractFinanceForAccount(
   svc: SupabaseClient,
   account: any,
@@ -575,72 +427,30 @@ export async function extractFinanceForAccount(
   let transactions = 0, statements = 0, skipped = 0;
 
   for (const em of candidates ?? []) {
-    // Forwarded-mail unwrap: dedicated forwarding inboxes (07statement@…)
-    // show only the user as `from:`, so pull the original headers out of
-    // the quoted forward block first. Use the unwrapped view for detection.
-    const outerBody = em.body_text ?? em.snippet ?? null;
-    const unwrapped = unwrapForwarded({ ...em, body_text: outerBody });
-    const detectionView = {
-      ...em,
-      from_email: unwrapped.from_email ?? em.from_email,
-      from_name: unwrapped.from_name ?? em.from_name,
-      subject: unwrapped.subject ?? em.subject,
-      body_text: unwrapped.body_text ?? outerBody,
-    };
-    const treatAll = !!account?.treat_all_as_finance;
-    const looksFinance = treatAll || em.finance_related || isFinanceMail(detectionView) || isFinanceSender(detectionView.from_email);
+    const looksFinance = em.finance_related || isFinanceMail(em) || isFinanceSender(em.from_email);
     if (!looksFinance) { skipped++; continue; }
     if (!em.finance_related) {
       await svc.from("emails").update({ finance_related: true, category: "finance" }).eq("id", em.id);
     }
 
-    // Skip if already extracted (idempotency via unique index) — except a
-    // statement stuck at parse_status='pending'/'failed', which gets
-    // retried. Covers rows from before this pipeline existed (always
-    // 'pending', never processed) and rows that failed transiently (e.g. no
-    // password set at the time of first attempt).
     const { data: exTx } = await svc.from("transactions").select("id").eq("user_id", em.user_id).eq("source_email_id", em.id).maybeSingle();
     const { data: exSt } = await svc.from("statements")
-      .select("id, parse_status, credit_card_id, financial_account_id, loan_id")
+      .select("id, parse_status, parse_reason, credit_card_id, financial_account_id, loan_id")
       .eq("user_id", em.user_id).eq("source_email_id", em.id).maybeSingle();
     if (exTx) { skipped++; continue; }
     if (exSt) {
-      const body = await fetchBody(svc, account, em);
-      const unwrappedRe = unwrapForwarded({ ...em, body_text: body });
-      const parseView = { ...em, ...unwrappedRe, body_text: unwrappedRe.body_text ?? body };
-      const parsedExisting = parseFinanceEmail(parseView);
-      const refreshedLinks = parsedExisting?.kind === "statement"
-        ? await resolveLinks(svc, em.user_id, parsedExisting, parseView)
-        : {
+      // Retry on pending / failed, and on 'skipped' rows that have no
+      // explicit reason yet (backfill) — otherwise skipped rows that were
+      // resolved as "no PDF attachment" stay put.
+      const shouldRetry =
+        exSt.parse_status === "pending" ||
+        exSt.parse_status === "failed" ||
+        (exSt.parse_status === "skipped" && !exSt.parse_reason);
+      if (shouldRetry) {
+        await ingestStatementAttachment(svc, account, em, exSt.id, {
           credit_card_id: exSt.credit_card_id,
           financial_account_id: exSt.financial_account_id,
           loan_id: exSt.loan_id,
-        };
-      if (parsedExisting?.kind === "statement") {
-        const finalCard = refreshedLinks.credit_card_id ?? exSt.credit_card_id ?? null;
-        const finalAcct = refreshedLinks.financial_account_id ?? exSt.financial_account_id ?? null;
-        const finalLoan = refreshedLinks.loan_id ?? exSt.loan_id ?? null;
-        const hasEntity = !!(finalCard || finalAcct || finalLoan);
-        // Only clear parse_error when we have a real entity link now; don't
-        // clobber a more specific prior error (e.g. wrong_or_missing_password)
-        // with a generic "unlinked" reason.
-        const patch: Record<string, unknown> = {
-          statement_type: parsedExisting.statement_type,
-          credit_card_id: finalCard,
-          financial_account_id: finalAcct,
-          loan_id: finalLoan,
-          linked_bank_id: (refreshedLinks as any).linked_bank_id ?? null,
-        };
-        if (hasEntity) patch.parse_error = null;
-        await svc.from("statements").update(patch).eq("id", exSt.id);
-      }
-      if (exSt.parse_status === "pending" || exSt.parse_status === "failed" || exSt.parse_status === "skipped") {
-        // Purge derived data first so retry runs identically to a fresh
-        // ingest — no leftover fields from a prior wrong-link attempt.
-        await purgeStatementDerived(svc, exSt.id);
-        await ingestStatementAttachment(svc, account, em, exSt.id, refreshedLinks, {
-          statement_type: (parsedExisting?.kind === "statement" ? parsedExisting.statement_type : null),
-          bank_slug: guessBankSlugFromSender(parseView.from_email ?? em.from_email),
         });
       }
       skipped++;
@@ -648,21 +458,10 @@ export async function extractFinanceForAccount(
     }
 
     const body = await fetchBody(svc, account, em);
-    const unwrappedNew = unwrapForwarded({ ...em, body_text: body });
-    const parseView = { ...em, ...unwrappedNew, body_text: unwrappedNew.body_text ?? body };
-    const parsed = parseFinanceEmail(parseView);
+    const parsed = parseFinanceEmail({ ...em, body_text: body });
     if (!parsed) { skipped++; continue; }
 
-    const links = await resolveLinks(svc, em.user_id, parsed, parseView);
-
-
-    // Guess the issuing bank from the sender domain — used for display when
-    // no card/account link resolves. Also useful for downstream filtering.
-    let linkedBankId: string | null = null;
-    const bankSlug = guessBankSlugFromSender(parseView.from_email ?? em.from_email);
-    linkedBankId = await findBankId(svc, em.user_id, bankSlug);
-
-    if (!linkedBankId && (links as any).linked_bank_id) linkedBankId = (links as any).linked_bank_id;
+    const links = await resolveLinks(svc, em.user_id, parsed);
 
     if (parsed.kind === "statement") {
       const { data: newStatement, error: se } = await svc.from("statements").insert({
@@ -675,17 +474,12 @@ export async function extractFinanceForAccount(
         credit_card_id: links.credit_card_id ?? null,
         financial_account_id: links.financial_account_id ?? null,
         loan_id: links.loan_id ?? null,
-        linked_bank_id: linkedBankId,
         source: "email",
         confidence: parsed.confidence,
-        parse_error: links.credit_card_id || links.financial_account_id || links.loan_id ? null : "unlinked_no_entity_match",
       }).select("id").single();
       if (!se && newStatement) {
         statements++;
-        await ingestStatementAttachment(svc, account, em, newStatement.id, links, {
-          statement_type: parsed.statement_type,
-          bank_slug: bankSlug,
-        });
+        await ingestStatementAttachment(svc, account, em, newStatement.id, links);
       } else if (se && !String(se.message).includes("duplicate")) {
         console.warn("statement insert", se.message);
       }
@@ -709,7 +503,6 @@ export async function extractFinanceForAccount(
       else if (!String(te.message).includes("duplicate")) console.warn("txn insert", te.message);
     }
 
-    // Enrich the source email with bank/card links.
     if (links.linked_bank_id || links.linked_card_id) {
       await svc.from("emails").update({
         linked_bank_id: links.linked_bank_id ?? null,

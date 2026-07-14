@@ -1,14 +1,20 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
+import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
+import KineticNumber from "@/components/hud/KineticNumber";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { HudSelect } from "@/components/hud/HudSelect";
 import { HudDatePicker } from "@/components/hud/HudDatePicker";
-import { db, inr } from "@/lib/db";
+import { db, inr, type FinancialAccount, type CreditCard, type Transaction } from "@/lib/db";
+import { authFetch } from "@/lib/authFetch";
+import { calcEmi, calcPrincipalFromEmi, roundCurrency } from "@/lib/loanCalc";
+import { calcCreditUtilization, generateAmortizationSchedule } from "@/lib/financeMetrics";
+import { runReconciliation } from "@/lib/reconciliation";
+import { useFinanceSnapshot } from "@/lib/useFinanceSnapshot";
 import { useUi } from "@/store/uiStore";
-import { RefreshCw } from "lucide-react";
-import { ConfigureCTA } from "./_shared";
+import { Trash2, RefreshCw } from "lucide-react";
+import { ConfigureCTA, utilTone } from "./_shared";
 import { detectRecurringSuggestions, type RecurringSuggestion } from "@/lib/recurringDetector";
-import { auditSubscriptions, type SubscriptionFinding } from "@/lib/subscriptionAudit";
 
 // ---------- Subscriptions ----------
 export default function Subs() {
@@ -24,20 +30,13 @@ export default function Subs() {
   const [scanning, setScanning] = useState(false);
   const [adding, setAdding] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
-  const [findings, setFindings] = useState<SubscriptionFinding[]>([]);
-  const [auditing, setAuditing] = useState(false);
 
   const load = async () => {
     const [s, a, c, al] = await Promise.all([db.subscriptions.list(), db.accounts.list(), db.cards.list(), db.alerts.list({ status: "open" })]);
     setItems(s); setAccounts(a); setCards(c); setAlerts(al);
-    return s;
   };
-  const runAudit = async (subs: any[]) => {
-    setAuditing(true);
-    try { setFindings(await auditSubscriptions(subs)); }
-    catch (e: any) { push(e?.message ?? "subscription audit failed", "err"); }
-    finally { setAuditing(false); }
-  };
+  useEffect(() => { load(); scan(); }, []);
+
   const scan = async () => {
     setScanning(true);
     try {
@@ -46,7 +45,6 @@ export default function Subs() {
     } catch (e: any) { push(e?.message ?? "scan failed", "err"); }
     finally { setScanning(false); }
   };
-  useEffect(() => { load().then(runAudit); scan(); }, []);
 
   const addFromSuggestion = async (s: RecurringSuggestion) => {
     setAdding(s.merchantKey);
@@ -68,8 +66,7 @@ export default function Subs() {
   };
 
   const visibleSuggestions = suggestions.filter((s) => !dismissed.has(s.merchantKey));
-  const findingsFor = (id: string) => findings.filter((f) => f.subId === id);
-  const hasIssue = (id: string) => alerts.some((a) => a.entity_type === "subscription" && a.entity_id === id) || findingsFor(id).length > 0;
+  const hasIssue = (id: string) => alerts.some((a) => a.entity_type === "subscription" && a.entity_id === id);
 
   const toggleOpen = (s: any) => {
     if (openId === s.id) { setOpenId(null); return; }
@@ -129,26 +126,6 @@ export default function Subs() {
               ))}
             </div>}
       </HudPanel>
-      {findings.length > 0 && (
-        <HudPanel title="Subscription Health" index="AUD" live="warn" style={{ flexShrink: 0 }}
-          actions={<Btn size="sm" onClick={() => runAudit(items)} disabled={auditing}>{auditing ? "checking…" : "re-check"}</Btn>}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {findings.map((f, i) => {
-              const sub = items.find((x: any) => x.id === f.subId);
-              const label = sub?.name ?? "subscription";
-              let message: string;
-              if (f.kind === "duplicate") message = `Looks like a duplicate of "${f.otherName}"`;
-              else if (f.kind === "price_change") message = `Recent charge was ${inr(f.closestAmount ?? 0)} vs tracked ${inr(f.expectedAmount ?? 0)} — price may have changed`;
-              else message = `No matching charge in the last ${f.lookbackDays} days — might be cancelled or unused`;
-              return (
-                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, padding: "4px 0" }}>
-                  <span><Chip tone={f.severity === "danger" ? "err" : "warn"}>{f.kind.replace("_", " ")}</Chip> <strong style={{ marginLeft: 6 }}>{label}</strong> — <span style={{ color: "var(--text-dim)" }}>{message}</span></span>
-                </div>
-              );
-            })}
-          </div>
-        </HudPanel>
-      )}
       <HudPanel title="Subscriptions" index="SUB" live="ok" style={{ flex: 1, minHeight: 0 }} bodyClass="overflow-auto"
         actions={<ConfigureCTA to="/config/finance/subscriptions" label="+ add new" />}>
         {items.length === 0 ? <EmptyState hint="add one in Config → Subscriptions">no subscriptions</EmptyState> :

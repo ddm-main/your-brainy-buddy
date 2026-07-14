@@ -13,6 +13,7 @@ const NAV = [
   { to: "/", label: "HUD" },
   { to: "/tasks", label: "Tasks" },
   { to: "/notes", label: "Notes" },
+  { to: "/decisions", label: "Decisions" },
   { to: "/finance", label: "Finance" },
   { to: "/projects", label: "Projects" },
 ];
@@ -155,18 +156,13 @@ export default function TopBar() {
             letterSpacing: "0.16em", textTransform: "uppercase",
             color: "var(--text-dim)",
           }}
-          title="Command palette"
-          aria-label="Command palette"
+          title="Command palette (⌘K)"
         >
-          <Command size={12} /> command
+          <Command size={12} /> ⌘K
         </button>
 
-        <StatusChip
-          label="sys"
-          ok={linkOk && aiOk}
-          icon={<Wifi size={11} />}
-          title={`Link ${linkOk ? "OK" : "DOWN"} · AI ${aiOk ? "OK" : "DOWN"}`}
-        />
+        <StatusChip label="link" ok={linkOk} icon={<Wifi size={11} />} />
+        <StatusChip label="ai" ok={aiOk} icon={<Zap size={11} />} />
 
         <div style={{ fontFamily: "var(--font-display)", fontSize: 13, color: "var(--accent-soft)", letterSpacing: "0.1em" }}>
           <span style={{ color: "var(--text-dim)", fontSize: 10, marginRight: 8 }}>{date}</span>
@@ -211,7 +207,7 @@ export default function TopBar() {
         </div>
         <button
           className="focus-outline"
-          title="Config"
+          title="Settings"
           onClick={() => navigate("/config")}
           style={iconBtn}
         >
@@ -238,9 +234,9 @@ const iconBtn = {
   background: "transparent", cursor: "pointer",
 } as const;
 
-function StatusChip({ label, ok, icon, title }: { label: string; ok: boolean; icon: any; title?: string }) {
+function StatusChip({ label, ok, icon }: { label: string; ok: boolean; icon: any }) {
   return (
-    <div title={title} style={{
+    <div style={{
       display: "flex", alignItems: "center", gap: 4,
       padding: "4px 8px", border: "1px solid var(--edge)", borderRadius: 2,
       fontSize: 9, fontFamily: "var(--font-hud)", letterSpacing: "0.18em",
