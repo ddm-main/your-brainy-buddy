@@ -1,5 +1,5 @@
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Suspense, useEffect, useMemo, useRef } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { useVoice } from "@/store/voiceStore";
 import { useBrain, currentBrainLabel } from "@/store/brainStore";
@@ -20,6 +20,7 @@ export default function JarvisCore() {
   const openConversation = useUi((s) => s.openConversation);
   const brain = useBrain();
   const brainLabel = currentBrainLabel(brain.provider, brain.model);
+  const [webglLost, setWebglLost] = useState(false);
 
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
@@ -32,15 +33,28 @@ export default function JarvisCore() {
 
   return (
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
-      <Canvas
-        camera={{ position: [0, 0, 6.2], fov: 40 }}
-        gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
-        dpr={[1, 2]}
-      >
-        <Suspense fallback={null}>
-          <Scene />
-        </Suspense>
-      </Canvas>
+      {webglLost ? (
+        <CoreFallback />
+      ) : (
+        <Canvas
+          camera={{ position: [0, 0, 6.2], fov: 40 }}
+          gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
+          dpr={[1, 2]}
+          onCreated={({ gl }) => {
+            const canvas = gl.domElement;
+            const onLost = (event: Event) => {
+              event.preventDefault();
+              console.warn("[JARVIS] WebGL context lost; switching core to CSS fallback.");
+              setWebglLost(true);
+            };
+            canvas.addEventListener("webglcontextlost", onLost, { once: true });
+          }}
+        >
+          <Suspense fallback={null}>
+            <Scene />
+          </Suspense>
+        </Canvas>
+      )}
 
       <button
         onClick={(e) => { e.stopPropagation(); openConversation(); }}
@@ -58,6 +72,17 @@ export default function JarvisCore() {
       >
         ◈ {brainLabel} · open conversation
       </button>
+    </div>
+  );
+}
+
+function CoreFallback() {
+  return (
+    <div className="jarvis-core-fallback" aria-hidden>
+      <span className="jarvis-core-ring r1" />
+      <span className="jarvis-core-ring r2" />
+      <span className="jarvis-core-ring r3" />
+      <span className="jarvis-core-node" />
     </div>
   );
 }

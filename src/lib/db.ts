@@ -730,21 +730,20 @@ export const db = {
   statements: {
     list: async (limit = 200) => {
       const { data, error } = await supabase.from("statements")
-        .select("*, credit_cards(card_name), financial_accounts(nickname), loans(lender_name)")
+        .select("*, credit_cards(card_name, banks(name)), financial_accounts(nickname, banks(name)), loans(lender_name), banks:linked_bank_id(name), emails:source_email_id(from_name, from_email, subject, received_at)")
         .order("statement_date", { ascending: false, nullsFirst: false })
+        .order("created_at", { ascending: false })
         .limit(limit);
       if (error) throw error;
       return data ?? [];
     },
     get: async (id: string) => {
       const { data, error } = await supabase.from("statements")
-        .select("*, credit_cards(card_name), financial_accounts(nickname), loans(lender_name)")
+        .select("*, credit_cards(card_name, banks(name)), financial_accounts(nickname, banks(name)), loans(lender_name), banks:linked_bank_id(name), emails:source_email_id(from_name, from_email, subject, received_at)")
         .eq("id", id).single();
       if (error) throw error;
       return data;
     },
-    // Most recent card statement per credit_card_id — net worth/utilization
-    // read this as "current card debt" since cards have no balance column.
     latestByCard: async () => {
       const { data, error } = await supabase.from("statements")
         .select("*").eq("statement_type", "card").not("credit_card_id", "is", null)
@@ -766,12 +765,13 @@ export const db = {
       if (error) throw error;
       return data ?? [];
     },
-    // Manual statement upload — for banks that never email a statement.
-    // Server-side parses + writes the same way the Gmail-attachment path does.
+    // Manual upload. Optional `existing_statement_id` attaches the PDF to an
+    // existing row (used for "skipped" statements that had no attachment).
     upload: async (params: {
       statement_type: "account" | "card" | "loan";
       credit_card_id?: string | null; financial_account_id?: string | null; loan_id?: string | null;
       filename: string; bytesBase64: string; password?: string;
+      existing_statement_id?: string | null;
     }) => {
       return callEdgeFunction("finance-upload-statement", { ...params, contentType: "application/pdf" });
     },
@@ -814,6 +814,19 @@ export const db = {
   finance: {
     extract: async (opts: { since_days?: number; limit?: number; account_id?: string } = {}) => {
       return callEdgeFunction("finance-extract", opts);
+    },
+    syncMarket: async () => callEdgeFunction("finance-market-sync", {}),
+    morningBrief: async (force = false) =>
+      callEdgeFunction("finance-morning-brief" + (force ? "?force=1" : ""), {}),
+    detect: async () => callEdgeFunction("finance-detect", {}),
+    reconcile: async () => callEdgeFunction("finance-reconcile", {}),
+    insight: async (topic: string, context: Record<string, unknown>, question?: string) =>
+      callEdgeFunction("jarvis-finance-insight", { topic, context, question }),
+    quotes: async () => {
+      const { data, error } = await supabase.from("market_quotes")
+        .select("*").order("kind").order("symbol");
+      if (error) throw error;
+      return (data ?? []) as AnyRow[];
     },
   },
 

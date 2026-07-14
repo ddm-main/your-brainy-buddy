@@ -27,6 +27,8 @@ export interface PdfParseResult {
   total_due: number | null;
   closing_balance: number | null;
   lines: StatementLine[];
+  parser_source?: string | null;
+  parse_confidence?: number | null;
   error?: string;
 }
 
@@ -40,6 +42,8 @@ function emptyResult(overrides: Partial<PdfParseResult> = {}): PdfParseResult {
     total_due: null,
     closing_balance: null,
     lines: [],
+    parser_source: "generic",
+    parse_confidence: 0.35,
     ...overrides,
   };
 }
@@ -78,7 +82,11 @@ export async function extractPdfText(bytes: Uint8Array, password?: string): Prom
   }
 }
 
-export async function parseStatementPdf(bytes: Uint8Array, password?: string): Promise<PdfParseResult> {
+export async function parseStatementPdf(
+  bytes: Uint8Array,
+  password?: string,
+  hint?: { bank_slug?: string | null; card_family?: string | null; statement_type?: "card" | "account" | "loan" | null },
+): Promise<PdfParseResult> {
   const extracted = await extractPdfText(bytes, password);
   if (!extracted.ok) {
     return {
@@ -88,7 +96,58 @@ export async function parseStatementPdf(bytes: Uint8Array, password?: string): P
       error: extracted.error,
     };
   }
-  return parseStatementText(extracted.text);
+  return parseStatementText(extracted.text, hint);
+}
+
+// Try a list of candidate passwords in order (plus a no-password attempt if
+// the PDF might be unprotected). Returns the parse result of the first
+// candidate that successfully decrypts + parses, and the winning password so
+// callers can persist it. If every candidate fails on password specifically,
+// the last wrong_password result is returned. If a non-password error occurs
+// (corrupt PDF, too many pages), it's returned immediately.
+export interface PasswordRotationResult {
+  result: PdfParseResult;
+  winning_password: string | null; // null = unprotected PDF succeeded
+  tried: number;
+}
+export async function parseStatementPdfWithPasswords(
+  bytes: Uint8Array,
+  candidates: (string | null | undefined)[],
+  hint?: { bank_slug?: string | null; card_family?: string | null; statement_type?: "card" | "account" | "loan" | null },
+): Promise<PasswordRotationResult> {
+  // Dedup, preserve order; try explicit/saved/user candidates first, then a
+  // no-password attempt. This avoids treating protected statements as
+  // unresolved before known bank/card passwords are exhausted.
+  const seen = new Set<string>();
+  const ordered: (string | null)[] = [];
+  const pushCandidate = (v: string | null | undefined) => {
+    const key = v == null ? "__none__" : v;
+    if (seen.has(key)) return;
+    seen.add(key);
+    ordered.push(v ?? null);
+  };
+  for (const c of candidates) if (c) pushCandidate(c);
+  pushCandidate(null);
+
+  let lastFailure: PdfParseResult | null = null;
+  let tried = 0;
+  for (const pwd of ordered) {
+    tried++;
+    const r = await parseStatementPdf(bytes, pwd ?? undefined, hint);
+    if (r.ok) {
+      return { result: r, winning_password: pwd ?? null, tried };
+    }
+    // Non-password error → stop trying.
+    if (r.error && r.error !== "wrong_password" && r.error !== "password_required") {
+      return { result: r, winning_password: null, tried };
+    }
+    lastFailure = r;
+  }
+  return {
+    result: lastFailure ?? { ok: false, period_start: null, period_end: null, statement_date: null, due_date: null, total_due: null, closing_balance: null, lines: [], error: "wrong_or_missing_password" },
+    winning_password: null,
+    tried,
+  };
 }
 
 // ---- Date parsing: DD/MM/YYYY, DD-MM-YYYY, "01 Jun 2026" → YYYY-MM-DD ----
@@ -111,7 +170,7 @@ function toIsoDate(raw: string | undefined | null): string | null {
 }
 
 // ---- Amount parsing: "Rs. 12,345.67", "₹12,345", "INR 12345.00" ----------
-const AMOUNT_RX = /(?:INR|Rs\.?|₹)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i;
+const AMOUNT_RX = /(?:INR|Rs\.?|₹)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i;
 
 function toAmount(raw: string | undefined | null): number | null {
   if (!raw) return null;
@@ -142,6 +201,8 @@ function genericFallback(text: string): Partial<PdfParseResult> {
     total_due: totalDueMatch ? toAmount(totalDueMatch[0]) : null,
     closing_balance: closingBalMatch ? toAmount(closingBalMatch[0]) : null,
     lines: extractLines(text),
+    parser_source: "generic",
+    parse_confidence: 0.35,
   };
 }
 
@@ -213,39 +274,25 @@ export function extractLines(text: string): StatementLine[] {
   return lines;
 }
 
-// ---- Per-bank parsers ------------------------------------------------------
-// Each extends the generic fallback with the same field extraction — banks
-// share broadly similar "Statement Period" / "Total Amount Due" phrasing, so
-// the fallback regex already covers most cases. These entries exist as the
-// place to add bank-specific itemized-transaction-line parsing once real
-// sample statements are available to tune the line-item regex against.
+// ---- Per-bank parsing (delegated to statement-parsers registry) ---------
+import { dispatchStatementParser } from "./statement-parsers/index.ts";
 
-function parseAxisStatement(text: string): Partial<PdfParseResult> {
-  return genericFallback(text);
-}
-function parseIciciStatement(text: string): Partial<PdfParseResult> {
-  return genericFallback(text);
-}
-function parseHdfcStatement(text: string): Partial<PdfParseResult> {
-  return genericFallback(text);
-}
-
-const BANK_PARSERS: Record<string, (text: string) => Partial<PdfParseResult>> = {
-  axis: parseAxisStatement,
-  icici: parseIciciStatement,
-  hdfc: parseHdfcStatement,
-};
-
-function detectBank(text: string): string | null {
-  if (/axis\s*bank/i.test(text)) return "axis";
-  if (/icici\s*bank/i.test(text)) return "icici";
-  if (/hdfc\s*bank/i.test(text)) return "hdfc";
-  return null;
+export function parseStatementText(text: string, hint?: { bank_slug?: string | null; card_family?: string | null; statement_type?: "card" | "account" | "loan" | null }): PdfParseResult {
+  const r = dispatchStatementParser(text, {
+    bank_slug: hint?.bank_slug ?? null,
+    card_family: hint?.card_family ?? null,
+    statement_type: hint?.statement_type ?? null,
+  });
+  return emptyResult({
+    period_start: r.fields.period_start,
+    period_end: r.fields.period_end,
+    statement_date: r.fields.statement_date,
+    due_date: r.fields.due_date,
+    total_due: r.fields.total_due,
+    closing_balance: r.fields.closing_balance,
+    lines: r.fields.lines,
+    parser_source: r.parser_source,
+    parse_confidence: r.confidence,
+  });
 }
 
-export function parseStatementText(text: string): PdfParseResult {
-  const bank = detectBank(text);
-  const parser = bank ? BANK_PARSERS[bank] : null;
-  const partial = parser ? parser(text) : genericFallback(text);
-  return emptyResult(partial);
-}

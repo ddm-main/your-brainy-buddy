@@ -53,3 +53,18 @@ verify_jwt = true
 
 [functions.finance-import-groww]
 verify_jwt = true
+
+[functions.finance-market-sync]
+verify_jwt = true
+
+[functions.finance-morning-brief]
+verify_jwt = true
+
+[functions.finance-detect]
+verify_jwt = true
+
+[functions.finance-reconcile]
+verify_jwt = true
+
+[functions.jarvis-finance-insight]
+verify_jwt = true

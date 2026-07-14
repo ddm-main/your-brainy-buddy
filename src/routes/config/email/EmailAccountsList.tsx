@@ -213,12 +213,23 @@ export default function EmailAccountsList({ initialAddView = false }: { initialA
     }
   };
 
+  // A reconnect is only required for real auth failures — not every synced
+  // account should carry a "reconnect" button next to Sync.
+  const needsReconnect = (a: EmailAccount): boolean => {
+    if (a.provider !== "gmail") return false;
+    if (!a.connected_at) return true;
+    if (!(a as any).refresh_token) return true;
+    const err = (a as any).last_error as string | null | undefined;
+    if (a.sync_status === "error" && err && /invalid_grant|unauthorized|insufficient[_ ]?scope|token|refresh/i.test(err)) return true;
+    return false;
+  };
+
   const sync = async (a: EmailAccount) => {
     setBusyId(a.id);
     try {
       const r: any = await gmail.sync(a.id);
       if (r?.paused) push("account is paused — resume from rules to sync", "warn" as any);
-      else push(`Synced ${r.inserted} new / ${r.total} scanned`, "ok");
+      else push(`Synced ${r?.inserted ?? 0} new / ${r?.total ?? 0} scanned`, "ok");
       setErrors((m) => { const c = { ...m }; delete c[a.id]; return c; });
       load();
     } catch (e: any) {
@@ -283,7 +294,9 @@ export default function EmailAccountsList({ initialAddView = false }: { initialA
                {a.provider === "gmail" && a.connected_at && (
                  <>
                    <Btn size="sm" onClick={() => sync(a)} disabled={busyId === a.id}><RefreshCw size={12} style={{ marginRight: 4 }} />sync</Btn>
-                   <Btn size="sm" onClick={() => connect(a)} disabled={busyId === a.id}>reconnect</Btn>
+                   {needsReconnect(a) && (
+                     <Btn size="sm" onClick={() => connect(a)} disabled={busyId === a.id}>reconnect</Btn>
+                   )}
                  </>
                )}
                <Btn size="sm" onClick={() => setRulesFor(a)}><Settings size={12} style={{ marginRight: 4 }} />rules</Btn>

@@ -1,0 +1,1 @@
+ALTER TABLE public.statements ADD COLUMN IF NOT EXISTS linked_bank_id uuid REFERENCES public.banks(id) ON DELETE SET NULL;

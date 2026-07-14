@@ -13,7 +13,6 @@ const NAV = [
   { to: "/", label: "HUD" },
   { to: "/tasks", label: "Tasks" },
   { to: "/notes", label: "Notes" },
-  { to: "/decisions", label: "Decisions" },
   { to: "/finance", label: "Finance" },
   { to: "/projects", label: "Projects" },
 ];
@@ -156,13 +155,18 @@ export default function TopBar() {
             letterSpacing: "0.16em", textTransform: "uppercase",
             color: "var(--text-dim)",
           }}
-          title="Command palette (⌘K)"
+          title="Command palette"
+          aria-label="Command palette"
         >
-          <Command size={12} /> ⌘K
+          <Command size={12} /> command
         </button>
 
-        <StatusChip label="link" ok={linkOk} icon={<Wifi size={11} />} />
-        <StatusChip label="ai" ok={aiOk} icon={<Zap size={11} />} />
+        <StatusChip
+          label="sys"
+          ok={linkOk && aiOk}
+          icon={<Wifi size={11} />}
+          title={`Link ${linkOk ? "OK" : "DOWN"} · AI ${aiOk ? "OK" : "DOWN"}`}
+        />
 
         <div style={{ fontFamily: "var(--font-display)", fontSize: 13, color: "var(--accent-soft)", letterSpacing: "0.1em" }}>
           <span style={{ color: "var(--text-dim)", fontSize: 10, marginRight: 8 }}>{date}</span>
@@ -234,9 +238,9 @@ const iconBtn = {
   background: "transparent", cursor: "pointer",
 } as const;
 
-function StatusChip({ label, ok, icon }: { label: string; ok: boolean; icon: any }) {
+function StatusChip({ label, ok, icon, title }: { label: string; ok: boolean; icon: any; title?: string }) {
   return (
-    <div style={{
+    <div title={title} style={{
       display: "flex", alignItems: "center", gap: 4,
       padding: "4px 8px", border: "1px solid var(--edge)", borderRadius: 2,
       fontSize: 9, fontFamily: "var(--font-hud)", letterSpacing: "0.18em",

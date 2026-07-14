@@ -1,115 +1,79 @@
-# JARVIS — Full Audit, Rebuild & Production Hardening
 
-Execution model: **one approval per phase**. Within an approved phase I proceed autonomously on destructive fixes (deleting dead routes/files, tightening RLS, rotating exposed secrets, dropping unused tables, replacing placeholder UI) and record every destructive action in that phase's delta report. To start a phase, reply `go phase N` (or with edits).
+## Statements Pipeline + Config Cleanup — corrected plan
 
----
+You're right — credit_cards is fully populated. Correcting the seed data and folding in your restructure of Config → Banks.
 
-## Phase 0 — Full Audit (report only, zero code changes)
+### Correction to the previous plan
 
-Read every route, component, store, edge function, migration, RLS policy, storage bucket, and shared lib. Produce **`.lovable/audit-2026-07.md`** grouped by module.
+Actual `credit_cards` in DB (all six link cleanly by bank + last-4):
 
-Each finding: `severity (P0/P1/P2) — description — evidence (file:line) — recommended fix`.
+| Card | Last-4 | Bank |
+|---|---|---|
+| Airtel AXIS | 2605 | Axis |
+| Amazon Pay ICICI | 6003 | ICICI Bank |
+| HDFC Millennia | 6560 | HDFC Bank |
+| SBI BPCL | **6662** | SBI |
+| SBI Cashback | **4814** | SBI |
+| Yes Bank | 0337 | Yes Bank |
 
-Sections:
-- Frontend (routes, components, stores, hooks)
-- Backend (edge functions, shared libs)
-- DB schema (tables, columns, indexes, triggers, functions)
-- RLS + GRANTs (per table)
-- Storage policies (`jarvis-vision`, `statement-pdfs`)
-- Auth flows (Google, Azure, Gmail OAuth start/callback, session, reset)
-- UX / Nav / Responsiveness / A11y
-- Perf (bundle, N+1, cache, long lists)
-- State (Zustand stores, React Query keys)
-- Animations
-- Security (secrets, RLS gaps, XSS/CSRF/IDOR, uploads, headers, prompt injection)
-- AI integration (Lovable AI gateway usage, rate limits, quota)
-- **Info-leak surfaces** — every place the UI renders raw errors, Supabase URLs, project IDs, storage paths, edge fn URLs, tokens, internal UUIDs
+Note: BPCL is `6662` (not `XX62`) and Cashback is `4814` (not `XX14`). The re-link backfill uses these actual last-4s. **No seeding needed** — remove that step entirely.
 
-Plus categorized rollup lists: **Bugs / Missing Features / UI Problems / Perf / Security / DB / UX / Code / Refactors**.
+Bank table has three duplicate "SBI" rows (image-11). Merge them: keep the one already referenced by cards, repoint any FKs, delete the orphans, add a `unique(lower(name))` constraint.
 
-Deliverable: the audit file + a Phase 1 kickoff summary. No code changes.
+### A. Config restructure — remove standalone Banks tab
 
----
+- Delete tab **Banks** from `src/routes/config/FinanceConfig.tsx` `SUBTABS`.
+- Delete route `banks` and `BanksConfig` lazy import in the same file; remove `src/routes/config/BanksConfig.tsx` and card in `FinanceHome`.
+- Introduce a shared **Indian banks combobox** `src/components/finance/BankPicker.tsx` (typeahead over a bundled `INDIAN_BANKS` list ∪ existing `banks` rows). On pick of a bundled bank that has no row yet, upsert into `public.banks` (case-insensitive dedupe) and return the id. Used by:
+  - `AccountsConfig` — replaces the current Bank ▾ + "Or new bank" fields.
+  - `CardsConfig` — same replacement in the add-card form.
+  - Statements upload flow (`finance-upload-statement` invoker UI on `Statements.tsx`) — bank field.
+- Bundled list: 40+ common Indian banks (SBI, HDFC Bank, ICICI Bank, Axis, Kotak Mahindra Bank, Yes Bank, IDFC FIRST, IndusInd, Federal, PNB, BOB, Canara, Union Bank, IOB, Central Bank, BOI, UCO, Karur Vysya, South Indian, RBL, AU SFB, Bandhan, DBS, HSBC, Standard Chartered, Citi, Deutsche, IDBI, J&K Bank, Karnataka Bank, Tamilnad Mercantile, DCB, CSB, Equitas SFB, Ujjivan SFB, Suryoday SFB, Fincare, ESAF, Jana SFB, Utkarsh SFB, plus card-issuer aliases: Amazon Pay ICICI, Airtel Axis, Flipkart Axis, Tata Neu HDFC). Living file `src/data/indianBanks.ts`.
 
-## Phase 1 — Security & Production Readiness (blocks all feature work)
+### B. Statements pipeline — remaining work
 
-- **Secrets sweep** — repo scan for hardcoded keys, verify `.env`/`.env.example`/`.gitignore`, confirm `service_role` never reaches client, rotate anything exposed. Confirm `STATEMENT_ENC_SECRET` is edge-only (never `VITE_`).
-- **RLS + GRANTs** on every public table (esp. `user_roles`, `statements`, `transactions`, `emails`, `email_accounts`, `credit_cards`, `loans`, `financial_accounts`). Owner-scoped policies, missing GRANTs added, `has_role`/admin usage verified.
-- **Edge functions** — `requireUserId` on every one, zod input validation, CORS allow-list, rate-limits on `jarvis-*`/`gmail-*`/`finance-*`, sanitized error responses (no stack traces, no SQL, no URLs), PII stripped from logs, correct `verify_jwt` per fn.
-- **Frontend info-leak fix** (the Gmail-reconnect complaint) — replace every raw error surface with user-friendly copy. Never render Supabase URL, project ID, storage paths, edge fn URLs, tokens, or internal IDs. Centralize in one `toUserError()` helper.
-- **XSS/CSRF/IDOR sweep** — `dangerouslySetInnerHTML` (Gmail HTML sanitized), no state-changing GETs, every `?id=` read authorized.
-- **File uploads** (`statement-pdfs`, `jarvis-vision`) — MIME + size checks, path-traversal guard, signed-URL scoping, PDF shape validation before parse.
-- **Security headers** — CSP, X-Frame-Options, Referrer-Policy in `index.html` + vite dev.
-- **Account deletion** — cascade user data + revoke Google/Azure tokens.
-- **Prompt-injection guard** on JARVIS chat + AI statement summaries.
+Schema (migration)
+- `statements.parse_reason` text
+- `statements.parser_confidence` numeric
+- `email_accounts.treat_all_as_finance` boolean not null default false
+- Bank dedupe: merge duplicate SBI rows, add `unique index banks_name_lower_idx on banks(lower(name))`
 
-Deliverable: green security linter, updated `@security-memory`, delta report of rotated secrets / removed code / tightened policies.
+Data (via `supabase--insert`, not migration)
+- `UPDATE email_accounts SET use_case='finance', finance_only=true, treat_all_as_finance=true, sync_period_days=GREATEST(COALESCE(sync_period_days,30),365) WHERE lower(email_address)='07statement@gmail.com'`
+- Backfill: for every `statements` row in `pending|failed|skipped`, re-run link resolution using `banks.name` slug + `credit_cards.masked_number`/`financial_accounts.masked_number` suffix match; write `parse_reason` and reset `status='pending'` where a link is now possible.
+- Schedule `pg_cron` job for `gmail-sync-due` every 15 min (uses existing `SYNC_HOOK_SECRET`).
 
----
+Edge functions
+- `_shared/finance-parsers.ts`: extend `BANK_SLUG_MAP` (sbicard.com, alerts.sbi, emailstatements.hdfcbank.com, icicibank.com, amazonpay.*icici, yesbank.in, axisbank.com + Airtel Axis); add `unwrapForwarded()`; broaden last-4 regex; bypass sender allow-list when `treat_all_as_finance=true`.
+- `_shared/finance-extract-core.ts`: new `resolveLinksV2({parsed, email, unwrapped}) → {credit_card_id, financial_account_id, loan_id, linked_bank_id, parse_reason, parser_confidence}`. Called on every `pending|failed|skipped` row before retry. Match: bank slug + last-4 `endsWith` OR strong subject-token on `card_name` (BPCL, CASHBACK, MILLENNIA, AMAZON PAY, AIRTEL, …).
+- Password rotation: explicit override → saved `statement_password_rule` → `jarvis_memory` candidates → none. Encrypt+persist winning password on success via `STATEMENT_ENC_SECRET`. `parse_reason` in {`password_missing`, `password_failed`, `parsed_with_saved_password`, `parsed_with_user_password`}. Never log plaintext.
+- Parser skeletons already exist in `_shared/statement-parsers/` (hdfc/icici/amazon-pay-icici/axis/yes/hdfc-account/icici-account/sbi-account) delegating to `generic`. Wire writer to persist `closing_balance, min_due, due_date, period_start/end, txn_count, parser_source, parser_confidence` in `finance-extract`, `finance-retry-statement`, `finance-upload-statement`, `_shared/statement-pdf.ts`.
 
-## Phase 2 — Finance (largest phase, 2–3 sub-turns under one approval)
+Statements UI (`src/routes/finance/Statements.tsx`)
+- Fixed-height scroll `max-h-[calc(100vh-260px)] overflow-y-auto` + sticky header.
+- Columns: Date · Bank · Linked card/account · Subject/Sender · Period · Txns · Status · Reason · Actions.
+- Row actions: **View PDF** (`finance-statement-pdf-url`), **Re-link & retry**.
+- Toolbar: **Retry all pending**, **Re-sync 07statement inbox**.
+- Filter chips: bank, status, unlinked-only. `parse_reason` shown muted under status pill.
 
-Finance becomes the intelligent core; everything auto-syncs.
+### C. Email Config bugs
 
-- **2a Statements & parsing** — redesign page (parse status, validation, matches, period, password, AI summary); fix statement-password saving; better PDF extraction (merchant, category, mode, account, card, ref, UPI); retry/repair flow; statements read-only after parse.
-- **2b Transactions & reconciliation** — manual entry, auto-reconcile with statements, detect missing / duplicate / suspicious, `reconciliation_matches` UI.
-- **2c Accounts / Cards / Loans / Subs / Goals** — clicking a card opens its detail page (view/edit/delete/history/analytics/linked-data). Kill all "Manage" pages. Loans redesigned with amortization, EMI auto-detect, prepayments, foreclosure, interest-saved. Cards: limit / outstanding / available / utilisation / rewards / payment history / paid-from account. Subs: auto-detect recurring, renewals, duplicates, price hikes, unused. Goals: milestones, sources, AI recs.
-- **2d Overview + interconnection** — Net worth, cash flow, income/expenses, health score, upcoming bills, AI insights. Wire the chain **Statement → Transactions → Merchant → Category → Card/Loan/Sub → Goal → HUD → Notifications → AI summary** so no module is isolated.
+1. **Reconnect only when needed.** In `EmailAccountsList.tsx` show Reconnect only if `sync_status==='error' && /invalid_grant|unauthorized|insufficient_scope|token|refresh/i.test(last_error)`, OR `!refresh_token`, OR permission scope drift after `connected_at`. Otherwise render Sync + Rules only.
+2. **Redundant text.** `EmailHome.tsx`: collapse tiles that all route to `/config/email/list` into one "Mailboxes" card; hide `OTHER` purpose chip on rows.
+3. **Daily auto-sync not firing.** `gmail-sync-due` exists but no cron scheduled. Create `pg_cron` job `gmail-sync-due-every-15m` calling the function URL with `x-cron-secret: <SYNC_HOOK_SECRET>` header (via `supabase--insert`, not migration, since URL + secret are project-specific). Verify `last_synced_at` advances afterwards.
+4. **`/config/email/undefined` after Reconnect.** In `gmail.startOAuth` caller (`EmailAccountsList.connect`), when the popup pre-opens `about:blank` and the edge fn returns no `url`, the popup navigates to string `"undefined"` resolved against opener. Fix: throw `GmailApiError` when `!url`; `popup.close()` in `finally` on failure; same guard on non-popup fallback.
+5. Defensive UI: `sync()` result uses `r.inserted ?? 0` / `r.total ?? 0`; `applyOAuthResult` accepts `event.source === opener` origin check; `AccountRulesDrawer` auto-bumps `sync_frequency` from `manual → daily` when `use_case` set to `finance`.
 
-Deliverable: end-to-end demo — upload statement → transactions land → card + subs update → alerts on HUD.
+### D. Execution order
 
----
+1. Migration: schema cols + bank unique index + duplicate-SBI merge.
+2. `supabase--insert`: onboard `07statement@gmail.com`, backfill re-link across statements, schedule `pg_cron`.
+3. Frontend: create `BankPicker` + `indianBanks.ts`; remove Banks tab/route/card; swap Bank fields in Accounts/Cards/Statements.
+4. Edge fns: extend slug map, `unwrapForwarded`, `resolveLinksV2`, password rotation, persist new fields.
+5. Statements UI redesign + Email Config bug fixes C1–C5.
+6. Deploy affected edge functions.
+7. Verify: read-only SQL for statement status/link/reason breakdown; cron `job_run_details`; Playwright walk of Statements (scroll, View PDF, retry one SBI + one HDFC row).
 
-## Phase 3 — HUD, Tasks, Notes, Projects
+### E. Out of scope
 
-- **HUD** — real data in Mission Control (today's tasks, meetings, due bills, cards, EMIs, goals, AI suggestions, finance alerts). AI Daily Brief. Signal becomes notification center. Pulse shows net worth / cash flow / income / expenses / savings / investments / credit util / loan status / health score. JARVIS core = command center (palette + voice).
-- **Tasks** — priorities, subtasks, recurring, reminders; Kanban + calendar + timeline; attachments; project/finance links; AI suggestions.
-- **Notes** — markdown + rich text, images, voice, tags, search, backlinks, AI summaries, cross-links.
-- **Projects** — dashboard + Kanban + timeline + files + tasks + notes + budget + milestones + progress; budget linked to Finance.
-
-Deliverable: cross-module links visible in every surface.
-
----
-
-## Phase 4 — JARVIS AI + Knowledge Hub (replaces Link)
-
-- JARVIS voice + chat with persistent `jarvis_memory`, route-aware context, global search across Notes/Tasks/Projects/Finance, tool-calling (create task, add transaction, summarize statement, plan day), smart suggestions, document analysis, planning.
-- Replace Link module with **Knowledge Hub** — bookmarks, docs, quick links, AI search over saved items + Notes.
-- Consolidated AI settings + model picker in Config.
-
-Deliverable: chat can answer "what did I spend on subs last month?" and create a follow-up task from the answer.
-
----
-
-## Phase 5 — Notifications + Config polish
-
-- **Notification center** — bills, EMIs, card dues, statement events, task/project due, goals, AI insights, security alerts. Persistence, read state, in-app + optional email.
-- **Config** — remove the "Config" text from top-bar button (icon only), regroup subsections as **Appearance, AI, Finance, Notifications, Security, Automation, Backup, Import/Export, Developer**. Existing entity forms (Email, Banks, Accounts, Cards, Loans, Goals, Subs, Projects) slot under Finance / Automation.
-
-Deliverable: notification bell with live badge and grouped Config.
-
----
-
-## Phase 6 — QA, Perf, A11y, Final Security Re-scan
-
-- **Perf** — route-level code split, React Query cache audit, kill N+1s in Finance, virtualize long lists.
-- **A11y** — keyboard nav everywhere, focus rings, ARIA on custom controls, contrast on cyan theme.
-- **Responsive** sweep across mobile/tablet.
-- Re-run security scanner, fix regressions, smoke-test every route signed-in.
-- Update `plan.md`, `Dashboard.md`, README; add `PRODUCTION-CHECKLIST.md`.
-
-Deliverable: production-ready build + final combined report.
-
----
-
-## Technical notes
-
-- Stack unchanged: Vite + React + TS + Tailwind, Supabase, HUD theme (cyan + system font).
-- Any new/changed tables + RLS go through `supabase--migration`, at most one migration per phase.
-- Edge functions redeploy automatically; secrets via `add_secret`.
-- Every destructive change (deletions, RLS tightening, secret rotation, dropped tables/routes, placeholder removal) is listed in that phase's delta report.
-- One approval gate per phase.
-
----
-
-**On approval I start Phase 0 — Audit.** Reply `go phase 0` to begin.
+Real HDFC/ICICI/Axis/Yes parser bodies (skeletons only); Gmail OAuth scope changes; UI outside Statements + Email Config + Accounts/Cards bank-picker swap.

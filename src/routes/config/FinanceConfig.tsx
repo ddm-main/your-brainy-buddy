@@ -2,7 +2,6 @@ import { Route, Routes, useLocation, useNavigate, NavLink } from "react-router-d
 import { lazy, Suspense } from "react";
 
 const FinanceHome = lazy(() => import("@/routes/config/finance/FinanceHome"));
-const BanksConfig = lazy(() => import("@/routes/config/BanksConfig"));
 const AccountsConfig = lazy(() => import("@/routes/config/AccountsConfig"));
 const CardsConfig = lazy(() => import("@/routes/config/CardsConfig"));
 const LoansConfig = lazy(() => import("@/routes/config/LoansConfig"));
@@ -11,7 +10,6 @@ const SubscriptionsConfig = lazy(() => import("@/routes/config/SubscriptionsConf
 
 const SUBTABS = [
   { to: "/config/finance", label: "Home", exact: true },
-  { to: "/config/finance/banks", label: "Banks" },
   { to: "/config/finance/accounts", label: "Accounts" },
   { to: "/config/finance/cards", label: "Cards" },
   { to: "/config/finance/loans", label: "Loans" },
@@ -49,7 +47,6 @@ export default function FinanceConfig() {
         <Suspense fallback={<div className="hud-label">loading…</div>}>
           <Routes>
             <Route index element={<FinanceHome />} />
-            <Route path="banks" element={<BanksConfig />} />
             <Route path="accounts" element={<AccountsConfig />} />
             <Route path="cards" element={<CardsConfig />} />
             <Route path="loans" element={<LoansConfig />} />

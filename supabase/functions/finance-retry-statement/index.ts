@@ -7,8 +7,9 @@
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { svcClient } from "../_shared/gmail.ts";
-import { applyParsedStatementResult, ingestStatementAttachment } from "../_shared/finance-extract-core.ts";
-import { parseStatementPdf } from "../_shared/statement-pdf.ts";
+import { applyParsedStatementResult, ingestStatementAttachment, loadPasswordCandidates, resolveLinks, saveWinningPassword } from "../_shared/finance-extract-core.ts";
+import { parseFinanceEmail } from "../_shared/finance-parsers.ts";
+import { parseStatementPdfWithPasswords } from "../_shared/statement-pdf.ts";
 import { decryptStatementPassword } from "../_shared/crypto.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
 import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
@@ -94,38 +95,58 @@ Deno.serve(async (req) => {
           status: 404, headers: { ...cors, "Content-Type": "application/json" },
         });
       }
-      await ingestStatementAttachment(svc, account, email, statement.id, {
-        credit_card_id: statement.credit_card_id ?? null,
-        financial_account_id: statement.financial_account_id ?? null,
-        loan_id: statement.loan_id ?? null,
+      const parsed = parseFinanceEmail({ ...email, body_text: email.body_text ?? email.snippet });
+      const links = parsed?.kind === "statement"
+        ? await resolveLinks(svc, uid, parsed, email)
+        : {
+          credit_card_id: statement.credit_card_id ?? null,
+          financial_account_id: statement.financial_account_id ?? null,
+          loan_id: statement.loan_id ?? null,
+        };
+      await svc.from("statements").update({
+        credit_card_id: links.credit_card_id ?? statement.credit_card_id ?? null,
+        financial_account_id: links.financial_account_id ?? statement.financial_account_id ?? null,
+        loan_id: links.loan_id ?? statement.loan_id ?? null,
+        linked_bank_id: links.linked_bank_id ?? statement.linked_bank_id ?? null,
+        parse_error: links.credit_card_id || links.financial_account_id || links.loan_id ? null : statement.parse_error,
+      }).eq("id", statement.id);
+      await ingestStatementAttachment(svc, account, email, statement.id, links, {
+        statement_type: (statement.statement_type as any) ?? null,
+        bank_slug: null,
       });
     } else if (statement.file_path) {
       const { data: blob, error: dlErr } = await svc.storage.from(STATEMENT_BUCKET).download(statement.file_path);
       if (dlErr || !blob) throw dlErr ?? new Error("PDF not found in storage");
       const bytes = new Uint8Array(await blob.arrayBuffer());
 
-      // Password resolution order: explicit override > saved rule on linked entity.
-      let pwd: string | undefined = password || undefined;
-      if (!pwd) {
-        if (statement.credit_card_id) {
-          const { data: c } = await svc.from("credit_cards").select("statement_password_rule").eq("id", statement.credit_card_id).maybeSingle();
-          if (c?.statement_password_rule) {
-            try { pwd = await decryptStatementPassword(c.statement_password_rule); } catch { /* ignore */ }
-          }
-        } else if (statement.financial_account_id) {
-          const { data: a } = await svc.from("financial_accounts").select("statement_password_rule").eq("id", statement.financial_account_id).maybeSingle();
-          if (a?.statement_password_rule) {
-            try { pwd = await decryptStatementPassword(a.statement_password_rule); } catch { /* ignore */ }
-          }
+      // Password rotation: explicit override → saved rule → user candidates.
+      let savedPwd: string | undefined;
+      if (statement.credit_card_id) {
+        const { data: c } = await svc.from("credit_cards").select("statement_password_rule").eq("id", statement.credit_card_id).maybeSingle();
+        if (c?.statement_password_rule) {
+          try { savedPwd = await decryptStatementPassword(c.statement_password_rule); } catch { /* ignore */ }
+        }
+      } else if (statement.financial_account_id) {
+        const { data: a } = await svc.from("financial_accounts").select("statement_password_rule").eq("id", statement.financial_account_id).maybeSingle();
+        if (a?.statement_password_rule) {
+          try { savedPwd = await decryptStatementPassword(a.statement_password_rule); } catch { /* ignore */ }
         }
       }
-
-      const result = await parseStatementPdf(bytes, pwd);
-      await applyParsedStatementResult(svc, statement.id, uid, {
+      const candidates = await loadPasswordCandidates(svc, uid);
+      const ordered = [password, savedPwd, ...candidates].filter((x): x is string => typeof x === "string" && x.length > 0);
+      const rotation = await parseStatementPdfWithPasswords(bytes, ordered, {
+        statement_type: (statement.statement_type as any) ?? null,
+      });
+      const links = {
         credit_card_id: statement.credit_card_id ?? null,
         financial_account_id: statement.financial_account_id ?? null,
         loan_id: statement.loan_id ?? null,
-      }, result, statement.file_path);
+        linked_bank_id: statement.linked_bank_id ?? null,
+      };
+      if (rotation.result.ok && rotation.winning_password && !savedPwd) {
+        await saveWinningPassword(svc, links, rotation.winning_password);
+      }
+      await applyParsedStatementResult(svc, statement.id, uid, links, rotation.result, statement.file_path);
     } else {
       return new Response(JSON.stringify({ error: "statement has no source email or stored PDF to re-parse" }), {
         status: 400, headers: { ...cors, "Content-Type": "application/json" },

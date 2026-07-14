@@ -76,26 +76,35 @@ export function bytesToText(u: Uint8Array): string {
 }
 
 /** Constant-time CRON secret verification for edge functions that run with
- * service-role privileges and no JWT gate. Reads CRON_SECRET from env,
- * fails closed on misconfiguration, and returns a ready-to-return Response
- * on failure so the caller can `if (bad) return bad;` and move on. */
+ * service-role privileges and no JWT gate. Accepts either `CRON_SECRET` or
+ * the project's existing `SYNC_HOOK_SECRET` env var (whichever is set), and
+ * matches against either `x-cron-secret` or `x-sync-hook-secret` on the
+ * request — pg_cron jobs and manual triggers can use whichever pair is
+ * configured. Fails closed on misconfiguration. */
 export async function verifyCronSecret(req: Request): Promise<Response | null> {
-  const secret = Deno.env.get("CRON_SECRET");
-  if (!secret) {
-    return new Response(JSON.stringify({ error: "misconfigured — CRON_SECRET not set" }), {
+  const secrets = [
+    Deno.env.get("CRON_SECRET"),
+    Deno.env.get("SYNC_HOOK_SECRET"),
+  ].filter((v): v is string => typeof v === "string" && v.length > 0);
+  if (secrets.length === 0) {
+    return new Response(JSON.stringify({ error: "misconfigured — CRON_SECRET / SYNC_HOOK_SECRET not set" }), {
       status: 500, headers: { "Content-Type": "application/json" },
     });
   }
-  const provided = req.headers.get("x-cron-secret") ?? "";
+  const provided =
+    req.headers.get("x-cron-secret") ??
+    req.headers.get("x-sync-hook-secret") ??
+    "";
   const enc = new TextEncoder();
-  const [a, b] = await Promise.all([
-    crypto.subtle.digest("SHA-256", enc.encode(provided)),
-    crypto.subtle.digest("SHA-256", enc.encode(secret)),
-  ]);
-  const av = new Uint8Array(a), bv = new Uint8Array(b);
-  let diff = av.length ^ bv.length;
-  for (let i = 0; i < av.length; i++) diff |= av[i] ^ bv[i];
-  if (diff !== 0) {
+  const providedDigest = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(provided)));
+  let match = false;
+  for (const s of secrets) {
+    const d = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(s)));
+    let diff = providedDigest.length ^ d.length;
+    for (let i = 0; i < providedDigest.length; i++) diff |= providedDigest[i] ^ d[i];
+    if (diff === 0) { match = true; break; }
+  }
+  if (!match) {
     return new Response(JSON.stringify({ error: "forbidden" }), {
       status: 403, headers: { "Content-Type": "application/json" },
     });

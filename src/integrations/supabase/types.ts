@@ -65,6 +65,78 @@ export type Database = {
         }
         Relationships: []
       }
+      budgets: {
+        Row: {
+          active: boolean
+          category: string
+          created_at: string
+          id: string
+          monthly_limit: number
+          rollover: boolean
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          active?: boolean
+          category: string
+          created_at?: string
+          id?: string
+          monthly_limit: number
+          rollover?: boolean
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          active?: boolean
+          category?: string
+          created_at?: string
+          id?: string
+          monthly_limit?: number
+          rollover?: boolean
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      category_rules: {
+        Row: {
+          category: string
+          created_at: string
+          hits: number
+          id: string
+          last_used_at: string | null
+          match_type: string
+          pattern: string
+          priority: number
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          category: string
+          created_at?: string
+          hits?: number
+          id?: string
+          last_used_at?: string | null
+          match_type: string
+          pattern: string
+          priority?: number
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          category?: string
+          created_at?: string
+          hits?: number
+          id?: string
+          last_used_at?: string | null
+          match_type?: string
+          pattern?: string
+          priority?: number
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       credit_cards: {
         Row: {
           autopay: boolean
@@ -187,6 +259,42 @@ export type Database = {
         }
         Relationships: []
       }
+      detection_runs: {
+        Row: {
+          created_at: string
+          error: string | null
+          finished_at: string | null
+          id: string
+          kind: string
+          ok: boolean | null
+          started_at: string
+          stats: Json
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          error?: string | null
+          finished_at?: string | null
+          id?: string
+          kind: string
+          ok?: boolean | null
+          started_at?: string
+          stats?: Json
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          error?: string | null
+          finished_at?: string | null
+          id?: string
+          kind?: string
+          ok?: boolean | null
+          started_at?: string
+          stats?: Json
+          user_id?: string
+        }
+        Relationships: []
+      }
       email_accounts: {
         Row: {
           access_token: string | null
@@ -214,6 +322,7 @@ export type Database = {
           sync_period_days: number
           sync_status: string | null
           token_expires_at: string | null
+          treat_all_as_finance: boolean
           use_case: string
           user_id: string
         }
@@ -243,6 +352,7 @@ export type Database = {
           sync_period_days?: number
           sync_status?: string | null
           token_expires_at?: string | null
+          treat_all_as_finance?: boolean
           use_case?: string
           user_id?: string
         }
@@ -272,6 +382,7 @@ export type Database = {
           sync_period_days?: number
           sync_status?: string | null
           token_expires_at?: string | null
+          treat_all_as_finance?: boolean
           use_case?: string
           user_id?: string
         }
@@ -318,6 +429,7 @@ export type Database = {
       email_attachments: {
         Row: {
           attachment_type: string | null
+          byte_size: number | null
           created_at: string
           email_id: string
           extracted_text: string | null
@@ -325,11 +437,13 @@ export type Database = {
           id: string
           mime: string | null
           parse_status: Database["public"]["Enums"]["parse_status"]
+          statement_id: string | null
           storage_path: string | null
           user_id: string
         }
         Insert: {
           attachment_type?: string | null
+          byte_size?: number | null
           created_at?: string
           email_id: string
           extracted_text?: string | null
@@ -337,11 +451,13 @@ export type Database = {
           id?: string
           mime?: string | null
           parse_status?: Database["public"]["Enums"]["parse_status"]
+          statement_id?: string | null
           storage_path?: string | null
           user_id?: string
         }
         Update: {
           attachment_type?: string | null
+          byte_size?: number | null
           created_at?: string
           email_id?: string
           extracted_text?: string | null
@@ -349,6 +465,7 @@ export type Database = {
           id?: string
           mime?: string | null
           parse_status?: Database["public"]["Enums"]["parse_status"]
+          statement_id?: string | null
           storage_path?: string | null
           user_id?: string
         }
@@ -358,6 +475,13 @@ export type Database = {
             columns: ["email_id"]
             isOneToOne: false
             referencedRelation: "emails"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "email_attachments_statement_id_fkey"
+            columns: ["statement_id"]
+            isOneToOne: false
+            referencedRelation: "statements"
             referencedColumns: ["id"]
           },
         ]
@@ -454,6 +578,75 @@ export type Database = {
           },
         ]
       }
+      fii_dii_activity: {
+        Row: {
+          activity_date: string
+          dii_net: number | null
+          fii_net: number | null
+          source: string | null
+          updated_at: string
+        }
+        Insert: {
+          activity_date: string
+          dii_net?: number | null
+          fii_net?: number | null
+          source?: string | null
+          updated_at?: string
+        }
+        Update: {
+          activity_date?: string
+          dii_net?: number | null
+          fii_net?: number | null
+          source?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      finance_alerts: {
+        Row: {
+          created_at: string
+          entity_id: string | null
+          entity_type: string | null
+          id: string
+          kind: string
+          message: string | null
+          metadata: Json
+          severity: string
+          status: string
+          title: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          entity_id?: string | null
+          entity_type?: string | null
+          id?: string
+          kind: string
+          message?: string | null
+          metadata?: Json
+          severity?: string
+          status?: string
+          title: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          entity_id?: string | null
+          entity_type?: string | null
+          id?: string
+          kind?: string
+          message?: string | null
+          metadata?: Json
+          severity?: string
+          status?: string
+          title?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       finance_email_rules: {
         Row: {
           attachment_name_pattern: string | null
@@ -528,6 +721,66 @@ export type Database = {
           },
         ]
       }
+      finance_reports: {
+        Row: {
+          body_md: string
+          created_at: string
+          id: string
+          kind: string
+          meta: Json
+          period: string
+          user_id: string
+        }
+        Insert: {
+          body_md: string
+          created_at?: string
+          id?: string
+          kind?: string
+          meta?: Json
+          period: string
+          user_id: string
+        }
+        Update: {
+          body_md?: string
+          created_at?: string
+          id?: string
+          kind?: string
+          meta?: Json
+          period?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      finance_suggestions: {
+        Row: {
+          created_at: string
+          id: string
+          kind: string
+          payload: Json
+          status: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          kind: string
+          payload?: Json
+          status?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          kind?: string
+          payload?: Json
+          status?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       financial_accounts: {
         Row: {
           account_type: string | null
@@ -540,6 +793,7 @@ export type Database = {
           notes: string | null
           source_email: string | null
           statement_cycle_day: number | null
+          statement_password_rule: Json | null
           updated_at: string
           user_id: string
         }
@@ -554,6 +808,7 @@ export type Database = {
           notes?: string | null
           source_email?: string | null
           statement_cycle_day?: number | null
+          statement_password_rule?: Json | null
           updated_at?: string
           user_id?: string
         }
@@ -568,6 +823,7 @@ export type Database = {
           notes?: string | null
           source_email?: string | null
           statement_cycle_day?: number | null
+          statement_password_rule?: Json | null
           updated_at?: string
           user_id?: string
         }
@@ -585,9 +841,12 @@ export type Database = {
         Row: {
           created_at: string
           current_amount: number
+          emergency_target_months: number | null
+          funding_source_account_id: string | null
           goal_type: string | null
           id: string
           linked_account_id: string | null
+          retirement_target: number | null
           target_amount: number | null
           target_date: string | null
           title: string
@@ -597,9 +856,12 @@ export type Database = {
         Insert: {
           created_at?: string
           current_amount?: number
+          emergency_target_months?: number | null
+          funding_source_account_id?: string | null
           goal_type?: string | null
           id?: string
           linked_account_id?: string | null
+          retirement_target?: number | null
           target_amount?: number | null
           target_date?: string | null
           title: string
@@ -609,9 +871,12 @@ export type Database = {
         Update: {
           created_at?: string
           current_amount?: number
+          emergency_target_months?: number | null
+          funding_source_account_id?: string | null
           goal_type?: string | null
           id?: string
           linked_account_id?: string | null
+          retirement_target?: number | null
           target_amount?: number | null
           target_date?: string | null
           title?: string
@@ -620,7 +885,135 @@ export type Database = {
         }
         Relationships: [
           {
+            foreignKeyName: "financial_goals_funding_source_account_id_fkey"
+            columns: ["funding_source_account_id"]
+            isOneToOne: false
+            referencedRelation: "financial_accounts"
+            referencedColumns: ["id"]
+          },
+          {
             foreignKeyName: "financial_goals_linked_account_id_fkey"
+            columns: ["linked_account_id"]
+            isOneToOne: false
+            referencedRelation: "financial_accounts"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      holding_transactions: {
+        Row: {
+          amount: number | null
+          created_at: string
+          fees: number | null
+          holding_id: string
+          id: string
+          kind: string
+          notes: string | null
+          price: number | null
+          source: string | null
+          txn_date: string
+          units: number
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          amount?: number | null
+          created_at?: string
+          fees?: number | null
+          holding_id: string
+          id?: string
+          kind: string
+          notes?: string | null
+          price?: number | null
+          source?: string | null
+          txn_date: string
+          units: number
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          amount?: number | null
+          created_at?: string
+          fees?: number | null
+          holding_id?: string
+          id?: string
+          kind?: string
+          notes?: string | null
+          price?: number | null
+          source?: string | null
+          txn_date?: string
+          units?: number
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "holding_transactions_holding_id_fkey"
+            columns: ["holding_id"]
+            isOneToOne: false
+            referencedRelation: "holdings"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      holdings: {
+        Row: {
+          as_of: string | null
+          asset_class: string
+          avg_cost: number | null
+          created_at: string
+          current_price: number | null
+          current_value: number | null
+          id: string
+          invested_amount: number | null
+          isin: string | null
+          linked_account_id: string | null
+          metadata: Json
+          name: string
+          symbol: string | null
+          units: number
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          as_of?: string | null
+          asset_class: string
+          avg_cost?: number | null
+          created_at?: string
+          current_price?: number | null
+          current_value?: number | null
+          id?: string
+          invested_amount?: number | null
+          isin?: string | null
+          linked_account_id?: string | null
+          metadata?: Json
+          name: string
+          symbol?: string | null
+          units?: number
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          as_of?: string | null
+          asset_class?: string
+          avg_cost?: number | null
+          created_at?: string
+          current_price?: number | null
+          current_value?: number | null
+          id?: string
+          invested_amount?: number | null
+          isin?: string | null
+          linked_account_id?: string | null
+          metadata?: Json
+          name?: string
+          symbol?: string | null
+          units?: number
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "holdings_linked_account_id_fkey"
             columns: ["linked_account_id"]
             isOneToOne: false
             referencedRelation: "financial_accounts"
@@ -657,6 +1050,74 @@ export type Database = {
           user_id?: string
         }
         Relationships: []
+      }
+      insurance_policies: {
+        Row: {
+          created_at: string
+          end_date: string | null
+          id: string
+          linked_account_id: string | null
+          metadata: Json
+          nickname: string | null
+          notes: string | null
+          policy_number: string | null
+          policy_type: string
+          premium_amount: number | null
+          premium_frequency: string | null
+          provider: string | null
+          renewal_date: string | null
+          start_date: string | null
+          sum_assured: number | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          end_date?: string | null
+          id?: string
+          linked_account_id?: string | null
+          metadata?: Json
+          nickname?: string | null
+          notes?: string | null
+          policy_number?: string | null
+          policy_type: string
+          premium_amount?: number | null
+          premium_frequency?: string | null
+          provider?: string | null
+          renewal_date?: string | null
+          start_date?: string | null
+          sum_assured?: number | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          end_date?: string | null
+          id?: string
+          linked_account_id?: string | null
+          metadata?: Json
+          nickname?: string | null
+          notes?: string | null
+          policy_number?: string | null
+          policy_type?: string
+          premium_amount?: number | null
+          premium_frequency?: string | null
+          provider?: string | null
+          renewal_date?: string | null
+          start_date?: string | null
+          sum_assured?: number | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "insurance_policies_linked_account_id_fkey"
+            columns: ["linked_account_id"]
+            isOneToOne: false
+            referencedRelation: "financial_accounts"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       jarvis_actions: {
         Row: {
@@ -894,6 +1355,72 @@ export type Database = {
           },
         ]
       }
+      market_news: {
+        Row: {
+          created_at: string
+          headline: string
+          id: string
+          published_at: string
+          source: string | null
+          url: string | null
+        }
+        Insert: {
+          created_at?: string
+          headline: string
+          id?: string
+          published_at?: string
+          source?: string | null
+          url?: string | null
+        }
+        Update: {
+          created_at?: string
+          headline?: string
+          id?: string
+          published_at?: string
+          source?: string | null
+          url?: string | null
+        }
+        Relationships: []
+      }
+      market_quotes: {
+        Row: {
+          change_abs: number | null
+          change_pct: number | null
+          currency: string
+          fetched_at: string
+          kind: string
+          name: string
+          price: number
+          source: string
+          symbol: string
+          updated_at: string
+        }
+        Insert: {
+          change_abs?: number | null
+          change_pct?: number | null
+          currency?: string
+          fetched_at?: string
+          kind: string
+          name: string
+          price: number
+          source?: string
+          symbol: string
+          updated_at?: string
+        }
+        Update: {
+          change_abs?: number | null
+          change_pct?: number | null
+          currency?: string
+          fetched_at?: string
+          kind?: string
+          name?: string
+          price?: number
+          source?: string
+          symbol?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       memories: {
         Row: {
           category: string
@@ -919,6 +1446,36 @@ export type Database = {
           created_at?: string
           id?: string
           source_file?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      merchant_aliases: {
+        Row: {
+          canonical: string
+          category: string | null
+          created_at: string
+          id: string
+          raw: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          canonical: string
+          category?: string | null
+          created_at?: string
+          id?: string
+          raw: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          canonical?: string
+          category?: string | null
+          created_at?: string
+          id?: string
+          raw?: string
           updated_at?: string
           user_id?: string
         }
@@ -955,6 +1512,69 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      morning_briefs: {
+        Row: {
+          brief_date: string
+          created_at: string
+          data: Json | null
+          id: string
+          summary: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          brief_date: string
+          created_at?: string
+          data?: Json | null
+          id?: string
+          summary: string
+          updated_at?: string
+          user_id?: string
+        }
+        Update: {
+          brief_date?: string
+          created_at?: string
+          data?: Json | null
+          id?: string
+          summary?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      nav_history: {
+        Row: {
+          created_at: string
+          id: string
+          isin: string | null
+          nav: number
+          nav_date: string
+          scheme_code: string | null
+          source: string
+          symbol: string | null
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          isin?: string | null
+          nav: number
+          nav_date: string
+          scheme_code?: string | null
+          source?: string
+          symbol?: string | null
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          isin?: string | null
+          nav?: number
+          nav_date?: string
+          scheme_code?: string | null
+          source?: string
+          symbol?: string | null
+        }
+        Relationships: []
       }
       next_actions: {
         Row: {
@@ -1175,16 +1795,24 @@ export type Database = {
       }
       statements: {
         Row: {
+          ai_summary: string | null
+          closing_balance: number | null
           confidence: number | null
           content_sha256: string | null
           created_at: string
           credit_card_id: string | null
+          due_date: string | null
           file_path: string | null
           financial_account_id: string | null
           id: string
+          linked_bank_id: string | null
           loan_id: string | null
+          min_due: number | null
+          parse_confidence: number | null
           parse_error: string | null
+          parse_reason: string | null
           parse_status: Database["public"]["Enums"]["parse_status"]
+          parser_confidence: number | null
           parser_source: string | null
           period_end: string | null
           period_start: string | null
@@ -1199,16 +1827,24 @@ export type Database = {
           user_id: string
         }
         Insert: {
+          ai_summary?: string | null
+          closing_balance?: number | null
           confidence?: number | null
           content_sha256?: string | null
           created_at?: string
           credit_card_id?: string | null
+          due_date?: string | null
           file_path?: string | null
           financial_account_id?: string | null
           id?: string
+          linked_bank_id?: string | null
           loan_id?: string | null
+          min_due?: number | null
+          parse_confidence?: number | null
           parse_error?: string | null
+          parse_reason?: string | null
           parse_status?: Database["public"]["Enums"]["parse_status"]
+          parser_confidence?: number | null
           parser_source?: string | null
           period_end?: string | null
           period_start?: string | null
@@ -1223,16 +1859,24 @@ export type Database = {
           user_id?: string
         }
         Update: {
+          ai_summary?: string | null
+          closing_balance?: number | null
           confidence?: number | null
           content_sha256?: string | null
           created_at?: string
           credit_card_id?: string | null
+          due_date?: string | null
           file_path?: string | null
           financial_account_id?: string | null
           id?: string
+          linked_bank_id?: string | null
           loan_id?: string | null
+          min_due?: number | null
+          parse_confidence?: number | null
           parse_error?: string | null
+          parse_reason?: string | null
           parse_status?: Database["public"]["Enums"]["parse_status"]
+          parser_confidence?: number | null
           parser_source?: string | null
           period_end?: string | null
           period_start?: string | null
@@ -1262,6 +1906,13 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
+            foreignKeyName: "statements_linked_bank_id_fkey"
+            columns: ["linked_bank_id"]
+            isOneToOne: false
+            referencedRelation: "banks"
+            referencedColumns: ["id"]
+          },
+          {
             foreignKeyName: "statements_loan_id_fkey"
             columns: ["loan_id"]
             isOneToOne: false
@@ -1280,6 +1931,7 @@ export type Database = {
       subscriptions: {
         Row: {
           amount: number | null
+          auto_detected: boolean
           billing_cycle: string | null
           category: string | null
           created_at: string
@@ -1293,6 +1945,7 @@ export type Database = {
         }
         Insert: {
           amount?: number | null
+          auto_detected?: boolean
           billing_cycle?: string | null
           category?: string | null
           created_at?: string
@@ -1306,6 +1959,7 @@ export type Database = {
         }
         Update: {
           amount?: number | null
+          auto_detected?: boolean
           billing_cycle?: string | null
           category?: string | null
           created_at?: string
@@ -1397,6 +2051,45 @@ export type Database = {
         }
         Relationships: []
       }
+      tax_entries: {
+        Row: {
+          amount: number
+          created_at: string
+          fiscal_year: string
+          id: string
+          label: string | null
+          notes: string | null
+          regime: string | null
+          section: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          amount?: number
+          created_at?: string
+          fiscal_year: string
+          id?: string
+          label?: string | null
+          notes?: string | null
+          regime?: string | null
+          section: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          amount?: number
+          created_at?: string
+          fiscal_year?: string
+          id?: string
+          label?: string | null
+          notes?: string | null
+          regime?: string | null
+          section?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       threads: {
         Row: {
           created_at: string
@@ -1430,13 +2123,17 @@ export type Database = {
           created_at: string
           credit_card_id: string | null
           description: string | null
+          detected_kind: string | null
           duplicate_group_id: string | null
           external_ref: string | null
           financial_account_id: string | null
           id: string
+          is_duplicate: boolean
           is_reconciled: boolean
+          is_suspicious: boolean
           loan_id: string | null
           merchant: string | null
+          merchant_normalized: string | null
           parser_source: string | null
           payment_mode: string | null
           reference_number: string | null
@@ -1456,13 +2153,17 @@ export type Database = {
           created_at?: string
           credit_card_id?: string | null
           description?: string | null
+          detected_kind?: string | null
           duplicate_group_id?: string | null
           external_ref?: string | null
           financial_account_id?: string | null
           id?: string
+          is_duplicate?: boolean
           is_reconciled?: boolean
+          is_suspicious?: boolean
           loan_id?: string | null
           merchant?: string | null
+          merchant_normalized?: string | null
           parser_source?: string | null
           payment_mode?: string | null
           reference_number?: string | null
@@ -1482,13 +2183,17 @@ export type Database = {
           created_at?: string
           credit_card_id?: string | null
           description?: string | null
+          detected_kind?: string | null
           duplicate_group_id?: string | null
           external_ref?: string | null
           financial_account_id?: string | null
           id?: string
+          is_duplicate?: boolean
           is_reconciled?: boolean
+          is_suspicious?: boolean
           loan_id?: string | null
           merchant?: string | null
+          merchant_normalized?: string | null
           parser_source?: string | null
           payment_mode?: string | null
           reference_number?: string | null

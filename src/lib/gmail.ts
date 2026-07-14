@@ -38,7 +38,13 @@ async function call<T = any>(name: string, body: unknown): Promise<T> {
 }
 
 export const gmail = {
-  startOAuth: (account_id: string) => call<{ url: string }>("gmail-oauth-start", { account_id }),
-  sync: (account_id: string, max = 50) => call<{ ok: boolean; inserted: number; total: number }>("gmail-sync", { account_id, max }),
+  startOAuth: async (account_id: string) => {
+    const r = await call<{ url?: string }>("gmail-oauth-start", { account_id });
+    if (!r?.url || typeof r.url !== "string") {
+      throw new GmailApiError("Google did not return an authorization URL", 500, JSON.stringify(r ?? {}), "Try again in a moment; if it persists, delete and re-add the mailbox.");
+    }
+    return { url: r.url };
+  },
+  sync: (account_id: string, max = 50) => call<{ ok: boolean; inserted?: number; total?: number; paused?: boolean }>("gmail-sync", { account_id, max }),
   message: (email_id: string) => call<{ body_text: string | null; body_html: string | null }>("gmail-message", { email_id }),
 };
