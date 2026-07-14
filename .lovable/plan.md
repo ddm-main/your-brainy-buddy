@@ -1,79 +1,82 @@
 
-## Statements Pipeline + Config Cleanup — corrected plan
+# Statements pipeline — root-cause fix + real parsers
 
-You're right — credit_cards is fully populated. Correcting the seed data and folding in your restructure of Config → Banks.
+## What I checked against the live DB (not the earlier plan)
 
-### Correction to the previous plan
+- `email_accounts` for 07statement@gmail.com is already correct: `finance_only=true, treat_all_as_finance=true, sync_frequency=daily, sync_period_days=365, sync_status=ok`.
+- Two `pg_cron` jobs already schedule `gmail-sync-due` every 15 min (`gmail-sync-due-15m` and `gmail-sync-due-every-15m`) — one is a duplicate.
+- `statements.parse_reason` / `parser_confidence` columns exist. `credit_cards` is fully populated (6 rows, last-4 = 2605/6003/6560/6662/4814/0337). No SBI duplicates in `banks` currently.
+- 48 emails synced from that mailbox, all `provider='gmail'`. 21 SBI statement rows are linked (bank + card_id both set) yet stuck at `parse_status='pending'` with **`parse_error IS NULL`**. That is the smoking gun: `ingestStatementAttachment` is being skipped or is early-returning silently — it never wrote *any* reason.
 
-Actual `credit_cards` in DB (all six link cleanly by bank + last-4):
+So the real remaining work is **not** schema/cron/config — it's fixing the silent drops in the ingest path, wiring specific error reasons, and turning the parser skeletons into real bodies. The "purge + re-ingest on retry" idea is the cleaner approach and is the one adopted below.
 
-| Card | Last-4 | Bank |
-|---|---|---|
-| Airtel AXIS | 2605 | Axis |
-| Amazon Pay ICICI | 6003 | ICICI Bank |
-| HDFC Millennia | 6560 | HDFC Bank |
-| SBI BPCL | **6662** | SBI |
-| SBI Cashback | **4814** | SBI |
-| Yes Bank | 0337 | Yes Bank |
+## Why the "purge on retry" approach wins
 
-Note: BPCL is `6662` (not `XX62`) and Cashback is `4814` (not `XX14`). The re-link backfill uses these actual last-4s. **No seeding needed** — remove that step entirely.
+Two candidates:
 
-Bank table has three duplicate "SBI" rows (image-11). Merge them: keep the one already referenced by cards, repoint any FKs, delete the orphans, add a `unique(lower(name))` constraint.
+1. Keep current row, patch fields in place on retry.
+2. On retry, purge derived data (`transactions where source_statement_id=…`, `file_path`, parsed fields, `email_attachments.storage_path`), re-download, re-parse, re-link, then re-insert. Row identity preserved.
 
-### A. Config restructure — remove standalone Banks tab
+(2) wins because: no half-written rows on password change, no orphan transactions when a wrong card was linked first, deterministic idempotency (retry == first run), and the UI can trust `parse_status` at a glance. Cost is one extra DELETE per retry, which is negligible.
 
-- Delete tab **Banks** from `src/routes/config/FinanceConfig.tsx` `SUBTABS`.
-- Delete route `banks` and `BanksConfig` lazy import in the same file; remove `src/routes/config/BanksConfig.tsx` and card in `FinanceHome`.
-- Introduce a shared **Indian banks combobox** `src/components/finance/BankPicker.tsx` (typeahead over a bundled `INDIAN_BANKS` list ∪ existing `banks` rows). On pick of a bundled bank that has no row yet, upsert into `public.banks` (case-insensitive dedupe) and return the id. Used by:
-  - `AccountsConfig` — replaces the current Bank ▾ + "Or new bank" fields.
-  - `CardsConfig` — same replacement in the add-card form.
-  - Statements upload flow (`finance-upload-statement` invoker UI on `Statements.tsx`) — bank field.
-- Bundled list: 40+ common Indian banks (SBI, HDFC Bank, ICICI Bank, Axis, Kotak Mahindra Bank, Yes Bank, IDFC FIRST, IndusInd, Federal, PNB, BOB, Canara, Union Bank, IOB, Central Bank, BOI, UCO, Karur Vysya, South Indian, RBL, AU SFB, Bandhan, DBS, HSBC, Standard Chartered, Citi, Deutsche, IDBI, J&K Bank, Karnataka Bank, Tamilnad Mercantile, DCB, CSB, Equitas SFB, Ujjivan SFB, Suryoday SFB, Fincare, ESAF, Jana SFB, Utkarsh SFB, plus card-issuer aliases: Amazon Pay ICICI, Airtel Axis, Flipkart Axis, Tata Neu HDFC). Living file `src/data/indianBanks.ts`.
+## Fixes
 
-### B. Statements pipeline — remaining work
+### Wave 1 — kill the silent drops (root cause of the current 21 stuck rows)
 
-Schema (migration)
-- `statements.parse_reason` text
-- `statements.parser_confidence` numeric
-- `email_accounts.treat_all_as_finance` boolean not null default false
-- Bank dedupe: merge duplicate SBI rows, add `unique index banks_name_lower_idx on banks(lower(name))`
+In `supabase/functions/_shared/finance-extract-core.ts`:
 
-Data (via `supabase--insert`, not migration)
-- `UPDATE email_accounts SET use_case='finance', finance_only=true, treat_all_as_finance=true, sync_period_days=GREATEST(COALESCE(sync_period_days,30),365) WHERE lower(email_address)='07statement@gmail.com'`
-- Backfill: for every `statements` row in `pending|failed|skipped`, re-run link resolution using `banks.name` slug + `credit_cards.masked_number`/`financial_accounts.masked_number` suffix match; write `parse_reason` and reset `status='pending'` where a link is now possible.
-- Schedule `pg_cron` job for `gmail-sync-due` every 15 min (uses existing `SYNC_HOOK_SECRET`).
+- `ingestStatementAttachment`
+  - Line 261 `if (!payload) return;` → write `parse_status='failed', parse_error='gmail_payload_empty', parse_reason='fetchMessagePayload returned null'` before returning. Same treatment on `!attRow` (line 326), `upErr` (line 298–301), and the `console.warn` branches. Every early-return persists a specific reason.
+  - Wrap the whole body in a top-level try/catch that writes `parse_error='ingest_crashed', parse_reason=<message>` — never leave a row silent.
+- `applyParsedStatementResult`
+  - On `!result.ok` branch: also set `parse_reason` from a small map — `password_required → 'password_missing'`, `wrong_password / wrong_or_missing_password → 'password_failed'`, `file_too_large → 'pdf_too_large'`, `too_many_pages → 'pdf_too_many_pages'`, otherwise `<verbatim error>`.
+  - On success: also set `parse_reason` to `'parsed_with_saved_password'` when the winning password came from `resolveStatementPassword`, `'parsed_with_user_password'` when it came from `jarvis_memory` candidates, `'parsed_no_password'` when null. Signal passed through from `parseStatementPdfWithPasswords` (already returns `winning_password`).
+- Purge-on-retry: at the top of the retry branch (line 541 `if (exSt)`), when `parse_status IN ('pending','failed','skipped')`, first run:
+  - `DELETE FROM transactions WHERE source_statement_id = exSt.id;`
+  - `UPDATE statements SET file_path=null, transactions_found=0, closing_balance=null, total_due=null, min_due=null, due_date=null, period_start=null, period_end=null, parser_source=null, parse_confidence=null, parser_confidence=null WHERE id = exSt.id;`
+  - `DELETE FROM email_attachments WHERE statement_id = exSt.id AND attachment_type='statement';` (storage object left for GC; new upload uses `upsert:true`).
 
-Edge functions
-- `_shared/finance-parsers.ts`: extend `BANK_SLUG_MAP` (sbicard.com, alerts.sbi, emailstatements.hdfcbank.com, icicibank.com, amazonpay.*icici, yesbank.in, axisbank.com + Airtel Axis); add `unwrapForwarded()`; broaden last-4 regex; bypass sender allow-list when `treat_all_as_finance=true`.
-- `_shared/finance-extract-core.ts`: new `resolveLinksV2({parsed, email, unwrapped}) → {credit_card_id, financial_account_id, loan_id, linked_bank_id, parse_reason, parser_confidence}`. Called on every `pending|failed|skipped` row before retry. Match: bank slug + last-4 `endsWith` OR strong subject-token on `card_name` (BPCL, CASHBACK, MILLENNIA, AMAZON PAY, AIRTEL, …).
-- Password rotation: explicit override → saved `statement_password_rule` → `jarvis_memory` candidates → none. Encrypt+persist winning password on success via `STATEMENT_ENC_SECRET`. `parse_reason` in {`password_missing`, `password_failed`, `parsed_with_saved_password`, `parsed_with_user_password`}. Never log plaintext.
-- Parser skeletons already exist in `_shared/statement-parsers/` (hdfc/icici/amazon-pay-icici/axis/yes/hdfc-account/icici-account/sbi-account) delegating to `generic`. Wire writer to persist `closing_balance, min_due, due_date, period_start/end, txn_count, parser_source, parser_confidence` in `finance-extract`, `finance-retry-statement`, `finance-upload-statement`, `_shared/statement-pdf.ts`.
+  Then continue with `ingestStatementAttachment`.
 
-Statements UI (`src/routes/finance/Statements.tsx`)
-- Fixed-height scroll `max-h-[calc(100vh-260px)] overflow-y-auto` + sticky header.
-- Columns: Date · Bank · Linked card/account · Subject/Sender · Period · Txns · Status · Reason · Actions.
-- Row actions: **View PDF** (`finance-statement-pdf-url`), **Re-link & retry**.
-- Toolbar: **Retry all pending**, **Re-sync 07statement inbox**.
-- Filter chips: bank, status, unlinked-only. `parse_reason` shown muted under status pill.
+### Wave 2 — real per-bank PDF parsers
 
-### C. Email Config bugs
+Replace the delegating stubs in `supabase/functions/_shared/statement-parsers/` with real bodies. Each file exports `<name>Parser: StatementParser` and returns a `ParserResult` with a bank-specific `parser_source` and `confidence >= 0.8` when it hits its anchor phrases.
 
-1. **Reconnect only when needed.** In `EmailAccountsList.tsx` show Reconnect only if `sync_status==='error' && /invalid_grant|unauthorized|insufficient_scope|token|refresh/i.test(last_error)`, OR `!refresh_token`, OR permission scope drift after `connected_at`. Otherwise render Sync + Rules only.
-2. **Redundant text.** `EmailHome.tsx`: collapse tiles that all route to `/config/email/list` into one "Mailboxes" card; hide `OTHER` purpose chip on rows.
-3. **Daily auto-sync not firing.** `gmail-sync-due` exists but no cron scheduled. Create `pg_cron` job `gmail-sync-due-every-15m` calling the function URL with `x-cron-secret: <SYNC_HOOK_SECRET>` header (via `supabase--insert`, not migration, since URL + secret are project-specific). Verify `last_synced_at` advances afterwards.
-4. **`/config/email/undefined` after Reconnect.** In `gmail.startOAuth` caller (`EmailAccountsList.connect`), when the popup pre-opens `about:blank` and the edge fn returns no `url`, the popup navigates to string `"undefined"` resolved against opener. Fix: throw `GmailApiError` when `!url`; `popup.close()` in `finally` on failure; same guard on non-popup fallback.
-5. Defensive UI: `sync()` result uses `r.inserted ?? 0` / `r.total ?? 0`; `applyOAuthResult` accepts `event.source === opener` origin check; `AccountRulesDrawer` auto-bumps `sync_frequency` from `manual → daily` when `use_case` set to `finance`.
+Files to fill in (kept small — one anchor set per bank family, generic line extractor reused):
 
-### D. Execution order
+- `sbi-card.ts` (already stub) — anchors: `Statement Summary`, `Payment Due Date`, `Total Amount Due`, `Minimum Amount Due`, `MERCHANT NAME` / `TRANSACTION DETAILS`. Two-column CASHBACK/BPCL layouts, dates as `DD MMM YY`, amount trailing `D`/`C`. Emit `card_family` from subject (`CASHBACK`, `BPCL`).
+- `hdfc-card.ts` — anchors: `Statement Date`, `Payment Due Date`, `Total Dues`, `Minimum Amount Due`, `Domestic Transactions` / `International Transactions` section headers; dates `DD/MM/YYYY`.
+- `hdfc-account.ts` — anchors: `Statement From`, `Statement To`, `Closing Balance`, columns `Date | Narration | Chq/Ref No | Value Dt | Withdrawal Amt | Deposit Amt | Closing Balance`.
+- `icici-card.ts` — anchors: `Statement Period`, `Total Amount due`, `Minimum Amount due`, `Transaction Details`; `DD/MM/YYYY`.
+- `amazon-pay-icici.ts` — same as icici-card + `Amazon Pay ICICI Bank Credit Card` header; direction indicated by `CR` suffix.
+- `icici-account.ts` — anchors: `Account Statement`, `Opening Balance`, `Closing Balance`, columns `DATE | MODE** | PARTICULARS | DEPOSITS | WITHDRAWALS | BALANCE`.
+- `sbi-account.ts` — anchors: `Account Statement`, `Txn Date`, `Value Date`, `Description`, `Debit`, `Credit`, `Balance`.
+- `axis-card.ts` + `airtel-axis` (share) — anchors: `Statement Period`, `Total Payment Due`, `Minimum Payment Due`, `Payment Due Date`, section `Transaction Details`.
+- `yes-card.ts` — anchors: `YES BANK`, `Statement Date`, `Total Amount Due`, `Payment Due Date`.
+- `kotak-card.ts` (new registry entry) — anchors: `Kotak Mahindra Bank`, `Total Amount Due`, `Payment Due Date`.
 
-1. Migration: schema cols + bank unique index + duplicate-SBI merge.
-2. `supabase--insert`: onboard `07statement@gmail.com`, backfill re-link across statements, schedule `pg_cron`.
-3. Frontend: create `BankPicker` + `indianBanks.ts`; remove Banks tab/route/card; swap Bank fields in Accounts/Cards/Statements.
-4. Edge fns: extend slug map, `unwrapForwarded`, `resolveLinksV2`, password rotation, persist new fields.
-5. Statements UI redesign + Email Config bug fixes C1–C5.
-6. Deploy affected edge functions.
-7. Verify: read-only SQL for statement status/link/reason breakdown; cron `job_run_details`; Playwright walk of Statements (scroll, View PDF, retry one SBI + one HDFC row).
+Each parser reuses `extractLines` from `generic.ts` but tightens it: passes a per-bank `dateFormat` hint and a column-count expectation. New helper `extractLinesForColumns(text, {cols, direction})` in `generic.ts` — biases toward the right column (debit vs credit) so account statements don't misclassify direction.
 
-### E. Out of scope
+Registry (`index.ts`) picks these up automatically; add the two new banks and drop the `(generic)` suffix once wired.
 
-Real HDFC/ICICI/Axis/Yes parser bodies (skeletons only); Gmail OAuth scope changes; UI outside Statements + Email Config + Accounts/Cards bank-picker swap.
+### Wave 3 — Statements UI (`src/routes/finance/Statements.tsx`)
+
+- Show `parse_error` and `parse_reason` distinctly under the status pill (`parse_error` is the machine code, `parse_reason` the human blurb). No more silent "PENDING" with empty status area.
+- Row actions column: **View PDF** (existing `finance-statement-pdf-url`), **Retry parse** (calls `finance-retry-statement` which now purges + re-ingests), **Set password** (opens the existing password drawer), **Attach PDF** (only when `parse_error='no_pdf_attachment_login_required'`).
+- Toolbar: **Retry all pending/failed** (batches to `finance-retry-statement`), **Re-sync mailbox** (calls `gmail-sync` for the 07statement account then `finance-extract`).
+- Row density: fixed-height scroller `max-h-[calc(100vh-260px)] overflow-y-auto` + sticky header; remove the expanded inline "TOTAL DUE / CLOSING BALANCE / …" panel and move it to a click-through detail drawer to stop the current visual overlap.
+
+### Wave 4 — clean up + verify
+
+- `supabase--insert` to drop the duplicate cron job: `cron.unschedule('gmail-sync-due-15m')` (keeps `gmail-sync-due-every-15m`).
+- One-off `supabase--insert` to kick a re-extract: for every user, invoke `finance-extract` for the 07statement account with `sinceDays=365` so all 21 stuck rows go through the fixed path. Also delete the 3 orphan `Unknown bank` statements that have `source_email_id IS NULL` (they can never be re-linked).
+- Deploy the touched edge functions.
+- Verify via SQL: `SELECT parse_status, parse_reason, count(*) FROM statements GROUP BY 1,2` should show real reasons (parsed / password_missing / password_failed / no_pdf_attachment_login_required) — no `NULL` rows.
+- Playwright walk: open Statements, click **Retry all**, wait, screenshot; then open the SBI BPCL row → **View PDF**; then a HDFC row.
+
+## Technical notes
+
+- Keep parser modules framework-free (already done) so vitest can cover them; add `tests/statementParsers.test.ts` with 1 synthetic text per bank family asserting `parser_source`, `total_due`, `due_date`, `lines.length > 0`.
+- Do not log plaintext passwords anywhere; `STATEMENT_ENC_SECRET` (already in secrets) is used by `saveWinningPassword` — verify the write path is invoked in the new purge-then-re-ingest flow.
+- No migration needed. No new secrets needed.
+- Sequencing: Wave 1 is what turns the current dark rows into actionable ones — even without the new parsers, the UI will start telling us exactly why each row isn't parsed. Waves 2–4 land on top without further schema churn.

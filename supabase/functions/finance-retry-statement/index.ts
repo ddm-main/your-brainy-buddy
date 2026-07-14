@@ -7,7 +7,7 @@
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { svcClient } from "../_shared/gmail.ts";
-import { applyParsedStatementResult, ingestStatementAttachment, loadPasswordCandidates, resolveLinks, saveWinningPassword } from "../_shared/finance-extract-core.ts";
+import { applyParsedStatementResult, ingestStatementAttachment, loadPasswordCandidates, purgeStatementDerived, resolveLinks, saveWinningPassword } from "../_shared/finance-extract-core.ts";
 import { parseFinanceEmail } from "../_shared/finance-parsers.ts";
 import { parseStatementPdfWithPasswords } from "../_shared/statement-pdf.ts";
 import { decryptStatementPassword } from "../_shared/crypto.ts";
@@ -108,8 +108,10 @@ Deno.serve(async (req) => {
         financial_account_id: links.financial_account_id ?? statement.financial_account_id ?? null,
         loan_id: links.loan_id ?? statement.loan_id ?? null,
         linked_bank_id: links.linked_bank_id ?? statement.linked_bank_id ?? null,
-        parse_error: links.credit_card_id || links.financial_account_id || links.loan_id ? null : statement.parse_error,
       }).eq("id", statement.id);
+      // Retry === fresh ingest: wipe derived fields/txns first so a prior
+      // wrong-card link or half-parsed run doesn't leak into the new result.
+      await purgeStatementDerived(svc, statement.id);
       await ingestStatementAttachment(svc, account, email, statement.id, links, {
         statement_type: (statement.statement_type as any) ?? null,
         bank_slug: null,
@@ -146,7 +148,10 @@ Deno.serve(async (req) => {
       if (rotation.result.ok && rotation.winning_password && !savedPwd) {
         await saveWinningPassword(svc, links, rotation.winning_password);
       }
-      await applyParsedStatementResult(svc, statement.id, uid, links, rotation.result, statement.file_path);
+      const pwdSource: "saved" | "candidate" | "unprotected" | "none" = rotation.result.ok
+        ? (rotation.winning_password == null ? "unprotected" : (savedPwd && rotation.winning_password === savedPwd ? "saved" : "candidate"))
+        : "none";
+      await applyParsedStatementResult(svc, statement.id, uid, links, rotation.result, statement.file_path, undefined, pwdSource);
     } else {
       return new Response(JSON.stringify({ error: "statement has no source email or stored PDF to re-parse" }), {
         status: 400, headers: { ...cors, "Content-Type": "application/json" },
@@ -154,12 +159,13 @@ Deno.serve(async (req) => {
     }
 
     const { data: updated } = await svc.from("statements")
-      .select("parse_status, parse_error").eq("id", statement_id).maybeSingle();
+      .select("parse_status, parse_error, parse_reason").eq("id", statement_id).maybeSingle();
 
     return new Response(JSON.stringify({
       ok: true,
       parse_status: updated?.parse_status ?? null,
       parse_error: updated?.parse_error ?? null,
+      parse_reason: updated?.parse_reason ?? null,
     }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {
     return sanitizedErrorResponse(err, "Statement retry failed", "finance-retry-statement", cors);

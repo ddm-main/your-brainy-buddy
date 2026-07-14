@@ -244,104 +244,147 @@ export async function ingestStatementAttachment(
   links: { financial_account_id?: string | null; credit_card_id?: string | null; loan_id?: string | null; linked_bank_id?: string | null },
   opts: { statement_type?: "card" | "account" | "loan" | null; bank_slug?: string | null } = {},
 ): Promise<void> {
-  let payload: any = null;
-  try {
-    payload = await fetchMessagePayload(svc, account, email);
-  } catch (e) {
-    // Persist a real reason so the UI surfaces "reconnect Gmail" / retry
-    // instead of showing a permanently 'pending' row.
-    const msg = e instanceof Error ? e.message : String(e);
-    await svc.from("statements").update({
-      parse_status: "failed",
-      parse_error: msg.startsWith("gmail_fetch_failed") ? "gmail_fetch_failed" : "gmail_fetch_failed",
-      parse_reason: msg,
-    }).eq("id", statementId);
-    return;
-  }
-  if (!payload) return; // provider not gmail — leave alone
-
-  const pdfAttachment = listAttachments(payload).find((a) =>
-    a.mimeType === "application/pdf" || /\.pdf$/i.test(a.filename ?? "")
-  );
-  if (!pdfAttachment) {
-    // Confirmed fact: this statement email has no PDF attached (e.g. a
-    // "login to view" notification, common for many banks). Mark 'skipped'
-    // with a distinct parse_error so the UI can offer an "Attach PDF"
-    // action — the user knows exactly which row needs a manual upload.
-    await svc.from("statements").update({
-      parse_status: "pending",
-      parse_error: "no_pdf_attachment_login_required",
-    }).eq("id", statementId);
-    return;
-  }
-
-  let bytes: Uint8Array;
-  try {
-    const token = await ensureAccessToken(svc, account);
-    bytes = await downloadAttachment(token, email.external_email_id, pdfAttachment.attachmentId);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.warn("downloadAttachment failed", msg);
-    await svc.from("statements").update({
-      parse_status: "failed",
-      parse_error: "attachment_download_failed",
-      parse_reason: msg,
-    }).eq("id", statementId);
-    return;
-  }
-
-  const storagePath = `${email.user_id}/${email.id}/${pdfAttachment.attachmentId}-${safeName(pdfAttachment.filename)}`;
-  const { error: upErr } = await svc.storage.from(STATEMENT_BUCKET).upload(storagePath, bytes, {
-    contentType: "application/pdf",
-    upsert: true,
-  });
-  if (upErr) {
-    console.warn("statement PDF upload failed", upErr.message);
-    return;
-  }
-
-  const attFields = {
-    file_name: pdfAttachment.filename,
-    mime: pdfAttachment.mimeType,
-    storage_path: storagePath,
-    byte_size: bytes.length,
-    attachment_type: "statement",
-    parse_status: "pending",
+  // Central helper: every early-exit path writes a specific parse_error +
+  // parse_reason so the UI never shows a bare "PENDING" chip again.
+  const failStatement = async (parse_error: string, parse_reason: string, status: "failed" | "pending" = "failed") => {
+    try {
+      await svc.from("statements").update({
+        parse_status: status, parse_error, parse_reason,
+      }).eq("id", statementId);
+    } catch (_) { /* swallow — nothing else we can do */ }
   };
-  const { data: existingAtt } = await svc.from("email_attachments")
-    .select("id").eq("email_id", email.id).eq("statement_id", statementId).limit(1).maybeSingle();
 
-  let attRow: { id: string } | null;
-  if (existingAtt) {
-    const { data, error } = await svc.from("email_attachments").update(attFields).eq("id", existingAtt.id).select("id").single();
-    if (error) { console.warn("email_attachments update failed", error.message); return; }
-    attRow = data;
-  } else {
-    const { data, error } = await svc.from("email_attachments").insert({
-      user_id: email.user_id, email_id: email.id, statement_id: statementId, ...attFields,
-    }).select("id").single();
-    if (error) { console.warn("email_attachments insert failed", error.message); return; }
-    attRow = data;
-  }
-  if (!attRow) return;
+  try {
+    let payload: any = null;
+    try {
+      payload = await fetchMessagePayload(svc, account, email);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await failStatement("gmail_fetch_failed", msg);
+      return;
+    }
+    if (!payload) {
+      // Non-gmail provider or empty payload — record it instead of dropping.
+      await failStatement("gmail_payload_empty", `provider=${email.provider ?? "unknown"} external_id=${email.external_email_id ?? "-"}`);
+      return;
+    }
 
-  // Password rotation: saved rule → user's default candidates → no-password.
-  // resolveStatementPassword needs a resolved link (card/account) to fetch
-  // the saved rule — call it *now*, after the row has been (re)linked at
-  // insert/update time in the caller, so first-time statements whose links
-  // were only resolvable at that step still get their saved password.
-  const savedPwd = await resolveStatementPassword(svc, email.user_id, links);
-  const candidates = await loadPasswordCandidates(svc, email.user_id);
-  const ordered = [savedPwd, ...candidates].filter((x): x is string => typeof x === "string" && x.length > 0);
-  const rotation = await parseStatementPdfWithPasswords(bytes, ordered, {
-    bank_slug: opts.bank_slug ?? null,
-    statement_type: opts.statement_type ?? null,
-  });
-  if (rotation.result.ok && rotation.winning_password && !savedPwd) {
-    // Persist the winner so future statements for this card/account skip the loop.
-    await saveWinningPassword(svc, links, rotation.winning_password);
+    const pdfAttachment = listAttachments(payload).find((a) =>
+      a.mimeType === "application/pdf" || /\.pdf$/i.test(a.filename ?? "")
+    );
+    if (!pdfAttachment) {
+      // "Login to view" notifications, common for many banks. Keep the row
+      // pending so the user can manually attach a PDF from the UI.
+      await failStatement(
+        "no_pdf_attachment_login_required",
+        "No PDF attached to this email — likely a 'login to view' notification. Attach a PDF to parse.",
+        "pending",
+      );
+      return;
+    }
+
+    let bytes: Uint8Array;
+    try {
+      const token = await ensureAccessToken(svc, account);
+      bytes = await downloadAttachment(token, email.external_email_id, pdfAttachment.attachmentId);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn("downloadAttachment failed", msg);
+      await failStatement("attachment_download_failed", msg);
+      return;
+    }
+
+    const storagePath = `${email.user_id}/${email.id}/${pdfAttachment.attachmentId}-${safeName(pdfAttachment.filename)}`;
+    const { error: upErr } = await svc.storage.from(STATEMENT_BUCKET).upload(storagePath, bytes, {
+      contentType: "application/pdf",
+      upsert: true,
+    });
+    if (upErr) {
+      console.warn("statement PDF upload failed", upErr.message);
+      await failStatement("storage_upload_failed", upErr.message);
+      return;
+    }
+
+    const attFields = {
+      file_name: pdfAttachment.filename,
+      mime: pdfAttachment.mimeType,
+      storage_path: storagePath,
+      byte_size: bytes.length,
+      attachment_type: "statement",
+      parse_status: "pending",
+    };
+    const { data: existingAtt } = await svc.from("email_attachments")
+      .select("id").eq("email_id", email.id).eq("statement_id", statementId).limit(1).maybeSingle();
+
+    let attRow: { id: string } | null;
+    if (existingAtt) {
+      const { data, error } = await svc.from("email_attachments").update(attFields).eq("id", existingAtt.id).select("id").single();
+      if (error) { await failStatement("attachment_row_update_failed", error.message); return; }
+      attRow = data;
+    } else {
+      const { data, error } = await svc.from("email_attachments").insert({
+        user_id: email.user_id, email_id: email.id, statement_id: statementId, ...attFields,
+      }).select("id").single();
+      if (error) { await failStatement("attachment_row_insert_failed", error.message); return; }
+      attRow = data;
+    }
+    if (!attRow) { await failStatement("attachment_row_missing", "no attachment row after insert"); return; }
+
+    // Password rotation: saved rule → user's default candidates → no-password.
+    const savedPwd = await resolveStatementPassword(svc, email.user_id, links);
+    const candidates = await loadPasswordCandidates(svc, email.user_id);
+    const ordered = [savedPwd, ...candidates].filter((x): x is string => typeof x === "string" && x.length > 0);
+    const rotation = await parseStatementPdfWithPasswords(bytes, ordered, {
+      bank_slug: opts.bank_slug ?? null,
+      statement_type: opts.statement_type ?? null,
+    });
+    // Determine which source produced the winning password (for parse_reason).
+    let pwdSource: "saved" | "candidate" | "none" | "unprotected" = "unprotected";
+    if (rotation.result.ok) {
+      if (rotation.winning_password == null) pwdSource = "unprotected";
+      else if (savedPwd && rotation.winning_password === savedPwd) pwdSource = "saved";
+      else pwdSource = "candidate";
+    } else {
+      pwdSource = "none";
+    }
+    if (rotation.result.ok && rotation.winning_password && !savedPwd) {
+      await saveWinningPassword(svc, links, rotation.winning_password);
+    }
+    await applyParsedStatementResult(
+      svc, statementId, email.user_id, links, rotation.result, storagePath, attRow.id, pwdSource,
+    );
+  } catch (e) {
+    // Absolute backstop — should never happen, but if it does we still leave
+    // a diagnostic on the row rather than a silent 'pending'.
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("ingestStatementAttachment crashed", msg);
+    await failStatement("ingest_crashed", msg);
   }
-  await applyParsedStatementResult(svc, statementId, email.user_id, links, rotation.result, storagePath, attRow.id);
+}
+
+// Purge every derived artifact for a statement so a retry runs identically to
+// a fresh ingest — no half-written fields, no orphan transactions from a
+// prior wrong-card link, no stale attachment row pointing at a superseded
+// storage object.
+export async function purgeStatementDerived(svc: SupabaseClient, statementId: string): Promise<void> {
+  await svc.from("transactions").delete().eq("source_statement_id", statementId);
+  await svc.from("email_attachments").delete().eq("statement_id", statementId).eq("attachment_type", "statement");
+  await svc.from("statements").update({
+    file_path: null,
+    transactions_found: 0,
+    closing_balance: null,
+    total_due: null,
+    min_due: null,
+    due_date: null,
+    period_start: null,
+    period_end: null,
+    statement_date: null,
+    parser_source: null,
+    parse_confidence: null,
+    parser_confidence: null,
+    parse_error: null,
+    parse_reason: null,
+  }).eq("id", statementId);
 }
 
 // Deterministic post-parse enrichment: normalize the raw merchant string
@@ -398,6 +441,27 @@ function enrich(description: string, txnType: "debit" | "credit"): {
 // inserts itemized transactions with the same dedup-against-email-alerts
 // logic. attachmentId is optional since a manual upload may not create an
 // email_attachments row.
+export type PasswordSource = "saved" | "candidate" | "unprotected" | "none";
+
+function reasonForParseError(err: string | undefined | null): string {
+  const e = (err ?? "").toLowerCase();
+  if (!e) return "unknown_parse_error";
+  if (e.includes("password_required")) return "password_missing";
+  if (e.includes("wrong_password") || e.includes("wrong_or_missing_password")) return "password_failed";
+  if (e.includes("file_too_large")) return "pdf_too_large";
+  if (e.includes("too_many_pages")) return "pdf_too_many_pages";
+  return err ?? "unknown_parse_error";
+}
+
+function reasonForSuccess(src: PasswordSource): string {
+  switch (src) {
+    case "saved": return "parsed_with_saved_password";
+    case "candidate": return "parsed_with_user_password";
+    case "unprotected": return "parsed_no_password";
+    default: return "parsed";
+  }
+}
+
 export async function applyParsedStatementResult(
   svc: SupabaseClient,
   statementId: string,
@@ -406,13 +470,13 @@ export async function applyParsedStatementResult(
   result: import("./statement-pdf.ts").PdfParseResult,
   storagePath: string | null,
   attachmentId?: string,
+  passwordSource: PasswordSource = "none",
 ): Promise<void> {
   if (!result.ok) {
-    // Persist the parser's error message so the UI can show a reason
-    // (e.g. "wrong_or_missing_password") instead of an opaque "failed" chip.
     await svc.from("statements").update({
       parse_status: "failed",
       parse_error: result.error ?? "unknown_parse_error",
+      parse_reason: reasonForParseError(result.error),
       file_path: storagePath,
     }).eq("id", statementId);
     if (attachmentId) await svc.from("email_attachments").update({ parse_status: "failed" }).eq("id", attachmentId);
@@ -427,15 +491,17 @@ export async function applyParsedStatementResult(
     total_due: result.total_due,
     closing_balance: result.closing_balance,
     parse_status: "parsed",
-    parse_error: null, // clear any previous failure
+    parse_error: null,
+    parse_reason: reasonForSuccess(passwordSource),
     transactions_found: result.lines.length,
     file_path: storagePath,
-      parser_source: result.parser_source ?? "generic",
-      parse_confidence: result.parse_confidence ?? null,
-      credit_card_id: links.credit_card_id ?? null,
-      financial_account_id: links.financial_account_id ?? null,
-      loan_id: links.loan_id ?? null,
-      linked_bank_id: links.linked_bank_id ?? null,
+    parser_source: result.parser_source ?? "generic",
+    parse_confidence: result.parse_confidence ?? null,
+    parser_confidence: result.parse_confidence ?? null,
+    credit_card_id: links.credit_card_id ?? null,
+    financial_account_id: links.financial_account_id ?? null,
+    loan_id: links.loan_id ?? null,
+    linked_bank_id: links.linked_bank_id ?? null,
   }).eq("id", statementId);
   if (attachmentId) await svc.from("email_attachments").update({ parse_status: "parsed" }).eq("id", attachmentId);
 
@@ -569,6 +635,9 @@ export async function extractFinanceForAccount(
         await svc.from("statements").update(patch).eq("id", exSt.id);
       }
       if (exSt.parse_status === "pending" || exSt.parse_status === "failed" || exSt.parse_status === "skipped") {
+        // Purge derived data first so retry runs identically to a fresh
+        // ingest — no leftover fields from a prior wrong-link attempt.
+        await purgeStatementDerived(svc, exSt.id);
         await ingestStatementAttachment(svc, account, em, exSt.id, refreshedLinks, {
           statement_type: (parsedExisting?.kind === "statement" ? parsedExisting.statement_type : null),
           bank_slug: guessBankSlugFromSender(parseView.from_email ?? em.from_email),
