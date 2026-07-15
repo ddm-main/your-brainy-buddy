@@ -17,8 +17,10 @@ const SUPABASE_PUBLISHABLE_KEY = (
 );
 
 export const supabaseConfigOk = Boolean(SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY);
-const SAFE_SUPABASE_URL = SUPABASE_URL;
-const SAFE_SUPABASE_KEY = SUPABASE_PUBLISHABLE_KEY;
+// Exported so callEdgeFunction / authFetch can reach the project even when
+// VITE_SUPABASE_* env vars are stripped from the built bundle.
+export const SAFE_SUPABASE_URL = SUPABASE_URL;
+export const SAFE_SUPABASE_KEY = SUPABASE_PUBLISHABLE_KEY;
 
 if (!supabaseConfigOk) {
   // eslint-disable-next-line no-console

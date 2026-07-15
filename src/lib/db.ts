@@ -1,4 +1,4 @@
-import { supabase as _supabase } from "@/integrations/supabase/client";
+import { supabase as _supabase, SAFE_SUPABASE_URL } from "@/integrations/supabase/client";
 import type { Database } from "@/integrations/supabase/types";
 import { authFetch } from "@/lib/authFetch";
 import { toSafeError } from "@/lib/errors";
@@ -49,7 +49,7 @@ export type InsurancePolicy = AnyRow;
 
 
 async function callEdgeFunction(name: string, body: Record<string, unknown>): Promise<any> {
-  const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/${name}`;
+  const url = `${SAFE_SUPABASE_URL}/functions/v1/${name}`;
   let r: Response;
   try {
     r = await authFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });

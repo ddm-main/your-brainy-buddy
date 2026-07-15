@@ -2,7 +2,7 @@
 // Falls back to the publishable key (apikey) so the request still passes the
 // PostgREST gateway; edge fns then validate the JWT server-side.
 
-import { supabase } from "@/integrations/supabase/client";
+import { supabase, SAFE_SUPABASE_KEY } from "@/integrations/supabase/client";
 
 async function bearer(): Promise<string | null> {
   const { data } = await supabase.auth.getSession();
@@ -11,8 +11,7 @@ async function bearer(): Promise<string | null> {
 
 export async function authHeaders(): Promise<Record<string, string>> {
   const token = await bearer();
-  const apikey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
-  const h: Record<string, string> = { apikey };
+  const h: Record<string, string> = { apikey: SAFE_SUPABASE_KEY };
   if (token) h.Authorization = `Bearer ${token}`;
   return h;
 }
