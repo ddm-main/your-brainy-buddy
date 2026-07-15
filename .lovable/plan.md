@@ -1,52 +1,49 @@
-## Plan
+## Goal
 
-### 1. Open statement PDFs inside the app
-- Replace `window.open(url, "_blank")` on the Statements page with an in-app PDF overlay/modal.
-- Reuse the signed private PDF URL but render it in an embedded viewer with:
-  - close button
-  - open/download fallback link
-  - loading/error state
-- Ensure row clicks do not accidentally expand/collapse when opening the PDF from the table or expanded row.
+Clicking anywhere on an Account tile or Card tile navigates to that item's dedicated detail page (which already exists and shows balance/utilization, statements, transactions, and linked items). Editing/deleting/logging-a-payment moves into the detail page so the list stays a clean, click-through grid.
 
-### 2. Fix the current edge function syntax/runtime issue
-- Clean up `supabase/functions/finance-reparse-statements/index.ts`; the file currently has a duplicated trailing `catch`/`Deno.serve` closure after the real handler.
-- Keep the small-batch reparse behavior, but reduce the edge-worker wall-clock deadline to a safer value so it exits before resource limits.
+## Current behavior
 
-### 3. Fix SBI statement parsing against the real extracted text
-- Update the SBI card parser to handle the actual PDF text shape already stored in `email_attachments.extracted_text`:
-  - labels and values split across adjacent lines, e.g. `*Total Amount Due` then `2,444.00`
-  - `Statement Date` / `Payment Due Date` values appearing in table-like rows
-  - statement period text like `for Statement Period: 02 Aug 25 to 01 Sep 25`
-  - transaction rows using `D` / `C` instead of only `Dr` / `Cr`
-  - two-digit years such as `01 Sep 25`
-- Prevent false-success rows: if due date / statement date / total due / transactions are missing, keep the row failed or low-confidence instead of marking it `parsed` with blanks.
+- `src/routes/finance/Accounts.tsx` and `src/routes/finance/Cards.tsx` toggle an **inline edit expander** on tile click. A small `details →` link in the corner is the only way to reach the real detail route.
+- Detail routes `/finance/accounts/:id` (`AccountDetail.tsx`) and `/finance/cards/:id` (`CardDetail.tsx`) already exist and render statements + recent transactions + linked entities. They currently have no inline edit UI.
 
-### 4. Improve transaction population and categorization
-- Insert statement transactions with the raw line `description` populated, not only `merchant`.
-- Store normalized merchant text where available.
-- Expand deterministic categorization for observed merchants and common Indian card-statement text, including online shopping, food delivery, utilities, fuel, cashback/refunds, EMI/fees/charges, subscriptions, healthcare, travel, groceries, cash/ATM.
-- Preserve idempotency: re-parsing a statement should replace only that statement’s derived transactions and avoid duplicating matching email-alert transactions.
+## Changes
 
-### 5. Add regression coverage
-- Extend `tests/statementParsers.test.ts` with a real-shape SBI fixture from the database sample:
-  - total due `2444`
-  - minimum due `200`
-  - statement date `2025-09-01`
-  - due date `2025-09-21`
-  - period `2025-08-02 → 2025-09-01`
-  - cashback credit plus debit purchase rows parsed correctly
-- Add cases for `D/C` line suffixes and label/value-split totals.
+### 1. `src/routes/finance/Accounts.tsx` — tile becomes a link
 
-### 6. Reprocess existing bad rows after deployment
-- After code changes, use the existing small-batch “re-parse unresolved” path or temporarily target rows with `parser_source like 'sbi-card% → generic fallback'` so the 21 existing SBI rows are refreshed.
-- Validate in Supabase that parsed SBI rows now have dates, totals, and statement-derived transactions.
+- Wrap each tile in a `<NavLink to={`/finance/accounts/${a.id}`}>` (or use `useNavigate` in the onClick).
+- Remove the inline expander, `openId`, `edit`, `save`, `remove`, `balanceTouched`, and related state/handlers.
+- Drop the small "details →" corner link (the whole tile is now the target).
+- Keep the summary rendering (nickname, chips, bank, mask, balance).
+- Add hover affordance (border/background shift) so the tile reads as clickable.
 
-## Technical notes
-- Main files to change:
-  - `src/routes/finance/Statements.tsx`
-  - `supabase/functions/finance-reparse-statements/index.ts`
-  - `supabase/functions/_shared/statement-parsers/sbi-card.ts`
-  - `supabase/functions/_shared/statement-parsers/generic.ts`
-  - `supabase/functions/_shared/finance-extract-core.ts`
-  - `tests/statementParsers.test.ts`
-- No schema migration is required for this pass; the needed columns already exist (`transactions.description`, `transactions.merchant_normalized`, statement parse fields, private PDF bucket path).
+### 2. `src/routes/finance/Cards.tsx` — same treatment
+
+- Wrap each tile in a link to `/finance/cards/${c.id}`.
+- Remove the inline expander, `openId`, `edit`, `save`, `remove`, `payment`, `logging`, `logPayment`, and related state.
+- Drop the "details →" corner link.
+- Keep the summary chips (bank, utilization %, reward badge) and metadata line.
+
+### 3. `src/routes/finance/AccountDetail.tsx` — add edit + delete
+
+- Add an "Edit" toggle in the header that opens the same form previously in `Accounts.tsx` (nickname, type, bank, last 4, statement cycle day, source email, current balance with as-of stamping, notes). Reuse `db.accounts.update` and `db.accounts.remove`.
+- Add a "Delete" action with confirm; on success navigate back to `/finance/accounts`.
+- After save, refetch the account row.
+
+### 4. `src/routes/finance/CardDetail.tsx` — add edit + delete + log-payment
+
+- Add an "Edit" toggle with the fields previously in `Cards.tsx` (name, bank, last 4, limit, bill/due day, reward type/rate, autopay, notes). Reuse `db.cards.update` / `db.cards.remove`.
+- Add the "log bill payment" block (paid-from account, amount, date) that currently lives inside the inline expander in `Cards.tsx`, using `db.transactions.create`. After logging, refetch statements/txns.
+- Delete action with confirm; on success navigate back to `/finance/cards`.
+
+## Non-goals / not touched
+
+- No schema changes, no `db.ts` (`src/lib/db/*`) changes.
+- Loans, Goals, Investments detail pages already work off the same pattern and aren't in scope.
+- Config pages (`AccountsConfig`, `CardsConfig`) stay as they are for creating new items.
+
+## Verification
+
+- Playwright: sign in, land on `/finance/accounts`, click an account tile — URL becomes `/finance/accounts/:id`, detail page shows balance + statements + txns. Edit nickname, save, back button returns to list with updated name.
+- Repeat on `/finance/cards`: click tile → `/finance/cards/:id`, edit + log-payment work, delete returns to list.
+- No console errors; build passes.
