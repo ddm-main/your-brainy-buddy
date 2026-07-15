@@ -1,4 +1,4 @@
-import { supabase as _supabase } from "@/integrations/supabase/client";
+import { supabase as _supabase, SAFE_SUPABASE_URL } from "@/integrations/supabase/client";
 import type { Database } from "@/integrations/supabase/types";
 import { authFetch } from "@/lib/authFetch";
 import { toSafeError } from "@/lib/errors";
