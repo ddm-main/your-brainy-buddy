@@ -146,9 +146,14 @@ export type Database = {
           created_at: string
           due_day: number | null
           id: string
+          latest_due_date: string | null
+          latest_min_due: number | null
+          latest_statement_id: string | null
+          latest_total_due: number | null
           limit_amount: number | null
           masked_number: string | null
           notes: string | null
+          payment_status: string | null
           statement_password_rule: Json | null
           updated_at: string
           user_id: string
@@ -161,9 +166,14 @@ export type Database = {
           created_at?: string
           due_day?: number | null
           id?: string
+          latest_due_date?: string | null
+          latest_min_due?: number | null
+          latest_statement_id?: string | null
+          latest_total_due?: number | null
           limit_amount?: number | null
           masked_number?: string | null
           notes?: string | null
+          payment_status?: string | null
           statement_password_rule?: Json | null
           updated_at?: string
           user_id?: string
@@ -176,9 +186,14 @@ export type Database = {
           created_at?: string
           due_day?: number | null
           id?: string
+          latest_due_date?: string | null
+          latest_min_due?: number | null
+          latest_statement_id?: string | null
+          latest_total_due?: number | null
           limit_amount?: number | null
           masked_number?: string | null
           notes?: string | null
+          payment_status?: string | null
           statement_password_rule?: Json | null
           updated_at?: string
           user_id?: string
@@ -189,6 +204,13 @@ export type Database = {
             columns: ["bank_id"]
             isOneToOne: false
             referencedRelation: "banks"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "credit_cards_latest_statement_id_fkey"
+            columns: ["latest_statement_id"]
+            isOneToOne: false
+            referencedRelation: "statements"
             referencedColumns: ["id"]
           },
         ]
@@ -1793,6 +1815,69 @@ export type Database = {
           },
         ]
       }
+      statement_skeletons: {
+        Row: {
+          bank_slug: string
+          created_at: string
+          id: string
+          last_learn_at: string | null
+          layout_fingerprint: string
+          learned_at: string
+          parse_failure_count: number
+          parse_success_count: number
+          promoted_at: string | null
+          sample_statement_id: string | null
+          scope: Database["public"]["Enums"]["skeleton_scope"]
+          skeleton: Json
+          statement_type: Database["public"]["Enums"]["statement_type"]
+          structural_fingerprint: string | null
+          updated_at: string
+          user_id: string
+          variant: string | null
+          version: number
+        }
+        Insert: {
+          bank_slug: string
+          created_at?: string
+          id?: string
+          last_learn_at?: string | null
+          layout_fingerprint: string
+          learned_at?: string
+          parse_failure_count?: number
+          parse_success_count?: number
+          promoted_at?: string | null
+          sample_statement_id?: string | null
+          scope?: Database["public"]["Enums"]["skeleton_scope"]
+          skeleton: Json
+          statement_type: Database["public"]["Enums"]["statement_type"]
+          structural_fingerprint?: string | null
+          updated_at?: string
+          user_id: string
+          variant?: string | null
+          version?: number
+        }
+        Update: {
+          bank_slug?: string
+          created_at?: string
+          id?: string
+          last_learn_at?: string | null
+          layout_fingerprint?: string
+          learned_at?: string
+          parse_failure_count?: number
+          parse_success_count?: number
+          promoted_at?: string | null
+          sample_statement_id?: string | null
+          scope?: Database["public"]["Enums"]["skeleton_scope"]
+          skeleton?: Json
+          statement_type?: Database["public"]["Enums"]["statement_type"]
+          structural_fingerprint?: string | null
+          updated_at?: string
+          user_id?: string
+          variant?: string | null
+          version?: number
+        }
+        Relationships: []
+      }
       statements: {
         Row: {
           ai_summary: string | null
@@ -1805,18 +1890,24 @@ export type Database = {
           file_path: string | null
           financial_account_id: string | null
           id: string
+          last_learn_at: string | null
+          learn_attempts: number
           linked_bank_id: string | null
           loan_id: string | null
           min_due: number | null
+          paid_amount: number | null
+          paid_on: string | null
           parse_confidence: number | null
           parse_error: string | null
           parse_reason: string | null
           parse_status: Database["public"]["Enums"]["parse_status"]
           parser_confidence: number | null
           parser_source: string | null
+          payment_status: Database["public"]["Enums"]["statement_payment_status"]
           period_end: string | null
           period_start: string | null
           reconciliation_status: Database["public"]["Enums"]["reconciliation_status"]
+          skeleton_id: string | null
           source: string | null
           source_email_id: string | null
           statement_date: string | null
@@ -1837,18 +1928,24 @@ export type Database = {
           file_path?: string | null
           financial_account_id?: string | null
           id?: string
+          last_learn_at?: string | null
+          learn_attempts?: number
           linked_bank_id?: string | null
           loan_id?: string | null
           min_due?: number | null
+          paid_amount?: number | null
+          paid_on?: string | null
           parse_confidence?: number | null
           parse_error?: string | null
           parse_reason?: string | null
           parse_status?: Database["public"]["Enums"]["parse_status"]
           parser_confidence?: number | null
           parser_source?: string | null
+          payment_status?: Database["public"]["Enums"]["statement_payment_status"]
           period_end?: string | null
           period_start?: string | null
           reconciliation_status?: Database["public"]["Enums"]["reconciliation_status"]
+          skeleton_id?: string | null
           source?: string | null
           source_email_id?: string | null
           statement_date?: string | null
@@ -1869,18 +1966,24 @@ export type Database = {
           file_path?: string | null
           financial_account_id?: string | null
           id?: string
+          last_learn_at?: string | null
+          learn_attempts?: number
           linked_bank_id?: string | null
           loan_id?: string | null
           min_due?: number | null
+          paid_amount?: number | null
+          paid_on?: string | null
           parse_confidence?: number | null
           parse_error?: string | null
           parse_reason?: string | null
           parse_status?: Database["public"]["Enums"]["parse_status"]
           parser_confidence?: number | null
           parser_source?: string | null
+          payment_status?: Database["public"]["Enums"]["statement_payment_status"]
           period_end?: string | null
           period_start?: string | null
           reconciliation_status?: Database["public"]["Enums"]["reconciliation_status"]
+          skeleton_id?: string | null
           source?: string | null
           source_email_id?: string | null
           statement_date?: string | null
@@ -1917,6 +2020,13 @@ export type Database = {
             columns: ["loan_id"]
             isOneToOne: false
             referencedRelation: "loans"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "statements_skeleton_id_fkey"
+            columns: ["skeleton_id"]
+            isOneToOne: false
+            referencedRelation: "statement_skeletons"
             referencedColumns: ["id"]
           },
           {
@@ -2290,6 +2400,13 @@ export type Database = {
         | "partial"
         | "reconciled"
         | "review"
+      skeleton_scope: "user" | "system"
+      statement_payment_status:
+        | "na"
+        | "pending"
+        | "paid"
+        | "overdue"
+        | "partial"
       statement_type: "account" | "card" | "loan"
       task_priority: "low" | "normal" | "high" | "urgent"
       task_status: "todo" | "doing" | "waiting" | "done" | "cancelled"
@@ -2452,6 +2569,8 @@ export const Constants = {
         "reconciled",
         "review",
       ],
+      skeleton_scope: ["user", "system"],
+      statement_payment_status: ["na", "pending", "paid", "overdue", "partial"],
       statement_type: ["account", "card", "loan"],
       task_priority: ["low", "normal", "high", "urgent"],
       task_status: ["todo", "doing", "waiting", "done", "cancelled"],

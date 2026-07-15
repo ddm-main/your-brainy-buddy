@@ -51,5 +51,12 @@ export const iciciCardParser = (text: string, ctx: ParserContext): ParserResult 
     parser_source: `icici-card${family}`,
     confidence: missing.length === 0 ? 0.85 : 0.55,
     missing_fields: missing,
+    matched_labels: {
+      statement_date: stmtDate ? "Statement Date" : (period ? "Statement Period" : undefined),
+      due_date: dueDate ? "Payment Due Date" : undefined,
+      total_due: totalDue ? "Total Amount Due" : undefined,
+      min_due: minDue ? "Minimum Amount Due" : undefined,
+      period: period ? "Statement Period" : undefined,
+    },
   };
 };

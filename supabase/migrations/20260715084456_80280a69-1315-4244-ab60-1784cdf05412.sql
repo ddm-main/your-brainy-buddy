@@ -1,0 +1,1 @@
+ALTER TYPE public.statement_payment_status ADD VALUE IF NOT EXISTS 'partial';

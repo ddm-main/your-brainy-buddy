@@ -730,7 +730,7 @@ export const db = {
   statements: {
     list: async (limit = 200) => {
       const { data, error } = await supabase.from("statements")
-        .select("*, credit_cards(card_name, banks(name)), financial_accounts(nickname, banks(name)), loans(lender_name), banks:linked_bank_id(name), emails:source_email_id(from_name, from_email, subject, received_at)")
+        .select("*, credit_cards!statements_credit_card_id_fkey(card_name, banks(name)), financial_accounts(nickname, banks(name)), loans(lender_name), banks:linked_bank_id(name), emails:source_email_id(from_name, from_email, subject, received_at)")
         .order("statement_date", { ascending: false, nullsFirst: false })
         .order("created_at", { ascending: false })
         .limit(limit);
@@ -739,7 +739,7 @@ export const db = {
     },
     get: async (id: string) => {
       const { data, error } = await supabase.from("statements")
-        .select("*, credit_cards(card_name, banks(name)), financial_accounts(nickname, banks(name)), loans(lender_name), banks:linked_bank_id(name), emails:source_email_id(from_name, from_email, subject, received_at)")
+        .select("*, credit_cards!statements_credit_card_id_fkey(card_name, banks(name)), financial_accounts(nickname, banks(name)), loans(lender_name), banks:linked_bank_id(name), emails:source_email_id(from_name, from_email, subject, received_at)")
         .eq("id", id).single();
       if (error) throw error;
       return data;
@@ -788,7 +788,7 @@ export const db = {
     upcomingDues: async (limit = 6) => {
       const todayIso = new Date().toISOString().slice(0, 10);
       const { data, error } = await supabase.from("statements")
-        .select("*, credit_cards(card_name), financial_accounts(nickname)")
+        .select("*, credit_cards!statements_credit_card_id_fkey(card_name), financial_accounts(nickname)")
         .eq("parse_status", "parsed")
         .not("due_date", "is", null)
         .gte("due_date", todayIso)
@@ -818,6 +818,34 @@ export const db = {
 
     summarize: async (id: string) => {
       return callEdgeFunction("finance-summarize-statement", { statement_id: id });
+    },
+    // Card-statement payment lifecycle actions. Server-side would be nicer,
+    // but a direct update stays within the user's RLS scope.
+    markPaid: async (id: string, amount: number | null) => {
+      const today = new Date().toISOString().slice(0, 10);
+      const { error } = await supabase.from("statements").update({
+        payment_status: "paid",
+        paid_amount: amount ?? undefined,
+        paid_on: today,
+      }).eq("id", id);
+      if (error) throw error;
+    },
+    markPartial: async (id: string, amount: number) => {
+      const today = new Date().toISOString().slice(0, 10);
+      const { error } = await supabase.from("statements").update({
+        payment_status: "partial",
+        paid_amount: amount,
+        paid_on: today,
+      }).eq("id", id);
+      if (error) throw error;
+    },
+    clearPayment: async (id: string) => {
+      const { error } = await supabase.from("statements").update({
+        payment_status: "pending",
+        paid_amount: null,
+        paid_on: null,
+      }).eq("id", id);
+      if (error) throw error;
     },
   },
 

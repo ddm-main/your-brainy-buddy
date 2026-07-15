@@ -313,6 +313,8 @@ export function extractLines(text: string): StatementLine[] {
 
 // ---- Per-bank parsing (delegated to statement-parsers registry) ---------
 import { dispatchStatementParser } from "./statement-parsers/index.ts";
+import { parseSubjectPeriod } from "./subject-period.ts";
+
 
 export function parseStatementText(text: string, hint?: { bank_slug?: string | null; card_family?: string | null; statement_type?: "card" | "account" | "loan" | null; subject?: string | null; sender?: string | null }): PdfParseResult {
   const yearMatch = `${hint?.subject ?? ""} ${text.slice(0, 1500)}`.match(/\b(20\d{2})\b/);
@@ -324,31 +326,55 @@ export function parseStatementText(text: string, hint?: { bank_slug?: string | n
     sender: hint?.sender ?? null,
     statement_year: yearMatch ? Number(yearMatch[1]) : null,
   });
-  const required: Array<keyof typeof r.fields> = hint?.statement_type === "card"
+
+  // Subject-line rescue: fill only missing period/statement_date fields.
+  const subjectHit = parseSubjectPeriod(hint?.subject ?? null);
+  const period_start = r.fields.period_start ?? subjectHit.period_start;
+  const period_end = r.fields.period_end ?? subjectHit.period_end;
+  let statement_date = r.fields.statement_date ?? subjectHit.statement_date;
+  // Account statements are dated at period end; default when still missing.
+  if (!statement_date && period_end && hint?.statement_type !== "card") {
+    statement_date = period_end;
+  }
+
+  const enriched = {
+    ...r.fields,
+    period_start,
+    period_end,
+    statement_date,
+  };
+
+  const required: Array<string> = hint?.statement_type === "card"
     ? ["statement_date", "due_date", "total_due"]
     : ["statement_date"];
-  const missing = new Set(r.missing_fields);
+  const missing = new Set(
+    r.missing_fields.filter((k) => {
+      const v = (enriched as any)[k];
+      return v === null || (Array.isArray(v) && v.length === 0);
+    }),
+  );
   for (const key of required) {
-    const value = r.fields[key];
-    if (value === null || (Array.isArray(value) && value.length === 0)) missing.add(String(key));
+    const value = (enriched as any)[key];
+    if (value === null || (Array.isArray(value) && value.length === 0)) missing.add(key);
   }
-  const ok = r.ok && required.every((key) => {
-    const value = r.fields[key];
+  const ok = required.every((key) => {
+    const value = (enriched as any)[key];
     return !(value === null || (Array.isArray(value) && value.length === 0));
   });
   return emptyResult({
     ok,
-    period_start: r.fields.period_start,
-    period_end: r.fields.period_end,
-    statement_date: r.fields.statement_date,
-    due_date: r.fields.due_date,
-    total_due: r.fields.total_due,
-    min_due: r.fields.min_due,
-    closing_balance: r.fields.closing_balance,
-    lines: r.fields.lines,
+    period_start: enriched.period_start,
+    period_end: enriched.period_end,
+    statement_date: enriched.statement_date,
+    due_date: enriched.due_date,
+    total_due: enriched.total_due,
+    min_due: enriched.min_due,
+    closing_balance: enriched.closing_balance,
+    lines: enriched.lines,
     parser_source: r.parser_source,
     parse_confidence: r.confidence,
     error: ok ? undefined : `missing_fields:${Array.from(missing).join(",")}`,
   });
 }
+
 

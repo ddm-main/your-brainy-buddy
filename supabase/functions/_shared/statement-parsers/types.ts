@@ -30,6 +30,15 @@ export interface ParserResult {
   confidence: number; // 0..1
   missing_fields: string[];
   error?: string;
+  /**
+   * Labels the regex parser matched, per field. Used by the skeleton
+   * synthesizer to cache anchors for the fast-path next time. Optional —
+   * parsers that don't populate this fall back to canonical labels.
+   */
+  matched_labels?: Partial<Record<
+    "statement_date" | "period" | "due_date" | "total_due" | "min_due" | "closing_balance",
+    string
+  >>;
 }
 
 export interface ParserContext {

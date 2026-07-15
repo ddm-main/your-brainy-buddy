@@ -12,8 +12,51 @@ import { ensureAccessToken, extractBody, gapi, listAttachments, downloadAttachme
 import { isFinanceMail, isFinanceSender, parseFinanceEmail, guessBankSlugFromSender, unwrapForwarded, type Parsed } from "./finance-parsers.ts";
 import { parseStatementPdfWithPasswords } from "./statement-pdf.ts";
 import { decryptStatementPassword, encryptStatementPassword, type StatementPasswordRule } from "./crypto.ts";
+import {
+  applySkeleton,
+  layoutFingerprint,
+  learnAndParse,
+  learnSkeleton,
+  loadSkeleton,
+  loadSkeletonByStructure,
+  recordSkeletonOutcome,
+  structuralFingerprint,
+  synthesizeSkeletonFromResult,
+  upsertSkeleton,
+} from "./statement-skeleton.ts";
+
+import { detectBank } from "./statement-parsers/index.ts";
 
 const STATEMENT_BUCKET = "statement-pdfs";
+
+// Sniff bank slug from the top of the PDF text as a last-ditch fallback
+// (used when neither the hint nor detectBank(sender/subject) resolves).
+function detectBankFromPdfText(text: string): string | null {
+  const head = text.slice(0, 4000).toLowerCase();
+  if (/amazon\s*pay.*icici|icici.*amazon\s*pay/.test(head)) return "amazon-pay-icici";
+  if (/airtel.*axis|axis.*airtel/.test(head)) return "airtel-axis";
+  if (/\baxis\s*bank\b/.test(head)) return "axis";
+  if (/\bicici\s*bank\b/.test(head)) return "icici";
+  if (/\bhdfc\s*bank\b|\bmillennia\b|\bregalia\b|\binfinia\b/.test(head)) return "hdfc";
+  if (/sbi\s*card|sbicard|state\s*bank\s*of\s*india/.test(head)) return "sbi";
+  if (/kotak\s*mahindra|\bkotak\b/.test(head)) return "kotak";
+  if (/\byes\s*bank\b/.test(head)) return "yes bank";
+  return null;
+}
+
+function canonicalBankSlug(slug: string | null | undefined): string | null {
+  const s = (slug ?? "").toLowerCase().replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!s) return null;
+  if (s.includes("amazon") && s.includes("icici")) return "amazon-pay-icici";
+  if (s.includes("airtel") && s.includes("axis")) return "airtel-axis";
+  if (s.includes("hdfc")) return "hdfc";
+  if (s.includes("icici")) return "icici";
+  if (s.includes("axis")) return "axis";
+  if (s.includes("sbi")) return "sbi";
+  if (s.includes("yes")) return "yes bank";
+  if (s.includes("kotak")) return "kotak";
+  return s;
+}
 
 export interface ExtractSummary {
   scanned: number;
@@ -251,7 +294,7 @@ export async function parseStoredStatementPdf(
   statementId: string,
   userId: string,
   links: { financial_account_id?: string | null; credit_card_id?: string | null; loan_id?: string | null; linked_bank_id?: string | null },
-  opts: { statementFilePath?: string | null; password?: string | null; statement_type?: "card" | "account" | "loan" | null; bank_slug?: string | null; subject?: string | null; sender?: string | null } = {},
+  opts: { statementFilePath?: string | null; password?: string | null; statement_type?: "card" | "account" | "loan" | null; bank_slug?: string | null; subject?: string | null; sender?: string | null; force_relearn?: boolean } = {},
 ): Promise<boolean> {
   const stored = await findStoredStatementPdf(svc, statementId, opts.statementFilePath ?? null);
   if (!stored) return false;
@@ -296,11 +339,200 @@ export async function parseStoredStatementPdf(
   if (rotation.result.ok && rotation.winning_password && !savedPwd) {
     await saveWinningPassword(svc, links, rotation.winning_password);
   }
-  // NOTE: transactions.delete moved into applyParsedStatementResult so we
-  // only wipe prior rows after the new parse is confirmed durable.
-  await applyParsedStatementResult(svc, statementId, userId, links, rotation.result, stored.storagePath, stored.attachmentId, pwdSource);
+  // Skeleton-learner fallback: if regex parsing missed required fields but
+  // we did extract text, learn (or reuse) a per-bank skeleton and re-derive
+  // the fields via cached anchors — no LLM cost on subsequent statements of
+  // the same layout.
+  const finalResult = await runSkeletonFallback(
+    svc, userId, statementId, rotation.result,
+    { bank_slug: opts.bank_slug ?? null, statement_type: opts.statement_type ?? null, subject: opts.subject ?? null, sender: opts.sender ?? null, force_relearn: opts.force_relearn ?? false, links },
+  );
+  await applyParsedStatementResult(svc, statementId, userId, links, finalResult.result, stored.storagePath, stored.attachmentId, pwdSource, finalResult.skeleton_id);
   return true;
 }
+
+// Shared skeleton-learner post-step used by both stored-PDF and inline-
+// attachment paths. Runs on every parse to (a) return the cached-skeleton
+// values when available, (b) LEARN on first sight so month 2 skips the
+// regex, and (c) short-circuit account statements (info-only, no due/total).
+export async function runSkeletonFallback(
+  svc: SupabaseClient,
+  userId: string,
+  statementId: string,
+  result: Awaited<ReturnType<typeof parseStatementPdfWithPasswords>>["result"],
+  hint: {
+    bank_slug: string | null;
+    statement_type: "card" | "account" | "loan" | null;
+    subject: string | null;
+    sender?: string | null;
+    force_relearn?: boolean;
+    links?: { credit_card_id?: string | null; financial_account_id?: string | null; loan_id?: string | null };
+  },
+): Promise<{ result: typeof result; skeleton_id: string | null }> {
+  const text = result.extracted_text ?? "";
+  const bumpAttempts = async (note?: string) => {
+    // Track every learner pass so operators can see why a bank still has no
+    // skeleton. Errors during learn are surfaced into parse_reason so they
+    // stop being invisible failures.
+    try {
+      const { data: cur } = await svc.from("statements")
+        .select("learn_attempts, parse_reason").eq("id", statementId).maybeSingle();
+      const attempts = (cur?.learn_attempts ?? 0) + 1;
+      const patch: Record<string, unknown> = {
+        learn_attempts: attempts,
+        last_learn_at: new Date().toISOString(),
+      };
+      if (note) patch.parse_reason = `${cur?.parse_reason ?? ""}${cur?.parse_reason ? " · " : ""}skeleton: ${note}`.slice(0, 500);
+      await svc.from("statements").update(patch).eq("id", statementId);
+    } catch (_) { /* best-effort */ }
+  };
+  if (!text) { await bumpAttempts("no extracted_text"); return { result, skeleton_id: null }; }
+  const bank_slug = canonicalBankSlug(
+    hint.bank_slug ??
+    detectBank(text, { subject: hint.subject ?? null, sender: hint.sender ?? null }) ??
+    detectBankFromPdfText(text)
+  );
+  if (!bank_slug) { await bumpAttempts("bank_slug not detected"); return { result, skeleton_id: null }; }
+
+  const links = hint.links ?? {};
+  let statement_type: "card" | "account" | "loan" =
+    hint.statement_type ??
+    (links.credit_card_id ? "card"
+      : links.financial_account_id ? "account"
+      : links.loan_id ? "loan"
+      : detectTypeFromText(text, hint.subject ?? null));
+
+  await bumpAttempts();
+
+  try {
+    const fp = await layoutFingerprint(text);
+
+    // 1) Exact cached skeleton — fastest path.
+    let cached = hint.force_relearn
+      ? null
+      : await loadSkeleton(svc, userId, bank_slug, statement_type, null, fp);
+
+    if (cached) {
+      const applied = applySkeleton(text, cached.skeleton);
+      if (applied.ok) {
+        await recordSkeletonOutcome(svc, cached.id, true).catch(() => {});
+        return { result: { ...applied, extracted_text: text }, skeleton_id: cached.id };
+      }
+      await recordSkeletonOutcome(svc, cached.id, false).catch(() => {});
+    }
+
+    // 2) LLM learn on first sight — do not swallow upsert errors.
+    const apiKey = Deno.env.get("LOVABLE_API_KEY");
+    if (apiKey) {
+      let learned = null as Awaited<ReturnType<typeof learnSkeleton>> | null;
+      try {
+        learned = await learnSkeleton({
+          text, bank_slug, statement_type, apiKey, subject: hint.subject ?? null,
+        });
+      } catch (le) {
+        await bumpAttempts(`learn failed: ${le instanceof Error ? le.message : String(le)}`);
+      }
+      if (learned) {
+        let up: Awaited<ReturnType<typeof upsertSkeleton>> = null;
+        try {
+          up = await upsertSkeleton(svc, userId, {
+            bank_slug, statement_type, variant: learned.variant,
+            layout_fingerprint: fp, skeleton: learned,
+            sample_statement_id: statementId,
+          });
+        } catch (ue) {
+          await bumpAttempts(`upsert failed: ${ue instanceof Error ? ue.message : String(ue)}`);
+        }
+        const applied = applySkeleton(text, learned);
+        if (applied.ok) {
+          if (up?.id) await recordSkeletonOutcome(svc, up.id, true).catch(() => {});
+          return { result: { ...applied, extracted_text: text }, skeleton_id: up?.id ?? null };
+        }
+        if (up?.id) await recordSkeletonOutcome(svc, up.id, false).catch(() => {});
+        const merged = mergeParseResults(result, { ...applied, extracted_text: text });
+        return { result: merged, skeleton_id: up?.id ?? null };
+      }
+    } else {
+      await bumpAttempts("LOVABLE_API_KEY missing");
+    }
+
+    // 3) LLM unavailable — synthesize canonical skeleton so next retry has
+    // anchors. Do not swallow the upsert error.
+    const skeleton = synthesizeSkeletonFromResult({
+      bank_slug, statement_type,
+      parser_source: result.parser_source ?? "regex",
+      result: {
+        ok: true,
+        fields: {
+          period_start: result.period_start,
+          period_end: result.period_end,
+          statement_date: result.statement_date,
+          due_date: result.due_date,
+          total_due: result.total_due,
+          min_due: result.min_due,
+          closing_balance: result.closing_balance,
+          lines: result.lines,
+        },
+        parser_source: result.parser_source ?? "regex",
+        confidence: result.parse_confidence ?? 0.6,
+        missing_fields: [],
+      },
+    });
+    let up: Awaited<ReturnType<typeof upsertSkeleton>> = null;
+    try {
+      up = await upsertSkeleton(svc, userId, {
+        bank_slug, statement_type, variant: null,
+        layout_fingerprint: fp, skeleton, sample_statement_id: statementId,
+      });
+    } catch (ue) {
+      await bumpAttempts(`synth upsert failed: ${ue instanceof Error ? ue.message : String(ue)}`);
+    }
+    const applied = applySkeleton(text, skeleton);
+    const merged = mergeParseResults(result, { ...applied, extracted_text: text });
+    return { result: merged, skeleton_id: up?.id ?? null };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn("skeleton pipeline failed", msg);
+    await bumpAttempts(`pipeline error: ${msg}`);
+    return { result, skeleton_id: null };
+  }
+}
+
+// Heuristic: card vs account when the statement row has no link yet.
+function detectTypeFromText(text: string, subject: string | null): "card" | "account" | "loan" {
+  const hay = `${subject ?? ""} ${text.slice(0, 4000)}`.toLowerCase();
+  if (/\bcredit\s*card\b|\bcard\s*statement\b|\bcard\s*ending\b|\bpayment\s*due\s*date\b/.test(hay)) return "card";
+  if (/\bloan\b|\bemi\b|\bprincipal\s*outstanding\b/.test(hay)) return "loan";
+  if (/\bsavings\b|\bcurrent\s*account\b|\baccount\s*statement\b|\baccount\s*summary\b|\bopening\s*balance\b/.test(hay)) return "account";
+  // Default to card only when we truly can't tell — accounts don't page us
+  // for missing due dates, so a wrong default here is less noisy for accounts.
+  return "card";
+}
+
+// Prefer the truthy value from the skeleton result but fall back to regex.
+function mergeParseResults(
+  regex: Awaited<ReturnType<typeof parseStatementPdfWithPasswords>>["result"],
+  skel: Awaited<ReturnType<typeof parseStatementPdfWithPasswords>>["result"],
+): typeof regex {
+  const pick = <K extends keyof typeof regex>(k: K) =>
+    (skel[k] ?? null) !== null && (skel[k] ?? null) !== undefined ? skel[k] : regex[k];
+  return {
+    ok: regex.ok || skel.ok,
+    period_start: pick("period_start"),
+    period_end: pick("period_end"),
+    statement_date: pick("statement_date"),
+    due_date: pick("due_date"),
+    total_due: pick("total_due"),
+    min_due: pick("min_due"),
+    closing_balance: pick("closing_balance"),
+    lines: skel.lines.length > regex.lines.length ? skel.lines : regex.lines,
+    parser_source: `${regex.parser_source ?? "regex"}+${skel.parser_source ?? "skeleton"}`,
+    parse_confidence: Math.max(regex.parse_confidence ?? 0, skel.parse_confidence ?? 0),
+    extracted_text: regex.extracted_text ?? skel.extracted_text ?? null,
+    error: undefined,
+  } as typeof regex;
+}
+
 
 function safeName(filename: string): string {
   return filename.replace(/[^\w.\-]/g, "_").slice(0, 80);
@@ -318,7 +550,7 @@ export async function ingestStatementAttachment(
   email: any,
   statementId: string,
   links: { financial_account_id?: string | null; credit_card_id?: string | null; loan_id?: string | null; linked_bank_id?: string | null },
-  opts: { statement_type?: "card" | "account" | "loan" | null; bank_slug?: string | null } = {},
+  opts: { statement_type?: "card" | "account" | "loan" | null; bank_slug?: string | null; force_relearn?: boolean } = {},
 ): Promise<void> {
   // Central helper: every early-exit path writes a specific parse_error +
   // parse_reason so the UI never shows a bare "PENDING" chip again.
@@ -387,6 +619,17 @@ export async function ingestStatementAttachment(
     }
 
     const storagePath = `${email.user_id}/${email.id}/${pdfAttachment.attachmentId}-${safeName(pdfAttachment.filename)}`;
+
+    // Purge any previously stored PDF for this statement whose path differs
+    // from the new one — otherwise a re-fetch leaves the old object behind
+    // (a rename in Gmail, a corrected attachment, a manual reupload).
+    try {
+      const { data: prev } = await svc.from("statements").select("file_path").eq("id", statementId).maybeSingle();
+      if (prev?.file_path && prev.file_path !== storagePath) {
+        await svc.storage.from(STATEMENT_BUCKET).remove([prev.file_path]);
+      }
+    } catch (_) { /* best effort */ }
+
     const { error: upErr } = await svc.storage.from(STATEMENT_BUCKET).upload(storagePath, bytes, {
       contentType: "application/pdf",
       upsert: true,
@@ -453,8 +696,12 @@ export async function ingestStatementAttachment(
     if (rotation.result.ok && rotation.winning_password && !savedPwd) {
       await saveWinningPassword(svc, links, rotation.winning_password);
     }
+    const finalResult = await runSkeletonFallback(
+      svc, email.user_id, statementId, rotation.result,
+      { bank_slug: opts.bank_slug ?? null, statement_type: opts.statement_type ?? null, subject: email.subject ?? null, sender: email.from_email ?? null, force_relearn: opts.force_relearn ?? false, links },
+    );
     await applyParsedStatementResult(
-      svc, statementId, email.user_id, links, rotation.result, storagePath, attRow.id, pwdSource,
+      svc, statementId, email.user_id, links, finalResult.result, storagePath, attRow.id, pwdSource, finalResult.skeleton_id,
     );
   } catch (e) {
     // Absolute backstop — should never happen, but if it does we still leave
@@ -469,11 +716,30 @@ export async function ingestStatementAttachment(
 // a fresh ingest — no half-written fields, no orphan transactions from a
 // prior wrong-card link, no stale attachment row pointing at a superseded
 // storage object.
-export async function purgeStatementDerived(svc: SupabaseClient, statementId: string): Promise<void> {
+// Wipes the derived state of a statement so a retry runs identically to a
+// fresh ingest. By default the stored PDF bytes are KEPT (retries usually
+// want to re-parse the same file), and `file_path` on the statements row is
+// left intact so `parseStoredStatementPdf` can still locate the object. Pass
+// `{ deleteStoredPdf: true }` to also purge storage (e.g. after a corrupt
+// upload).
+export async function purgeStatementDerived(
+  svc: SupabaseClient,
+  statementId: string,
+  opts: { deleteStoredPdf?: boolean } = {},
+): Promise<void> {
+  const { data: prev } = await svc.from("statements")
+    .select("file_path").eq("id", statementId).maybeSingle();
+  if (opts.deleteStoredPdf && prev?.file_path) {
+    try { await svc.storage.from(STATEMENT_BUCKET).remove([prev.file_path]); }
+    catch (e) { console.warn("purge storage failed", e instanceof Error ? e.message : e); }
+  }
   await svc.from("transactions").delete().eq("source_statement_id", statementId);
-  await svc.from("email_attachments").delete().eq("statement_id", statementId).eq("attachment_type", "statement");
-  await svc.from("statements").update({
-    file_path: null,
+  // Preserve the email_attachments row so the stored PDF stays discoverable
+  // via findStoredStatementPdf; just reset its parse status.
+  await svc.from("email_attachments")
+    .update({ parse_status: "pending", extracted_text: null })
+    .eq("statement_id", statementId).eq("attachment_type", "statement");
+  const patch: Record<string, unknown> = {
     transactions_found: 0,
     closing_balance: null,
     total_due: null,
@@ -487,7 +753,14 @@ export async function purgeStatementDerived(svc: SupabaseClient, statementId: st
     parser_confidence: null,
     parse_error: null,
     parse_reason: null,
-  }).eq("id", statementId);
+    skeleton_id: null,
+    payment_status: "na",
+    paid_amount: null,
+    paid_on: null,
+    ai_summary: null,
+  };
+  if (opts.deleteStoredPdf) patch.file_path = null;
+  await svc.from("statements").update(patch).eq("id", statementId);
 }
 
 // Deterministic post-parse enrichment: normalize the raw merchant string
@@ -554,6 +827,7 @@ function enrich(description: string, txnType: "debit" | "credit"): {
 // logic. attachmentId is optional since a manual upload may not create an
 // email_attachments row.
 export type PasswordSource = "saved" | "candidate" | "unprotected" | "none";
+export { computeCardPaymentStatus } from "./card-payment-status.ts";
 
 function reasonForParseError(err: string | undefined | null): string {
   const e = (err ?? "").toLowerCase();
@@ -575,6 +849,18 @@ function reasonForSuccess(src: PasswordSource): string {
   }
 }
 
+function missingRequiredParsedFields(
+  statementType: "card" | "account" | "loan",
+  result: import("./statement-pdf.ts").PdfParseResult,
+): string[] {
+  const required = statementType === "card"
+    ? ["statement_date", "due_date", "total_due"]
+    : statementType === "loan"
+    ? ["statement_date"]
+    : ["statement_date"];
+  return required.filter((key) => (result as any)[key] == null);
+}
+
 export async function applyParsedStatementResult(
   svc: SupabaseClient,
   statementId: string,
@@ -584,6 +870,7 @@ export async function applyParsedStatementResult(
   storagePath: string | null,
   attachmentId?: string,
   passwordSource: PasswordSource = "none",
+  skeletonId: string | null = null,
 ): Promise<void> {
   if (!result.ok) {
     if (attachmentId && result.extracted_text) {
@@ -598,6 +885,7 @@ export async function applyParsedStatementResult(
       period_start: result.period_start ?? undefined,
       period_end: result.period_end ?? undefined,
       statement_date: result.statement_date ?? undefined,
+      skeleton_id: skeletonId,
     }).eq("id", statementId);
     if (attachmentId) await svc.from("email_attachments").update({ parse_status: "failed" }).eq("id", attachmentId);
     return;
@@ -606,6 +894,44 @@ export async function applyParsedStatementResult(
   if (attachmentId && result.extracted_text) {
     await svc.from("email_attachments").update({ extracted_text: result.extracted_text.slice(0, 200_000) }).eq("id", attachmentId);
   }
+
+  // Card statements track payment lifecycle; accounts/loans stay 'na'.
+  const { data: existing } = await svc.from("statements")
+    .select("statement_type, payment_status, paid_amount")
+    .eq("id", statementId).maybeSingle();
+  const resolvedStatementType = (existing?.statement_type ?? "card") as "card" | "account" | "loan";
+  const isCard = resolvedStatementType === "card";
+  const missingRequired = missingRequiredParsedFields(resolvedStatementType, result);
+  if (missingRequired.length > 0) {
+    await svc.from("statements").update({
+      parse_status: "failed",
+      parse_error: `missing_fields:${missingRequired.join(",")}`,
+      parse_reason: `${resolvedStatementType} statement parsed from PDF but required fields are still missing`,
+      transactions_found: result.lines.length,
+      file_path: storagePath,
+      parser_source: result.parser_source ?? "generic",
+      parse_confidence: result.parse_confidence ?? null,
+      parser_confidence: result.parse_confidence ?? null,
+      period_start: result.period_start,
+      period_end: result.period_end,
+      statement_date: result.statement_date,
+      due_date: result.due_date,
+      total_due: result.total_due,
+      min_due: result.min_due,
+      closing_balance: result.closing_balance,
+      skeleton_id: skeletonId,
+    }).eq("id", statementId);
+    if (attachmentId) await svc.from("email_attachments").update({ parse_status: "failed" }).eq("id", attachmentId);
+    return;
+  }
+  const paymentUpdate = isCard
+    ? { payment_status: computeCardPaymentStatus(
+        existing?.payment_status ?? null,
+        Number(existing?.paid_amount ?? 0),
+        result.total_due,
+        result.due_date,
+      ) }
+    : { payment_status: "na" as const };
 
   const { error: stErr } = await svc.from("statements").update({
     period_start: result.period_start,
@@ -627,6 +953,8 @@ export async function applyParsedStatementResult(
     financial_account_id: links.financial_account_id ?? null,
     loan_id: links.loan_id ?? null,
     linked_bank_id: links.linked_bank_id ?? null,
+    skeleton_id: skeletonId,
+    ...paymentUpdate,
   }).eq("id", statementId).select("id").single();
   if (stErr) {
     await svc.from("statements").update({
@@ -639,6 +967,19 @@ export async function applyParsedStatementResult(
     return;
   }
   if (attachmentId) await svc.from("email_attachments").update({ parse_status: "parsed" }).eq("id", attachmentId);
+
+  // Card lifecycle: mirror the latest statement onto the linked credit_card
+  // so Cards list can show due-date/total-due/payment_status without
+  // re-scanning statements.
+  if (isCard && links.credit_card_id) {
+    await svc.from("credit_cards").update({
+      latest_statement_id: statementId,
+      latest_due_date: result.due_date ?? null,
+      latest_total_due: result.total_due ?? null,
+      latest_min_due: result.min_due ?? null,
+      payment_status: (paymentUpdate as any).payment_status ?? null,
+    }).eq("id", links.credit_card_id).catch?.(() => {});
+  }
 
   // Now safe to purge old statement-derived transactions — the new parse is
   // committed on the statements row, so we won't orphan the statement if a

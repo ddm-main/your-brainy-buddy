@@ -7,7 +7,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { parseStatementPdfWithPasswords } from "../_shared/statement-pdf.ts";
-import { applyParsedStatementResult, loadPasswordCandidates, saveWinningPassword } from "../_shared/finance-extract-core.ts";
+import { applyParsedStatementResult, loadPasswordCandidates, runSkeletonFallback, saveWinningPassword } from "../_shared/finance-extract-core.ts";
 import { decryptStatementPassword, type StatementPasswordRule } from "../_shared/crypto.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
 import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
@@ -174,7 +174,14 @@ Deno.serve(async (req) => {
     if (rotation.result.ok && rotation.winning_password && !savedPwd) {
       await saveWinningPassword(supabase, links, rotation.winning_password);
     }
-    await applyParsedStatementResult(supabase, statement.id, uid, links, rotation.result, storagePath);
+    const finalResult = await runSkeletonFallback(supabase, uid, statement.id, rotation.result, {
+      bank_slug: null,
+      statement_type: (statement_type as any) ?? null,
+      subject: filename,
+      links,
+      force_relearn: true,
+    });
+    await applyParsedStatementResult(supabase, statement.id, uid, links, finalResult.result, storagePath, undefined, rotation.result.ok ? (rotation.winning_password == null ? "unprotected" : "candidate") : "none", finalResult.skeleton_id);
 
     const { data: updated } = await supabase.from("statements")
       .select("parse_status, parse_error").eq("id", statement.id).maybeSingle();

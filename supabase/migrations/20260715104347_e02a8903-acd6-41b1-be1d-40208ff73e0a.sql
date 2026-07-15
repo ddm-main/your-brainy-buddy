@@ -1,0 +1,1 @@
+ALTER TABLE public.statements ADD COLUMN IF NOT EXISTS learn_attempts integer NOT NULL DEFAULT 0;

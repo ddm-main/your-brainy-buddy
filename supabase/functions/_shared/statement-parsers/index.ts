@@ -50,28 +50,31 @@ function normalizeBank(slug: string | null | undefined): string | null {
 
 // Auto-detect bank — subject/sender first (very high signal, e.g. "Amazon
 // Pay ICICI Bank Statement"), then in-text anchors as a fallback.
-function detectBank(text: string, ctx: ParserContext): string | null {
-  const hay = `${ctx.subject ?? ""} ${ctx.sender ?? ""}`.toLowerCase();
+export function detectBank(text: string, ctx: ParserContext): string | null {
+  // Normalize underscores/hyphens to spaces so tokens like YES_BANK_,
+  // HDFC-Bank, SBI_Card match the same rules as plain forms.
+  const hay = `${ctx.subject ?? ""} ${ctx.sender ?? ""}`.toLowerCase().replace(/[_\-]+/g, " ");
   if (hay.trim()) {
     if (/amazon\s*pay.*icici|icici.*amazon\s*pay/.test(hay)) return "amazon-pay-icici";
     if (/airtel.*axis|axis.*airtel/.test(hay)) return "airtel-axis";
     if (/\baxis\b/.test(hay)) return "axis";
     if (/amazon\s*pay/.test(hay) && /icici/.test(hay)) return "amazon-pay-icici";
     if (/\bicici\b/.test(hay)) return "icici";
-    if (/\bhdfc\b/.test(hay)) return "hdfc";
+    if (/millennia|regalia|infinia|diners/.test(hay) || /\bhdfc\b/.test(hay)) return "hdfc";
     if (/sbicard|\bsbi\s*card\b/.test(hay)) return "sbi";
     if (/\bsbi\b/.test(hay)) return "sbi";
-    if (/yes\s*bank/.test(hay)) return "yes bank";
+    if (/yes\s*bank|yesbank|klick/.test(hay)) return "yes bank";
     if (/\bkotak\b/.test(hay)) return "kotak";
   }
-  if (/amazon\s*pay.*icici|icici.*amazon\s*pay/i.test(text)) return "amazon-pay-icici";
-  if (/airtel.*axis/i.test(text)) return "airtel-axis";
-  if (/axis\s*bank/i.test(text)) return "axis";
-  if (/icici\s*bank/i.test(text)) return "icici";
-  if (/hdfc\s*bank/i.test(text)) return "hdfc";
-  if (/sbi\s*(?:card|credit\s*card)|sbicard/i.test(text)) return "sbi";
-  if (/yes\s*bank/i.test(text)) return "yes bank";
-  if (/kotak/i.test(text)) return "kotak";
+  const t = text.replace(/[_\-]+/g, " ");
+  if (/amazon\s*pay.*icici|icici.*amazon\s*pay/i.test(t)) return "amazon-pay-icici";
+  if (/airtel.*axis/i.test(t)) return "airtel-axis";
+  if (/axis\s*bank/i.test(t)) return "axis";
+  if (/icici\s*bank/i.test(t)) return "icici";
+  if (/hdfc\s*bank|millennia|regalia|infinia/i.test(t)) return "hdfc";
+  if (/sbi\s*(?:card|credit\s*card)|sbicard/i.test(t)) return "sbi";
+  if (/yes\s*bank|klick/i.test(t)) return "yes bank";
+  if (/kotak/i.test(t)) return "kotak";
   return null;
 }
 

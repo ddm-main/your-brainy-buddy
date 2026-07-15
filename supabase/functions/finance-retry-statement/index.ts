@@ -115,6 +115,13 @@ Deno.serve(async (req) => {
         linked_bank_id: links.linked_bank_id ?? statement.linked_bank_id ?? null,
       }).eq("id", statement.id);
 
+      // Manual retry === user asking for a completely clean re-run. Purge
+      // derived fields, stored PDF, and transactions before re-ingest so
+      // stale bytes / half-parsed rows can never survive into the new pass.
+      // Also reset learn_attempts and force a skeleton relearn — the user's
+      // explicit ask overrides any auto-cap.
+      await purgeStatementDerived(svc, statement.id);
+      await svc.from("statements").update({ learn_attempts: 0 }).eq("id", statement.id);
       const handledStored = await parseStoredStatementPdf(svc, statement.id, uid, links, {
         statementFilePath: statement.file_path ?? null,
         password: password ?? null,
@@ -122,17 +129,17 @@ Deno.serve(async (req) => {
         bank_slug: guessBankSlugFromSender(email.from_email),
         subject: email.subject ?? null,
         sender: email.from_email ?? null,
+        force_relearn: true,
       });
       if (!handledStored) {
-        // Retry === fresh ingest: wipe derived fields/txns first so a prior
-        // wrong-card link or half-parsed run doesn't leak into the new result.
-        await purgeStatementDerived(svc, statement.id);
         await ingestStatementAttachment(svc, account, email, statement.id, links, {
           statement_type: (statement.statement_type as any) ?? null,
           bank_slug: guessBankSlugFromSender(email.from_email),
+          force_relearn: true,
         });
       }
     } else {
+      await purgeStatementDerived(svc, statement.id);
       const handledStored = await parseStoredStatementPdf(svc, statement.id, uid, links, {
         statementFilePath: statement.file_path ?? null,
         password: password ?? null,

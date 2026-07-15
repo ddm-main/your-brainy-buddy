@@ -45,7 +45,7 @@ Deno.serve(async (req) => {
 
     const svc = svcClient();
     const { data: unresolvedRows, error } = await svc.from("statements")
-      .select("id, user_id, statement_type, source_email_id, file_path, parse_status, credit_card_id, financial_account_id, loan_id, linked_bank_id")
+      .select("id, user_id, statement_type, source_email_id, file_path, parse_status, credit_card_id, financial_account_id, loan_id, linked_bank_id, learn_attempts")
       .eq("user_id", uid)
       .in("parse_status", ["pending", "failed", "skipped"])
       .gte("created_at", cutoff)
@@ -55,12 +55,18 @@ Deno.serve(async (req) => {
 
     let rows = unresolvedRows ?? [];
     if (includeIncompleteParsed && rows.length < cap) {
+      // Only CARD statements have a lifecycle to reconcile. Accounts are
+      // info-only, so treating an account row as "incomplete" for missing
+      // due_date/total_due would loop forever. Drop the 3-attempt cap —
+      // instead, only requeue if we haven't tried in the last 24 hours.
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 3600_000).toISOString();
       const { data: incompleteRows, error: incompleteErr } = await svc.from("statements")
-        .select("id, user_id, statement_type, source_email_id, file_path, parse_status, credit_card_id, financial_account_id, loan_id, linked_bank_id")
+        .select("id, user_id, statement_type, source_email_id, file_path, parse_status, credit_card_id, financial_account_id, loan_id, linked_bank_id, learn_attempts")
         .eq("user_id", uid)
         .eq("parse_status", "parsed")
         .eq("statement_type", "card")
         .gte("created_at", cutoff)
+        .or(`last_learn_at.is.null,last_learn_at.lt.${twentyFourHoursAgo}`)
         .or("statement_date.is.null,due_date.is.null,total_due.is.null,transactions_found.eq.0")
         .order("updated_at", { ascending: true, nullsFirst: true })
         .limit(cap - rows.length);
@@ -114,18 +120,33 @@ Deno.serve(async (req) => {
           }
         }
 
+        // "parsed-but-incomplete" cards need a real re-learn, not another
+        // regex pass. Force LLM path. Bump both learn_attempts (audit) and
+        // last_learn_at (throttle).
+        const forceRelearn = st.parse_status === "parsed";
+        if (forceRelearn) {
+          await svc.from("statements")
+            .update({
+              learn_attempts: (st.learn_attempts ?? 0) + 1,
+              last_learn_at: new Date().toISOString(),
+            })
+            .eq("id", st.id);
+        }
+
         const storedHandled = await parseStoredStatementPdf(svc, st.id, uid, links, {
           statementFilePath: st.file_path ?? null,
           statement_type: (st.statement_type as any) ?? null,
           bank_slug: guessBankSlugFromSender(email?.from_email),
           subject: email?.subject ?? null,
           sender: email?.from_email ?? null,
+          force_relearn: forceRelearn,
         });
 
         if (!storedHandled && email && account) {
           await ingestStatementAttachment(svc, account, email, st.id, links, {
             statement_type: (st.statement_type as any) ?? null,
             bank_slug: guessBankSlugFromSender(email.from_email),
+            force_relearn: forceRelearn,
           });
         } else if (!storedHandled) {
           await svc.from("statements").update({

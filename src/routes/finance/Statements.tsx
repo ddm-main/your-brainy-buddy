@@ -80,28 +80,77 @@ function linkReason(s: any): string | null {
 function needsReparse(s: any): boolean {
   if (["pending", "failed", "skipped"].includes(s.parse_status ?? "")) return true;
   if (s.parse_status !== "parsed") return false;
+  // Accounts are info-only — no due/total lifecycle to complete. Never
+  // treat an account row as "incomplete" for missing card-only fields.
+  if (s.statement_type === "account") return false;
   if (s.statement_type === "card" && (s.statement_date == null || s.due_date == null || s.total_due == null)) return true;
   return Number(s.transactions_found ?? 0) === 0;
 }
 
-function PdfCanvasViewer({ url, title, password }: { url: string; title: string; password?: string | null }) {
+function PdfPage({ doc, pageNumber, scale }: { doc: any; pageNumber: number; scale: number }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const renderTaskRef = useRef<any>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!doc || !canvasRef.current) return;
+    let cancelled = false;
+    const canvas = canvasRef.current;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    renderTaskRef.current?.cancel?.();
+    setErr(null);
+
+    doc.getPage(pageNumber)
+      .then((pdfPage: any) => {
+        if (cancelled) return;
+        const viewport = pdfPage.getViewport({ scale });
+        const ratio = window.devicePixelRatio || 1;
+        canvas.width = Math.floor(viewport.width * ratio);
+        canvas.height = Math.floor(viewport.height * ratio);
+        canvas.style.width = `${viewport.width}px`;
+        canvas.style.height = `${viewport.height}px`;
+        context.setTransform(ratio, 0, 0, ratio, 0, 0);
+        context.clearRect(0, 0, viewport.width, viewport.height);
+        const task = pdfPage.render({ canvasContext: context, viewport });
+        renderTaskRef.current = task;
+        return task.promise;
+      })
+      .catch((e: any) => {
+        if (cancelled || e?.name === "RenderingCancelledException") return;
+        setErr(e?.message ?? "render failed");
+      });
+
+    return () => { cancelled = true; renderTaskRef.current?.cancel?.(); };
+  }, [doc, pageNumber, scale]);
+
+  return (
+    <div style={{ position: "relative", marginBottom: 14, textAlign: "center" }}>
+      <div className="hud-label" style={{ position: "absolute", left: 4, top: 4, background: "rgba(0,0,0,0.55)", padding: "2px 6px", borderRadius: 2, zIndex: 1 }}>
+        page {pageNumber}
+      </div>
+      {err && <div style={{ padding: 8, color: "var(--warn)", fontSize: 12 }}>{err}</div>}
+      <canvas
+        ref={canvasRef}
+        style={{ display: err ? "none" : "inline-block", maxWidth: "100%", height: "auto", background: "#f8fafc", boxShadow: "0 0 0 1px rgba(127,233,255,0.18)" }}
+      />
+    </div>
+  );
+}
+
+function PdfCanvasViewer({ url, title, password }: { url: string; title: string; password?: string | null }) {
   const [doc, setDoc] = useState<any>(null);
-  const [page, setPage] = useState(1);
   const [pages, setPages] = useState(0);
   const [scale, setScale] = useState(1.15);
-  const [status, setStatus] = useState<"loading" | "rendering" | "ready" | "error">("loading");
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setDoc(null);
-    setPage(1);
     setPages(0);
     setError(null);
     setStatus("loading");
-
     let task: any = null;
 
     fetch(url)
@@ -114,20 +163,16 @@ function PdfCanvasViewer({ url, title, password }: { url: string; title: string;
         task = pdfjsLib.getDocument({
           data: new Uint8Array(buffer),
           password: password || undefined,
-          disableAutoFetch: true,
-          disableStream: true,
           isEvalSupported: false,
         });
         return task.promise;
       })
       .then((loaded) => {
         if (!loaded) return;
-        if (cancelled) {
-          loaded.destroy().catch(() => {});
-          return;
-        }
+        if (cancelled) { loaded.destroy().catch(() => {}); return; }
         setDoc(loaded);
         setPages(loaded.numPages);
+        setStatus("ready");
       })
       .catch((e) => {
         if (cancelled) return;
@@ -135,75 +180,30 @@ function PdfCanvasViewer({ url, title, password }: { url: string; title: string;
         setError(e?.message ?? "PDF could not be rendered in the app");
       });
 
-    return () => {
-      cancelled = true;
-      task?.destroy?.();
-      renderTaskRef.current?.cancel?.();
-    };
+    return () => { cancelled = true; task?.destroy?.(); };
   }, [url, password]);
-
-  useEffect(() => {
-    if (!doc || !canvasRef.current) return;
-    let cancelled = false;
-    const canvas = canvasRef.current;
-    const context = canvas.getContext("2d");
-    if (!context) return;
-
-    renderTaskRef.current?.cancel?.();
-    setStatus("rendering");
-    setError(null);
-
-    doc.getPage(page)
-      .then((pdfPage: any) => {
-        if (cancelled) return;
-        const viewport = pdfPage.getViewport({ scale });
-        const ratio = window.devicePixelRatio || 1;
-        canvas.width = Math.floor(viewport.width * ratio);
-        canvas.height = Math.floor(viewport.height * ratio);
-        canvas.style.width = `${viewport.width}px`;
-        canvas.style.height = `${viewport.height}px`;
-        context.setTransform(ratio, 0, 0, ratio, 0, 0);
-        context.clearRect(0, 0, viewport.width, viewport.height);
-        const renderTask = pdfPage.render({ canvasContext: context, viewport });
-        renderTaskRef.current = renderTask;
-        return renderTask.promise;
-      })
-      .then(() => {
-        if (!cancelled) setStatus("ready");
-      })
-      .catch((e: any) => {
-        if (cancelled || e?.name === "RenderingCancelledException") return;
-        setStatus("error");
-        setError(e?.message ?? "PDF could not be rendered in the app");
-      });
-
-    return () => {
-      cancelled = true;
-      renderTaskRef.current?.cancel?.();
-    };
-  }, [doc, page, scale]);
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderBottom: "1px solid var(--edge)", background: "var(--panel-tint)" }}>
-        <Btn size="sm" disabled={!doc || page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>‹</Btn>
-        <div className="hud-label" style={{ minWidth: 90, textAlign: "center" }}>{pages ? `${page} / ${pages}` : "—"}</div>
-        <Btn size="sm" disabled={!doc || page >= pages} onClick={() => setPage((p) => Math.min(pages, p + 1))}>›</Btn>
+        <div className="hud-label" style={{ minWidth: 90 }}>{pages ? `${pages} page${pages === 1 ? "" : "s"}` : "—"}</div>
         <div style={{ flex: 1 }} />
         <Btn size="sm" disabled={!doc || scale <= 0.75} onClick={() => setScale((v) => Math.max(0.75, Number((v - 0.15).toFixed(2))))}>−</Btn>
         <div className="hud-label" style={{ minWidth: 48, textAlign: "center" }}>{Math.round(scale * 100)}%</div>
         <Btn size="sm" disabled={!doc || scale >= 2.25} onClick={() => setScale((v) => Math.min(2.25, Number((v + 0.15).toFixed(2))))}>+</Btn>
       </div>
-      <div style={{ position: "relative", flex: 1, minHeight: 0, overflow: "auto", background: "var(--bg)", padding: 18, textAlign: "center" }}>
-        {status !== "ready" && status !== "error" && (
-          <div className="hud-label" style={{ position: "absolute", left: 18, top: 18 }}>{status === "loading" ? "loading PDF…" : "rendering PDF…"}</div>
+      <div style={{ position: "relative", flex: 1, minHeight: 0, overflow: "auto", background: "var(--bg)", padding: 18 }}>
+        {status === "loading" && (
+          <div className="hud-label" style={{ position: "absolute", left: 18, top: 18 }}>loading PDF…</div>
         )}
         {error && <div style={{ padding: 18, color: "var(--warn)", fontSize: 12 }}>{error}</div>}
-        <canvas
-          ref={canvasRef}
-          aria-label={title}
-          style={{ display: error ? "none" : "inline-block", maxWidth: "100%", height: "auto", background: "#f8fafc", boxShadow: "0 0 0 1px rgba(127,233,255,0.18)" }}
-        />
+        {doc && !error && (
+          <div aria-label={title}>
+            {Array.from({ length: pages }, (_, i) => (
+              <PdfPage key={i + 1} doc={doc} pageNumber={i + 1} scale={scale} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -237,7 +237,7 @@ export default function Statements() {
   const [attachTargetId, setAttachTargetId] = useState<string | null>(null); // existing_statement_id when attaching
 
   const [filterStatus, setFilterStatus] = useState<string>("");
-  const [filterType, setFilterType] = useState<string>("");
+  const [filterType, setFilterType] = useState<string>("card");
   const [filterUnlinked, setFilterUnlinked] = useState<boolean>(false);
 
 
@@ -420,6 +420,41 @@ export default function Statements() {
     return true;
   }), [items, filterStatus, filterType, filterUnlinked]);
 
+  const typeCounts = useMemo(() => {
+    const c = { card: 0, account: 0, loan: 0 };
+    for (const s of items) {
+      if (s.statement_type === "card") c.card++;
+      else if (s.statement_type === "account") c.account++;
+      else if (s.statement_type === "loan") c.loan++;
+    }
+    return c;
+  }, [items]);
+
+  const markPaid = async (s: any) => {
+    try {
+      await db.statements.markPaid(s.id, s.total_due ?? null);
+      push("Marked paid", "ok");
+      await load();
+    } catch (e: any) { push(e?.message ?? "failed to mark paid", "err"); }
+  };
+  const markPartial = async (s: any) => {
+    const raw = window.prompt(`Amount paid so far (total due: ${s.total_due ?? "—"})`);
+    const amt = Number(raw);
+    if (!raw || !Number.isFinite(amt) || amt <= 0) return;
+    try {
+      await db.statements.markPartial(s.id, amt);
+      push("Marked partial", "ok");
+      await load();
+    } catch (e: any) { push(e?.message ?? "failed", "err"); }
+  };
+  const clearPayment = async (s: any) => {
+    try {
+      await db.statements.clearPayment(s.id);
+      push("Payment reset", "ok");
+      await load();
+    } catch (e: any) { push(e?.message ?? "failed", "err"); }
+  };
+
 
   const validationFor = (s: any, statementTxns: any[]): { ok: boolean; msg: string } | null => {
     if (s.parse_status !== "parsed" || s.total_due == null || statementTxns.length === 0) return null;
@@ -530,6 +565,34 @@ export default function Statements() {
           </div>
         </div>
 
+        {/* Cards vs Accounts vs Loans — cards need lifecycle tracking (due
+            dates, payment status), accounts are info-only. Split at the top
+            so the two workflows never fight for the same table. */}
+        <div style={{ display: "flex", gap: 4, marginBottom: 8, borderBottom: "1px solid var(--edge)" }}>
+          {([
+            { key: "card",    label: `Cards (${typeCounts.card})` },
+            { key: "account", label: `Accounts (${typeCounts.account})` },
+            { key: "loan",    label: `Loans (${typeCounts.loan})` },
+            { key: "",        label: "All" },
+          ] as const).map((t) => (
+            <button
+              key={t.key || "all"}
+              onClick={() => setFilterType(t.key)}
+              style={{
+                padding: "6px 12px",
+                background: filterType === t.key ? "var(--panel-tint-heavy)" : "transparent",
+                color: filterType === t.key ? "var(--accent)" : "var(--text-dim)",
+                border: "none",
+                borderBottom: filterType === t.key ? "2px solid var(--accent)" : "2px solid transparent",
+                fontSize: 11,
+                fontFamily: "var(--font-hud)",
+                letterSpacing: "0.14em",
+                textTransform: "uppercase",
+                cursor: "pointer",
+              }}
+            >{t.label}</button>
+          ))}
+        </div>
         <div style={{ display: "flex", gap: 8, alignItems: "end", marginBottom: 10, flexWrap: "wrap" }}>
           <div style={{ minWidth: 140 }}>
             <label style={labelStyle}>status</label>
@@ -539,15 +602,6 @@ export default function Statements() {
               { value: "pending", label: "pending" },
               { value: "failed", label: "failed" },
               { value: "skipped", label: "skipped" },
-            ]} />
-          </div>
-          <div style={{ minWidth: 140 }}>
-            <label style={labelStyle}>type</label>
-            <HudSelect value={filterType} onChange={setFilterType} placeholder="all" options={[
-              { value: "", label: "all" },
-              { value: "card", label: "card" },
-              { value: "account", label: "account" },
-              { value: "loan", label: "loan" },
             ]} />
           </div>
           <Btn size="sm" variant={filterUnlinked ? "primary" : undefined} onClick={() => setFilterUnlinked((v) => !v)}>unlinked only</Btn>
@@ -609,8 +663,15 @@ export default function Statements() {
                const dateStr = s.statement_date
                  ? new Date(s.statement_date).toLocaleDateString()
                  : em?.received_at ? new Date(em.received_at).toLocaleDateString() : "—";
-               const hint = explainParseError(s.parse_error);
+                const hint = explainParseError(s.parse_error);
                 const unlinkedReason = linkReason(s);
+                // Dedupe: if parse_reason and parse_error carry the same info, show only one.
+                const rawErr = s.parse_error ?? "";
+                const rawReason = s.parse_reason ?? "";
+                const reasonSameAsError = rawErr && rawReason && (
+                  rawErr === rawReason || rawErr.startsWith(rawReason) || rawReason.startsWith(rawErr)
+                );
+                const showParseReason = rawReason && !reasonSameAsError;
                return (
                  <Fragment key={s.id}>
                    <tr style={{ borderBottom: "1px solid rgba(127,233,255,0.06)", cursor: "pointer" }} onClick={() => toggleOpen(s)}>
@@ -634,16 +695,49 @@ export default function Statements() {
                      <td style={{ padding: "6px 8px", color: "var(--text-dim)", verticalAlign: "top" }}>{s.period_start && s.period_end ? `${s.period_start} → ${s.period_end}` : "—"}</td>
                      <td style={{ padding: "6px 8px", color: "var(--text-dim)", verticalAlign: "top" }}>{s.transactions_found ?? 0}</td>
                      <td style={{ padding: "6px 8px", verticalAlign: "top" }}>
-                       <Chip tone={statusTone(s.parse_status)}>{s.parse_status ?? "manual"}</Chip>
-                       {s.parse_reason && (
-                         <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2, maxWidth: 220 }}>{s.parse_reason}</div>
-                       )}
-                        {needsReparse(s) && s.parse_status === "parsed" && (
-                          <div style={{ fontSize: 10, color: "var(--warn)", marginTop: 2, maxWidth: 220 }}>parsed row is missing fields or transactions</div>
+                        {(() => {
+                          const isCard = s.statement_type === "card";
+                          // Accounts are info-only: never flag them as
+                          // incomplete for missing card lifecycle fields,
+                          // and never for zero transactions (many account
+                          // statement PDFs just carry balances, not a txn
+                          // table).
+                          const incomplete = s.parse_status === "parsed" && isCard && (
+                            s.statement_date == null || s.due_date == null || s.total_due == null ||
+                            Number(s.transactions_found ?? 0) === 0
+                          );
+                          const label = s.parse_status === "parsed" && incomplete ? "parsed · incomplete" : (s.parse_status ?? "manual");
+                          const tone = incomplete ? "warn" : statusTone(s.parse_status);
+                          return <Chip tone={tone}>{label}</Chip>;
+                        })()}
+                        {s.statement_type === "card" && s.payment_status && s.payment_status !== "na" && (
+                          <div style={{ marginTop: 3 }}>
+                            <Chip tone={s.payment_status === "paid" ? "ok" : s.payment_status === "overdue" ? "err" : "warn"}>{s.payment_status}</Chip>
+                          </div>
                         )}
-                        {hint && s.parse_status !== "parsed" && (
-                         <div style={{ fontSize: 10, color: "var(--warn)", marginTop: 2, maxWidth: 220 }}>{hint}</div>
-                       )}
+                        {s.skeleton_id && (
+                          <div style={{ marginTop: 3 }} title="Layout skeleton learned — future statements skip regex">
+                            <Chip tone="ok">skeleton learned</Chip>
+                          </div>
+                        )}
+                        {!s.skeleton_id && Number(s.learn_attempts ?? 0) > 0 && (
+                          <div style={{ marginTop: 3 }} title={`Learner attempted ${s.learn_attempts} time(s) without persisting a skeleton`}>
+                            <Chip tone="warn">learn: {s.learn_attempts}×</Chip>
+                          </div>
+                        )}
+                        {showParseReason && (
+                          <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2, maxWidth: 220 }}>{s.parse_reason}</div>
+                        )}
+                        {needsReparse(s) && s.parse_status === "parsed" && (
+                          <div style={{ fontSize: 10, color: "var(--warn)", marginTop: 2, maxWidth: 220 }}>
+                            {Number(s.learn_attempts ?? 0) >= 3
+                              ? "learner exhausted — click retry to re-scan"
+                              : "missing fields — auto re-scan queued"}
+                          </div>
+                        )}
+                        {hint && s.parse_status !== "parsed" && hint !== s.parse_reason && hint !== s.parse_error && (
+                          <div style={{ fontSize: 10, color: "var(--warn)", marginTop: 2, maxWidth: 220 }}>{hint}</div>
+                        )}
                      </td>
                       <td style={{ padding: "6px 8px", verticalAlign: "top", textAlign: "right" }}>
                         {s.file_path ? (
@@ -659,6 +753,15 @@ export default function Statements() {
                            <div><span className="hud-label">closing balance</span><br />{s.closing_balance != null ? inr(s.closing_balance) : "—"}</div>
                            <div><span className="hud-label">statement date</span><br />{s.statement_date ? new Date(s.statement_date).toLocaleDateString() : "—"}</div>
                            <div><span className="hud-label">due date</span><br />{s.due_date ? new Date(s.due_date).toLocaleDateString() : "—"}</div>
+                            {s.statement_type === "card" && s.min_due != null && (
+                              <div><span className="hud-label">min due</span><br />{inr(s.min_due)}</div>
+                            )}
+                            {s.statement_type === "card" && s.paid_amount != null && (
+                              <div><span className="hud-label">paid</span><br />{inr(s.paid_amount)}{s.paid_on ? ` · ${new Date(s.paid_on).toLocaleDateString()}` : ""}</div>
+                            )}
+                            {s.skeleton_id && (
+                              <div><span className="hud-label">layout</span><br /><Chip tone="ok">skeleton · {s.parser_source ?? "cached"}</Chip></div>
+                            )}
                             {s.file_path && <Btn size="sm" onClick={(e: any) => { e.stopPropagation(); viewPdf(s); }}>view PDF →</Btn>}
                            {s.parse_status === "parsed" && (
                              <Btn size="sm" disabled={summarizingId === s.id} onClick={() => summarize(s)}>
@@ -670,6 +773,19 @@ export default function Statements() {
                                attach PDF for this statement →
                              </Btn>
                            )}
+                            {s.statement_type === "card" && s.parse_status === "parsed" && (
+                              <>
+                                {s.payment_status !== "paid" && (
+                                  <Btn size="sm" variant="primary" onClick={() => markPaid(s)}>mark paid</Btn>
+                                )}
+                                {s.payment_status !== "partial" && s.payment_status !== "paid" && (
+                                  <Btn size="sm" onClick={() => markPartial(s)}>mark partial…</Btn>
+                                )}
+                                {(s.payment_status === "paid" || s.payment_status === "partial") && (
+                                  <Btn size="sm" onClick={() => clearPayment(s)}>clear payment</Btn>
+                                )}
+                              </>
+                            )}
                          </div>
                          {(() => {
                            const v = validationFor(s, txns);
@@ -688,11 +804,12 @@ export default function Statements() {
                              {s.ai_summary}
                            </div>
                          )}
-                         {hint && s.parse_status !== "parsed" && (
-                           <div style={{ marginTop: 8, padding: "6px 8px", background: "rgba(255,107,107,0.08)", border: "1px solid rgba(255,107,107,0.25)", borderRadius: 4, color: "var(--warn)", fontSize: 11 }}>
-                             <span className="hud-label" style={{ color: "var(--warn)" }}>{s.parse_error}</span> · {hint}
-                           </div>
-                         )}
+                          {(hint || rawErr) && s.parse_status !== "parsed" && (
+                            <div style={{ marginTop: 8, padding: "6px 8px", background: "rgba(255,107,107,0.08)", border: "1px solid rgba(255,107,107,0.25)", borderRadius: 4, color: "var(--warn)", fontSize: 11 }}>
+                              <span className="hud-label" style={{ color: "var(--warn)" }}>{rawErr || "parse_error"}</span>
+                              {hint && hint !== rawErr ? <> · {hint}</> : null}
+                            </div>
+                          )}
                           {(s.parse_status === "failed" || s.parse_status === "pending" || needsReparse(s) || (!s.credit_card_id && !s.financial_account_id && !s.loan_id)) && (
                            <div style={{ display: "flex", gap: 6, marginTop: 10, alignItems: "end", flexWrap: "wrap" }}>
                              <div style={{ minWidth: 240 }}>

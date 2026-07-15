@@ -47,6 +47,12 @@ export const axisCardParser = (text: string, ctx: ParserContext): ParserResult =
     parser_source: `axis-card${family}`,
     confidence: missing.length === 0 ? 0.85 : 0.55,
     missing_fields: missing,
+    matched_labels: {
+      statement_date: stmtDate ? "Statement Date" : undefined,
+      due_date: dueDate ? "Payment Due Date" : undefined,
+      total_due: totalDue ? "Total Payment Due" : undefined,
+      min_due: minDue ? "Minimum Due" : undefined,
+    },
   };
 };
 

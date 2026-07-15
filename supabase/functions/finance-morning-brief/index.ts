@@ -49,6 +49,17 @@ Deno.serve(async (req) => {
 
     const brief_date = todayIso();
 
+    // Nightly-ish sweep: flip card statements past their due date to
+    // 'overdue'. Cheap, idempotent, one UPDATE per morning brief hit.
+    try {
+      await supabase.from("statements").update({ payment_status: "overdue" })
+        .eq("user_id", uid)
+        .eq("statement_type", "card")
+        .eq("payment_status", "pending")
+        .not("due_date", "is", null)
+        .lt("due_date", brief_date);
+    } catch (_) { /* non-fatal */ }
+
     if (!force) {
       const { data: existing } = await supabase.from("morning_briefs")
         .select("summary, data, updated_at")

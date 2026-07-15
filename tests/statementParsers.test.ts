@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { dispatchStatementParser } from "../supabase/functions/_shared/statement-parsers/index.ts";
+import { parseSubjectPeriod } from "../supabase/functions/_shared/subject-period.ts";
 
 describe("statement parsers", () => {
   it("sbi-card extracts due date + family from subject", () => {
@@ -156,5 +157,32 @@ TRANSACTIONS FOR DEEPAK DONGARE
       Total Dues Rs. 100.00`;
     const r = dispatchStatementParser(text, { subject: "HDFC Bank Credit Card Statement", statement_type: "card" });
     expect(r.parser_source).toBe("hdfc-card");
+  });
+
+  it("subject fallback: ICICI account long-form period", () => {
+    const r = parseSubjectPeriod("Fwd: ICICI Bank Statement from June 01, 2026 to June 30, 2026 for XXXXXXXX3037");
+    expect(r.period_start).toBe("2026-06-01");
+    expect(r.period_end).toBe("2026-06-30");
+    expect(r.statement_date).toBe("2026-06-30");
+  });
+
+  it("subject fallback: HDFC account hyphen-dated period", () => {
+    const r = parseSubjectPeriod("HDFC Bank e-Statement for the period 09-Jun-2026 TO 08-Jul-2026");
+    expect(r.period_start).toBe("2026-06-09");
+    expect(r.period_end).toBe("2026-07-08");
+    expect(r.statement_date).toBe("2026-07-08");
+  });
+
+  it("subject fallback: Kotak month-only rolls to full month", () => {
+    const r = parseSubjectPeriod("Your June 2026 statement for Kotak A/c X9894");
+    expect(r.period_start).toBe("2026-06-01");
+    expect(r.period_end).toBe("2026-06-30");
+    expect(r.statement_date).toBe("2026-06-30");
+  });
+
+  it("subject fallback: Amazon Pay ICICI card long-form period", () => {
+    const r = parseSubjectPeriod("Your Amazon Pay ICICI Bank statement for the period June 2, 2026 to July 1, 2026");
+    expect(r.period_start).toBe("2026-06-02");
+    expect(r.period_end).toBe("2026-07-01");
   });
 });

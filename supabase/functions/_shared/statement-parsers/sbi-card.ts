@@ -167,5 +167,12 @@ export const sbiCardParser = (text: string, ctx: ParserContext): ParserResult =>
     parser_source: `sbi-card${family}`,
     confidence: missing.length === 0 ? 0.85 : 0.6,
     missing_fields: missing,
+    matched_labels: {
+      statement_date: (statementDateMatch || splitStatementDate) ? "Statement Date" : undefined,
+      due_date: (dueDateMatch || splitDueDate) ? "Payment Due Date" : undefined,
+      total_due: (totalDueMatch || splitTotalDue) ? "Total Amount Due" : undefined,
+      min_due: (minDueMatch || splitMinDue) ? "Minimum Amount Due" : undefined,
+      period: periodMatch ? "Statement Period" : undefined,
+    },
   };
 };
