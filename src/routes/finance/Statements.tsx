@@ -109,6 +109,17 @@ function needsReparse(s: any): boolean {
   return Number(s.transactions_found ?? 0) === 0;
 }
 
+/** One inline label+value pair in the expanded statement row. Inline (not
+ * stacked over a <br/>) so the whole fact set fits on a single line. */
+function Fact({ label, value }: { label: string; value: string }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "baseline", gap: 5, whiteSpace: "nowrap" }}>
+      <span className="hud-label">{label}</span>
+      <span style={{ color: "var(--text)" }}>{value}</span>
+    </span>
+  );
+}
+
 export default function Statements() {
   const push = useUi((s) => s.push);
   const [items, setItems] = useState<any[]>([]);
@@ -127,7 +138,6 @@ export default function Statements() {
   const [retryingAll, setRetryingAll] = useState(false);
   const [rowRetryingId, setRowRetryingId] = useState<string | null>(null);
 
-  const [summarizingId, setSummarizingId] = useState<string | null>(null);
   const [pdfViewer, setPdfViewer] = useState<{ statementId: string; title: string; url: string | null; password: string | null; loading: boolean; error: string | null } | null>(null);
 
   const [showUpload, setShowUpload] = useState(false);
@@ -219,16 +229,6 @@ export default function Statements() {
     } finally { setRetryingAll(false); }
   };
 
-
-  const summarize = async (s: any) => {
-    setSummarizingId(s.id);
-    try {
-      const res: any = await db.statements.summarize(s.id);
-      setItems((prev) => prev.map((x) => x.id === s.id ? { ...x, ai_summary: res.ai_summary } : x));
-      push("summary ready", "ok");
-    } catch (e: any) { push(e?.message ?? "summary failed", "err"); }
-    finally { setSummarizingId(null); }
-  };
 
   useEffect(() => {
     load();
@@ -406,16 +406,6 @@ export default function Statements() {
       push("Marked paid", "ok");
       await load();
     } catch (e: any) { push(e?.message ?? "failed to mark paid", "err"); }
-  };
-  const markPartial = async (s: any) => {
-    const raw = window.prompt(`Amount paid so far (total due: ${s.total_due ?? "—"})`);
-    const amt = Number(raw);
-    if (!raw || !Number.isFinite(amt) || amt <= 0) return;
-    try {
-      await db.statements.markPartial(s.id, amt);
-      push("Marked partial", "ok");
-      await load();
-    } catch (e: any) { push(e?.message ?? "failed", "err"); }
   };
   const clearPayment = async (s: any) => {
     try {
@@ -599,10 +589,13 @@ export default function Statements() {
             <thead style={{ position: "sticky", top: 0, zIndex: 1, background: "var(--panel-tint-heavy)" }}>
              <tr style={{ color: "var(--text-dim)", textAlign: "left", fontSize: 10, fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>bank · card/account</th>
-               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>subject / sender</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>date</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>period</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>txns</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>total due</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>due</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>min due</th>
+               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>limit</th>
                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>status</th>
                 <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>PDF</th>
              </tr>
@@ -616,13 +609,7 @@ export default function Statements() {
                  : em?.received_at ? new Date(em.received_at).toLocaleDateString() : "—";
                 const hint = explainParseError(s.parse_error);
                 const unlinkedReason = linkReason(s);
-                // Dedupe: if parse_reason and parse_error carry the same info, show only one.
                 const rawErr = s.parse_error ?? "";
-                const rawReason = s.parse_reason ?? "";
-                const reasonSameAsError = rawErr && rawReason && (
-                  rawErr === rawReason || rawErr.startsWith(rawReason) || rawReason.startsWith(rawErr)
-                );
-                const showParseReason = rawReason && !reasonSameAsError;
                return (
                  <Fragment key={s.id}>
                    <tr style={{ borderBottom: "1px solid rgba(127,233,255,0.06)", cursor: "pointer" }} onClick={() => toggleOpen(s)}>
@@ -634,17 +621,13 @@ export default function Statements() {
                        </div>
                         {unlinkedReason && <div style={{ color: "var(--warn)", fontSize: 10, marginTop: 2 }}>{unlinkedReason}</div>}
                      </td>
-                     <td style={{ padding: "6px 8px", verticalAlign: "top", maxWidth: 380 }}>
-                       <div style={{ color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={em?.subject ?? ""}>
-                         {em?.subject ?? (s.source === "manual" ? "Manual upload" : "—")}
-                       </div>
-                       <div style={{ color: "var(--text-dim)", fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={em?.from_email ?? ""}>
-                         {em?.from_name ? `${em.from_name} · ` : ""}{em?.from_email ?? ""}
-                       </div>
-                     </td>
                      <td style={{ padding: "6px 8px", color: "var(--text-dim)", verticalAlign: "top" }}>{dateStr}</td>
                      <td style={{ padding: "6px 8px", color: "var(--text-dim)", verticalAlign: "top" }}>{s.period_start && s.period_end ? `${s.period_start} → ${s.period_end}` : "—"}</td>
                      <td style={{ padding: "6px 8px", color: "var(--text-dim)", verticalAlign: "top" }}>{s.transactions_found ?? 0}</td>
+                     <td style={{ padding: "6px 8px", color: "var(--text)", verticalAlign: "top", textAlign: "right", whiteSpace: "nowrap" }}>{s.total_due != null ? inr(s.total_due) : "—"}</td>
+                     <td style={{ padding: "6px 8px", color: "var(--text-dim)", verticalAlign: "top", whiteSpace: "nowrap" }}>{s.due_date ? new Date(s.due_date).toLocaleDateString() : "—"}</td>
+                     <td style={{ padding: "6px 8px", color: "var(--text-dim)", verticalAlign: "top", textAlign: "right", whiteSpace: "nowrap" }}>{s.statement_type === "card" && s.min_due != null ? inr(s.min_due) : "—"}</td>
+                     <td style={{ padding: "6px 8px", color: "var(--text-dim)", verticalAlign: "top", textAlign: "right", whiteSpace: "nowrap" }}>{s.statement_type === "card" && s.credit_limit != null ? inr(s.credit_limit) : "—"}</td>
                      <td style={{ padding: "6px 8px", verticalAlign: "top" }}>
                         {(() => {
                           const isCard = s.statement_type === "card";
@@ -666,18 +649,22 @@ export default function Statements() {
                             <Chip tone={s.payment_status === "paid" ? "ok" : s.payment_status === "overdue" ? "err" : "warn"}>{s.payment_status}</Chip>
                           </div>
                         )}
-                        {s.skeleton_id && (
-                          <div style={{ marginTop: 3 }} title="Layout skeleton learned — future statements skip regex">
-                            <Chip tone="ok">skeleton learned</Chip>
+                        {/* Payment actions sit with the payment chips rather than
+                            behind a row expand. */}
+                        {s.statement_type === "card" && s.parse_status === "parsed" && (
+                          <div style={{ marginTop: 3 }} onClick={(e) => e.stopPropagation()}>
+                            {s.payment_status !== "paid" ? (
+                              <Btn size="sm" variant="primary" onClick={() => markPaid(s)}>mark paid</Btn>
+                            ) : null}
+                            {(s.payment_status === "paid" || s.payment_status === "partial") && (
+                              <Btn size="sm" onClick={() => clearPayment(s)}>clear payment</Btn>
+                            )}
                           </div>
                         )}
                         {!s.skeleton_id && Number(s.learn_attempts ?? 0) > 0 && (
                           <div style={{ marginTop: 3 }} title={`Learner attempted ${s.learn_attempts} time(s) without persisting a skeleton`}>
                             <Chip tone="warn">learn: {s.learn_attempts}×</Chip>
                           </div>
-                        )}
-                        {showParseReason && (
-                          <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2, maxWidth: 220 }}>{s.parse_reason}</div>
                         )}
                          {s.parse_status === "parsed" && (() => {
                            // List EVERY missing field explicitly — for cards
@@ -726,57 +713,31 @@ export default function Statements() {
                    </tr>
                    {openId === s.id && (
                      <tr>
-                        <td colSpan={7} style={{ padding: "10px 8px", background: "rgba(53,214,237,0.03)", borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
-                         <div style={{ display: "flex", gap: 24, flexWrap: "wrap", fontSize: 11, color: "var(--text-dim)" }}>
-                           <div><span className="hud-label">total due</span><br />{s.total_due != null ? inr(s.total_due) : "—"}</div>
-                           <div><span className="hud-label">closing balance</span><br />{s.closing_balance != null ? inr(s.closing_balance) : "—"}</div>
-                            {s.statement_type === "card" && s.credit_limit != null && (
-                              <div><span className="hud-label">credit limit</span><br />{inr(s.credit_limit)}</div>
-                            )}
-                           <div><span className="hud-label">statement date</span><br />{s.statement_date ? new Date(s.statement_date).toLocaleDateString() : "—"}</div>
-                           <div><span className="hud-label">due date</span><br />{s.due_date ? new Date(s.due_date).toLocaleDateString() : "—"}</div>
-                            {s.statement_type === "card" && s.min_due != null && (
-                              <div><span className="hud-label">min due</span><br />{inr(s.min_due)}</div>
-                            )}
-                            {s.statement_type === "card" && s.paid_amount != null && (
-                              <div><span className="hud-label">paid</span><br />{inr(s.paid_amount)}{s.paid_on ? ` · ${new Date(s.paid_on).toLocaleDateString()}` : ""}</div>
-                            )}
-                            {s.skeleton_id && (
-                              <div><span className="hud-label">layout</span><br /><Chip tone="ok">skeleton · {s.parser_source ?? "cached"}</Chip></div>
-                            )}
-                            {s.file_path && <Btn size="sm" onClick={(e: any) => { e.stopPropagation(); viewPdf(s); }}>view PDF →</Btn>}
-                           {s.parse_status === "parsed" && (
-                             <Btn size="sm" disabled={summarizingId === s.id} onClick={() => summarize(s)}>
-                               {summarizingId === s.id ? "summarizing…" : s.ai_summary ? "regenerate AI summary" : "AI summary"}
-                             </Btn>
-                           )}
-                           {s.parse_status === "skipped" && (
-                             <Btn size="sm" variant="primary" onClick={() => startAttachToRow(s)}>
-                               attach PDF for this statement →
-                             </Btn>
-                           )}
-                            {s.statement_type === "card" && s.parse_status === "parsed" && (
-                              <>
-                                {s.payment_status !== "paid" && (
-                                  <Btn size="sm" variant="primary" onClick={() => markPaid(s)}>mark paid</Btn>
-                                )}
-                                {s.payment_status !== "partial" && s.payment_status !== "paid" && (
-                                  <Btn size="sm" onClick={() => markPartial(s)}>mark partial…</Btn>
-                                )}
-                                {(s.payment_status === "paid" || s.payment_status === "partial") && (
-                                  <Btn size="sm" onClick={() => clearPayment(s)}>clear payment</Btn>
-                                )}
-                              </>
-                            )}
-                         </div>
+                        <td colSpan={10} style={{ padding: "10px 8px", background: "rgba(53,214,237,0.03)", borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
+                         {/* Facts (total due / due / min due / limit) now live as
+                             main-row columns. What stays here needs the loaded
+                             txns (validation) or is rare (paid detail, attach). */}
                          {(() => {
                            const v = validationFor(s, txns);
-                           if (!v) return null;
+                           const paid = s.statement_type === "card" && s.paid_amount != null;
+                           const attach = s.parse_status === "skipped";
+                           if (!v && !paid && !attach) return null;
                            return (
-                             <div style={{ marginTop: 8, padding: "4px 8px", fontSize: 11,
-                                 border: `1px solid ${v.ok ? "rgba(74,255,181,0.25)" : "rgba(255,190,80,0.3)"}`,
-                                 color: v.ok ? "var(--ok)" : "var(--warn)", borderRadius: 4 }}>
-                               <Chip tone={v.ok ? "ok" : "warn"}>{v.ok ? "validated" : "mismatch"}</Chip> {v.msg}
+                             <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", fontSize: 11, color: "var(--text-dim)", marginBottom: 8 }}>
+                               {paid && (
+                                 <Fact label="paid" value={`${inr(s.paid_amount)}${s.paid_on ? ` · ${new Date(s.paid_on).toLocaleDateString()}` : ""}`} />
+                               )}
+                               {v && (
+                                 <span title={v.msg} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                                   <Chip tone={v.ok ? "ok" : "warn"}>{v.ok ? "validated" : "mismatch"}</Chip>
+                                   <span style={{ color: v.ok ? "var(--ok)" : "var(--warn)" }}>{v.msg}</span>
+                                 </span>
+                               )}
+                               {attach && (
+                                 <span style={{ marginLeft: "auto" }}>
+                                   <Btn size="sm" variant="primary" onClick={() => startAttachToRow(s)}>attach PDF →</Btn>
+                                 </span>
+                               )}
                              </div>
                            );
                          })()}
@@ -819,16 +780,17 @@ export default function Statements() {
                               }}
                             />
                           )}
-                          <div style={{ marginTop: 10 }}>
-
-                           <span className="hud-label">transactions from this statement</span>
-                           {txnsLoading ? <div className="hud-label" style={{ marginTop: 6 }}>loading…</div> :
-                            txns.length === 0 ? <div className="hud-label" style={{ marginTop: 6 }}>none extracted</div> :
-                            <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 6 }}>
+                          {/* Row 2 — transactions, label inline so the whole
+                              section reads as a single row. */}
+                          <div style={{ display: "flex", gap: 10, marginTop: 8, alignItems: "baseline" }}>
+                           <span className="hud-label" style={{ flex: "0 0 auto" }}>txns</span>
+                           {txnsLoading ? <span className="hud-label">loading…</span> :
+                            txns.length === 0 ? <span className="hud-label">none extracted</span> :
+                            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
                               {txns.map((t: any) => (
-                                <div key={t.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
-                                  <span style={{ color: "var(--text)" }}>{new Date(t.txn_date).toLocaleDateString()} · {t.merchant ?? "—"}</span>
-                                  <span style={{ color: t.txn_type === "debit" ? "var(--warn)" : "var(--ok)" }}>{t.txn_type === "debit" ? "-" : "+"}{inr(t.amount)}</span>
+                                <div key={t.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 11 }}>
+                                  <span style={{ color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{new Date(t.txn_date).toLocaleDateString()} · {t.merchant ?? "—"}</span>
+                                  <span style={{ color: t.txn_type === "debit" ? "var(--warn)" : "var(--ok)", flex: "0 0 auto" }}>{t.txn_type === "debit" ? "-" : "+"}{inr(t.amount)}</span>
                                 </div>
                               ))}
                             </div>}
