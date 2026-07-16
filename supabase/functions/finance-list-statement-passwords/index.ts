@@ -37,7 +37,7 @@ Deno.serve(async (req) => {
 
     const [cardsRes, accountsRes] = await Promise.all([
       supabase.from("credit_cards")
-        .select("id, name, last_four, statement_password_rule, banks(name)")
+        .select("id, card_name, masked_number, statement_password_rule, banks(name)")
         .eq("user_id", uid)
         .not("statement_password_rule", "is", null),
       supabase.from("financial_accounts")
@@ -56,9 +56,9 @@ Deno.serve(async (req) => {
     const cards = await Promise.all((cardsRes.data ?? []).map(async (c: any) => ({
       type: "card" as const,
       id: c.id,
-      label: c.name,
+      label: c.card_name,
       bank: c.banks?.name ?? null,
-      mask: c.last_four ? `••${c.last_four}` : null,
+      mask: c.masked_number ?? null,
       password: await decrypt(c.statement_password_rule),
     })));
     const accounts = await Promise.all((accountsRes.data ?? []).map(async (a: any) => ({
