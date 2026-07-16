@@ -37,16 +37,32 @@ Deno.serve(async (req) => {
 
     const [cardsRes, accountsRes] = await Promise.all([
       supabase.from("credit_cards")
-        .select("id, card_name, masked_number, statement_password_rule, banks(name)")
+        .select("id, bank_id, card_name, masked_number, statement_password_rule")
         .eq("user_id", uid)
         .not("statement_password_rule", "is", null),
       supabase.from("financial_accounts")
-        .select("id, nickname, masked_number, statement_password_rule, banks(name)")
+        .select("id, bank_id, nickname, masked_number, statement_password_rule")
         .eq("user_id", uid)
         .not("statement_password_rule", "is", null),
     ]);
     if (cardsRes.error) throw cardsRes.error;
     if (accountsRes.error) throw accountsRes.error;
+
+    const bankIds = [...new Set([
+      ...(cardsRes.data ?? []).map((c: any) => c.bank_id),
+      ...(accountsRes.data ?? []).map((a: any) => a.bank_id),
+    ].filter(Boolean))];
+
+    const bankNames = new Map<string, string>();
+    if (bankIds.length) {
+      const { data: banks, error: banksError } = await supabase
+        .from("banks")
+        .select("id, name")
+        .eq("user_id", uid)
+        .in("id", bankIds);
+      if (banksError) throw banksError;
+      for (const bank of banks ?? []) bankNames.set((bank as any).id, (bank as any).name);
+    }
 
     const decrypt = async (rule: unknown): Promise<string | null> => {
       try { return await decryptStatementPassword(rule as StatementPasswordRule); }
@@ -56,16 +72,16 @@ Deno.serve(async (req) => {
     const cards = await Promise.all((cardsRes.data ?? []).map(async (c: any) => ({
       type: "card" as const,
       id: c.id,
-      label: c.card_name,
-      bank: c.banks?.name ?? null,
+      label: c.card_name ?? "Credit card",
+      bank: c.bank_id ? bankNames.get(c.bank_id) ?? null : null,
       mask: c.masked_number ?? null,
       password: await decrypt(c.statement_password_rule),
     })));
     const accounts = await Promise.all((accountsRes.data ?? []).map(async (a: any) => ({
       type: "account" as const,
       id: a.id,
-      label: a.nickname,
-      bank: a.banks?.name ?? null,
+      label: a.nickname ?? "Account",
+      bank: a.bank_id ? bankNames.get(a.bank_id) ?? null : null,
       mask: a.masked_number ?? null,
       password: await decrypt(a.statement_password_rule),
     })));
