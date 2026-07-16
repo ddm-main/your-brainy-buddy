@@ -54,6 +54,7 @@ export default function FinanceConfig() {
             <Route path="loans" element={<LoansConfig />} />
             <Route path="goals" element={<GoalsConfig />} />
             <Route path="subscriptions" element={<SubscriptionsConfig />} />
+            <Route path="passwords" element={<StatementPasswordsConfig />} />
           </Routes>
         </Suspense>
       </div>
