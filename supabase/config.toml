@@ -33,6 +33,9 @@ verify_jwt = false
 [functions.finance-set-statement-password]
 verify_jwt = true
 
+[functions.finance-list-statement-passwords]
+verify_jwt = true
+
 [functions.finance-statement-pdf-url]
 verify_jwt = true
 
