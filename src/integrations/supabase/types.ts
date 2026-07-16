@@ -1886,6 +1886,7 @@ export type Database = {
           content_sha256: string | null
           created_at: string
           credit_card_id: string | null
+          credit_limit: number | null
           due_date: string | null
           file_path: string | null
           financial_account_id: string | null
@@ -1924,6 +1925,7 @@ export type Database = {
           content_sha256?: string | null
           created_at?: string
           credit_card_id?: string | null
+          credit_limit?: number | null
           due_date?: string | null
           file_path?: string | null
           financial_account_id?: string | null
@@ -1962,6 +1964,7 @@ export type Database = {
           content_sha256?: string | null
           created_at?: string
           credit_card_id?: string | null
+          credit_limit?: number | null
           due_date?: string | null
           file_path?: string | null
           financial_account_id?: string | null
