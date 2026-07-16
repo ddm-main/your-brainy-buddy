@@ -785,10 +785,6 @@ export const db = {
         passwordProtected: Boolean(j.password_protected),
       };
     },
-    listPasswords: async (): Promise<Array<{ type: "card" | "account"; id: string; label: string; bank: string | null; mask: string | null; password: string | null }>> => {
-      const j = await callEdgeFunction("finance-list-statement-passwords", {});
-      return (j?.items ?? []) as any;
-    },
     upcomingDues: async (limit = 6) => {
       const todayIso = new Date().toISOString().slice(0, 10);
       const { data, error } = await supabase.from("statements")

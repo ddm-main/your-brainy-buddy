@@ -12,6 +12,15 @@ import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
 
 const limiter = createSlidingWindowLimiter(3, 60_000);
 
+// Hard cap: after this many auto-retries a row is left alone until the user
+// explicitly clicks "Retry" on it. Prevents a single broken PDF from
+// monopolising every batch and burning credits forever.
+const MAX_AUTO_LEARN_ATTEMPTS = 5;
+// Cool-down window between auto-retries of the same row. Applied to BOTH
+// the failed/pending/skipped branch and the parsed-but-incomplete branch so
+// the batch actually converges.
+const AUTO_RETRY_COOLDOWN_MS = 30 * 60_000;
+
 Deno.serve(async (req) => {
   const pre = preflight(req);
   if (pre) return pre;
@@ -42,6 +51,7 @@ Deno.serve(async (req) => {
     const DEADLINE_MS = 1_600;
     const startedAt = Date.now();
     const cutoff = new Date(Date.now() - sinceDays * 86400_000).toISOString();
+    const cooldownCutoff = new Date(Date.now() - AUTO_RETRY_COOLDOWN_MS).toISOString();
 
     const svc = svcClient();
     const { data: unresolvedRows, error } = await svc.from("statements")
@@ -49,6 +59,8 @@ Deno.serve(async (req) => {
       .eq("user_id", uid)
       .in("parse_status", ["pending", "failed", "skipped"])
       .gte("created_at", cutoff)
+      .lt("learn_attempts", MAX_AUTO_LEARN_ATTEMPTS)
+      .or(`last_learn_at.is.null,last_learn_at.lt.${cooldownCutoff}`)
       .order("updated_at", { ascending: true, nullsFirst: true })
       .limit(cap);
     if (error) throw error;
@@ -57,16 +69,16 @@ Deno.serve(async (req) => {
     if (includeIncompleteParsed && rows.length < cap) {
       // Only CARD statements have a lifecycle to reconcile. Accounts are
       // info-only, so treating an account row as "incomplete" for missing
-      // due_date/total_due would loop forever. Drop the 3-attempt cap —
-      // instead, only requeue if we haven't tried in the last 24 hours.
-      const twentyFourHoursAgo = new Date(Date.now() - 24 * 3600_000).toISOString();
+      // due_date/total_due would loop forever. Apply the same cool-down +
+      // attempt cap the failed branch uses.
       const { data: incompleteRows, error: incompleteErr } = await svc.from("statements")
         .select("id, user_id, statement_type, source_email_id, file_path, parse_status, credit_card_id, financial_account_id, loan_id, linked_bank_id, learn_attempts")
         .eq("user_id", uid)
         .eq("parse_status", "parsed")
         .eq("statement_type", "card")
         .gte("created_at", cutoff)
-        .or(`last_learn_at.is.null,last_learn_at.lt.${twentyFourHoursAgo}`)
+        .lt("learn_attempts", MAX_AUTO_LEARN_ATTEMPTS)
+        .or(`last_learn_at.is.null,last_learn_at.lt.${cooldownCutoff}`)
         .or("statement_date.is.null,due_date.is.null,total_due.is.null,transactions_found.eq.0")
         .order("updated_at", { ascending: true, nullsFirst: true })
         .limit(cap - rows.length);
@@ -171,15 +183,27 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Count unresolved rows still remaining beyond this batch so the caller
-    // knows whether to invoke again.
+    // Count unresolved rows still remaining beyond this batch, using the
+    // SAME filters we used to pick rows so the counter actually converges.
+    // Anything over the attempt cap or still on cool-down is reported as
+    // `throttled` so the UI can distinguish "waiting" from "stuck".
+    const nowIso = new Date().toISOString();
     const { count: unresolvedRemaining } = await svc.from("statements")
       .select("id", { count: "exact", head: true })
       .eq("user_id", uid)
       .in("parse_status", ["pending", "failed", "skipped"])
-      .gte("created_at", cutoff);
+      .gte("created_at", cutoff)
+      .lt("learn_attempts", MAX_AUTO_LEARN_ATTEMPTS)
+      .or(`last_learn_at.is.null,last_learn_at.lt.${nowIso}`);
+    const { count: unresolvedThrottled } = await svc.from("statements")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", uid)
+      .in("parse_status", ["pending", "failed", "skipped"])
+      .gte("created_at", cutoff)
+      .or(`learn_attempts.gte.${MAX_AUTO_LEARN_ATTEMPTS},last_learn_at.gt.${cooldownCutoff}`);
 
     let incompleteRemaining = 0;
+    let incompleteThrottled = 0;
     if (includeIncompleteParsed) {
       const { count } = await svc.from("statements")
         .select("id", { count: "exact", head: true })
@@ -187,8 +211,19 @@ Deno.serve(async (req) => {
         .eq("parse_status", "parsed")
         .eq("statement_type", "card")
         .gte("created_at", cutoff)
+        .lt("learn_attempts", MAX_AUTO_LEARN_ATTEMPTS)
+        .or(`last_learn_at.is.null,last_learn_at.lt.${cooldownCutoff}`)
         .or("statement_date.is.null,due_date.is.null,total_due.is.null,transactions_found.eq.0");
       incompleteRemaining = count ?? 0;
+      const { count: throttled } = await svc.from("statements")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", uid)
+        .eq("parse_status", "parsed")
+        .eq("statement_type", "card")
+        .gte("created_at", cutoff)
+        .or(`learn_attempts.gte.${MAX_AUTO_LEARN_ATTEMPTS},last_learn_at.gt.${cooldownCutoff}`)
+        .or("statement_date.is.null,due_date.is.null,total_due.is.null,transactions_found.eq.0");
+      incompleteThrottled = throttled ?? 0;
     }
 
     return new Response(JSON.stringify({
@@ -198,6 +233,8 @@ Deno.serve(async (req) => {
       failed,
       still_unresolved: stillUnresolved,
       remaining_after: (unresolvedRemaining ?? 0) + incompleteRemaining,
+      throttled: (unresolvedThrottled ?? 0) + incompleteThrottled,
+      attempt_cap: MAX_AUTO_LEARN_ATTEMPTS,
       results,
     }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {

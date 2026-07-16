@@ -26,6 +26,11 @@ function toIsoDate(raw: string | undefined | null, fallbackYear?: number | null)
 function toAmount(raw: string | undefined | null): number | null { const m = raw?.match(AMT_RX); if (!m) return null; const n = Number(m[1].replace(/,/g, "")); return Number.isFinite(n) ? n : null; }
 function normalizedLines(text: string): string[] { return text.replace(/\r/g, "\n").replace(/\u00a0/g, " ").split(/\n+/).map((line) => line.replace(/\s{2,}/g, " ").trim()).filter(Boolean); }
 function allAmounts(raw: string): number[] { const out: number[] = []; for (const m of raw.matchAll(/(?:INR|Rs\.?|₹|`)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/gi)) { const n = Number(m[1].replace(/,/g, "")); if (Number.isFinite(n) && n > 0) out.push(n); } return out; }
+function cardLast4(text: string): string | null {
+  return text.match(/(?:card\s*(?:number|no\.?|ending)?|account\s*(?:number|no\.?)?)\s*[:#\-]?\s*(?:\d{2,6})?[xX*\s-]{4,}(\d{4})\b/i)?.[1]
+    ?? text.match(/\b(?:ending|ends)\s+(?:in|with)\s+(\d{4})\b/i)?.[1]
+    ?? null;
+}
 
 const VALUE_CURRENCY = /\b(?:INR|Rs\.?)\b|₹|`/i;
 const COMPETING_LABEL = /\b(previous\s+balance|credit\s+limit|available|cash\s+limit|points?|purchases?|payments?|credits?|cash\s+advances?|interest|fees?|charges?|debits?)\b/i;
@@ -89,6 +94,7 @@ export function genericExtract(text: string, fallbackYear?: number | null): Pars
   const totalDueMatch = text.match(/total\s*(?:amount\s*)?dues?\s*[:\s]*(?:INR|Rs\.?|₹|`)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
   const minDueMatch = text.match(/(?:minimum\s*(?:amount\s*)?due|min\.?\s*due)\s*[:\s]*(?:INR|Rs\.?|₹|`)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
   const closingBalMatch = text.match(/closing\s*balance\s*[:\s]*(?:INR|Rs\.?|₹|`)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
+  const creditLimitMatch = text.match(/credit\s*limit\s*[:\s]*(?:INR|Rs\.?|₹|`)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
   const splitStatementDate = dateNearLabel(lines, /\b(statement\s*date|date\s*of\s*statement)\b/i, fallbackYear);
   const splitDueDate = dateNearLabel(lines, /\b(payment\s*due\s*date|due\s*date|payment\s*due\s*on)\b/i, fallbackYear);
   const splitTotalDue = amountNearLabel(lines, /\b(total\s*(?:amount\s*)?dues?|total\s*payment\s*due|amount\s*payable)\b/i);
@@ -102,6 +108,8 @@ export function genericExtract(text: string, fallbackYear?: number | null): Pars
     total_due: (totalDueMatch ? toAmount(totalDueMatch[0]) : null) ?? splitTotalDue,
     min_due: (minDueMatch ? toAmount(minDueMatch[0]) : null) ?? splitMinDue,
     closing_balance: (closingBalMatch ? toAmount(closingBalMatch[0]) : null) ?? splitClosing,
+    credit_limit: creditLimitMatch ? toAmount(creditLimitMatch[0]) : null,
+    card_last4: cardLast4(text),
     lines: extractLines(text, fallbackYear),
   };
 }

@@ -1881,6 +1881,7 @@ export type Database = {
       statements: {
         Row: {
           ai_summary: string | null
+          bank_slug: string | null
           closing_balance: number | null
           confidence: number | null
           content_sha256: string | null
@@ -1920,6 +1921,7 @@ export type Database = {
         }
         Insert: {
           ai_summary?: string | null
+          bank_slug?: string | null
           closing_balance?: number | null
           confidence?: number | null
           content_sha256?: string | null
@@ -1959,6 +1961,7 @@ export type Database = {
         }
         Update: {
           ai_summary?: string | null
+          bank_slug?: string | null
           closing_balance?: number | null
           confidence?: number | null
           content_sha256?: string | null

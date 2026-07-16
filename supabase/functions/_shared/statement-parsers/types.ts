@@ -10,6 +10,8 @@ export interface StatementLine {
   description: string;
   amount: number;
   txn_type: "debit" | "credit";
+  merchant_category?: string | null;
+  reference_number?: string | null;
 }
 
 export interface ParsedStatementFields {
@@ -20,6 +22,8 @@ export interface ParsedStatementFields {
   total_due: number | null;
   min_due: number | null;
   closing_balance: number | null;
+  credit_limit: number | null;
+  card_last4: string | null;
   lines: StatementLine[];
 }
 

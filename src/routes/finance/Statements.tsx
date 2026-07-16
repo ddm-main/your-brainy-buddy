@@ -15,7 +15,20 @@ function statusTone(status: string | null | undefined): "neutral" | "ok" | "warn
   if (status === "parsed") return "ok";
   if (status === "failed") return "err";
   if (status === "pending") return "warn";
+  if (status === "skipped") return "warn";
   return "neutral";
+}
+
+function statementStatusLabel(s: any): string {
+  const status = s.parse_status ?? "manual";
+  if (status === "skipped") return "attach PDF";
+  if (status === "pending") return "queued";
+  if (status === "failed") return "needs retry";
+  if (status !== "parsed") return status;
+  if (s.statement_type === "card" && (
+    s.statement_date == null || s.due_date == null || s.total_due == null || Number(s.transactions_found ?? 0) === 0
+  )) return "parsed · incomplete";
+  return "parsed";
 }
 
 // Human-friendly parse_error → hint used in the row hint and expanded panel.
@@ -34,6 +47,14 @@ function explainParseError(err: string | null | undefined): string | null {
       return "No PDF attachment was available in Gmail — row is linked where possible, attach the PDF to parse details.";
     case "unlinked_no_entity_match":
       return "Bank was detected, but no saved card/account confidently matched this statement.";
+    case "statement_update_failed":
+      return "Statement metadata could not be saved during an older parser run — retry this row.";
+    case "unknown_parse_error":
+      return "Parser could not complete required fields — retry with the improved parser, or attach/link the correct PDF.";
+    case "no_pdf_available":
+      return "No stored PDF or source email is available — attach the PDF manually.";
+    case "reparse_crashed":
+      return "Reparse crashed during the previous run — retry this row.";
     case "file_too_large":
       return "PDF exceeds the 20 MB size limit.";
     case "too_many_pages":
@@ -284,19 +305,35 @@ export default function Statements() {
     try {
       // The edge function processes a tiny batch per call (CPU-bound PDF
       // parsing hits the worker's ~2s limit). Loop until nothing's left, or
-      // we bail out after a safety cap of iterations.
+      // we detect no forward progress — a broken row would otherwise churn
+      // 40 batches producing 40 identical toasts.
       let totalParsed = 0;
       let totalScanned = 0;
       let remaining = targets.length;
-      for (let i = 0; i < 40; i++) {
+      let throttled = 0;
+      let lastRemaining = -1;
+      let noProgress = 0;
+      for (let i = 0; i < 20; i++) {
         const res: any = await db.statements.reparseAll({ limit: 3 });
         totalParsed += res?.parsed ?? 0;
         totalScanned += res?.scanned ?? 0;
         remaining = res?.remaining_after ?? 0;
-        push(`Batch ${i + 1}: ${res?.parsed ?? 0}/${res?.scanned ?? 0} parsed · ${remaining} left`, remaining ? "info" : "ok");
+        throttled = res?.throttled ?? 0;
         if (!remaining || (res?.scanned ?? 0) === 0) break;
+        // Everything left is on cool-down or over the attempt cap.
+        if (remaining > 0 && remaining === throttled) break;
+        // Two consecutive no-progress batches → stop.
+        if ((res?.parsed ?? 0) === 0 && remaining === lastRemaining) {
+          noProgress++;
+          if (noProgress >= 2) break;
+        } else {
+          noProgress = 0;
+        }
+        lastRemaining = remaining;
       }
-      push(`Done · ${totalParsed}/${totalScanned} parsed · ${remaining} still need input`, remaining ? "warn" : "ok");
+      const tone = remaining === 0 ? "ok" : throttled >= remaining ? "info" : "warn";
+      const suffix = throttled > 0 && remaining > 0 ? ` (${throttled} throttled — retry manually)` : "";
+      push(`Reparse done · ${totalParsed}/${totalScanned} parsed · ${remaining} left${suffix}`, tone);
       await load();
     } finally { setRetryingAll(false); }
   };
@@ -706,7 +743,7 @@ export default function Statements() {
                             s.statement_date == null || s.due_date == null || s.total_due == null ||
                             Number(s.transactions_found ?? 0) === 0
                           );
-                          const label = s.parse_status === "parsed" && incomplete ? "parsed · incomplete" : (s.parse_status ?? "manual");
+                          const label = statementStatusLabel(s);
                           const tone = incomplete ? "warn" : statusTone(s.parse_status);
                           return <Chip tone={tone}>{label}</Chip>;
                         })()}
@@ -728,13 +765,30 @@ export default function Statements() {
                         {showParseReason && (
                           <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2, maxWidth: 220 }}>{s.parse_reason}</div>
                         )}
-                        {needsReparse(s) && s.parse_status === "parsed" && (
-                          <div style={{ fontSize: 10, color: "var(--warn)", marginTop: 2, maxWidth: 220 }}>
-                            {Number(s.learn_attempts ?? 0) >= 3
-                              ? "learner exhausted — click retry to re-scan"
-                              : "missing fields — auto re-scan queued"}
-                          </div>
-                        )}
+                        {needsReparse(s) && s.parse_status === "parsed" && (() => {
+                          // Show WHICH fields are missing, not the generic
+                          // "missing fields" line. Prefer parse_error's
+                          // `missing_fields:x,y,z` payload, else derive from
+                          // the current row.
+                          let missing: string[] = [];
+                          const mErr = /missing_fields:([\w,]+)/i.exec(s.parse_error ?? "");
+                          if (mErr) missing = mErr[1].split(",").filter(Boolean);
+                          else {
+                            if (s.statement_date == null) missing.push("statement_date");
+                            if (s.due_date == null) missing.push("due_date");
+                            if (s.total_due == null) missing.push("total_due");
+                            if (Number(s.transactions_found ?? 0) === 0) missing.push("transactions");
+                          }
+                          const exhausted = Number(s.learn_attempts ?? 0) >= 3;
+                          return (
+                            <div style={{ fontSize: 10, color: "var(--warn)", marginTop: 2, maxWidth: 220 }}
+                                 title={missing.length ? `missing: ${missing.join(", ")}` : ""}>
+                              {exhausted
+                                ? "learner exhausted — click retry"
+                                : `missing ${missing.length ? missing.join(", ") : "fields"} — auto re-scan queued`}
+                            </div>
+                          );
+                        })()}
                         {hint && s.parse_status !== "parsed" && hint !== s.parse_reason && hint !== s.parse_error && (
                           <div style={{ fontSize: 10, color: "var(--warn)", marginTop: 2, maxWidth: 220 }}>{hint}</div>
                         )}
@@ -751,6 +805,9 @@ export default function Statements() {
                          <div style={{ display: "flex", gap: 24, flexWrap: "wrap", fontSize: 11, color: "var(--text-dim)" }}>
                            <div><span className="hud-label">total due</span><br />{s.total_due != null ? inr(s.total_due) : "—"}</div>
                            <div><span className="hud-label">closing balance</span><br />{s.closing_balance != null ? inr(s.closing_balance) : "—"}</div>
+                            {s.statement_type === "card" && s.credit_limit != null && (
+                              <div><span className="hud-label">credit limit</span><br />{inr(s.credit_limit)}</div>
+                            )}
                            <div><span className="hud-label">statement date</span><br />{s.statement_date ? new Date(s.statement_date).toLocaleDateString() : "—"}</div>
                            <div><span className="hud-label">due date</span><br />{s.due_date ? new Date(s.due_date).toLocaleDateString() : "—"}</div>
                             {s.statement_type === "card" && s.min_due != null && (

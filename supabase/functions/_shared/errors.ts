@@ -15,11 +15,7 @@ export interface SafeErrorBody {
 
 export function sanitizeError(err: unknown, publicMessage: string, logContext: string): SafeErrorBody {
   const ref = crypto.randomUUID().slice(0, 8);
-  const detail = err instanceof Error
-    ? (err.stack ?? err.message)
-    : typeof err === "object" && err !== null
-      ? JSON.stringify(err)
-      : String(err);
+  const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
   console.error(`${logContext} [ref ${ref}]:`, detail);
   return { error: `${publicMessage} (ref ${ref})`, ref };
 }

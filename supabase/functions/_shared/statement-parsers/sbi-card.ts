@@ -5,52 +5,10 @@
 
 import type { ParserContext, ParserResult, StatementLine } from "./types.ts";
 import { extractLines, genericExtract, reportMissing } from "./generic.ts";
-
-const MONTHS: Record<string, string> = {
-  jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
-  jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12",
-};
-
-function toIsoDate(raw: string | undefined | null, fallbackYear?: number | null): string | null {
-  if (!raw) return null;
-  const s = raw.trim();
-  let m = s.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4}|\d{2})$/);
-  if (m) {
-    const yr = m[3].length === 2 ? `20${m[3]}` : m[3];
-    return `${yr}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
-  }
-  m = s.match(/^(\d{1,2})[\s-]+([A-Za-z]{3,})[\s-]+(\d{2}|\d{4})$/);
-  if (m) {
-    const mon = MONTHS[m[2].slice(0, 3).toLowerCase()];
-    const yr = m[3].length === 2 ? `20${m[3]}` : m[3];
-    if (mon) return `${yr}-${mon}-${m[1].padStart(2, "0")}`;
-  }
-  m = s.match(/^(\d{1,2})[\s-]+([A-Za-z]{3,})$/);
-  if (m && fallbackYear) {
-    const mon = MONTHS[m[2].slice(0, 3).toLowerCase()];
-    if (mon) return `${fallbackYear}-${mon}-${m[1].padStart(2, "0")}`;
-  }
-  return null;
-}
-
-function toAmount(raw: string | undefined | null): number | null {
-  if (!raw) return null;
-  const m = raw.match(/([0-9][0-9,]*(?:\.[0-9]{1,2})?)/);
-  if (!m) return null;
-  const n = Number(m[1].replace(/,/g, ""));
-  return Number.isFinite(n) ? n : null;
-}
+import { inferYear, toAmount, toIsoDate } from "./shared.ts";
 
 const DATE = /([0-9]{1,2}[./-][0-9]{1,2}[./-](?:[0-9]{4}|[0-9]{2})|[0-9]{1,2}[\s-]+[A-Za-z]{3,}(?:[\s-]+(?:[0-9]{4}|[0-9]{2}))?)/;
 const AMOUNT_ONLY = /^\s*(?:INR|Rs\.?|₹|`|\(|\)|\s)*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*(?:CR|DR|C|D)?\s*$/i;
-
-function inferYear(text: string, ctx: ParserContext): number | null {
-  if (ctx.statement_year) return ctx.statement_year;
-  const hay = `${ctx.subject ?? ""} ${text.slice(0, 1200)}`;
-  const full = hay.match(/\b(20\d{2})\b/);
-  if (full) return Number(full[1]);
-  return null;
-}
 
 function normalizedLines(text: string): string[] {
   return text
@@ -59,6 +17,26 @@ function normalizedLines(text: string): string[] {
     .split(/\n+/)
     .map((line) => line.replace(/\s{2,}/g, " ").trim())
     .filter(Boolean);
+}
+
+// SBI masks credit card numbers as `XXXX XXXX XXXX XX##` — only the trailing
+// 2 digits are exposed. Anchor on the `Credit Card Number` label to avoid
+// pulling `2999` from the fee-waiver line at the bottom of the statement.
+function sbiCardLast4(rawText: string): string | null {
+  const lines = rawText.replace(/\r/g, "\n").split(/\n+/);
+  for (let i = 0; i < lines.length; i++) {
+    if (!/\bCredit\s*Card\s*Number\b/i.test(lines[i])) continue;
+    for (let j = i + 1; j <= Math.min(lines.length - 1, i + 4); j++) {
+      const raw = lines[j].trim();
+      if (!raw) continue;
+      const m = raw.match(/[X\*]{2,}\s*([0-9]{2,4})\b/i);
+      if (m) return m[1];
+      const m2 = raw.match(/^\d{4}[X*]+\d{2,4}$/);
+      if (m2) return raw.slice(-4);
+    }
+  }
+  // Fallback: full 12-mask form (some SBI variants render `4784XXXXXXXX1234`)
+  return rawText.match(/\b\d{4}[X*]{4,}(\d{4})\b/)?.[1] ?? null;
 }
 
 function lastDateIn(raw: string, fallbackYear?: number | null): string | null {
@@ -83,8 +61,9 @@ function dateNearLabel(lines: string[], label: RegExp, fallbackYear?: number | n
 function amountAfterLabel(lines: string[], label: RegExp): number | null {
   const idx = lines.findIndex((line) => label.test(line));
   if (idx < 0) return null;
-  const inline = lines[idx].slice((lines[idx].match(label)?.index ?? 0) + (lines[idx].match(label)?.[0]?.length ?? 0));
-  const inlineAmount = toAmount(inline);
+  const match = lines[idx].match(label);
+  const cursor = (match?.index ?? 0) + (match?.[0]?.length ?? 0);
+  const inlineAmount = toAmount(lines[idx].slice(cursor));
   if (inlineAmount !== null) return inlineAmount;
   for (let i = idx + 1; i <= Math.min(lines.length - 1, idx + 5); i++) {
     if (/\b(stmt|statement\s+no|ckyc|credit\s+limit|available|pay\s+now|card\s+number)\b/i.test(lines[i])) continue;
@@ -97,16 +76,21 @@ function amountAfterLabel(lines: string[], label: RegExp): number | null {
 function extractSbiLines(lines: string[], fallbackYear?: number | null): StatementLine[] {
   const out: StatementLine[] = [];
   const seen = new Set<string>();
-  const rowRx = /^\s*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[A-Za-z]{3,}(?:\s+\d{2,4})?)\s+(.+?)\s+((?:[0-9]{1,3}(?:,[0-9]{2,3})+|[0-9]+)(?:\.[0-9]{2})?)\s*(C|D|Cr|CR|Dr|DR|Credit|Debit)\s*$/i;
+  const rowStartRx = /^\s*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[A-Za-z]{3,}(?:\s+\d{2,4})?)\s+(.+)$/i;
+  const amountTokenRx = /((?:[0-9]{1,3}(?:,[0-9]{2,3})+|[0-9]+)(?:\.[0-9]{2})?)\s*(C|D|Cr|CR|Dr|DR|Credit|Debit)?\b/gi;
   for (const line of lines) {
-    const m = line.match(rowRx);
+    const m = line.match(rowStartRx);
     if (!m) continue;
     const date = toIsoDate(m[1], fallbackYear);
-    const amount = toAmount(m[3]);
+    const rest = m[2].trim();
+    const tokens = Array.from(rest.matchAll(amountTokenRx));
+    if (!tokens.length) continue;
+    const token = tokens.find((tok) => tok[2]) ?? tokens[tokens.length - 1];
+    const amount = toAmount(token[1]);
     if (!date || amount == null || amount <= 0) continue;
-    const description = m[2].trim();
+    const description = rest.slice(0, token.index).trim();
     if (!description || /^(date|transaction details|transactions for)/i.test(description)) continue;
-    const marker = m[4].toLowerCase();
+    const marker = (token[2] ?? "D").toLowerCase();
     const txn_type = marker === "c" || marker === "cr" || marker === "credit" ? "credit" : "debit";
     const key = `${date}|${amount}|${description.slice(0, 40).toLowerCase()}`;
     if (seen.has(key)) continue;
@@ -126,33 +110,39 @@ export const sbiCardParser = (text: string, ctx: ParserContext): ParserResult =>
     ?? compact.match(new RegExp(`date\\s*of\\s*statement\\s*[:\\s]*${DATE.source}`, "i"));
   const dueDateMatch = compact.match(new RegExp(`(?:payment\\s*)?due\\s*date\\s*[:\\s]*${DATE.source}`, "i"))
     ?? compact.match(new RegExp(`payment\\s*due\\s*on\\s*[:\\s]*${DATE.source}`, "i"));
-  const totalDueMatch = compact.match(/(?:total\s*(?:amount\s*)?due|total\s*payment\s*due|amount\s*payable)\s*[:\s]*(?:INR|Rs\.?|₹)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
-  const minDueMatch = compact.match(/(?:minimum\s*(?:amount\s*)?due|min\.?\s*due)\s*[:\s]*(?:INR|Rs\.?|₹)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
+  // Handle SBI's "NO PAYMENT REQUIRED" sentinel when the card has zero balance.
+  const noPaymentRequired = /NO\s*PAYMENT\s*REQUIRED/i.test(compact);
+  const totalDueMatch = compact.match(/(?:total\s*(?:amount\s*)?due|total\s*payment\s*due|amount\s*payable)\s*[:\s]*(?:INR|Rs\.?|₹|`)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
+  const minDueMatch = compact.match(/(?:minimum\s*(?:amount\s*)?due|min\.?\s*due)\s*[:\s]*(?:INR|Rs\.?|₹|`)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
   const periodMatch = compact.match(new RegExp(`(?:statement\\s*)?period\\s*[:\\s]*${DATE.source}\\s*(?:to|-|–)\\s*${DATE.source}`, "i"))
     ?? compact.match(new RegExp(`for\\s+the\\s+period\\s+${DATE.source}\\s*(?:to|-|–)\\s*${DATE.source}`, "i"));
-  const creditLimitMatch = compact.match(/credit\s*limit\s*[:\s]*(?:INR|Rs\.?|₹)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
+  const creditLimitMatch = compact.match(/credit\s*limit[^\n]*?[:\s]*(?:INR|Rs\.?|₹|`)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
   const splitStatementDate = dateNearLabel(lines, /\bstatement\s*date\b/i, inferredYear);
   const splitDueDate = dateNearLabel(lines, /\bpayment\s*due\s*date\b|\bdue\s*date\b/i, inferredYear);
   const splitTotalDue = amountAfterLabel(lines, /\btotal\s*(?:amount\s*)?due\b/i);
   const splitMinDue = amountAfterLabel(lines, /\bminimum\s*(?:amount\s*)?due\b|\bmin\.?\s*due\b/i);
 
   const sbiLines = extractSbiLines(lines, inferredYear);
+  const resolvedTotal = (totalDueMatch ? toAmount(totalDueMatch[1]) : null) ?? splitTotalDue ?? base.total_due;
+  const resolvedStmtDate = (statementDateMatch ? toIsoDate(statementDateMatch[1], inferredYear) : null) ?? splitStatementDate ?? base.statement_date;
+  const last4 = sbiCardLast4(text);
+
   const fields = {
     ...base,
-    statement_date: (statementDateMatch ? toIsoDate(statementDateMatch[1], inferredYear) : null) ?? splitStatementDate ?? base.statement_date,
-    due_date: (dueDateMatch ? toIsoDate(dueDateMatch[1], inferredYear) : null) ?? splitDueDate ?? base.due_date,
-    total_due: (totalDueMatch ? toAmount(totalDueMatch[1]) : null) ?? splitTotalDue ?? base.total_due,
+    statement_date: resolvedStmtDate,
+    // NO PAYMENT REQUIRED (zero balance) — treat statement_date as the effective due_date placeholder.
+    due_date: (dueDateMatch ? toIsoDate(dueDateMatch[1], inferredYear) : null) ?? splitDueDate ?? (noPaymentRequired ? resolvedStmtDate : base.due_date),
+    total_due: noPaymentRequired && resolvedTotal == null ? 0 : resolvedTotal,
     min_due: (minDueMatch ? toAmount(minDueMatch[1]) : null) ?? splitMinDue ?? base.min_due,
     period_start: periodMatch ? toIsoDate(periodMatch[1], inferredYear) : base.period_start,
     period_end: periodMatch ? toIsoDate(periodMatch[2], inferredYear) : base.period_end,
-    // SBI Card statements don't carry a running "closing balance" like an
-    // account statement — total_due is the payable amount.
-    closing_balance: base.closing_balance ?? (totalDueMatch ? toAmount(totalDueMatch[1]) : null) ?? splitTotalDue,
+    credit_limit: (creditLimitMatch ? toAmount(creditLimitMatch[1]) : null) ?? base.credit_limit,
+    closing_balance: base.closing_balance ?? resolvedTotal,
+    card_last4: last4 ?? base.card_last4,
     lines: sbiLines.length ? sbiLines : (base.lines.length ? base.lines : extractLines(compact, inferredYear)),
   };
 
   const missing = reportMissing(fields, ["statement_date", "due_date", "total_due"]);
-  void creditLimitMatch; // reserved for future card-limit sync
   const hay = `${ctx.subject ?? ""} ${text.slice(0, 400)}`.toLowerCase();
   let inferred = ctx.card_family ?? null;
   if (!inferred) {

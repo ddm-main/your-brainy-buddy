@@ -1,0 +1,144 @@
+167302/86916724-16771/1-2/RESTS/07-04
+                                                                                                                                             Your Base Branch : PUNE - MODEL COLONY
+                                                                                                                                             BRANCH, CTS NO 1125, FINAL PLOT NO 499,
+MR.DEEPAK SUBHASH DONGARE                                                                                                                    MODEL COLONY, BHAMBURDA, 411016
+ROOM,NO 180 SAINATH CHAWL,NEAR SAI,
+BABA MANDIR WAGHOBA,NAGAR KALWA-E,KALWA EAST                                                                                                  : Visit www.icici.bank.in
+THANE
+MAHARASHTRA - INDIA - 400605                                                                                                                  Å Dial your Bank 1800 1080
+  Never share your OTP, URN, CVV or passwords with anyone, even if the person claims to be a Bank employee.
+
+STATEMENT SUMMARY for Customer ID : XXXXX5015 as on June 30, 2026. CKYC ID: 30092642927256
+
+ACCOUNT DETAILS - INR
+ACCOUNT HOLDERS : MR.DEEPAK SUBHASH DONGARE
+
+ ACCOUNT TYPE                                                                                                                       ACCOUNT BALANCE (I)                     NOMINATION
+
+ Savings A/c XXXXXXXX3037                                                                                                                              23,683.39             Registered
+
+ TOTAL                                                                                                                                                 23,683.39
+
+
+Note: Amount available for withdrawal from Operative Account includes Savings/Current Account Balance and principal amount of Linked Fixed Deposits.
+
+ Statement of Transactions in Savings Account XXXXXXXX3037 in INR for the period June 01, 2026 - June 30, 2026
+
+
+ DATE           MODE                     PARTICULARS                                                                             DEPOSITS                  WITHDRAWALS                BALANCE
+
+01-06-2026                               B/F                                                                                                                                         1,10,015.32
+                                         BIL/NEFT/IN12615239683298/MF/DEEPAK SUB/KOTAK
+01-06-2026                                                                                                                                                      10,000.00            1,00,015.32
+                                         MAHINDRA
+                                         CANARA ROBECO MUTUAL FUND
+                                         NEFT-HDFCH01033791633-CANARA ROBECO MUTUAL
+02-06-2026                                                                                                                        40,074.13                                          1,40,089.45
+                                         FUND EQUITY SCHEME REDEMPTION-0001NEFT -
+                                         17753874-00600
+                                         Deepak Dongare
+                                         UPI/Deepak Don/8425062561@yes/Paid via C/Kotak
+03-06-2026                                                                                                                                                    1,00,000.00             40,089.45
+                                         Mahi/652014572560/YCD7A63C76DF0BB4ACA955C7DF9738
+                                         780DF
+05-06-2026                               BIL/Used Car Loan XX55381 EMI Deep                                                                                     14,905.00             25,184.45
+05-06-2026                               BIL/Home Loan XX42175 EMI Deepak S                                                                                     21,039.00                 4,145.45
+                                         DEEPAK DONGARE
+                                         UPI/DEEPAK DON/8425062561@yes/Paid via C/HDFC
+16-06-2026                                                                                                                        53,500.00                                           57,645.45
+                                         BANK/653329546274/YCD56EB97A09B7B496BA6DFB14D6D
+                                         01AAD0
+                                         DEEPAK DONGARE
+                                         UPI/DEEPAK DON/8425062561@yes/Paid via C/HDFC
+16-06-2026                                                                                                                         7,000.00                                           64,645.45
+                                         BANK/653301600791/YCD6098154979EE4C08BB2138715FE
+                                         D8416
+16-06-2026                               BIL/INFT/FFK1647622/CC BillPay-6003/Self                                                                               63,897.39                  748.06
+30-06-2026 NET BANKING                   INF/INFT/044936165571/RealThingks Salary June 2026/                                    1,09,258.00                                          1,10,006.06
+30-06-2026                               167301503037:Int.Pd:30-03-2026 to 29-06-2026                                                102.00                                          1,10,108.06
+                                         CRED Club
+                                         UPI/CRED Club/cred.club@axis/payment on/AXIS
+30-06-2026                                                                                                                                                      26,424.67             83,683.39
+                                         BANK/654730555545/ACD5046e05c94dc4d63b660c19469aaf
+                                         cda/
+                                         Deepak Dongare
+                                         UPI/Deepak Don/8425062561@yes/Paid via C/Kotak
+30-06-2026                                                                                                                                                      50,000.00             33,683.39
+                                         Mahi/654730555890/YCD2179A64B9CF743EC94A4ACD5294
+                                         04016
+                                         Deepak Dongare
+                                         UPI/Deepak Don/8425062561@yes/Paid via C/HDFC
+30-06-2026                                                                                                                                                      10,000.00             23,683.39
+                                         BANK/654724572479/YCDEDE630B626DA4209B898D192D1
+                                         F48E1F/
+                                        Total:                                                                                 2,09,934.13                    2,96,266.06             23,683.39
+
+
+
+Account Related Other Information
+
+ ACCOUNT TYPE                          ACCOUNT NUMBER                                    MICR CODE                          IFS CODE                   NAME OF NOMINEE*
+
+ Savings                               XXXXXXXX3037                                      411229032                        ICIC0001673                  -
+
+* Nominee name displayed only upon specific consent of the customer
+
+
+
+
+                                                                                                                                                                      Page 1 of 2 M-86916724-16771
+Sincerely,                                                                                                          Legends for transactions in your Account Statement
+Team ICICI Bank                                                       VAT/MAT/NFS- Cash Withdrawal at other Bank's ATM                                       INF - Internet fund transfer in linked Accounts
+                                                                      EBA / ISEC-Transaction at ICICIDirect                                                  BIL - Internet bill payment or funds transfer to third party
+                                                                      VPS/IPS-Debit Card Transaction                                                         TOP - Mobile Recharge
+                                                                      RTGS-Real Time Gross Settlement (Instant transfer above Rs 2 Lakh)                     NEFT - National Electronic Fund Transfer
+
+                                                           This is a system generated statement. Hence, it does not require any signature.
+You can now download the Account Statement using the iMobile Pay app and Internet Banking.
+Customers with Pradhan Mantri Jan Dhan Yojana (PMJDY) Account, having RuPay PMJDY Debit Card are eligible for Personal Accident Insurance Cover under the RuPay Insurance Programme by NPCI, subject
+to Terms & Conditions. Please visit our website for more details.
+
+Card blocking procedure for Savings Account:
+iMobile: Log in to iMobile > Debit Card > Services > Card Services > Block/Unblock Debit Card
+Personal Banking: Call 1800 1080 > IVR > Voice Assist > Say ‘Card Block’ or press ‘0’.
+Internet Banking: Service Request > Block Debit/ATM Card > Select the Card you want to block > Submit.
+Card blocking procedure for Current Account:
+InstaBIZ: Log in to InstaBIZ > More > Services > Debit Card > Card Block/Unblock
+Corporate Internet Banking > Service Request > Debit Card > Block Debit Card.
+Account blocking procedure for Savings Account:
+SMS: SMS ‘BLOCK’ <last three digits of your Account number> to 9215676766
+W.e.f. July 1, 2023, a monthly limit will be applicable on ATM cash withdrawals using Debit Cards. (Minimum limit of ₹ 2 lakh up to a maximum of ₹7.5 lakh as per the Card type). For details, please visit
+https://www.icici.bank.in/about-us/notice-board
+
+
+
+
+ l   ICICI Bank will follow the Customer Relationship Policy to address the customer risks arising out of                l   Grievance Redressal / Complaints / Escalations: If you are not satisfied with our services, you may register your
+     unauthorised electronic banking transaction. The policy is already available on the ICICI Bank website:                 grievance by (i) visiting the ‘Complaint Form’ section on www.icici.bank.in or (ii) by calling our Customer Care on
+     Homepage>>Other>>Customer Service Policies>>Customer Relations Policy                                                   1800 1080 or (iii) by writing to Mrs. Sharlet Malvankar - The Principal Nodal Officer, ICICI Bank Ltd., Bandra Kurla
+ l   Update nominee details for your ICICI Bank Account and ensure your family's financial security.                         Complex Mumbai - 400051, Telephone No.: 022-39337979 (Monday to Friday, 10.00 a.m. to 5:00 p.m. excluding
+                                                                                                                             Bank holidays), E-mail: pno@icici.bank.in
+ l   There is a revision in the service charge for domestic Savings/Current Accounts w.e.f. July 01, 2025. For
+     details, please visit https://www.icici.bank.in/notice-board.page                                                   l   Do not fall prey to fictitious offers about winning prizes, money circulation schemes, cheap funds, etc. through SMS,
+                                                                                                                             e-mails and calls.
+ l   There   is   a   change   in   the   Terms   and   Conditions   for   Salary   Accounts.   For   details,   visit
+     www.icici.bank.in/managed-assets/docs/terms-condition/tnc-savings-account.pdf (Clause XV).                          l   As per the prevailing guidelines of the Income Tax Act, 1961, if valid PAN is not provided by the customer, then the
+                                                                                                                             Form 15G/15H will not be treated as valid and tax will be deducted at the prevailing rate or at 20%, whichever is
+ l   Bank’s Code of Commitment to its Customers and Micro and Small Enterprises (MSE): Please visit                          higher. PAN can be updated online or at the nearest ICICI Bank Branch .
+     www.icici.bank.in > ‘About Us’ > ‘Notice Board’ > ‘Code of Commitment’. The Code has been framed as per
+     the guidelines provided by Banking Codes and Standards Board of India (BCSBI).                                      l   The address of the customer in Form 16A will be the last updated address in the database of the income tax
+                                                                                                                             department.
+ l   As per the guidelines issued by CBDT on May 13,2011, Form 16A (TDS Certificates) will be generated
+     through the Income tax website for which the PAN of the customer needs to be necessarily updated in the             l   PMJJBY Insurance: The insurance premium is collected on behalf of ICICI Prudential Life Insurance Company Limited
+     Bank's record.                                                                                                          plus administration charges are collected by ICICI Bank (including GST), as per the existing laws. Effective Sep 01,
+                                                                                                                             2018, a premium is charged on a pro-rata basis for all new enrolments in the scheme. It is noteworthy that the
+ l   The depositor is insured by the Deposit Insurance and Credit Guarantee Corporation (DICGC) up to a                      renewal premium for all existing customers will be charged for a period of one year (i.e. Rs 330) between May 25
+     maximum of Rs. 5 lakh, for both principal and interest amount held by him/her in the same right and same                and May 31, every year. For details on the premium structure, refer to the Terms & Conditions under the Pradhan
+     capacity.                                                                                                               Mantri Social Security Schemes at www.icici.bank.in .
+Corporate Office: ICICI Bank Ltd., ICICI Bank Towers, Bandra-Kurla complex, Mumbai - 400051, India.                                                         www.icici.bank.in                           Page 2 of 2 M-86916724-16771
+Registered Office: ICICI Bank Tower, Near Chakli Circle, Old Padra Road, Vadodara, Gujarat. Pin – 390 007.                                                  Category of service: Banking & Financial Services.
+                                                                                                                                                            Registration No. MIV/ST/Bank & Finc/4.
+This is an authenticated intimation/statement.
+                                                                                                                                                            CIN : L65190GJ1994PLC021012
+Customers are requested to immediately notify the Bank in case of any error(s) in the statement.                                                                                                                                          SR244554715
+

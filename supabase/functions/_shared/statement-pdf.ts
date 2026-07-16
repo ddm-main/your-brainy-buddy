@@ -16,6 +16,8 @@ export interface StatementLine {
   description: string;
   amount: number;
   txn_type: "debit" | "credit";
+  merchant_category?: string | null;
+  reference_number?: string | null;
 }
 
 export interface PdfParseResult {
@@ -27,6 +29,8 @@ export interface PdfParseResult {
   total_due: number | null;
   min_due: number | null;
   closing_balance: number | null;
+  credit_limit: number | null;
+  card_last4: string | null;
   lines: StatementLine[];
   parser_source?: string | null;
   parse_confidence?: number | null;
@@ -44,6 +48,8 @@ function emptyResult(overrides: Partial<PdfParseResult> = {}): PdfParseResult {
     total_due: null,
     min_due: null,
     closing_balance: null,
+    credit_limit: null,
+    card_last4: null,
     lines: [],
     parser_source: "generic",
     parse_confidence: 0.35,
@@ -129,7 +135,7 @@ export async function parseStatementPdf(
     return {
       ok: false,
       period_start: null, period_end: null, statement_date: null, due_date: null,
-      total_due: null, min_due: null, closing_balance: null, lines: [],
+      total_due: null, min_due: null, closing_balance: null, credit_limit: null, card_last4: null, lines: [],
       error: extracted.error,
     };
   }
@@ -181,7 +187,7 @@ export async function parseStatementPdfWithPasswords(
     lastFailure = r;
   }
   return {
-    result: lastFailure ?? { ok: false, period_start: null, period_end: null, statement_date: null, due_date: null, total_due: null, min_due: null, closing_balance: null, lines: [], error: "wrong_or_missing_password" },
+    result: lastFailure ?? { ok: false, period_start: null, period_end: null, statement_date: null, due_date: null, total_due: null, min_due: null, closing_balance: null, credit_limit: null, card_last4: null, lines: [], error: "wrong_or_missing_password" },
     winning_password: null,
     tried,
   };
@@ -370,6 +376,8 @@ export function parseStatementText(text: string, hint?: { bank_slug?: string | n
     total_due: enriched.total_due,
     min_due: enriched.min_due,
     closing_balance: enriched.closing_balance,
+    credit_limit: enriched.credit_limit,
+    card_last4: enriched.card_last4,
     lines: enriched.lines,
     parser_source: r.parser_source,
     parse_confidence: r.confidence,

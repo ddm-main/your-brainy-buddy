@@ -26,6 +26,7 @@ import {
 } from "./statement-skeleton.ts";
 
 import { detectBank } from "./statement-parsers/index.ts";
+import { computeCardPaymentStatus } from "./card-payment-status.ts";
 
 const STATEMENT_BUCKET = "statement-pdfs";
 
@@ -133,11 +134,37 @@ function subjectTokenScore(subject: string | null | undefined, entityName: strin
   return normWords(entityName).reduce((score, w) => score + (hay.has(w) ? 1 : 0), 0);
 }
 
+// Canonical display name per slug — used when auto-inserting a banks row
+// so the user sees "Yes Bank" rather than "yes bank". Everything not in
+// this map falls back to a Title-Cased slug.
+const BANK_DISPLAY: Record<string, string> = {
+  "hdfc": "HDFC Bank",
+  "icici": "ICICI Bank",
+  "axis": "Axis Bank",
+  "sbi": "SBI",
+  "yes bank": "Yes Bank",
+  "kotak": "Kotak Mahindra Bank",
+  "amazon-pay-icici": "Amazon Pay ICICI",
+  "airtel-axis": "Airtel Axis",
+};
+
 async function findBankId(svc: SupabaseClient, userId: string, bankSlug: string | null): Promise<string | null> {
   if (!bankSlug) return null;
   const { data: banks } = await svc.from("banks").select("id, name").eq("user_id", userId);
   const match = (banks ?? []).find((b: any) => bankMatches(b.name, bankSlug));
-  return match?.id ?? null;
+  if (match?.id) return match.id;
+  // Auto-insert the bank so this and future statements can link immediately
+  // instead of showing "Unknown bank / unlinked" forever. Safe: banks are
+  // per-user, dedup'd by name lower via the unique index; if a race inserts
+  // twice we swallow and re-select.
+  const displayName = BANK_DISPLAY[bankSlug] ?? bankSlug.replace(/\b\w/g, (c) => c.toUpperCase());
+  const { data: inserted, error: insErr } = await svc.from("banks")
+    .insert({ user_id: userId, name: displayName })
+    .select("id")
+    .single();
+  if (!insErr && inserted?.id) return inserted.id;
+  const { data: refetched } = await svc.from("banks").select("id, name").eq("user_id", userId);
+  return (refetched ?? []).find((b: any) => bankMatches(b.name, bankSlug))?.id ?? null;
 }
 
 export async function resolveLinks(svc: SupabaseClient, userId: string, parsed: Parsed, email?: any) {
@@ -336,9 +363,6 @@ export async function parseStoredStatementPdf(
   const pwdSource: PasswordSource = rotation.result.ok
     ? (rotation.winning_password == null ? "unprotected" : (savedPwd && rotation.winning_password === savedPwd ? "saved" : "candidate"))
     : "none";
-  if (rotation.result.ok && rotation.winning_password && !savedPwd) {
-    await saveWinningPassword(svc, links, rotation.winning_password);
-  }
   // Skeleton-learner fallback: if regex parsing missed required fields but
   // we did extract text, learn (or reuse) a per-bank skeleton and re-derive
   // the fields via cached anchors — no LLM cost on subsequent statements of
@@ -347,7 +371,25 @@ export async function parseStoredStatementPdf(
     svc, userId, statementId, rotation.result,
     { bank_slug: opts.bank_slug ?? null, statement_type: opts.statement_type ?? null, subject: opts.subject ?? null, sender: opts.sender ?? null, force_relearn: opts.force_relearn ?? false, links },
   );
-  await applyParsedStatementResult(svc, statementId, userId, links, finalResult.result, stored.storagePath, stored.attachmentId, pwdSource, finalResult.skeleton_id);
+  const pdfLinks = await resolveLinksFromPdf(svc, userId, links, finalResult.result, {
+    bank_slug: opts.bank_slug ?? null,
+    subject: opts.subject ?? null,
+    sender: opts.sender ?? null,
+  });
+  if (rotation.result.ok && rotation.winning_password && !savedPwd) {
+    await saveWinningPassword(svc, pdfLinks, rotation.winning_password);
+  }
+  const detectedSlug = canonicalBankSlug(
+    opts.bank_slug
+    ?? detectBank(finalResult.result.extracted_text ?? "", { subject: opts.subject ?? null, sender: opts.sender ?? null })
+    ?? detectBankFromPdfText(finalResult.result.extracted_text ?? "")
+  );
+  const detectedType = opts.statement_type
+    ?? (pdfLinks.credit_card_id ? "card" : pdfLinks.financial_account_id ? "account" : pdfLinks.loan_id ? "loan" : null);
+  await applyParsedStatementResult(
+    svc, statementId, userId, pdfLinks, finalResult.result, stored.storagePath, stored.attachmentId,
+    pwdSource, finalResult.skeleton_id, { bank_slug: detectedSlug, statement_type: detectedType },
+  );
   return true;
 }
 
@@ -401,6 +443,14 @@ export async function runSkeletonFallback(
       : links.financial_account_id ? "account"
       : links.loan_id ? "loan"
       : detectTypeFromText(text, hint.subject ?? null));
+
+  // Bank-specific regex parsers are authoritative once they have all
+  // required fields. Skeletons are a recovery path, not a replacement path:
+  // applying a stale/bad skeleton over a good regex parse was creating noisy
+  // learn_attempts and sometimes downgrading valid rows.
+  if (!hint.force_relearn && result.ok) {
+    return { result, skeleton_id: null };
+  }
 
   await bumpAttempts();
 
@@ -471,6 +521,8 @@ export async function runSkeletonFallback(
           total_due: result.total_due,
           min_due: result.min_due,
           closing_balance: result.closing_balance,
+          credit_limit: result.credit_limit ?? null,
+          card_last4: result.card_last4 ?? null,
           lines: result.lines,
         },
         parser_source: result.parser_source ?? "regex",
@@ -525,12 +577,66 @@ function mergeParseResults(
     total_due: pick("total_due"),
     min_due: pick("min_due"),
     closing_balance: pick("closing_balance"),
+    credit_limit: pick("credit_limit"),
+    card_last4: pick("card_last4"),
     lines: skel.lines.length > regex.lines.length ? skel.lines : regex.lines,
     parser_source: `${regex.parser_source ?? "regex"}+${skel.parser_source ?? "skeleton"}`,
     parse_confidence: Math.max(regex.parse_confidence ?? 0, skel.parse_confidence ?? 0),
     extracted_text: regex.extracted_text ?? skel.extracted_text ?? null,
-    error: undefined,
+    error: regex.ok || skel.ok
+      ? undefined
+      : skel.error ?? regex.error ?? "missing_fields:statement_date,due_date,total_due",
   } as typeof regex;
+}
+
+export async function resolveLinksFromPdf(
+  svc: SupabaseClient,
+  userId: string,
+  links: { financial_account_id?: string | null; credit_card_id?: string | null; loan_id?: string | null; linked_bank_id?: string | null },
+  result: Awaited<ReturnType<typeof parseStatementPdfWithPasswords>>["result"],
+  hint: { bank_slug?: string | null; subject?: string | null; sender?: string | null },
+): Promise<typeof links> {
+  const out = { ...links };
+  const text = result.extracted_text ?? "";
+  const bankSlug = canonicalBankSlug(hint.bank_slug ?? detectBank(text, { subject: hint.subject ?? null, sender: hint.sender ?? null }) ?? detectBankFromPdfText(text));
+  if (!out.linked_bank_id && bankSlug) out.linked_bank_id = await findBankId(svc, userId, bankSlug);
+  const last4 = result.card_last4 ?? text.match(/(?:card\s*(?:number|no\.?)?|account\s*(?:number|no\.?)?)\s*[:#\-]?\s*(?:\d{2,6})?[xX*\s-]{4,}(\d{4})\b/i)?.[1] ?? null;
+  if (!last4) return out;
+
+  if (!out.credit_card_id) {
+    const { data: cards } = await svc.from("credit_cards").select("id, bank_id, masked_number, card_name, banks(name)").eq("user_id", userId);
+    let best: any = null, bestScore = 0;
+    for (const card of cards ?? []) {
+      let score = 0;
+      if (suffixMatches(card.masked_number, last4)) score += 8;
+      if (bankMatches(card.banks?.name, bankSlug)) score += 4;
+      score += subjectTokenScore(hint.subject, card.card_name);
+      if (score > bestScore) { bestScore = score; best = card; }
+    }
+    if (best && bestScore >= 8) {
+      out.credit_card_id = best.id;
+      out.financial_account_id = null;
+      out.linked_bank_id = best.bank_id ?? out.linked_bank_id ?? null;
+      return out;
+    }
+  }
+
+  if (!out.financial_account_id && !out.credit_card_id) {
+    const { data: accounts } = await svc.from("financial_accounts").select("id, bank_id, masked_number, nickname, banks(name)").eq("user_id", userId);
+    let best: any = null, bestScore = 0;
+    for (const acct of accounts ?? []) {
+      let score = 0;
+      if (suffixMatches(acct.masked_number, last4)) score += 8;
+      if (bankMatches(acct.banks?.name, bankSlug)) score += 4;
+      score += subjectTokenScore(hint.subject, acct.nickname);
+      if (score > bestScore) { bestScore = score; best = acct; }
+    }
+    if (best && bestScore >= 8) {
+      out.financial_account_id = best.id;
+      out.linked_bank_id = best.bank_id ?? out.linked_bank_id ?? null;
+    }
+  }
+  return out;
 }
 
 
@@ -693,15 +799,28 @@ export async function ingestStatementAttachment(
     } else {
       pwdSource = "none";
     }
-    if (rotation.result.ok && rotation.winning_password && !savedPwd) {
-      await saveWinningPassword(svc, links, rotation.winning_password);
-    }
     const finalResult = await runSkeletonFallback(
       svc, email.user_id, statementId, rotation.result,
       { bank_slug: opts.bank_slug ?? null, statement_type: opts.statement_type ?? null, subject: email.subject ?? null, sender: email.from_email ?? null, force_relearn: opts.force_relearn ?? false, links },
     );
+    const pdfLinks = await resolveLinksFromPdf(svc, email.user_id, links, finalResult.result, {
+      bank_slug: opts.bank_slug ?? null,
+      subject: email.subject ?? null,
+      sender: email.from_email ?? null,
+    });
+    if (rotation.result.ok && rotation.winning_password && !savedPwd) {
+      await saveWinningPassword(svc, pdfLinks, rotation.winning_password);
+    }
+    const detectedSlug = canonicalBankSlug(
+      opts.bank_slug
+      ?? detectBank(finalResult.result.extracted_text ?? "", { subject: email.subject ?? null, sender: email.from_email ?? null })
+      ?? detectBankFromPdfText(finalResult.result.extracted_text ?? "")
+    );
+    const detectedType = opts.statement_type
+      ?? (pdfLinks.credit_card_id ? "card" : pdfLinks.financial_account_id ? "account" : pdfLinks.loan_id ? "loan" : null);
     await applyParsedStatementResult(
-      svc, statementId, email.user_id, links, finalResult.result, storagePath, attRow.id, pwdSource, finalResult.skeleton_id,
+      svc, statementId, email.user_id, pdfLinks, finalResult.result, storagePath, attRow.id, pwdSource, finalResult.skeleton_id,
+      { bank_slug: detectedSlug, statement_type: detectedType },
     );
   } catch (e) {
     // Absolute backstop — should never happen, but if it does we still leave
@@ -777,7 +896,10 @@ function enrich(description: string, txnType: "debit" | "credit"): {
   // Strip common trailing card refs, city codes, POS terminal ids, and
   // padding characters that make merchants look different across rows.
   let merchant = raw
+    .replace(/\s*-\s*Ref\s*No\s*:?\s*[A-Z0-9-]+\b.*$/i, "")
+    .replace(/^UPI[_\s-]+/i, "")
     .replace(/\s+(?:POS|ATM|NEFT|IMPS|RTGS|UPI|ECOM)\b.*$/i, "")
+    .replace(/\bIND\b\s*$/i, "")
     .replace(/\s+X{2,}\d{2,}\b.*$/i, "")
     .replace(/\s+\*{2,}\d{2,}\b.*$/i, "")
     .replace(/\s+\b(?:BANGALORE|BENGALURU|MUMBAI|DELHI|NOIDA|GURGAON|GURUGRAM|PUNE|HYDERABAD|CHENNAI|KOLKATA|IN)\b\s*$/i, "")
@@ -811,7 +933,7 @@ function enrich(description: string, txnType: "debit" | "credit"): {
   const category = CATEGORIES.find(([rx]) => rx.test(hay))?.[1] ?? null;
 
   let payment_mode: string | null = null;
-  if (/\bupi\b|@[a-z]/i.test(raw)) payment_mode = "UPI";
+  if (/\bupi\b|^UPI[_\s-]|@[a-z]/i.test(raw)) payment_mode = "UPI";
   else if (/\b(neft|imps|rtgs)\b/i.test(raw)) payment_mode = "Bank Transfer";
   else if (/\bpos\b|\bcard\b|\becom\b|\b(visa|mastercard|rupay)\b/i.test(raw)) payment_mode = "Card";
   else if (/\batm\b|\bcash\b/i.test(raw)) payment_mode = "Cash";
@@ -827,7 +949,7 @@ function enrich(description: string, txnType: "debit" | "credit"): {
 // logic. attachmentId is optional since a manual upload may not create an
 // email_attachments row.
 export type PasswordSource = "saved" | "candidate" | "unprotected" | "none";
-export { computeCardPaymentStatus } from "./card-payment-status.ts";
+export { computeCardPaymentStatus };
 
 function reasonForParseError(err: string | undefined | null): string {
   const e = (err ?? "").toLowerCase();
@@ -871,12 +993,15 @@ export async function applyParsedStatementResult(
   attachmentId?: string,
   passwordSource: PasswordSource = "none",
   skeletonId: string | null = null,
+  hint: { bank_slug?: string | null; statement_type?: "card" | "account" | "loan" | null } = {},
 ): Promise<void> {
   if (!result.ok) {
     if (attachmentId && result.extracted_text) {
       await svc.from("email_attachments").update({ extracted_text: result.extracted_text.slice(0, 200_000) }).eq("id", attachmentId);
     }
     await svc.from("statements").update({
+      bank_slug: hint.bank_slug ?? undefined,
+      statement_type: hint.statement_type ?? undefined,
       parse_status: "failed",
       parse_error: result.error ?? "unknown_parse_error",
       parse_reason: reasonForParseError(result.error),
@@ -897,13 +1022,18 @@ export async function applyParsedStatementResult(
 
   // Card statements track payment lifecycle; accounts/loans stay 'na'.
   const { data: existing } = await svc.from("statements")
-    .select("statement_type, payment_status, paid_amount")
+    .select("statement_type, payment_status, paid_amount, bank_slug")
     .eq("id", statementId).maybeSingle();
-  const resolvedStatementType = (existing?.statement_type ?? "card") as "card" | "account" | "loan";
+  // Prefer the freshly-sniffed type from the parser over whatever the
+  // statements row was created with — Gmail sync often defaults to 'card'.
+  const resolvedStatementType = (hint.statement_type ?? existing?.statement_type ?? "card") as "card" | "account" | "loan";
+  const resolvedBankSlug = hint.bank_slug ?? existing?.bank_slug ?? null;
   const isCard = resolvedStatementType === "card";
   const missingRequired = missingRequiredParsedFields(resolvedStatementType, result);
   if (missingRequired.length > 0) {
     await svc.from("statements").update({
+      bank_slug: resolvedBankSlug,
+      statement_type: resolvedStatementType,
       parse_status: "failed",
       parse_error: `missing_fields:${missingRequired.join(",")}`,
       parse_reason: `${resolvedStatementType} statement parsed from PDF but required fields are still missing`,
@@ -919,6 +1049,7 @@ export async function applyParsedStatementResult(
       total_due: result.total_due,
       min_due: result.min_due,
       closing_balance: result.closing_balance,
+      credit_limit: result.credit_limit ?? null,
       skeleton_id: skeletonId,
     }).eq("id", statementId);
     if (attachmentId) await svc.from("email_attachments").update({ parse_status: "failed" }).eq("id", attachmentId);
@@ -934,6 +1065,8 @@ export async function applyParsedStatementResult(
     : { payment_status: "na" as const };
 
   const { error: stErr } = await svc.from("statements").update({
+    bank_slug: resolvedBankSlug,
+    statement_type: resolvedStatementType,
     period_start: result.period_start,
     period_end: result.period_end,
     statement_date: result.statement_date,
@@ -941,6 +1074,7 @@ export async function applyParsedStatementResult(
     total_due: result.total_due,
     min_due: result.min_due,
     closing_balance: result.closing_balance,
+    credit_limit: result.credit_limit ?? null,
     parse_status: "parsed",
     parse_error: null,
     parse_reason: reasonForSuccess(passwordSource),
@@ -972,13 +1106,15 @@ export async function applyParsedStatementResult(
   // so Cards list can show due-date/total-due/payment_status without
   // re-scanning statements.
   if (isCard && links.credit_card_id) {
-    await svc.from("credit_cards").update({
+    const cardPatch: Record<string, unknown> = {
       latest_statement_id: statementId,
       latest_due_date: result.due_date ?? null,
       latest_total_due: result.total_due ?? null,
       latest_min_due: result.min_due ?? null,
       payment_status: (paymentUpdate as any).payment_status ?? null,
-    }).eq("id", links.credit_card_id).catch?.(() => {});
+    };
+    if (result.credit_limit != null) cardPatch.limit_amount = result.credit_limit;
+    await svc.from("credit_cards").update(cardPatch).eq("id", links.credit_card_id).catch?.(() => {});
   }
 
   // Now safe to purge old statement-derived transactions — the new parse is
@@ -1008,11 +1144,17 @@ export async function applyParsedStatementResult(
     }
 
     if (existingId) {
+      const en = enrich(line.description, line.txn_type);
       await svc.from("transactions").update({
         source: "statement",
         source_statement_id: statementId,
         confidence_score: 0.85,
         description: line.description,
+        merchant: en.merchant,
+        category: line.merchant_category ?? en.category,
+        payment_mode: en.payment_mode,
+        merchant_normalized: en.merchant_normalized,
+        reference_number: line.reference_number ?? null,
       }).eq("id", existingId);
     } else {
       const en = enrich(line.description, line.txn_type);
@@ -1023,9 +1165,10 @@ export async function applyParsedStatementResult(
         txn_type: line.txn_type,
         merchant: en.merchant,
         description: line.description,
-        category: en.category,
+        category: line.merchant_category ?? en.category,
         payment_mode: en.payment_mode,
         merchant_normalized: en.merchant_normalized,
+        reference_number: line.reference_number ?? null,
         source: "statement",
         source_statement_id: statementId,
         credit_card_id: links.credit_card_id ?? null,

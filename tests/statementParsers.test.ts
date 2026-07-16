@@ -1,8 +1,201 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { dispatchStatementParser } from "../supabase/functions/_shared/statement-parsers/index.ts";
+import { detectBank } from "../supabase/functions/_shared/statement-parsers/index.ts";
 import { parseSubjectPeriod } from "../supabase/functions/_shared/subject-period.ts";
 
+const fixture = (name: string) => readFileSync(join(__dirname, "fixtures/statements", name), "utf8");
+
+describe("statement parsers — real PDF fixtures", () => {
+  it("sbi-cashback: anchors last4 on the Credit Card Number label, not footer '2999'", () => {
+    const r = dispatchStatementParser(fixture("sbi-cashback.txt"), { bank_slug: "sbi", statement_type: "card", subject: "SBI Cashback statement" });
+    expect(r.ok).toBe(true);
+    expect(r.fields.card_last4).toBe("14");
+    expect(r.fields.total_due).toBe(4389);
+    expect(r.fields.min_due).toBe(100);
+    expect(r.fields.due_date).toBe("2026-07-21");
+    expect(r.fields.credit_limit).toBe(76000);
+  });
+  it("sbi-bpcl: last4 = 62 and NO PAYMENT REQUIRED zeroes the total", () => {
+    const r = dispatchStatementParser(fixture("sbi-bpcl.txt"), { bank_slug: "sbi", statement_type: "card", subject: "SBI BPCL statement" });
+    expect(r.fields.card_last4).toBe("62");
+    expect(r.fields.total_due).toBe(0);
+  });
+  it("hdfc-millennia: extracts total / min / credit limit from the 2-row columnar summary", () => {
+    const r = dispatchStatementParser(fixture("hdfc-millennia.txt"), { bank_slug: "hdfc", statement_type: "card", subject: "HDFC Millennia" });
+    expect(r.ok).toBe(true);
+    expect(r.fields.total_due).toBe(7459);
+    expect(r.fields.min_due).toBe(380);
+    expect(r.fields.credit_limit).toBe(225000);
+    expect(r.fields.due_date).toBe("2026-07-18");
+  });
+  it("icici-credit-card: does NOT leak Oct 26, 2023 footer date into due_date", () => {
+    const r = dispatchStatementParser(fixture("icici-credit-card.txt"), { bank_slug: "icici", statement_type: "card", subject: "ICICI credit card" });
+    expect(r.ok).toBe(true);
+    expect(r.fields.due_date).toBe("2026-07-19");
+    expect(r.fields.due_date).not.toBe("2025-10-26");
+    expect(r.fields.total_due).toBe(678);
+    expect(r.fields.min_due).toBe(100);
+    expect(r.fields.credit_limit).toBe(440000);
+  });
+  it("amazon-pay-icici fixture: same footer-date guard", () => {
+    const r = dispatchStatementParser(fixture("amazon-pay-icici.txt"), { subject: "Your Amazon Pay ICICI Bank Statement", statement_type: "card" });
+    expect(r.fields.due_date).toBe("2026-07-19");
+    expect(r.fields.due_date).not.toBe("2025-10-26");
+  });
+  it("icici-savings: back-fills descriptions from lines above the anchor row", () => {
+    const r = dispatchStatementParser(fixture("icici-savings.txt"), { bank_slug: null, statement_type: null, subject: "ICICI Bank Statement" });
+    expect(r.fields.lines.length).toBeGreaterThanOrEqual(12);
+    expect(r.fields.closing_balance).toBe(23683.39);
+  });
+});
+
+// End-to-end fixtures captured from Deepak's real bank/card PDFs (2026-07):
+// see tests/fixtures/statements/pdf/ for the encrypted source and
+// tests/fixtures/statements/raw/ for the pdftotext -layout output used
+// here. If a bank changes its template, regenerate the raw file with:
+//   qpdf --password=<pwd> --decrypt in.pdf out.pdf && pdftotext -layout out.pdf raw/<name>.txt
+describe("statement parsers — captured real PDFs", () => {
+  const raw = (name: string) => readFileSync(join(__dirname, "fixtures/statements/raw", name), "utf8");
+
+  it("sbi-cashback (real)", () => {
+    const r = dispatchStatementParser(raw("180519944814_SBI_Cashback_CreditCard.txt"), { bank_slug: "sbi", statement_type: "card", subject: "SBI Cashback statement" });
+    expect(r.ok).toBe(true);
+    expect(r.fields.statement_date).toBe("2026-07-01");
+    expect(r.fields.due_date).toBe("2026-07-21");
+    expect(r.fields.total_due).toBe(4389);
+    expect(r.fields.lines.length).toBeGreaterThan(10);
+  });
+  it("sbi-bpcl (real)", () => {
+    const r = dispatchStatementParser(raw("180519946662_SBI_CreditCard_BPCL.txt"), { bank_slug: "sbi", statement_type: "card", subject: "SBI BPCL statement" });
+    expect(r.ok).toBe(true);
+    expect(r.fields.statement_date).toBe("2026-07-02");
+    expect(r.fields.total_due).toBe(0);
+    expect(r.fields.card_last4).toBe("62");
+  });
+  it("hdfc-millennia (real)", () => {
+    const r = dispatchStatementParser(raw("DEEP1805_HDFC_CreditCard.txt"), { bank_slug: "hdfc", statement_type: "card", subject: "HDFC Millennia" });
+    expect(r.ok).toBe(true);
+    expect(r.fields.statement_date).toBe("2026-06-28");
+    expect(r.fields.due_date).toBe("2026-07-18");
+    expect(r.fields.total_due).toBe(7459);
+    expect(r.fields.card_last4).toBe("6560");
+    expect(r.fields.lines.length).toBeGreaterThan(0);
+  });
+  it("yes-klick (real)", () => {
+    const r = dispatchStatementParser(raw("DEEP1805_YesBank_CreditCard.txt"), { bank_slug: "yes", statement_type: "card", subject: "YES Bank Klick" });
+    expect(r.ok).toBe(true);
+    expect(r.fields.total_due).toBe(17930.32);
+    expect(r.fields.due_date).toBe("2026-07-21");
+    expect(r.fields.lines.length).toBeGreaterThanOrEqual(60);
+  });
+  it("amazon-pay-icici (real)", () => {
+    const r = dispatchStatementParser(raw("deep1805_ICICI_CreditCard.txt"), { statement_type: "card", subject: "Amazon Pay ICICI Bank Statement" });
+    expect(r.ok).toBe(true);
+    expect(r.fields.statement_date).toBe("2026-07-01");
+    expect(r.fields.due_date).toBe("2026-07-19");
+    expect(r.fields.total_due).toBe(678);
+    expect(r.fields.card_last4).toBe("6003");
+  });
+  it("axis-airtel (real)", () => {
+    const r = dispatchStatementParser(raw("DEEP1805_AxisBank.txt"), { bank_slug: "axis", statement_type: "card", subject: "Airtel Axis Bank" });
+    expect(r.ok).toBe(true);
+    expect(r.fields.total_due).toBe(26424.67);
+    expect(r.fields.due_date).toBe("2026-07-05");
+    expect(r.fields.lines.length).toBeGreaterThan(100);
+  });
+  it("icici-savings (real)", () => {
+    const r = dispatchStatementParser(raw("deep1805_ICICIBANK.txt"), { statement_type: "account", subject: "ICICI Bank Statement" });
+    expect(r.ok).toBe(true);
+    expect(r.fields.card_last4).toBe("3037");
+    expect(r.fields.lines.length).toBeGreaterThan(10);
+  });
+  it("kotak-savings (real)", () => {
+    const r = dispatchStatementParser(raw("deep1805_KotakBank.txt"), { statement_type: "account", subject: "Kotak Bank Statement" });
+    expect(r.ok).toBe(true);
+    expect(r.fields.lines.length).toBeGreaterThan(30);
+  });
+});
+
 describe("statement parsers", () => {
+  it("yes-card parses YES Bank Klick statement fields and merchant categories", () => {
+    const text = `Credit Card Statement
+YES BANK KLICK
+Overview  Statement Summary
+Statement for YES BANK Card Number 3561XXXXXXXX0337
+Statement Period:  Credit Limit:
+02/06/2026 To 01/07/2026  Rs. 2,79,000.00  Current Purchases / Cash Advance
+Statement Date : 01/07/2026
+Rs. 2,60,909.68  Rs. 17,930.32 Dr
+Total Amount Due:  Cash Limit:  Points Earned : 0
+Rs. 17,930.32  Rs. 0.00
+Minimum Amount Due:  Available Cash Limit:  Rs. 32,773.82 Cr
+Rs. 358.61  Rs. 0.00
+Payment Due Date: 21/07/2026  Other Mode
+Statement Details
+Date  Transaction Details  Merchant Category  Amount (Rs.)
+01/06/2026 UPI_MR SAGAR SAGAR SK IND - Ref No: RT261530396001420000495  Retail Outlet Services  100.00 Dr
+02/06/2026 UPI_HERO WINES IND - Ref No: RT261540397001480000126  Miscellaneous Stores  240.00 Dr
+06/06/2026 UPI_KIWI SUBSCRIPTION EE IND - Ref No: RT261570396000340000825 Business Services  1,178.82 Dr`;
+    const r = dispatchStatementParser(text, { subject: "Fwd: Your YES_BANK_Klick Credit Card E-Statement", statement_type: "card" });
+    expect(r.ok).toBe(true);
+    expect(r.parser_source).toBe("yes-card");
+    expect(r.fields.card_last4).toBe("0337");
+    expect(r.fields.period_start).toBe("2026-06-02");
+    expect(r.fields.period_end).toBe("2026-07-01");
+    expect(r.fields.statement_date).toBe("2026-07-01");
+    expect(r.fields.due_date).toBe("2026-07-21");
+    expect(r.fields.total_due).toBe(17930.32);
+    expect(r.fields.min_due).toBe(358.61);
+    expect(r.fields.credit_limit).toBe(279000);
+    expect(r.fields.lines).toHaveLength(3);
+    expect(r.fields.lines[0].merchant_category).toBe("Retail Outlet Services");
+    expect(r.fields.lines[1].reference_number).toBe("RT261540397001480000126");
+  });
+
+  it("axis-card parses Airtel Axis Rupay KLICK-style tabular layout (no colons, Dr/Cr markers, ALL-CAPS categories)", () => {
+    // pdftotext output from an Airtel Axis Bank Rupay Credit Card statement
+    // (June 2026 cycle). Modern Axis co-brand statements use the same
+    // two-row PAYMENT SUMMARY table as YES Bank KLICK — labels row followed
+    // by values row, no colons, Dr/Cr markers on amounts.
+    const text = `Airtel Axis Bank Rupay Credit Card
+DEEPAK SUBHASH DONGARE
+PAYMENT SUMMARY
+Total Payment Due   Minimum Payment Due   Statement Period          Payment Due Date  Statement Generation Date
+26,424.67 Dr        540.00 Dr             17/05/2026 - 15/06/2026   05/07/2026        15/06/2026
+Credit Card Number  Credit Limit  Available Credit Limit  Available Cash Limit
+653036******2605    155,000.00    128,575.33              15,500.00
+Account Summary
+Date  Transaction Details  Merchant Category  Amount (Rs.)
+Card No:  653036******2605       Name  DEEPAK SUBHASH DONGARE
+16/05/2026 UPI/ALANKAR JEWELLERS/Q274311760@YBL/8425062561  JEWELLERY  12,100.00 Dr
+17/05/2026 UPI/NANEKAR DAIRY/PAYTMQR6FHY00@PTYS/8425062561  FOOD PRODUCTS  60.00 Dr
+18/05/2026 FUEL CASHBACK REBATES  8.87 Cr
+20/05/2026 UPI/KAVITA PRAVIN KATE/Q053860584@YBL/842506256  UTILITIES  10.00 Dr
+22/05/2026 UPI/LEELA RANJEET CHOUDHARY/Q744880675@YBL/8425  SERVICES  20.00 Dr`;
+    const r = dispatchStatementParser(text, { subject: "Fwd: Airtel Axis Bank Rupay Credit Card ending XX05 - June 2026", statement_type: "card" });
+    expect(r.parser_source).toBe("axis-card-airtel");
+    expect(r.fields.card_last4).toBe("2605");
+    expect(r.fields.period_start).toBe("2026-05-17");
+    expect(r.fields.period_end).toBe("2026-06-15");
+    expect(r.fields.statement_date).toBe("2026-06-15");
+    expect(r.fields.due_date).toBe("2026-07-05");
+    expect(r.fields.total_due).toBe(26424.67);
+    expect(r.fields.min_due).toBe(540);
+    expect(r.fields.credit_limit).toBe(155000);
+    expect(r.fields.lines.length).toBeGreaterThanOrEqual(5);
+    expect(r.fields.lines[0].merchant_category).toBe("JEWELLERY");
+    expect(r.fields.lines[0].amount).toBe(12100);
+    expect(r.fields.lines[0].txn_type).toBe("debit");
+    // Cashback credit row parsed as credit
+    const cashback = r.fields.lines.find((l) => /CASHBACK/i.test(l.description));
+    expect(cashback?.txn_type).toBe("credit");
+    expect(r.ok).toBe(true);
+  });
+
+
+
   it("sbi-card extracts due date + family from subject", () => {
     const text = `SBI Card Statement
       Statement Date : 05/07/2026
@@ -120,6 +313,37 @@ TRANSACTIONS FOR DEEPAK DONGARE
     expect(r.fields.due_date).toBe("2026-07-22");
   });
 
+  it("hdfc-card recovers Millennia pdfjs summary layout", () => {
+    const text = `Millennia Credit Card Statement
+HDFC Bank Credit Cards GSTIN: 33AAACH2702H2Z6
+DEEPAK DONGARE  Credit Card No.  434155XXXXXX6560
+Statement Date  28 Jun, 2026
+Billing Period  29 May, 2026 - 28 Jun, 2026
+PAYMENTS/CREDITS  PURCHASES/DEBIT
+PREVIOUS STATEMENT DUES  FINANCE CHARGES  TOTAL AMOUNT DUE
+RECEIVED  (Current Billing Cycle)
+_
+C -,196.33  C 0.00  +  C 7,655.26  +  C 0.00  = C 7,459.00
+TOTAL CREDIT LIMIT
+AVAILABLE CREDIT LIMIT  AVAILABLE CASH LIMIT
+MINIMUM DUE  DUE DATE
+(Including Cash)
+C 380.00  18 Jul, 2026
+C 2,25,000  C 2,17,541  C 90,000
+Domestic Transactions
+DATE & TIME  TRANSACTION DESCRIPTION  AMOUNT PI
+31/05/2026| 20:38 EMI DMART AVENUE SUPERMARTSPUNE  C 2,505.46
+07/06/2026| 10:28 EMI RAZ*Turtlemint Insuranc Mumbai  C 5,119.80 l`;
+    const r = dispatchStatementParser(text, { bank_slug: "hdfc", statement_type: "card", subject: "HDFC Millennia June 2026" });
+    expect(r.ok).toBe(true);
+    expect(r.fields.statement_date).toBe("2026-06-28");
+    expect(r.fields.due_date).toBe("2026-07-18");
+    expect(r.fields.total_due).toBe(7459);
+    expect(r.fields.credit_limit).toBe(225000);
+    expect(r.fields.card_last4).toBe("6560");
+    expect(r.fields.lines.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("icici-card handles CR refunds and period range", () => {
     const text = `ICICI Bank Credit Card
       Statement Period : 06/06/2026 to 05/07/2026
@@ -184,5 +408,22 @@ TRANSACTIONS FOR DEEPAK DONGARE
     const r = parseSubjectPeriod("Your Amazon Pay ICICI Bank statement for the period June 2, 2026 to July 1, 2026");
     expect(r.period_start).toBe("2026-06-02");
     expect(r.period_end).toBe("2026-07-01");
+  });
+});
+
+describe("detectBank — forwarder alias skiplist", () => {
+  it("ignores ddongarecc forwarder and matches HDFC from subject", () => {
+    const bank = detectBank("nothing bank-ish in body", {
+      subject: "Fwd: Your HDFC Bank Credit Card Statement",
+      sender: "ddongarecc@gmail.com",
+    });
+    expect(bank).toBe("hdfc");
+  });
+  it("ignores 52-cc forwarder and matches YES bank from body text", () => {
+    const bank = detectBank("YES BANK Klick Credit Card e-statement", {
+      subject: "Fwd: Statement",
+      sender: "52-cc@myforwarder.com",
+    });
+    expect(bank).toBe("yes bank");
   });
 });

@@ -14,6 +14,7 @@
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import type { PdfParseResult, StatementLine } from "./statement-pdf.ts";
 import type { ParserResult } from "./statement-parsers/types.ts";
+import { PARSER_VERSION } from "./statement-parsers/index.ts";
 
 export interface FieldAnchor {
   /** The label(s) that appear in the PDF near the value. First match wins.
@@ -210,6 +211,9 @@ export async function loadSkeleton(
     .maybeSingle();
   if (!data) return null;
   if ((data.variant ?? null) !== (variant ?? null)) return null;
+  // Discard skeletons written by an older parser — force a re-learn so the
+  // new parser's regex/anchor rewrites take effect on cached layouts.
+  if ((data.version ?? 1) < PARSER_VERSION) return null;
   return data as SkeletonRow;
 }
 
@@ -231,6 +235,7 @@ export async function loadSkeletonByStructure(
     .order("last_learn_at", { ascending: false, nullsFirst: false })
     .limit(1)
     .maybeSingle();
+  if (data && (data.version ?? 1) < PARSER_VERSION) return null;
   return (data as SkeletonRow | null) ?? null;
 }
 
@@ -263,6 +268,7 @@ export async function upsertSkeleton(
     structural_fingerprint: structural,
     skeleton: args.skeleton,
     sample_statement_id: args.sample_statement_id ?? null,
+    version: PARSER_VERSION,
     learned_at: new Date().toISOString(),
     last_learn_at: new Date().toISOString(),
   };
@@ -487,6 +493,8 @@ export function applySkeleton(text: string, skeleton: SkeletonJson): PdfParseRes
     total_due: toAmount(total.value),
     min_due: toAmount(mindue.value),
     closing_balance: toAmount(clos.value),
+    credit_limit: null,
+    card_last4: null,
     lines,
     parser_source: `skeleton (${enriched.learned_by})`,
     parse_confidence: missing.length === 0 ? 0.9 : 0.6,
@@ -613,7 +621,7 @@ export async function learnAndParse(
     .eq("layout_fingerprint", fp)
     .maybeSingle();
 
-  if (existing && !ctx.force) {
+  if (existing && !ctx.force && (existing.version ?? 1) >= PARSER_VERSION) {
     const applied = applySkeleton(text, existing.skeleton as SkeletonJson);
     if (applied.ok) {
       await recordSkeletonOutcome(ctx.svc, existing.id, true).catch(() => {});

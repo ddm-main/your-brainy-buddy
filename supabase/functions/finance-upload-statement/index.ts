@@ -7,7 +7,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { parseStatementPdfWithPasswords } from "../_shared/statement-pdf.ts";
-import { applyParsedStatementResult, loadPasswordCandidates, runSkeletonFallback, saveWinningPassword } from "../_shared/finance-extract-core.ts";
+import { applyParsedStatementResult, loadPasswordCandidates, resolveLinksFromPdf, runSkeletonFallback, saveWinningPassword } from "../_shared/finance-extract-core.ts";
 import { decryptStatementPassword, type StatementPasswordRule } from "../_shared/crypto.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
 import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
@@ -171,17 +171,24 @@ Deno.serve(async (req) => {
       financial_account_id: financial_account_id ?? null,
       loan_id: loan_id ?? null,
     };
-    if (rotation.result.ok && rotation.winning_password && !savedPwd) {
-      await saveWinningPassword(supabase, links, rotation.winning_password);
-    }
     const finalResult = await runSkeletonFallback(supabase, uid, statement.id, rotation.result, {
       bank_slug: null,
       statement_type: (statement_type as any) ?? null,
       subject: filename,
       links,
-      force_relearn: true,
+      force_relearn: false,
     });
-    await applyParsedStatementResult(supabase, statement.id, uid, links, finalResult.result, storagePath, undefined, rotation.result.ok ? (rotation.winning_password == null ? "unprotected" : "candidate") : "none", finalResult.skeleton_id);
+    const pdfLinks = await resolveLinksFromPdf(supabase, uid, links, finalResult.result, { subject: filename });
+    if (rotation.result.ok && rotation.winning_password && !savedPwd) {
+      await saveWinningPassword(supabase, pdfLinks, rotation.winning_password);
+    }
+    const detectedType = (statement_type as any) ?? (pdfLinks.credit_card_id ? "card" : pdfLinks.financial_account_id ? "account" : pdfLinks.loan_id ? "loan" : null);
+    await applyParsedStatementResult(
+      supabase, statement.id, uid, pdfLinks, finalResult.result, storagePath, undefined,
+      rotation.result.ok ? (rotation.winning_password == null ? "unprotected" : "candidate") : "none",
+      finalResult.skeleton_id,
+      { statement_type: detectedType },
+    );
 
     const { data: updated } = await supabase.from("statements")
       .select("parse_status, parse_error").eq("id", statement.id).maybeSingle();
