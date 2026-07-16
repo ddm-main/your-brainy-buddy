@@ -37,7 +37,7 @@ Deno.serve(async (req) => {
 
     const [cardsRes, accountsRes] = await Promise.all([
       supabase.from("credit_cards")
-        .select("id, name, last_four, statement_password_rule, banks(name)")
+        .select("id, card_name, masked_number, statement_password_rule, banks(name)")
         .eq("user_id", uid)
         .not("statement_password_rule", "is", null),
       supabase.from("financial_accounts")
