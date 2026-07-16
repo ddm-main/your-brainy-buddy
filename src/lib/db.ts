@@ -730,7 +730,7 @@ export const db = {
   statements: {
     list: async (limit = 200) => {
       const { data, error } = await supabase.from("statements")
-        .select("*, credit_cards!statements_credit_card_id_fkey(card_name, banks(name)), financial_accounts(nickname, banks(name)), loans(lender_name), banks:linked_bank_id(name), emails:source_email_id(from_name, from_email, subject, received_at)")
+        .select("*, credit_cards!statements_credit_card_id_fkey(card_name, masked_number, banks(name)), financial_accounts(nickname, banks(name)), loans(lender_name), banks:linked_bank_id(name), emails:source_email_id(from_name, from_email, subject, received_at)")
         .order("statement_date", { ascending: false, nullsFirst: false })
         .order("created_at", { ascending: false })
         .limit(limit);
@@ -739,7 +739,7 @@ export const db = {
     },
     get: async (id: string) => {
       const { data, error } = await supabase.from("statements")
-        .select("*, credit_cards!statements_credit_card_id_fkey(card_name, banks(name)), financial_accounts(nickname, banks(name)), loans(lender_name), banks:linked_bank_id(name), emails:source_email_id(from_name, from_email, subject, received_at)")
+        .select("*, credit_cards!statements_credit_card_id_fkey(card_name, masked_number, banks(name)), financial_accounts(nickname, banks(name)), loans(lender_name), banks:linked_bank_id(name), emails:source_email_id(from_name, from_email, subject, received_at)")
         .eq("id", id).single();
       if (error) throw error;
       return data;
@@ -809,6 +809,31 @@ export const db = {
     retry: async (id: string, links?: { credit_card_id?: string | null; financial_account_id?: string | null }, password?: string) => {
       return callEdgeFunction("finance-retry-statement", { statement_id: id, ...links, password });
     },
+    // Save just the card/account link on a statement without re-parsing.
+    // Also derives linked_bank_id from the chosen entity so the row's bank
+    // column stops saying "Unknown bank" for forwarded-email statements.
+    saveLink: async (id: string, link: { credit_card_id?: string | null; financial_account_id?: string | null }) => {
+      const update: Record<string, any> = {
+        credit_card_id: link.credit_card_id ?? null,
+        financial_account_id: link.financial_account_id ?? null,
+        // Manually linking is a user action, but not a parser result. Keep
+        // the row terminal (`failed`) until the retry replaces it with either
+        // `parsed` or a more specific failure. This prevents persistent
+        // user-visible `pending/queued` rows when the retry request is blocked.
+        parse_error: null,
+        parse_reason: "Link saved — parser retry still needs to complete.",
+        parse_status: "failed",
+      };
+      if (link.credit_card_id) {
+        const { data: card } = await supabase.from("credit_cards").select("bank_id").eq("id", link.credit_card_id).maybeSingle();
+        if (card?.bank_id) update.linked_bank_id = card.bank_id;
+      } else if (link.financial_account_id) {
+        const { data: acct } = await supabase.from("financial_accounts").select("bank_id").eq("id", link.financial_account_id).maybeSingle();
+        if (acct?.bank_id) update.linked_bank_id = acct.bank_id;
+      }
+      const { error } = await supabase.from("statements").update(update).eq("id", id);
+      if (error) throw error;
+    },
     reparseAll: async (opts?: { limit?: number; since_days?: number; include_incomplete_parsed?: boolean }) =>
       callEdgeFunction("finance-reparse-statements", {
         limit: opts?.limit ?? 3,
@@ -819,6 +844,12 @@ export const db = {
     summarize: async (id: string) => {
       return callEdgeFunction("finance-summarize-statement", { statement_id: id });
     },
+    // Save user-supplied corrections for fields the parser couldn't find.
+    // Stamps `manual_override` so re-parses won't blow the values away.
+    saveManualFields: async (id: string, fields: Record<string, any>) => {
+      return callEdgeFunction("finance-statement-manual-fields", { statement_id: id, fields });
+    },
+
     // Card-statement payment lifecycle actions. Server-side would be nicer,
     // but a direct update stays within the user's RLS scope.
     markPaid: async (id: string, amount: number | null) => {

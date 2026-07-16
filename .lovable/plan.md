@@ -1,200 +1,90 @@
-Deepak, here is the exact production-fix plan for the Statements section.
+## Root cause of the retry error
 
-## Current audit result
+The HDFC/Yes rows still show `parse_error='statement_update_failed'` with reason `Could not find the 'extracted_text' column of 'statements' in the schema cache`.
 
-### Completed already
-- Statement section UI exists with:
-  - mailbox fetch
-  - card/account/loan tabs
-  - status filters
-  - unlinked filter
-  - PDF viewer
-  - retry per row
-  - bulk re-parse incomplete action
-  - manual upload/attach flow
-- Real bank parsers exist for:
-  - YES Bank card
-  - HDFC card
-  - Axis/Airtel Axis card
-  - ICICI/Amazon Pay ICICI card
-  - SBI card
-  - ICICI/Kotak/SBI/HDFC account variants
-- Secure PDF handling exists:
-  - private `statement-pdfs` bucket
-  - server-side password attempts
-  - saved/candidate password support
-  - signed PDF viewer URLs
-- Database now has the key statement columns:
-  - `bank_slug`
-  - parser/source/confidence fields
-  - skeleton metadata
-  - payment lifecycle fields
-- Existing parser fixtures already cover many real statement formats.
+Verified against the live DB:
 
-### Remaining live issues found
-- `21` card statements are still incomplete.
-- `5` statements are unresolved (`failed` or `skipped`).
-- `2` card rows are unlinked to a saved card.
-- `bank_slug` is still empty on every live statement row even though banks are linked elsewhere.
-- Old skeletons are still present with older parser versions and bad outcomes:
-  - HDFC skeleton: `138` failures, `0` successes.
-  - SBI skeletons are still version `2` while parser version is `3`.
-- HDFC Millennia is stuck with `learn_attempts = 140`, which means the auto-retry cap/cooldown logic is not cleaningly preventing churn for already-broken rows.
-- Several rows show `parsed` but are functionally incomplete because required card fields are missing.
-- The statement list is surfacing technical statuses (`parsed_with_user_password`, `skeleton learned`, raw missing fields) instead of a clear next action.
+- `information_schema.columns` confirms `public.statements.extracted_text` **exists**.
+- But every write in `applyParsedStatementResult` includes `extracted_text: …` in the same `UPDATE`, and PostgREST is still returning the "column not in schema cache" error. That means the **PostgREST schema cache was never reloaded** after the column was added, so every retry immediately re-fails at the final `statements.update(...)` and stamps `statement_update_failed` again.
+- Your data-fix SQL (Wave A) resets the stale rows but does NOT reload the cache — so the very next retry writes the same error back in.
 
-## Root causes to fix
+Two rows are currently stuck (HDFC Millennia `6560`, YES Klick `0337`); both have `file_path` + `source_email_id`, both are correctly linked to a credit card, both already have the last-4 stored in `manual_fields`.
 
-1. **Forwarded email sender problem**
-   - Many statements come from `ddongarecc@gmail.com`, so sender-based bank detection fails unless subject/PDF detection wins everywhere.
-   - The code has detection helpers, but the live rows prove `bank_slug` is not being persistently written or backfilled.
+## Status of prior plans
 
-2. **Stale/bad skeleton reuse**
-   - Skeleton rows from older parser versions remain in the database.
-   - HDFC has a bad learned skeleton repeatedly failing and poisoning retries.
+| Prior plan item | State |
+|---|---|
+| Wave 1 diagnostic `failStatement` on every early-return | Done |
+| Wave 2 `purgeStatementDerived` on retry (keeps txns) | Done |
+| Wave 3 password rotation + persist winning password | Done |
+| Wave A1 data reconcile of `manual_fields.card_last4` + reset stale `statement_update_failed` | **Not run yet — this plan runs it** |
+| Wave B1 keep-txns-on-retry | Done in `finance-retry-statement` (passes `keepTransactions: true`) |
+| Wave B2 HDFC Millennia parser hardening | Not done |
+| Wave B3 auto-link on suffix match inside `finance-extract-core` | Not done (only in manual-fields fn) |
+| Wave B4 promote row-level retry + optimistic UI | Done |
+| Wave B5 review panel auto-retry after save + max=4 | Done |
+| Schema-cache reload | **Missing — this is the actual blocker** |
 
-3. **Incomplete parsed rows are treated inconsistently**
-   - Some rows are `parse_status='parsed'` while missing required card fields.
-   - The UI labels these as incomplete, but backend status remains ambiguous.
+## New plan (DB first, then code)
 
-4. **Auto-reparse convergence is weak**
-   - The HDFC row has 140 learn attempts despite caps intended to stop retry churn.
-   - Bulk reparse can still feel like it “does something” while leaving the same visible errors.
+### Wave 0 — Schema-cache reload (migration, DB-only, run first)
 
-5. **Manual link/retry is not enough**
-   - HDFC and YES rows are unlinked even though matching cards exist by bank + card suffix/name.
-   - The link resolver needs stronger subject/PDF-based matching for forwarded statements.
+One tiny migration whose only job is to force PostgREST to re-introspect `public.statements`:
 
-6. **Parser output mismatch on live PDFs**
-   - Fixtures pass in tests, but live extracted text still fails for HDFC, YES, Amazon Pay ICICI, and SBI month rows.
-   - That means the parser must be validated against stored live extracted text, not only static fixtures.
+```sql
+NOTIFY pgrst, 'reload schema';
+```
 
-## Implementation plan
+Without this, every retry will keep writing `statement_update_failed` regardless of any other fix.
 
-### 1. Add a statement health/audit query path
-- Add backend-safe helper logic to classify each statement into:
-  - healthy parsed card
-  - parsed but incomplete
-  - unlinked
-  - failed parser
-  - skipped/no PDF
-  - stale skeleton blocked
-- Use this classification for both the UI and reparse targets so counts match what the user sees.
+### Wave A — Data reconcile (migration, runs right after Wave 0)
 
-### 2. Fix bank detection and persistence
-- Ensure every parse path writes `bank_slug` from the strongest available signal:
-  1. explicit row value
-  2. saved linked bank/card/account
-  3. subject
-  4. original sender
-  5. PDF text
-- Backfill existing rows from subject/link/PDF-derived signals.
-- Normalize slugs consistently:
-  - `yes bank`
-  - `hdfc`
-  - `sbi`
-  - `amazon-pay-icici`
-  - `airtel-axis`
-  - `icici`
-  - `kotak`
+Exactly the SQL you pasted, wrapped in a migration:
 
-### 3. Fix card/account linking for forwarded statements
-- Update link resolution so forwarded statements match by:
-  - card last digits from PDF
-  - bank slug
-  - subject tokens (`Millennia`, `Amazon Pay`, `Cashback`, `BPCL`, `Airtel`, `Klick`)
-  - saved card bank/name
-- Backfill currently unlinked card rows where confidence is high.
-- Preserve manual overrides if a row was explicitly linked by the user.
+- For every statement whose linked `credit_cards.masked_number` has ≥ 4 digits, rewrite `manual_fields.card_last4` to the true last-4.
+- For any row where `parse_error='statement_update_failed'` OR `parse_reason ILIKE '%extracted_text%'` OR `parse_reason ILIKE '%schema cache%'`, reset `parse_status='pending'`, clear `parse_error`, `parse_reason`, `learn_attempts=0`, `last_learn_at=null`.
+- Transactions and stored PDFs untouched.
 
-### 4. Purge or invalidate stale/bad skeletons
-- Delete or supersede skeletons below current parser version.
-- Disable skeletons with repeated failures and zero successes.
-- Stop skeleton fallback from overriding good regex fields with null/weak learned values.
-- Reset runaway `learn_attempts` only after the stale skeletons are cleared.
+After Wave 0 + Wave A, clicking **Re-parse incomplete** on the two rows will actually succeed instead of re-stamping the same error.
 
-### 5. Harden parsers using live stored extracted text
-- Pull the extracted text from stored statement attachments where available.
-- Add/adjust parser tests for each failing live class:
-  - HDFC Millennia June 2026
-  - YES Bank Klick July 2026
-  - Amazon Pay ICICI June/July 2026
-  - SBI Cashback/BPCL monthly statements from 2025
-- Fix parser gaps until these produce required fields:
-  - `statement_date`
-  - `due_date`
-  - `total_due`
-  - `transactions_found > 0` where the PDF contains line items
-  - correct `card_last4`
+### Wave B — Code hardening (single build, no schema changes)
 
-### 6. Make “parsed but incomplete” a real backend state
-- Keep `parse_status='failed'` or a clear `parse_error='missing_fields:...'` when required card fields are missing.
-- Avoid showing `parsed` for a card that cannot drive billing/payment lifecycle.
-- Preserve partial extracted fields so rows still show useful info.
+**B1. Never let one bad column blow up the whole statement update** — `supabase/functions/_shared/finance-extract-core.ts` `applyParsedStatementResult`:
+- On the terminal `statements.update(...).select("id").single()`, if `stErr` is a schema-cache error (`code === 'PGRST204'` or message mentions `schema cache`), retry ONCE after `svc.rpc('pgrst_reload', …)` **or** re-issue the same update with `extracted_text` stripped out (fallback — the row still gets the useful metadata; extracted_text is a cache, not required for UI).
+- Only mark `statement_update_failed` after both attempts fail, and include the PostgREST `code` in `parse_reason` so future diagnosis is unambiguous.
 
-### 7. Fix reparse-all convergence
-- Make bulk reparse operate only on actionable rows.
-- Return separate counts:
-  - fixed
-  - still missing fields
-  - skipped/no PDF
-  - needs manual password/link
-  - capped/stale skeleton blocked
-- Stop repeating retries for rows already known to be unfixable without user input.
-- Surface a precise toast and row-level next action.
+**B2. Auto-link statements when only `card_last4` is known** — extend `finance-extract-core.ts` `resolveLinks` / final update path to run the same suffix-match logic that already lives in `finance-statement-manual-fields` (`digits(masked_number).endsWith(card_last4)`), so HDFC/YES rows with a clear last-4 get linked to their card on retry without any UI action.
 
-### 8. Clean up Statements UI messaging
-- Replace noisy technical messages with clear states:
-  - “Needs parser fix”
-  - “Needs PDF attach”
-  - “Needs card link”
-  - “Password failed”
-  - “Parsed successfully”
-- Keep diagnostic detail available in expanded row, not in the main table.
-- Add a compact “Repair status” summary above the table:
-  - Healthy
-  - Incomplete
-  - Unlinked
-  - Needs PDF
+**B3. HDFC Millennia parser hardening** — `supabase/functions/_shared/statement-parsers/hdfc-card.ts`:
+- Fold standalone `l` / `●` marker lines into the preceding txn line before regex.
+- Tolerate `C\s*2,505.46` and `C2,505.46` alike.
+- Two-pass fallback: if strict `rowRx` finds < 2 rows but "Domestic Transactions" block exists, run a lax `date … amount` scan between that header and the next section header.
+- Add unit test in `tests/statementParsers.test.ts` asserting ≥ 3 rows from `tests/fixtures/statements/raw/hdfc-millennia-jun2026-pdfjs.txt`.
 
-### 9. Data repair pass
-- After parser/link fixes, run a controlled repair:
-  - invalidate stale skeletons
-  - backfill bank slugs
-  - backfill confident card/account links
-  - reparse incomplete rows in batches
-  - verify remaining failures are truly manual-action items
+**B4. UI cleanup** — `src/routes/finance/Statements.tsx`:
+- Add `PGRST204` / `schema cache` codes to `explainParseError` so a future recurrence reads as "database cache out of date — reloading" instead of the current cryptic banner.
+- Clear the optimistic-retry state even when the endpoint returns `parse_status='failed'` so the sticky "NEEDS RETRY" chip doesn't stack.
 
-### 10. Verification
-- Run targeted parser tests.
-- Test the edge functions:
-  - `finance-reparse-statements`
-  - `finance-retry-statement`
-  - `finance-statement-pdf-url`
-- Re-query live DB and verify:
-  - incomplete card count drops materially, ideally to `0` except rows needing PDF/manual data
-  - no rows show `parsed` while missing required card fields
-  - bank slugs are populated
-  - no stale skeletons remain active
-  - the UI count matches backend repair classification
+### Wave C — Verify
 
-## Required database changes
+- `bunx tsgo --noEmit` clean.
+- `bunx vitest run tests/statementParsers.test.ts` — new HDFC Millennia case green.
+- Manual: `/finance/statements` → click **retry** on both HDFC 6560 and YES 0337 rows. Expect `parse_status='parsed'`, `parse_error=null`, txns column ≥ 3 for HDFC, banner gone.
+- DB spot-check:
+  ```sql
+  select id, bank_slug, parse_status, parse_error, transactions_found
+  from statements
+  where id in ('31263a89-7c3c-4c96-a2cf-06c9172550bf','36219955-a080-417b-833a-06bf34d9bdab');
+  ```
 
-Likely small data/schema maintenance only:
-- Add optional `repair_status` / `repair_reason` only if the existing `parse_status + parse_error + parse_reason` fields are not enough.
-- Add indexes if needed for statement repair queries:
-  - user + parse status
-  - user + statement type + incomplete fields
-  - statement attachments by statement id
-- Use migration tool for schema/index changes.
-- Use data-change tool for backfills/cleanup after code is ready.
+### Preview issue
 
-## Definition of done
+Not a real bug — verified in a prior turn via Playwright: the preview iframe renders the `/auth` sign-in screen; the blank screenshot the user sees is the auth panel being scrolled outside the visible viewport. No code change needed. If you want, I can add a small tweak in `src/routes/Auth.tsx` to center the panel with `min-h-svh` + `grid place-items-center` so the form is always in view in narrow preview frames — say the word and I'll fold it into Wave B.
 
-- The Statements page no longer shows “Unknown bank” for rows where bank can be inferred.
-- Rows linked to known cards show the card name consistently.
-- “Re-parse incomplete” converges and stops with an honest result.
-- HDFC/YES/Amazon ICICI/SBI rows either parse fully or show a specific manual action.
-- No active stale skeleton is repeatedly failing.
-- Main table is readable: operational statuses first, diagnostics second.
-- Live DB audit confirms the remaining count is real, not parser/system noise.
+## Out of scope
+
+- Schema changes to `statements`, `transactions`, `credit_cards`.
+- Cron / gmail-sync-due changes.
+- Full app-wide UI redesign from the earlier message.
+
+I'll surface Wave 0 + Wave A migrations first for approval; Wave B code changes ship in the same build right after.

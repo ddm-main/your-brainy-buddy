@@ -21,7 +21,7 @@ import { sniffStatementType } from "./shared.ts";
  * `statement_skeletons` rows written by an older parser are discarded on
  * load so the next parse re-learns the layout.
  */
-export const PARSER_VERSION = 3;
+export const PARSER_VERSION = 4;
 
 // Sender aliases used by users who forward statements from an intermediate
 // mailbox. When the raw sender is one of these, ignore it in `detectBank`

@@ -37,13 +37,13 @@ verify_jwt = true
 verify_jwt = true
 
 [functions.finance-retry-statement]
-verify_jwt = true
+verify_jwt = false
 
 [functions.finance-reparse-statements]
-verify_jwt = true
+verify_jwt = false
 
 [functions.finance-upload-statement]
-verify_jwt = true
+verify_jwt = false
 
 [functions.finance-extract]
 verify_jwt = true

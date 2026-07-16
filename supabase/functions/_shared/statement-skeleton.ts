@@ -30,14 +30,15 @@ export interface FieldAnchor {
   column_hint?: "same_line" | "next_line" | "right_of";
 }
 
+export type SkeletonFieldKey =
+  | "statement_date" | "period" | "period_start" | "period_end"
+  | "due_date" | "total_due" | "min_due" | "closing_balance" | "credit_limit";
+
 export interface SkeletonJson {
   bank_slug: string;
   statement_type: "card" | "account" | "loan";
   variant: string | null;
-  fields: Partial<Record<
-    "statement_date" | "period" | "due_date" | "total_due" | "min_due" | "closing_balance",
-    FieldAnchor
-  >>;
+  fields: Partial<Record<SkeletonFieldKey, FieldAnchor>>;
   txn_header_line?: string | null;
   learned_by: string;
   learned_at: string;
@@ -294,13 +295,16 @@ export async function recordSkeletonOutcome(
 }
 
 // ---------- Regex-derived skeleton synthesis ------------------------------
-const CANONICAL_LABELS: Record<string, string> = {
+const CANONICAL_LABELS: Record<SkeletonFieldKey, string> = {
   statement_date: "Statement Date",
   period: "Statement Period",
+  period_start: "Statement Period From",
+  period_end: "Statement Period To",
   due_date: "Payment Due Date",
   total_due: "Total Amount Due",
   min_due: "Minimum Amount Due",
   closing_balance: "Closing Balance",
+  credit_limit: "Credit Limit",
 };
 
 const REQUIRED_FOR_SYNTHESIS: Record<"card" | "account" | "loan", Array<keyof SkeletonJson["fields"]>> = {
@@ -391,14 +395,36 @@ function windowAfterLabel(text: string, label: string): string | null {
 
 const DATE_RX = /(\d{1,2}[./-]\d{1,2}[./-](?:\d{4}|\d{2})|\d{1,2}[\s-]+[A-Za-z]{3,}(?:[\s-]+(?:\d{4}|\d{2}))?)/;
 
-function extractByAnchor(text: string, anchor: FieldAnchor): { value: string | null; second?: string | null; matched_label?: string | null } {
+// Lines that look like identifiers, not values. Common in Indian bank
+// statements where a "STMT No." / "CKYC No." row sits between a label
+// (e.g. "Minimum Amount Due") and its real value further down the column.
+// Stripping these before scanning for the first number prevents pollution
+// like ₹ 26,07,02,37,829 leaking in from "STMT No. J26070237829".
+const NOISE_LINE_RX = /^\s*(?:\*+\s*)?(?:STMT(?:\s*No)?\.?|Statement\s+No\.?|CKYC(?:\s+No)?\.?|Card\s+Number|Credit\s+Card\s+Number|Alternate\s+Account\s+Number|Account\s+Number|Available\s+(?:Credit|Cash)\s+Limit|Cash\s+Limit|GSTIN|HSN(?:\s+Code)?|Invoice\s+No\.?|Ref(?:erence)?\s*No\.?|IFSC|MICR|Customer\s+(?:ID|Id|No))\b.*$/gim;
+// Inline "Label : J1234567890" — strip the identifier body so a shared
+// line that starts with a noise label doesn't leak its digits.
+const NOISE_INLINE_ID_RX = /(?:STMT|Statement\s+No|CKYC|Card\s+Number|Account\s+Number|Customer\s+ID|Invoice\s+No|Ref(?:erence)?\s*No)\.?\s*[:\-]?\s*[A-Z]?\d[\dA-Z\/-]{5,}/gi;
+const NO_PAYMENT_RX = /NO\s*PAYMENT\s*REQUIRED/i;
+
+function sanitizeAmountWindow(win: string): string {
+  return win.replace(NOISE_LINE_RX, " ").replace(NOISE_INLINE_ID_RX, " ");
+}
+
+export type AnchorSentinel = "no_payment_required";
+
+function extractByAnchor(
+  text: string,
+  anchor: FieldAnchor,
+): { value: string | null; second?: string | null; matched_label?: string | null; sentinel?: AnchorSentinel } {
   const labels = anchorLabels(anchor);
   for (const label of labels) {
     const win = windowAfterLabel(text, label);
     if (!win) continue;
+    const noPayment = NO_PAYMENT_RX.test(win);
     if (anchor.value_kind === "date") {
       const m = win.match(DATE_RX);
       if (m) return { value: m[1], matched_label: label };
+      if (noPayment) return { value: null, matched_label: label, sentinel: "no_payment_required" };
       continue;
     }
     if (anchor.value_kind === "date_range") {
@@ -408,7 +434,9 @@ function extractByAnchor(text: string, anchor: FieldAnchor): { value: string | n
       continue;
     }
     if (anchor.value_kind === "amount") {
-      const m = win.match(/(?:INR|Rs\.?|₹)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/);
+      if (noPayment) return { value: "0", matched_label: label, sentinel: "no_payment_required" };
+      const cleaned = sanitizeAmountWindow(win);
+      const m = cleaned.match(/(?:INR|Rs\.?|₹)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/);
       if (m) return { value: m[1], matched_label: label };
       continue;
     }
@@ -453,27 +481,39 @@ export function applySkeleton(text: string, skeleton: SkeletonJson): PdfParseRes
   const enriched = mergeAltLabels(skeleton.bank_slug, skeleton);
   const fields = enriched.fields;
   const period = fields.period ? extractByAnchor(text, fields.period) : { value: null as string | null, second: null as string | null };
+  const pStart = fields.period_start ? extractByAnchor(text, fields.period_start) : { value: null };
+  const pEnd   = fields.period_end   ? extractByAnchor(text, fields.period_end)   : { value: null };
   const stmt   = fields.statement_date ? extractByAnchor(text, fields.statement_date) : { value: null };
   const due    = fields.due_date ? extractByAnchor(text, fields.due_date) : { value: null };
   const total  = fields.total_due ? extractByAnchor(text, fields.total_due) : { value: null };
   const mindue = fields.min_due ? extractByAnchor(text, fields.min_due) : { value: null };
   const clos   = fields.closing_balance ? extractByAnchor(text, fields.closing_balance) : { value: null };
+  const climit = fields.credit_limit ? extractByAnchor(text, fields.credit_limit) : { value: null };
 
-  const period_start = period.value ? toIso(period.value) : null;
-  const period_end   = (period as any).second ? toIso((period as any).second) : null;
+  const period_start = (period.value ? toIso(period.value) : null) ?? (pStart.value ? toIso(pStart.value) : null);
+  const period_end   = ((period as any).second ? toIso((period as any).second) : null) ?? (pEnd.value ? toIso(pEnd.value) : null);
   const statement_date = stmt.value ? toIso(stmt.value) : null;
-  const due_date = due.value ? toIso(due.value) : null;
+  // NO PAYMENT REQUIRED: no printed due date. Mirror the SBI regex parser
+  // and fall back to statement_date so downstream code that requires a
+  // due_date doesn't blow up, while amount fields are forced to 0 below.
+  const noPaymentDue = (due as any).sentinel === "no_payment_required";
+  const due_date = due.value ? toIso(due.value) : (noPaymentDue ? statement_date : null);
   const yearHint = statement_date ? Number(statement_date.slice(0, 4))
                   : period_end ? Number(period_end.slice(0, 4)) : null;
 
   const lines: StatementLine[] = extractTxnBlock(text, enriched.txn_header_line, yearHint);
 
+  const totalSentinel = (total as any).sentinel === "no_payment_required";
+  const mindueSentinel = (mindue as any).sentinel === "no_payment_required";
+  const total_due = totalSentinel || noPaymentDue ? 0 : toAmount(total.value);
+  const min_due   = mindueSentinel || noPaymentDue ? 0 : toAmount(mindue.value);
+
   const required = REQUIRED_FIELDS_BY_TYPE[enriched.statement_type];
   const values: Record<string, unknown> = {
     statement_date,
     due_date,
-    total_due: toAmount(total.value),
-    min_due: toAmount(mindue.value),
+    total_due,
+    min_due,
     closing_balance: toAmount(clos.value),
     period: period_start && period_end ? `${period_start}..${period_end}` : null,
   };
@@ -490,10 +530,10 @@ export function applySkeleton(text: string, skeleton: SkeletonJson): PdfParseRes
     ok: missing.length === 0,
     period_start, period_end,
     statement_date, due_date,
-    total_due: toAmount(total.value),
-    min_due: toAmount(mindue.value),
+    total_due,
+    min_due,
     closing_balance: toAmount(clos.value),
-    credit_limit: null,
+    credit_limit: toAmount(climit.value),
     card_last4: null,
     lines,
     parser_source: `skeleton (${enriched.learned_by})`,
@@ -501,6 +541,196 @@ export function applySkeleton(text: string, skeleton: SkeletonJson): PdfParseRes
     extracted_text: null,
     error: missing.length ? `missing_fields:${missing.join(",")}` : undefined,
   };
+}
+
+// ---------- Learn anchors from user-supplied correct values ---------------
+// Given the PDF text and the user's known-correct values, locate each value
+// in the text and derive the nearest preceding label. Returns a partial
+// `fields` map suitable for merging into an existing skeleton.
+
+const AMOUNT_FIELDS: SkeletonFieldKey[] = ["total_due", "min_due", "closing_balance", "credit_limit"];
+const DATE_FIELDS: SkeletonFieldKey[] = ["statement_date", "due_date", "period_start", "period_end"];
+
+function normalizeLabel(raw: string): string | null {
+  let s = raw.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+  s = s.replace(/[|•·>»›\-–—:]+\s*$/, "").trim();
+  s = s.replace(/^[|•·>»›\-–—:]+\s*/, "").trim();
+  // Trim any leading currency / stray tokens
+  s = s.replace(/^(?:INR|Rs\.?|₹|\$)\s*/i, "").trim();
+  // Keep the last 2–6 word segment that looks like a label (letters + spaces)
+  const m = s.match(/([A-Za-z][A-Za-z .&/()]{2,60})\s*$/);
+  if (!m) return null;
+  const label = m[1].trim();
+  if (label.length < 3 || label.length > 60) return null;
+  if (!/[A-Za-z]{3,}/.test(label)) return null;
+  return label;
+}
+
+function findValuePositions(text: string, patterns: RegExp[]): number[] {
+  const positions: number[] = [];
+  for (const rx of patterns) {
+    const g = new RegExp(rx.source, rx.flags.includes("g") ? rx.flags : rx.flags + "g");
+    let m: RegExpExecArray | null;
+    while ((m = g.exec(text)) !== null) {
+      positions.push(m.index);
+      if (positions.length > 8) break;
+    }
+    if (positions.length) break; // first pattern that matches wins
+  }
+  return positions;
+}
+
+function amountPatterns(value: number): RegExp[] {
+  const abs = Math.abs(value);
+  const int = Math.trunc(abs);
+  const decs = Math.round((abs - int) * 100);
+  const intStr = String(int);
+  // With grouping (Indian + Western)
+  const grouped = intStr.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const indianGrouped = intStr.length > 3
+    ? intStr.slice(0, -3).replace(/\B(?=(\d{2})+(?!\d))/g, ",") + "," + intStr.slice(-3)
+    : intStr;
+  const bodies = Array.from(new Set([intStr, grouped, indianGrouped]));
+  const rxs: RegExp[] = [];
+  for (const b of bodies) {
+    const esc = b.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (decs > 0) {
+      const d = String(decs).padStart(2, "0");
+      rxs.push(new RegExp(`(?<![\\d.])${esc}\\.${d}(?!\\d)`));
+    } else {
+      rxs.push(new RegExp(`(?<![\\d.])${esc}(?:\\.00?)?(?!\\d)`));
+    }
+  }
+  return rxs;
+}
+
+function datePatterns(iso: string): RegExp[] {
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return [];
+  const [, y, mo, d] = m;
+  const yy = y.slice(2);
+  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const mon = monthNames[Number(mo) - 1];
+  const dNoPad = String(Number(d));
+  const moNoPad = String(Number(mo));
+  const variants = [
+    `${d}[/.\\-]${mo}[/.\\-]${y}`,
+    `${d}[/.\\-]${mo}[/.\\-]${yy}`,
+    `${dNoPad}[/.\\-]${moNoPad}[/.\\-]${y}`,
+    `${dNoPad}[/.\\-]${moNoPad}[/.\\-]${yy}`,
+    `${d}\\s+${mon}[a-z]{0,6}\\s+${y}`,
+    `${dNoPad}\\s+${mon}[a-z]{0,6}\\s+${y}`,
+    `${d}\\s+${mon}[a-z]{0,6}\\s+${yy}`,
+    `${mon}[a-z]{0,6}\\s+${d},?\\s+${y}`,
+    `${y}[/.\\-]${mo}[/.\\-]${d}`,
+  ];
+  return variants.map((v) => new RegExp(`\\b${v}\\b`, "i"));
+}
+
+function labelBeforePosition(text: string, pos: number): string | null {
+  // Look on the same physical line (window of 100 chars before pos, cut at newline).
+  const windowStart = Math.max(0, pos - 160);
+  const chunk = text.slice(windowStart, pos);
+  const lastNl = chunk.lastIndexOf("\n");
+  const sameLine = lastNl >= 0 ? chunk.slice(lastNl + 1) : chunk;
+  const sameLabel = normalizeLabel(sameLine);
+  if (sameLabel) return sameLabel;
+  // Otherwise, use the previous non-empty line.
+  if (lastNl >= 0) {
+    const before = chunk.slice(0, lastNl).replace(/\s+$/, "");
+    const prevNl = before.lastIndexOf("\n");
+    const prevLine = prevNl >= 0 ? before.slice(prevNl + 1) : before;
+    return normalizeLabel(prevLine);
+  }
+  return null;
+}
+
+export interface LearnAnchorsInput {
+  statement_date?: string | null;
+  due_date?: string | null;
+  period_start?: string | null;
+  period_end?: string | null;
+  total_due?: number | null;
+  min_due?: number | null;
+  closing_balance?: number | null;
+  credit_limit?: number | null;
+}
+
+export interface LearnedAnchorResult {
+  fields: Partial<Record<SkeletonFieldKey, FieldAnchor>>;
+  learned_keys: SkeletonFieldKey[];
+  skipped: Array<{ key: SkeletonFieldKey; reason: string }>;
+}
+
+export function learnAnchorsFromValues(
+  text: string,
+  statement_type: "card" | "account" | "loan",
+  values: LearnAnchorsInput,
+): LearnedAnchorResult {
+  const learned: Partial<Record<SkeletonFieldKey, FieldAnchor>> = {};
+  const learned_keys: SkeletonFieldKey[] = [];
+  const skipped: Array<{ key: SkeletonFieldKey; reason: string }> = [];
+
+  const attempt = (key: SkeletonFieldKey, patterns: RegExp[], kind: FieldAnchor["value_kind"]) => {
+    if (!patterns.length) { skipped.push({ key, reason: "no-pattern" }); return; }
+    const positions = findValuePositions(text, patterns);
+    if (positions.length === 0) { skipped.push({ key, reason: "value-not-found" }); return; }
+    if (positions.length > 3) { skipped.push({ key, reason: "ambiguous" }); return; }
+    const label = labelBeforePosition(text, positions[0]);
+    if (!label) { skipped.push({ key, reason: "no-label" }); return; }
+    learned[key] = { labels: [label], value_kind: kind };
+    learned_keys.push(key);
+  };
+
+  if (values.total_due != null)       attempt("total_due",       amountPatterns(values.total_due),       "amount");
+  if (values.min_due != null)         attempt("min_due",         amountPatterns(values.min_due),         "amount");
+  if (values.closing_balance != null) attempt("closing_balance", amountPatterns(values.closing_balance), "amount");
+  if (values.credit_limit != null && statement_type !== "account") {
+    attempt("credit_limit", amountPatterns(values.credit_limit), "amount");
+  }
+  if (values.statement_date) attempt("statement_date", datePatterns(values.statement_date), "date");
+  if (values.due_date)       attempt("due_date",       datePatterns(values.due_date),       "date");
+  if (values.period_start)   attempt("period_start",   datePatterns(values.period_start),   "date");
+  if (values.period_end)     attempt("period_end",     datePatterns(values.period_end),     "date");
+
+  return { fields: learned, learned_keys, skipped };
+}
+
+export function mergeLearnedAnchors(
+  existing: SkeletonJson | null,
+  bank_slug: string,
+  statement_type: "card" | "account" | "loan",
+  learned: Partial<Record<SkeletonFieldKey, FieldAnchor>>,
+): SkeletonJson {
+  const base: SkeletonJson = existing ?? {
+    bank_slug,
+    statement_type,
+    variant: null,
+    fields: {},
+    txn_header_line: null,
+    learned_by: "user-correction",
+    learned_at: new Date().toISOString(),
+  };
+  const fields: SkeletonJson["fields"] = { ...base.fields };
+  for (const [k, anchor] of Object.entries(learned) as Array<[SkeletonFieldKey, FieldAnchor]>) {
+    if (!anchor) continue;
+    const prior = fields[k];
+    const priorLabels = prior ? anchorLabels(prior) : [];
+    const newLabels = (anchor.labels ?? []).filter((l) => l && l.trim().length);
+    const merged = Array.from(new Set([...newLabels, ...priorLabels])).slice(0, 6);
+    fields[k] = {
+      labels: merged,
+      value_kind: anchor.value_kind ?? prior?.value_kind ?? "amount",
+      column_hint: prior?.column_hint ?? anchor.column_hint,
+      format: prior?.format ?? anchor.format,
+    };
+  }
+  return mergeAltLabels(bank_slug, {
+    ...base,
+    fields,
+    learned_by: existing ? `${existing.learned_by}+user-correction` : "user-correction",
+    learned_at: new Date().toISOString(),
+  });
 }
 
 // ---------- LLM learner ---------------------------------------------------

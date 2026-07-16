@@ -36,8 +36,14 @@ export function HudPanel({
     return () => window.clearTimeout(t);
   }, [updatedKey]);
 
+  const { style, ...restNoStyle } = rest as { style?: React.CSSProperties } & Record<string, unknown>;
+
   return (
-    <section className={cn("hud-panel mounted flex flex-col", className)} {...rest}>
+    <section
+      className={cn("hud-panel mounted", className)}
+      style={{ display: "flex", flexDirection: "column", minHeight: 0, ...(style || {}) }}
+      {...restNoStyle}
+    >
       <span className="hud-corner tl" />
       <span className="hud-corner tr" />
       <span className="hud-corner bl" />
@@ -51,6 +57,7 @@ export function HudPanel({
             padding: "10px 14px",
             borderBottom: "1px solid var(--edge)",
             gap: 10,
+            flex: "0 0 auto",
           }}
         >
           <div className="h-title">
@@ -65,7 +72,17 @@ export function HudPanel({
           {actions && <div style={{ display: "flex", gap: 6 }}>{actions}</div>}
         </header>
       )}
-      <div className={cn("relative flex-1 min-h-0", bodyClass)} style={{ padding: 12 }}>
+      <div
+        className={cn("relative", bodyClass)}
+        style={{
+          flex: "1 1 0",
+          minHeight: 0,
+          padding: 12,
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+        }}
+      >
         {children}
       </div>
     </section>

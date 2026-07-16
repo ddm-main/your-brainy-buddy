@@ -176,7 +176,20 @@ function anchoredDate(text: string, label: RegExp, year: number | null): string 
 function extractHdfcLines(text: string, year: number | null): StatementLine[] {
   const out: StatementLine[] = [];
   const seen = new Set<string>();
-  const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  // Fold standalone `l` / `●` / `•` marker lines (HDFC's payment-indicator
+  // glyph, sometimes emitted on its own line by pdfjs) into the previous
+  // txn line so rowRx can consume them cleanly.
+  const raw = text.split(/\n+/).map((l) => l.trim());
+  const folded: string[] = [];
+  for (const line of raw) {
+    if (!line) continue;
+    if (/^[l●•]\s*$/i.test(line) && folded.length) {
+      folded[folded.length - 1] = `${folded[folded.length - 1]} ${line}`;
+    } else {
+      folded.push(line);
+    }
+  }
+  const lines = folded;
   const rowRx = /^(\d{1,2}\/\d{1,2}\/\d{2,4})(?:\s*\|?\s*\d{1,2}:\d{2})?\s+(?:(EMI)\s+)?(.+?)\s+(?:C|₹|Rs\.?|INR|`)\s*(-?[0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*(?:l|●|\u2022)?\s*(Cr|CR|Credit)?\s*$/i;
   const cardholderAnchor = /\bCKYC\s*ID\b|\bDEEPAK\s+DONGARE\s*\[/i;
   for (const line of lines) {

@@ -7,7 +7,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { parseStatementPdfWithPasswords } from "../_shared/statement-pdf.ts";
-import { applyParsedStatementResult, loadPasswordCandidates, resolveLinksFromPdf, runSkeletonFallback, saveWinningPassword } from "../_shared/finance-extract-core.ts";
+import { applyParsedStatementResult, ensureTerminalStatementStatus, loadPasswordCandidates, resolveLinksFromPdf, runSkeletonFallback, saveWinningPassword } from "../_shared/finance-extract-core.ts";
 import { decryptStatementPassword, type StatementPasswordRule } from "../_shared/crypto.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
 import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
@@ -25,6 +25,8 @@ Deno.serve(async (req) => {
   const pre = preflight(req);
   if (pre) return pre;
   const cors = corsFor(req);
+  let statementIdForFailure: string | null = null;
+  let supabaseForFailure: ReturnType<typeof createClient> | null = null;
 
   const auth = await requireUserId(req);
   if ("error" in auth) {
@@ -64,6 +66,7 @@ Deno.serve(async (req) => {
     const url = Deno.env.get("SUPABASE_URL")!;
     const svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(url, svc, { auth: { persistSession: false } });
+    supabaseForFailure = supabase;
 
     // Verify ownership of whatever entity this statement is being linked to,
     // and fetch its stored password if present.
@@ -125,8 +128,10 @@ Deno.serve(async (req) => {
       if (exErr) throw exErr;
       if (!existing) return new Response(JSON.stringify({ error: "statement not found" }), { status: 404, headers: { ...cors, "Content-Type": "application/json" } });
       statement = { id: existing.id };
+      statementIdForFailure = existing.id;
       await supabase.from("statements").update({
-        parse_status: "pending", parse_error: null,
+        parse_status: "failed", parse_error: "upload_parse_started",
+        parse_reason: "PDF attached — parser is running.",
         credit_card_id: credit_card_id ?? null,
         financial_account_id: financial_account_id ?? null,
         loan_id: loan_id ?? null,
@@ -144,6 +149,7 @@ Deno.serve(async (req) => {
       }).select("id").single();
       if (stErr) throw stErr;
       statement = created;
+      statementIdForFailure = created.id;
     }
 
     const storagePath = `${uid}/manual/${statement.id}-${safeName(filename)}`;
@@ -189,6 +195,10 @@ Deno.serve(async (req) => {
       finalResult.skeleton_id,
       { statement_type: detectedType },
     );
+    await ensureTerminalStatementStatus(supabase, statement.id, {
+      parse_error: "upload_no_terminal_status",
+      parse_reason: "Upload finished without a parser result. Check password/link and retry.",
+    });
 
     const { data: updated } = await supabase.from("statements")
       .select("parse_status, parse_error").eq("id", statement.id).maybeSingle();
@@ -200,6 +210,14 @@ Deno.serve(async (req) => {
       parse_error: updated?.parse_error ?? null,
     }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {
+    if (statementIdForFailure && supabaseForFailure) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await supabaseForFailure.from("statements").update({
+        parse_status: "failed",
+        parse_error: "upload_crashed",
+        parse_reason: msg.slice(0, 500),
+      }).eq("id", statementIdForFailure).then(() => {}, () => {});
+    }
     return sanitizedErrorResponse(err, "Statement upload failed", "finance-upload-statement", cors);
   }
 });

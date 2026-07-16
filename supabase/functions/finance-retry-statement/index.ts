@@ -7,7 +7,7 @@
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { svcClient } from "../_shared/gmail.ts";
-import { ingestStatementAttachment, parseStoredStatementPdf, purgeStatementDerived, resolveLinks } from "../_shared/finance-extract-core.ts";
+import { ensureTerminalStatementStatus, ingestStatementAttachment, parseStoredStatementPdf, purgeStatementDerived, resolveLinks } from "../_shared/finance-extract-core.ts";
 import { guessBankSlugFromSender, parseFinanceEmail } from "../_shared/finance-parsers.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
 import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
@@ -18,6 +18,8 @@ Deno.serve(async (req) => {
   const pre = preflight(req);
   if (pre) return pre;
   const cors = corsFor(req);
+  let statementIdForFailure: string | null = null;
+  let svcForFailure: ReturnType<typeof svcClient> | null = null;
 
   const auth = await requireUserId(req);
   if ("error" in auth) {
@@ -41,8 +43,11 @@ Deno.serve(async (req) => {
         status: 400, headers: { ...cors, "Content-Type": "application/json" },
       });
     }
+    statementIdForFailure = statement_id;
+    const userProvidedLink = credit_card_id !== undefined || financial_account_id !== undefined;
 
     const svc = svcClient();
+    svcForFailure = svc;
 
     const { data: statement, error: stErr } = await svc.from("statements")
       .select("*").eq("id", statement_id).eq("user_id", uid).maybeSingle();
@@ -64,13 +69,26 @@ Deno.serve(async (req) => {
         const { data: acct } = await svc.from("financial_accounts").select("id").eq("id", financial_account_id).eq("user_id", uid).maybeSingle();
         if (!acct) return new Response(JSON.stringify({ error: "account not found" }), { status: 404, headers: { ...cors, "Content-Type": "application/json" } });
       }
+      // Derive linked_bank_id from the chosen entity so the row shows the
+      // right bank even when the source email is forwarded and the parser
+      // couldn't detect it.
+      let derivedBankId: string | null = null;
+      if (credit_card_id) {
+        const { data: card } = await svc.from("credit_cards").select("bank_id").eq("id", credit_card_id).maybeSingle();
+        derivedBankId = card?.bank_id ?? null;
+      } else if (financial_account_id) {
+        const { data: acct } = await svc.from("financial_accounts").select("bank_id").eq("id", financial_account_id).maybeSingle();
+        derivedBankId = acct?.bank_id ?? null;
+      }
       const { error: updErr } = await svc.from("statements").update({
         credit_card_id: credit_card_id ?? null,
         financial_account_id: financial_account_id ?? null,
+        linked_bank_id: derivedBankId ?? statement.linked_bank_id ?? null,
       }).eq("id", statement_id);
       if (updErr) throw updErr;
       statement.credit_card_id = credit_card_id ?? null;
       statement.financial_account_id = financial_account_id ?? null;
+      statement.linked_bank_id = derivedBankId ?? statement.linked_bank_id ?? null;
     }
 
     let email: any = null;
@@ -100,27 +118,37 @@ Deno.serve(async (req) => {
       }
       account = accountRow;
       const parsed = parseFinanceEmail({ ...email, body_text: email.body_text ?? email.snippet });
-      links = parsed?.kind === "statement"
-        ? await resolveLinks(svc, uid, parsed, email)
-        : {
+      // If the user manually chose the link (common for forwarded emails
+      // where the parser can't detect the bank), TRUST that choice — do not
+      // let the parser's resolveLinks overwrite it.
+      if (userProvidedLink) {
+        links = {
           credit_card_id: statement.credit_card_id ?? null,
           financial_account_id: statement.financial_account_id ?? null,
           loan_id: statement.loan_id ?? null,
           linked_bank_id: statement.linked_bank_id ?? null,
         };
-      await svc.from("statements").update({
-        credit_card_id: links.credit_card_id ?? statement.credit_card_id ?? null,
-        financial_account_id: links.financial_account_id ?? statement.financial_account_id ?? null,
-        loan_id: links.loan_id ?? statement.loan_id ?? null,
-        linked_bank_id: links.linked_bank_id ?? statement.linked_bank_id ?? null,
-      }).eq("id", statement.id);
+      } else {
+        links = parsed?.kind === "statement"
+          ? await resolveLinks(svc, uid, parsed, email)
+          : {
+            credit_card_id: statement.credit_card_id ?? null,
+            financial_account_id: statement.financial_account_id ?? null,
+            loan_id: statement.loan_id ?? null,
+            linked_bank_id: statement.linked_bank_id ?? null,
+          };
+        await svc.from("statements").update({
+          credit_card_id: links.credit_card_id ?? statement.credit_card_id ?? null,
+          financial_account_id: links.financial_account_id ?? statement.financial_account_id ?? null,
+          loan_id: links.loan_id ?? statement.loan_id ?? null,
+          linked_bank_id: links.linked_bank_id ?? statement.linked_bank_id ?? null,
+        }).eq("id", statement.id);
+      }
 
-      // Manual retry === user asking for a completely clean re-run. Purge
-      // derived fields, stored PDF, and transactions before re-ingest so
-      // stale bytes / half-parsed rows can never survive into the new pass.
-      // Also reset learn_attempts and force a skeleton relearn — the user's
-      // explicit ask overrides any auto-cap.
-      await purgeStatementDerived(svc, statement.id);
+      // Manual retry === user asking for a clean metadata re-run. Keep current
+      // statement transactions until the new parse has replacement lines; the
+      // parser tail deletes/replaces them only after a non-regressed parse.
+      await purgeStatementDerived(svc, statement.id, { keepTransactions: true });
       await svc.from("statements").update({ learn_attempts: 0 }).eq("id", statement.id);
       const handledStored = await parseStoredStatementPdf(svc, statement.id, uid, links, {
         statementFilePath: statement.file_path ?? null,
@@ -138,18 +166,30 @@ Deno.serve(async (req) => {
           force_relearn: true,
         });
       }
+      await ensureTerminalStatementStatus(svc, statement.id, {
+        parse_error: "retry_no_terminal_status",
+        parse_reason: "Retry finished without a parser result. Reconnect Gmail or attach the PDF, then retry.",
+      });
     } else {
-      await purgeStatementDerived(svc, statement.id);
+      await purgeStatementDerived(svc, statement.id, { keepTransactions: true });
       const handledStored = await parseStoredStatementPdf(svc, statement.id, uid, links, {
         statementFilePath: statement.file_path ?? null,
         password: password ?? null,
         statement_type: (statement.statement_type as any) ?? null,
       });
       if (!handledStored) {
-        return new Response(JSON.stringify({ error: "statement has no source email or stored PDF to re-parse" }), {
-          status: 400, headers: { ...cors, "Content-Type": "application/json" },
+        const terminal = await ensureTerminalStatementStatus(svc, statement.id, {
+          parse_error: "no_pdf_available",
+          parse_reason: "Statement has no source email or stored PDF to re-parse.",
+        });
+        return new Response(JSON.stringify({ ok: true, ...terminal }), {
+          status: 200, headers: { ...cors, "Content-Type": "application/json" },
         });
       }
+      await ensureTerminalStatementStatus(svc, statement.id, {
+        parse_error: "retry_no_terminal_status",
+        parse_reason: "Retry finished without a parser result. Attach the PDF or enter the password, then retry.",
+      });
     }
 
     const { data: updated } = await svc.from("statements")
@@ -162,6 +202,14 @@ Deno.serve(async (req) => {
       parse_reason: updated?.parse_reason ?? null,
     }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {
+    if (statementIdForFailure && svcForFailure) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await svcForFailure.from("statements").update({
+        parse_status: "failed",
+        parse_error: "retry_crashed",
+        parse_reason: msg.slice(0, 500),
+      }).eq("id", statementIdForFailure).then(() => {}, () => {});
+    }
     return sanitizedErrorResponse(err, "Statement retry failed", "finance-retry-statement", cors);
   }
 });

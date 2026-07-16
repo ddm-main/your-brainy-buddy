@@ -30,6 +30,24 @@ describe("statement parsers — real PDF fixtures", () => {
     expect(r.fields.credit_limit).toBe(225000);
     expect(r.fields.due_date).toBe("2026-07-18");
   });
+  it("hdfc-millennia (real pdf.js output): extracts all 3 transactions from Jun-2026 fixture", () => {
+    const r = dispatchStatementParser(
+      fixture("raw/hdfc-millennia-jun2026-pdfjs.txt"),
+      { bank_slug: "hdfc", statement_type: "card", subject: "Fwd: Your HDFC Bank - Millennia Credit Card Statement - June-2026" },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.fields.due_date).toBe("2026-07-18");
+    expect(r.fields.total_due).toBe(7459);
+    expect(r.fields.lines).toHaveLength(3);
+    const amounts = r.fields.lines.map((l) => l.amount).sort((a, b) => a - b);
+    expect(amounts).toEqual([30, 2505.46, 5119.8]);
+    const dates = r.fields.lines.map((l) => l.date).sort();
+    expect(dates).toEqual(["2026-05-31", "2026-05-31", "2026-06-07"]);
+    // Descriptions include the merchant even when the EMI badge is present.
+    expect(r.fields.lines.some((l) => /DMART AVENUE SUPERMART/i.test(l.description))).toBe(true);
+    expect(r.fields.lines.some((l) => /AVENUE FOOD PLAZA/i.test(l.description))).toBe(true);
+    expect(r.fields.lines.some((l) => /Turtlemint/i.test(l.description))).toBe(true);
+  });
   it("icici-credit-card: does NOT leak Oct 26, 2023 footer date into due_date", () => {
     const r = dispatchStatementParser(fixture("icici-credit-card.txt"), { bank_slug: "icici", statement_type: "card", subject: "ICICI credit card" });
     expect(r.ok).toBe(true);
@@ -425,5 +443,50 @@ describe("detectBank — forwarder alias skiplist", () => {
       sender: "52-cc@myforwarder.com",
     });
     expect(bank).toBe("yes bank");
+  });
+});
+
+// Regression: skeleton apply path must not leak STMT No. digits into min_due
+// and must honour "NO PAYMENT REQUIRED" for both due_date and dues on
+// SBI BPCL zero-balance months. See gap-audit 2026-07-16.
+import { applySkeleton, synthesizeSkeletonFromResult } from "../supabase/functions/_shared/statement-skeleton.ts";
+import { sbiCardParser } from "../supabase/functions/_shared/statement-parsers/sbi-card.ts";
+
+describe("skeleton apply path — SBI BPCL NO PAYMENT REQUIRED", () => {
+  const raw = (name: string) => readFileSync(join(__dirname, "fixtures/statements/raw", name), "utf8");
+
+  it("sbi-bpcl (skeleton apply): zeroes min_due/total_due and mirrors due_date to statement_date", () => {
+    const text = raw("180519946662_SBI_CreditCard_BPCL.txt");
+    const ctx = { bank_slug: "sbi", statement_type: "card" as const, subject: "SBI BPCL statement" };
+    const parsed = sbiCardParser(text, ctx);
+    const skeleton = synthesizeSkeletonFromResult({
+      bank_slug: "sbi",
+      statement_type: "card",
+      parser_source: parsed.parser_source,
+      result: parsed,
+    });
+    const applied = applySkeleton(text, skeleton);
+    expect(applied.min_due).toBe(0);
+    expect(applied.total_due).toBe(0);
+    expect(applied.statement_date).toBe("2026-07-02");
+    expect(applied.due_date).toBe("2026-07-02");
+  });
+
+  it("sbi-cashback (skeleton apply): real dues survive the sanitizer", () => {
+    const text = raw("180519944814_SBI_Cashback_CreditCard.txt");
+    const ctx = { bank_slug: "sbi", statement_type: "card" as const, subject: "SBI Cashback statement" };
+    const parsed = sbiCardParser(text, ctx);
+    const skeleton = synthesizeSkeletonFromResult({
+      bank_slug: "sbi",
+      statement_type: "card",
+      parser_source: parsed.parser_source,
+      result: parsed,
+    });
+    const applied = applySkeleton(text, skeleton);
+    expect(applied.total_due).toBe(4389);
+    expect(applied.due_date).toBe("2026-07-21");
+    expect(applied.statement_date).toBe("2026-07-01");
+    // must not leak a huge STMT-No-sized number
+    expect(applied.min_due! < 100000).toBe(true);
   });
 });

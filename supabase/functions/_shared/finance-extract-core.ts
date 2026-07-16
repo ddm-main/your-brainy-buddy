@@ -445,10 +445,12 @@ export async function runSkeletonFallback(
       : detectTypeFromText(text, hint.subject ?? null));
 
   // Bank-specific regex parsers are authoritative once they have all
-  // required fields. Skeletons are a recovery path, not a replacement path:
-  // applying a stale/bad skeleton over a good regex parse was creating noisy
-  // learn_attempts and sometimes downgrading valid rows.
-  if (!hint.force_relearn && result.ok) {
+  // required fields AND yielded transactions (for cards/loans, which have a
+  // transactions table; account statements don't materialize txns here). If a
+  // card parser reports ok but 0 lines, fall through to the skeleton path so
+  // its extractor gets a shot before we accept an empty statement.
+  const linesRequired = statement_type === "card" || statement_type === "loan";
+  if (!hint.force_relearn && result.ok && (!linesRequired || result.lines.length > 0)) {
     return { result, skeleton_id: null };
   }
 
@@ -568,6 +570,12 @@ function mergeParseResults(
 ): typeof regex {
   const pick = <K extends keyof typeof regex>(k: K) =>
     (skel[k] ?? null) !== null && (skel[k] ?? null) !== undefined ? skel[k] : regex[k];
+  // Line-source policy: whichever side actually extracted rows wins. When
+  // both extracted rows, prefer the larger set (usually the bank-specific
+  // parser). When both are empty we leave it empty — callers can rescue.
+  const linesFromRegex = regex.lines?.length ?? 0;
+  const linesFromSkel = skel.lines?.length ?? 0;
+  const lines = linesFromRegex >= linesFromSkel ? regex.lines : skel.lines;
   return {
     ok: regex.ok || skel.ok,
     period_start: pick("period_start"),
@@ -579,7 +587,7 @@ function mergeParseResults(
     closing_balance: pick("closing_balance"),
     credit_limit: pick("credit_limit"),
     card_last4: pick("card_last4"),
-    lines: skel.lines.length > regex.lines.length ? skel.lines : regex.lines,
+    lines,
     parser_source: `${regex.parser_source ?? "regex"}+${skel.parser_source ?? "skeleton"}`,
     parse_confidence: Math.max(regex.parse_confidence ?? 0, skel.parse_confidence ?? 0),
     extracted_text: regex.extracted_text ?? skel.extracted_text ?? null,
@@ -600,8 +608,14 @@ export async function resolveLinksFromPdf(
   const text = result.extracted_text ?? "";
   const bankSlug = canonicalBankSlug(hint.bank_slug ?? detectBank(text, { subject: hint.subject ?? null, sender: hint.sender ?? null }) ?? detectBankFromPdfText(text));
   if (!out.linked_bank_id && bankSlug) out.linked_bank_id = await findBankId(svc, userId, bankSlug);
-  const last4 = result.card_last4 ?? text.match(/(?:card\s*(?:number|no\.?)?|account\s*(?:number|no\.?)?)\s*[:#\-]?\s*(?:\d{2,6})?[xX*\s-]{4,}(\d{4})\b/i)?.[1] ?? null;
-  if (!last4) return out;
+  // Some issuers (SBI Card, a few HDFC layouts) only reveal the last 2 digits
+  // of the card number (`XXXX XXXX XXXX XX62`). Accept 2–4 trailing digits so
+  // suffix scoring can still match against the stored full last-4.
+  const last4 = result.card_last4
+    ?? text.match(/(?:card\s*(?:number|no\.?)?|account\s*(?:number|no\.?)?)\s*[:#\-]?\s*(?:\d{2,6})?[xX*\s-]{4,}(\d{4})\b/i)?.[1]
+    ?? text.match(/[xX*]{4,}\s*(\d{2,4})\b/)?.[1]
+    ?? null;
+  if (!last4 || last4.length < 2) return out;
 
   if (!out.credit_card_id) {
     const { data: cards } = await svc.from("credit_cards").select("id, bank_id, masked_number, card_name, banks(name)").eq("user_id", userId);
@@ -702,13 +716,11 @@ export async function ingestStatementAttachment(
       a.mimeType === "application/pdf" || /\.pdf$/i.test(a.filename ?? "")
     );
     if (!pdfAttachment) {
-      // "Login to view" notifications, common for many banks. Keep the row
-      // skipped so bulk reparse doesn't churn forever; the user must attach
-      // the downloaded PDF from the UI.
+      // "Login to view" notifications, common for many banks. This is a
+      // terminal parser failure until the user attaches the downloaded PDF.
       await failStatement(
         "no_pdf_attachment_login_required",
         "No PDF attached to this email — likely a 'login to view' notification. Attach a PDF to parse.",
-        "skipped",
       );
       return;
     }
@@ -844,7 +856,7 @@ export async function ingestStatementAttachment(
 export async function purgeStatementDerived(
   svc: SupabaseClient,
   statementId: string,
-  opts: { deleteStoredPdf?: boolean } = {},
+  opts: { deleteStoredPdf?: boolean; keepTransactions?: boolean } = {},
 ): Promise<void> {
   const { data: prev } = await svc.from("statements")
     .select("file_path").eq("id", statementId).maybeSingle();
@@ -852,14 +864,16 @@ export async function purgeStatementDerived(
     try { await svc.storage.from(STATEMENT_BUCKET).remove([prev.file_path]); }
     catch (e) { console.warn("purge storage failed", e instanceof Error ? e.message : e); }
   }
-  await svc.from("transactions").delete().eq("source_statement_id", statementId);
+  if (!opts.keepTransactions) {
+    await svc.from("transactions").delete().eq("source_statement_id", statementId);
+  }
   // Preserve the email_attachments row so the stored PDF stays discoverable
   // via findStoredStatementPdf; just reset its parse status.
   await svc.from("email_attachments")
     .update({ parse_status: "pending", extracted_text: null })
     .eq("statement_id", statementId).eq("attachment_type", "statement");
   const patch: Record<string, unknown> = {
-    transactions_found: 0,
+    ...(opts.keepTransactions ? {} : { transactions_found: 0 }),
     closing_balance: null,
     total_due: null,
     min_due: null,
@@ -951,13 +965,37 @@ function enrich(description: string, txnType: "debit" | "credit"): {
 export type PasswordSource = "saved" | "candidate" | "unprotected" | "none";
 export { computeCardPaymentStatus };
 
+export async function ensureTerminalStatementStatus(
+  svc: SupabaseClient,
+  statementId: string,
+  fallback: { parse_error: string; parse_reason: string },
+): Promise<{ parse_status: string | null; parse_error: string | null; parse_reason: string | null }> {
+  const { data: current } = await svc.from("statements")
+    .select("parse_status, parse_error, parse_reason")
+    .eq("id", statementId)
+    .maybeSingle();
+  if (current?.parse_status === "parsed" || current?.parse_status === "failed") {
+    return {
+      parse_status: current.parse_status,
+      parse_error: current.parse_error ?? null,
+      parse_reason: current.parse_reason ?? null,
+    };
+  }
+  await svc.from("statements").update({
+    parse_status: "failed",
+    parse_error: fallback.parse_error,
+    parse_reason: fallback.parse_reason,
+  }).eq("id", statementId);
+  return { parse_status: "failed", parse_error: fallback.parse_error, parse_reason: fallback.parse_reason };
+}
+
 function reasonForParseError(err: string | undefined | null): string {
   const e = (err ?? "").toLowerCase();
   if (!e) return "unknown_parse_error";
   if (e.includes("password_required")) return "password_missing";
   if (e.includes("wrong_password") || e.includes("wrong_or_missing_password")) return "password_failed";
-  if (e.includes("file_too_large")) return "pdf_too_large";
-  if (e.includes("too_many_pages")) return "pdf_too_many_pages";
+  if (e.includes("file_too_large")) return "file_too_large";
+  if (e.includes("too_many_pages")) return "too_many_pages";
   if (e.includes("stored_password_unreadable")) return "stored_password_unreadable";
   return err ?? "unknown_parse_error";
 }
@@ -1022,14 +1060,33 @@ export async function applyParsedStatementResult(
 
   // Card statements track payment lifecycle; accounts/loans stay 'na'.
   const { data: existing } = await svc.from("statements")
-    .select("statement_type, payment_status, paid_amount, bank_slug")
+    .select("statement_type, payment_status, paid_amount, bank_slug, manual_override, manual_fields, transactions_found")
     .eq("id", statementId).maybeSingle();
+  const rawManualFields = (existing?.manual_override && existing?.manual_fields && typeof existing.manual_fields === "object")
+    ? existing.manual_fields as Record<string, unknown> : {};
+  // `manual_fields` is a JSON bag that can hold anything the user typed —
+  // including values like `card_last4` that are NOT real columns on
+  // `statements` (last-4 lives on credit_cards.masked_number). Spreading the
+  // whole bag into an UPDATE causes PostgREST schema-cache errors and marks
+  // the row `statement_update_failed`. Only spread keys that are actual
+  // overridable statement columns.
+  const STATEMENT_OVERRIDE_COLUMNS = new Set([
+    "statement_date", "due_date", "period_start", "period_end",
+    "total_due", "min_due", "closing_balance", "credit_limit",
+  ]);
+  const manualFields: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(rawManualFields)) {
+    if (STATEMENT_OVERRIDE_COLUMNS.has(k)) manualFields[k] = v;
+  }
+  const priorTxnCount = Number(existing?.transactions_found ?? 0);
   // Prefer the freshly-sniffed type from the parser over whatever the
   // statements row was created with — Gmail sync often defaults to 'card'.
   const resolvedStatementType = (hint.statement_type ?? existing?.statement_type ?? "card") as "card" | "account" | "loan";
+
   const resolvedBankSlug = hint.bank_slug ?? existing?.bank_slug ?? null;
   const isCard = resolvedStatementType === "card";
-  const missingRequired = missingRequiredParsedFields(resolvedStatementType, result);
+  const missingRequired = missingRequiredParsedFields(resolvedStatementType, result)
+    .filter((f) => manualFields[f] == null);
   if (missingRequired.length > 0) {
     await svc.from("statements").update({
       bank_slug: resolvedBankSlug,
@@ -1051,10 +1108,12 @@ export async function applyParsedStatementResult(
       closing_balance: result.closing_balance,
       credit_limit: result.credit_limit ?? null,
       skeleton_id: skeletonId,
+      ...manualFields,
     }).eq("id", statementId);
     if (attachmentId) await svc.from("email_attachments").update({ parse_status: "failed" }).eq("id", attachmentId);
     return;
   }
+
   const paymentUpdate = isCard
     ? { payment_status: computeCardPaymentStatus(
         existing?.payment_status ?? null,
@@ -1064,7 +1123,13 @@ export async function applyParsedStatementResult(
       ) }
     : { payment_status: "na" as const };
 
-  const { error: stErr } = await svc.from("statements").update({
+  // Regression guard: a re-parse that yields ZERO lines when we previously
+  // had transactions is almost always a parser hiccup, not a genuine empty
+  // statement. Keep the prior txn count on the row and skip the purge below
+  // so the historical rows aren't wiped by a bad pass.
+  const parserRegressed = result.lines.length === 0 && priorTxnCount > 0;
+
+  const fullUpdate: Record<string, unknown> = {
     bank_slug: resolvedBankSlug,
     statement_type: resolvedStatementType,
     period_start: result.period_start,
@@ -1077,8 +1142,12 @@ export async function applyParsedStatementResult(
     credit_limit: result.credit_limit ?? null,
     parse_status: "parsed",
     parse_error: null,
-    parse_reason: reasonForSuccess(passwordSource),
-    transactions_found: result.lines.length,
+    parse_reason: parserRegressed
+      ? "header_only_retry_kept_prior_txns"
+      : reasonForSuccess(passwordSource),
+    // Do not overwrite prior txn count with 0 on a regressed pass — keeps
+    // the txns visible in the UI while the parser is being iterated on.
+    transactions_found: parserRegressed ? priorTxnCount : result.lines.length,
     file_path: storagePath,
     parser_source: result.parser_source ?? "generic",
     parse_confidence: result.parse_confidence ?? null,
@@ -1088,13 +1157,43 @@ export async function applyParsedStatementResult(
     loan_id: links.loan_id ?? null,
     linked_bank_id: links.linked_bank_id ?? null,
     skeleton_id: skeletonId,
+    // Persist the exact pdf.js output that produced this parse so future
+    // parser diffs can be verified against the frozen input without
+    // re-downloading and re-decrypting the PDF.
+    extracted_text: result.extracted_text ? result.extracted_text.slice(0, 200_000) : null,
     ...paymentUpdate,
-  }).eq("id", statementId).select("id").single();
+    ...manualFields,
+  };
+
+  let { error: stErr } = await svc.from("statements").update(fullUpdate)
+    .eq("id", statementId).select("id").single();
+
+  // PostgREST schema-cache miss (typically right after a column was added but
+  // the API replica hasn't reloaded yet — code PGRST204 with reason
+  // "Could not find the 'extracted_text' column of 'statements' in the schema
+  // cache"). Retry once without the offending optional columns so the row
+  // still gets its useful metadata instead of being stuck on
+  // `statement_update_failed` forever.
+  const isSchemaCacheErr = (e: any) =>
+    !!e && ((e as any).code === "PGRST204"
+      || /schema cache|Could not find the .* column/i.test(String((e as any).message ?? "")));
+  if (isSchemaCacheErr(stErr)) {
+    const { extracted_text: _drop, ...safeUpdate } = fullUpdate;
+    const retry = await svc.from("statements").update(safeUpdate)
+      .eq("id", statementId).select("id").single();
+    if (!retry.error) {
+      stErr = null as any;
+      console.warn("statements.update: dropped extracted_text due to schema-cache miss", { statementId });
+    } else {
+      stErr = retry.error;
+    }
+  }
+
   if (stErr) {
     await svc.from("statements").update({
       parse_status: "failed",
       parse_error: "statement_update_failed",
-      parse_reason: stErr.message,
+      parse_reason: `${(stErr as any).code ?? "err"}: ${stErr.message}`,
       file_path: storagePath,
     }).eq("id", statementId);
     if (attachmentId) await svc.from("email_attachments").update({ parse_status: "failed" }).eq("id", attachmentId);
@@ -1117,10 +1216,13 @@ export async function applyParsedStatementResult(
     await svc.from("credit_cards").update(cardPatch).eq("id", links.credit_card_id).catch?.(() => {});
   }
 
-  // Now safe to purge old statement-derived transactions — the new parse is
-  // committed on the statements row, so we won't orphan the statement if a
-  // later insert fails.
-  await svc.from("transactions").delete().eq("source_statement_id", statementId);
+  // Purge old statement-derived transactions ONLY when we have new lines
+  // to replace them with (or the statement genuinely had 0 before). A
+  // regressed pass keeps prior txns intact — see `parserRegressed` above.
+  if (!parserRegressed) {
+    await svc.from("transactions").delete().eq("source_statement_id", statementId);
+  }
+
 
 
   const idCol = links.credit_card_id ? "credit_card_id" : links.financial_account_id ? "financial_account_id" : null;

@@ -1,14 +1,13 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import * as pdfjsLib from "pdfjs-dist";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import HudPanel from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { HudSelect } from "@/components/hud/HudSelect";
+import { PdfCanvasViewer } from "@/components/finance/PdfCanvasViewer";
 import { db, inr } from "@/lib/db";
 import { gmail } from "@/lib/gmail";
 import { useUi } from "@/store/uiStore";
+import { StatementReviewPanel, missingFieldsFor } from "./StatementReviewPanel";
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 // ---------- Statements ----------
 function statusTone(status: string | null | undefined): "neutral" | "ok" | "warn" | "err" {
@@ -21,9 +20,9 @@ function statusTone(status: string | null | undefined): "neutral" | "ok" | "warn
 
 function statementStatusLabel(s: any): string {
   const status = s.parse_status ?? "manual";
-  if (status === "skipped") return "attach PDF";
-  if (status === "pending") return "queued";
-  if (status === "failed") return "needs retry";
+  if (status === "skipped") return "failed";
+  if (status === "pending") return "failed";
+  if (status === "failed") return "failed";
   if (status !== "parsed") return status;
   if (s.statement_type === "card" && (
     s.statement_date == null || s.due_date == null || s.total_due == null || Number(s.transactions_found ?? 0) === 0
@@ -49,6 +48,8 @@ function explainParseError(err: string | null | undefined): string | null {
       return "Bank was detected, but no saved card/account confidently matched this statement.";
     case "statement_update_failed":
       return "Statement metadata could not be saved during an older parser run — retry this row.";
+    case "schema_cache_miss":
+      return "Database cache was out of date — it has been reloaded, retry the row.";
     case "unknown_parse_error":
       return "Parser could not complete required fields — retry with the improved parser, or attach/link the correct PDF.";
     case "no_pdf_available":
@@ -108,128 +109,6 @@ function needsReparse(s: any): boolean {
   return Number(s.transactions_found ?? 0) === 0;
 }
 
-function PdfPage({ doc, pageNumber, scale }: { doc: any; pageNumber: number; scale: number }) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const renderTaskRef = useRef<any>(null);
-  const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!doc || !canvasRef.current) return;
-    let cancelled = false;
-    const canvas = canvasRef.current;
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    renderTaskRef.current?.cancel?.();
-    setErr(null);
-
-    doc.getPage(pageNumber)
-      .then((pdfPage: any) => {
-        if (cancelled) return;
-        const viewport = pdfPage.getViewport({ scale });
-        const ratio = window.devicePixelRatio || 1;
-        canvas.width = Math.floor(viewport.width * ratio);
-        canvas.height = Math.floor(viewport.height * ratio);
-        canvas.style.width = `${viewport.width}px`;
-        canvas.style.height = `${viewport.height}px`;
-        context.setTransform(ratio, 0, 0, ratio, 0, 0);
-        context.clearRect(0, 0, viewport.width, viewport.height);
-        const task = pdfPage.render({ canvasContext: context, viewport });
-        renderTaskRef.current = task;
-        return task.promise;
-      })
-      .catch((e: any) => {
-        if (cancelled || e?.name === "RenderingCancelledException") return;
-        setErr(e?.message ?? "render failed");
-      });
-
-    return () => { cancelled = true; renderTaskRef.current?.cancel?.(); };
-  }, [doc, pageNumber, scale]);
-
-  return (
-    <div style={{ position: "relative", marginBottom: 14, textAlign: "center" }}>
-      <div className="hud-label" style={{ position: "absolute", left: 4, top: 4, background: "rgba(0,0,0,0.55)", padding: "2px 6px", borderRadius: 2, zIndex: 1 }}>
-        page {pageNumber}
-      </div>
-      {err && <div style={{ padding: 8, color: "var(--warn)", fontSize: 12 }}>{err}</div>}
-      <canvas
-        ref={canvasRef}
-        style={{ display: err ? "none" : "inline-block", maxWidth: "100%", height: "auto", background: "#f8fafc", boxShadow: "0 0 0 1px rgba(127,233,255,0.18)" }}
-      />
-    </div>
-  );
-}
-
-function PdfCanvasViewer({ url, title, password }: { url: string; title: string; password?: string | null }) {
-  const [doc, setDoc] = useState<any>(null);
-  const [pages, setPages] = useState(0);
-  const [scale, setScale] = useState(1.15);
-  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setDoc(null);
-    setPages(0);
-    setError(null);
-    setStatus("loading");
-    let task: any = null;
-
-    fetch(url)
-      .then((res) => {
-        if (!res.ok) throw new Error(`PDF download failed (${res.status})`);
-        return res.arrayBuffer();
-      })
-      .then((buffer) => {
-        if (cancelled) return null;
-        task = pdfjsLib.getDocument({
-          data: new Uint8Array(buffer),
-          password: password || undefined,
-          isEvalSupported: false,
-        });
-        return task.promise;
-      })
-      .then((loaded) => {
-        if (!loaded) return;
-        if (cancelled) { loaded.destroy().catch(() => {}); return; }
-        setDoc(loaded);
-        setPages(loaded.numPages);
-        setStatus("ready");
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        setStatus("error");
-        setError(e?.message ?? "PDF could not be rendered in the app");
-      });
-
-    return () => { cancelled = true; task?.destroy?.(); };
-  }, [url, password]);
-
-  return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderBottom: "1px solid var(--edge)", background: "var(--panel-tint)" }}>
-        <div className="hud-label" style={{ minWidth: 90 }}>{pages ? `${pages} page${pages === 1 ? "" : "s"}` : "—"}</div>
-        <div style={{ flex: 1 }} />
-        <Btn size="sm" disabled={!doc || scale <= 0.75} onClick={() => setScale((v) => Math.max(0.75, Number((v - 0.15).toFixed(2))))}>−</Btn>
-        <div className="hud-label" style={{ minWidth: 48, textAlign: "center" }}>{Math.round(scale * 100)}%</div>
-        <Btn size="sm" disabled={!doc || scale >= 2.25} onClick={() => setScale((v) => Math.min(2.25, Number((v + 0.15).toFixed(2))))}>+</Btn>
-      </div>
-      <div style={{ position: "relative", flex: 1, minHeight: 0, overflow: "auto", background: "var(--bg)", padding: 18 }}>
-        {status === "loading" && (
-          <div className="hud-label" style={{ position: "absolute", left: 18, top: 18 }}>loading PDF…</div>
-        )}
-        {error && <div style={{ padding: 18, color: "var(--warn)", fontSize: 12 }}>{error}</div>}
-        {doc && !error && (
-          <div aria-label={title}>
-            {Array.from({ length: pages }, (_, i) => (
-              <PdfPage key={i + 1} doc={doc} pageNumber={i + 1} scale={scale} />
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 export default function Statements() {
   const push = useUi((s) => s.push);
   const [items, setItems] = useState<any[]>([]);
@@ -246,6 +125,8 @@ export default function Statements() {
   const [retryPassword, setRetryPassword] = useState("");
   const [retrying, setRetrying] = useState(false);
   const [retryingAll, setRetryingAll] = useState(false);
+  const [rowRetryingId, setRowRetryingId] = useState<string | null>(null);
+
   const [summarizingId, setSummarizingId] = useState<string | null>(null);
   const [pdfViewer, setPdfViewer] = useState<{ statementId: string; title: string; url: string | null; password: string | null; loading: boolean; error: string | null } | null>(null);
 
@@ -402,13 +283,65 @@ export default function Statements() {
       } else if (res?.parse_status === "parsed") {
         push("Parsed", "ok");
       } else {
-        push("Retry queued", "ok");
+        push(`Retry did not finish: ${res?.parse_reason ?? res?.parse_status ?? "unknown"}`, "warn");
       }
       setRetryLinkId("");
       setRetryPassword("");
       await load();
       setTxns(await db.statements.transactions(s.id));
     } catch (e: any) { push(e?.message ?? "retry failed", "err"); }
+    finally { setRetrying(false); }
+  };
+
+  // Per-row quick retry — no link override, no password. Uses whatever's
+  // already saved on the statement (bank + link + stored password). Lets
+  // the user re-parse ONE row without expanding it or bulk-retrying all.
+  const retryRow = async (s: any) => {
+    setRowRetryingId(s.id);
+    try {
+      const res: any = await db.statements.retry(s.id);
+      if (res?.parse_status === "failed") {
+        push(`Retry failed: ${explainParseError(res?.parse_error) ?? "unknown error"}`, "err");
+      } else if (res?.parse_status === "parsed") {
+        push("Parsed", "ok");
+      } else {
+        push(`Retry did not finish: ${res?.parse_reason ?? res?.parse_status ?? "unknown"}`, "warn");
+      }
+      const fresh = await db.statements.list();
+      setItems(fresh);
+      if (openId === s.id) {
+        try { setTxns(await db.statements.transactions(s.id)); } catch { /* ignore */ }
+      }
+    } catch (e: any) {
+      push(e?.message ?? "retry failed", "err");
+      try { setItems(await db.statements.list()); } catch { /* keep current rows */ }
+    }
+    finally { setRowRetryingId(null); }
+  };
+
+
+  // Save just the link (no reparse) — for forwarded-email rows where the
+  // parser can't detect the bank but you know which card/account it is.
+  // Also clears the "unknown_parse_error" banner and kicks off a retry so
+  // the row reflects the user's chosen bank on the next parse pass.
+  const saveLinkOnly = async (s: any) => {
+    if (!retryLinkId) { push("Choose a card or account first", "warn"); return; }
+    setRetrying(true);
+    try {
+      const link = cards.some((c) => c.id === retryLinkId)
+        ? { credit_card_id: retryLinkId, financial_account_id: null }
+        : { credit_card_id: null, financial_account_id: retryLinkId };
+      await db.statements.saveLink(s.id, link);
+      // Fire-and-forget retry — the edge function re-parses using the
+      // user's link and refreshes parse_status. Don't block the toast on
+      // it; user sees "Link saved" immediately and the row refreshes when
+      // load() finishes below.
+      db.statements.retry(s.id, link, retryPassword || undefined).catch(() => {});
+      push("Link saved — re-parsing…", "ok");
+      setRetryLinkId("");
+      setRetryPassword("");
+      await load();
+    } catch (e: any) { push(e?.message ?? "failed to save link", "err"); }
     finally { setRetrying(false); }
   };
 
@@ -566,7 +499,7 @@ export default function Statements() {
           </div>
         </div>
       )}
-      <HudPanel title="Statements" index="STM" live="ok" style={{ flex: 1, minHeight: 0 }} bodyClass="overflow-auto"
+      <HudPanel title="Statements" index="STM" live="ok" style={{ flex: 1, minHeight: 0 }} bodyClass="overflow-hidden flex flex-col"
         actions={<>
           {unresolvedCount > 0 && (
             <Btn size="sm" onClick={reparseUnresolved} disabled={retryingAll}>
@@ -576,76 +509,57 @@ export default function Statements() {
           <Btn size="sm" onClick={() => { setAttachTargetId(null); setShowUpload((v) => !v); }}>+ upload statement</Btn>
         </>}>
 
-        {/* Fetch from Gmail */}
-        <div style={{ display: "flex", gap: 8, alignItems: "end", flexWrap: "wrap", padding: 10, marginBottom: 10, border: "1px solid var(--edge)", borderRadius: 2 }}>
-          <div style={{ minWidth: 220 }}>
-            <label style={labelStyle}>fetch from mailbox</label>
-            <HudSelect value={fetchAccountId} onChange={setFetchAccountId}
-              placeholder={emailAccounts.length ? "select mailbox" : "no mailbox connected"}
-              options={emailAccounts.map((a) => ({ value: a.id, label: a.email_address }))} />
-          </div>
-          <div style={{ minWidth: 140 }}>
-            <label style={labelStyle}>period</label>
-            <HudSelect value={fetchPeriodDays} onChange={setFetchPeriodDays} options={[
-              { value: "7", label: "last 7 days" },
-              { value: "30", label: "last 30 days" },
-              { value: "90", label: "last 90 days" },
-              { value: "180", label: "last 6 months" },
-              { value: "365", label: "last 12 months" },
+        {/* Single-row toolbar: fetch + type tabs + filters */}
+        <div style={{ display: "flex", gap: 4, alignItems: "center", padding: "4px 6px", marginBottom: 8, border: "1px solid var(--edge)", borderRadius: 2, overflow: "hidden" }}>
+          <HudSelect value={fetchAccountId} onChange={setFetchAccountId}
+            placeholder={emailAccounts.length ? "mailbox" : "no mailbox"}
+            style={{ maxWidth: 140, flex: "0 1 auto" }}
+            options={emailAccounts.map((a) => ({ value: a.id, label: a.email_address }))} />
+          <HudSelect value={fetchPeriodDays} onChange={setFetchPeriodDays}
+            style={{ width: 56, flex: "0 0 auto" }}
+            options={[
+              { value: "7", label: "7d" },
+              { value: "30", label: "30d" },
+              { value: "90", label: "90d" },
+              { value: "180", label: "6mo" },
+              { value: "365", label: "12mo" },
             ]} />
-          </div>
           <Btn size="sm" variant="primary" disabled={fetching || !fetchAccountId} onClick={fetchFromGmail}>
-            {fetching ? "fetching…" : "fetch statements"}
+            {fetching ? "…" : "fetch"}
           </Btn>
-          <div style={{ marginLeft: "auto", fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
-            statements auto-detect bank + type from the sender
-          </div>
-        </div>
-
-        {/* Cards vs Accounts vs Loans — cards need lifecycle tracking (due
-            dates, payment status), accounts are info-only. Split at the top
-            so the two workflows never fight for the same table. */}
-        <div style={{ display: "flex", gap: 4, marginBottom: 8, borderBottom: "1px solid var(--edge)" }}>
+          <div style={{ width: 1, height: 18, background: "var(--edge)", margin: "0 2px", flex: "0 0 auto" }} />
           {([
-            { key: "card",    label: `Cards (${typeCounts.card})` },
-            { key: "account", label: `Accounts (${typeCounts.account})` },
-            { key: "loan",    label: `Loans (${typeCounts.loan})` },
+            { key: "card",    label: `C ${typeCounts.card}` },
+            { key: "account", label: `A ${typeCounts.account}` },
+            { key: "loan",    label: `L ${typeCounts.loan}` },
             { key: "",        label: "All" },
           ] as const).map((t) => (
-            <button
-              key={t.key || "all"}
-              onClick={() => setFilterType(t.key)}
+            <button key={t.key || "all"} onClick={() => setFilterType(t.key)}
               style={{
-                padding: "6px 12px",
+                padding: "3px 7px",
                 background: filterType === t.key ? "var(--panel-tint-heavy)" : "transparent",
                 color: filterType === t.key ? "var(--accent)" : "var(--text-dim)",
-                border: "none",
-                borderBottom: filterType === t.key ? "2px solid var(--accent)" : "2px solid transparent",
-                fontSize: 11,
-                fontFamily: "var(--font-hud)",
-                letterSpacing: "0.14em",
-                textTransform: "uppercase",
-                cursor: "pointer",
+                border: "1px solid " + (filterType === t.key ? "var(--accent)" : "var(--edge)"),
+                borderRadius: 2, fontSize: 10, fontFamily: "var(--font-hud)",
+                letterSpacing: "0.1em", textTransform: "uppercase", cursor: "pointer",
+                flex: "0 0 auto", whiteSpace: "nowrap",
               }}
             >{t.label}</button>
           ))}
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "end", marginBottom: 10, flexWrap: "wrap" }}>
-          <div style={{ minWidth: 140 }}>
-            <label style={labelStyle}>status</label>
-            <HudSelect value={filterStatus} onChange={setFilterStatus} placeholder="all" options={[
+          <div style={{ width: 1, height: 18, background: "var(--edge)", margin: "0 2px", flex: "0 0 auto" }} />
+          <HudSelect value={filterStatus} onChange={setFilterStatus} placeholder="status"
+            style={{ width: 86, flex: "0 0 auto" }}
+            options={[
               { value: "", label: "all" },
               { value: "parsed", label: "parsed" },
-              { value: "pending", label: "pending" },
               { value: "failed", label: "failed" },
-              { value: "skipped", label: "skipped" },
             ]} />
-          </div>
-          <Btn size="sm" variant={filterUnlinked ? "primary" : undefined} onClick={() => setFilterUnlinked((v) => !v)}>unlinked only</Btn>
-          <div style={{ marginLeft: "auto", fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
-            {filtered.length} / {items.length}
+          <Btn size="sm" variant={filterUnlinked ? "primary" : undefined} onClick={() => setFilterUnlinked((v) => !v)} style={{ padding: "3px 7px" }}>unlinked</Btn>
+          <div style={{ marginLeft: "auto", fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-hud)", letterSpacing: "0.12em", textTransform: "uppercase", flex: "0 0 auto" }}>
+            {filtered.length}/{items.length}
           </div>
         </div>
+
 
 
         {showUpload && (
@@ -680,7 +594,7 @@ export default function Statements() {
 
         {loading ? <div className="hud-label">loading…</div> :
          filtered.length === 0 ? <EmptyState hint="click 'fetch statements' above, or upload a PDF manually">no statements match</EmptyState> :
-          <div style={{ maxHeight: "min(58vh, 560px)", minHeight: 260, overflowY: "auto", overflowX: "auto", borderTop: "1px solid rgba(127,233,255,0.12)", borderBottom: "1px solid rgba(127,233,255,0.12)" }}>
+          <div className="stmt-scroll" style={{ flex: "1 1 0", minHeight: 0, maxHeight: "100%", overflowY: "auto", overflowX: "auto", scrollbarGutter: "stable", borderTop: "1px solid rgba(127,233,255,0.12)", borderBottom: "1px solid rgba(127,233,255,0.12)" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead style={{ position: "sticky", top: 0, zIndex: 1, background: "var(--panel-tint-heavy)" }}>
              <tr style={{ color: "var(--text-dim)", textAlign: "left", fontSize: 10, fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
@@ -765,39 +679,50 @@ export default function Statements() {
                         {showParseReason && (
                           <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2, maxWidth: 220 }}>{s.parse_reason}</div>
                         )}
-                        {needsReparse(s) && s.parse_status === "parsed" && (() => {
-                          // Show WHICH fields are missing, not the generic
-                          // "missing fields" line. Prefer parse_error's
-                          // `missing_fields:x,y,z` payload, else derive from
-                          // the current row.
-                          let missing: string[] = [];
-                          const mErr = /missing_fields:([\w,]+)/i.exec(s.parse_error ?? "");
-                          if (mErr) missing = mErr[1].split(",").filter(Boolean);
-                          else {
-                            if (s.statement_date == null) missing.push("statement_date");
-                            if (s.due_date == null) missing.push("due_date");
-                            if (s.total_due == null) missing.push("total_due");
-                            if (Number(s.transactions_found ?? 0) === 0) missing.push("transactions");
-                          }
-                          const exhausted = Number(s.learn_attempts ?? 0) >= 3;
-                          return (
-                            <div style={{ fontSize: 10, color: "var(--warn)", marginTop: 2, maxWidth: 220 }}
-                                 title={missing.length ? `missing: ${missing.join(", ")}` : ""}>
-                              {exhausted
-                                ? "learner exhausted — click retry"
-                                : `missing ${missing.length ? missing.join(", ") : "fields"} — auto re-scan queued`}
-                            </div>
-                          );
-                        })()}
+                         {s.parse_status === "parsed" && (() => {
+                           // List EVERY missing field explicitly — for cards
+                           // and accounts alike. Prefer the parse_error
+                           // payload when the parser said so, else derive
+                           // from the row.
+                           let missing: string[] = [];
+                           const mErr = /missing_fields:([\w,]+)/i.exec(s.parse_error ?? "");
+                           if (mErr) missing = mErr[1].split(",").filter(Boolean);
+                           else missing = missingFieldsFor(s) as string[];
+                           if (Number(s.transactions_found ?? 0) === 0 && s.statement_type !== "loan") missing.push("transactions");
+                           if (missing.length === 0) return null;
+                           return (
+                             <div style={{ fontSize: 10, color: "var(--warn)", marginTop: 2, maxWidth: 260, lineHeight: 1.35 }}>
+                               missing: {missing.join(", ")}
+                               <br />
+                               <span style={{ color: "var(--text-dim)" }}>expand row → review &amp; fix</span>
+                             </div>
+                           );
+                         })()}
+
                         {hint && s.parse_status !== "parsed" && hint !== s.parse_reason && hint !== s.parse_error && (
                           <div style={{ fontSize: 10, color: "var(--warn)", marginTop: 2, maxWidth: 220 }}>{hint}</div>
                         )}
                      </td>
-                      <td style={{ padding: "6px 8px", verticalAlign: "top", textAlign: "right" }}>
-                        {s.file_path ? (
-                          <Btn size="sm" onClick={(e: any) => { e.stopPropagation(); viewPdf(s); }}>view PDF</Btn>
-                        ) : <span className="hud-label">—</span>}
-                      </td>
+                       <td style={{ padding: "6px 8px", verticalAlign: "top", textAlign: "right" }}>
+                         <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end" }}>
+                           {s.file_path ? (
+                             <Btn size="sm" onClick={(e: any) => { e.stopPropagation(); viewPdf(s); }}>view PDF</Btn>
+                           ) : <span className="hud-label">—</span>}
+                           {(s.file_path || s.source_email_id || s.parse_status === "failed" || s.parse_status === "skipped") && (
+                             <Btn
+                               size="sm"
+                               disabled={rowRetryingId === s.id}
+                               onClick={(e: any) => { e.stopPropagation(); retryRow(s); }}
+                               title={s.file_path || s.source_email_id
+                                 ? "Re-parse just this statement"
+                                 : "Retry — attach a PDF first if none is linked"}
+                             >
+                               {rowRetryingId === s.id ? "retrying…" : "retry"}
+                             </Btn>
+                           )}
+                         </div>
+                       </td>
+
                    </tr>
                    {openId === s.id && (
                      <tr>
@@ -881,9 +806,21 @@ export default function Statements() {
                                <input type="password" value={retryPassword} onChange={(e) => setRetryPassword(e.target.value)} placeholder="auto-try saved" style={{ ...inputStyle, width: 160 }} />
                              </div>
                              <Btn size="sm" variant="primary" disabled={retrying} onClick={() => retryStatement(s)}>{retrying ? "retrying…" : "retry"}</Btn>
-                           </div>
-                         )}
-                         <div style={{ marginTop: 10 }}>
+                              <Btn size="sm" disabled={retrying || !retryLinkId} onClick={() => saveLinkOnly(s)} title="Save the chosen card/account without re-parsing the PDF">
+                                save link only
+                              </Btn>
+                            </div>
+                          )}
+                          {(missingFieldsFor(s).length > 0 || Number(s.transactions_found ?? 0) === 0) && s.parse_status !== "pending" && (
+                            <StatementReviewPanel
+                              statement={s}
+                              onSaved={(patch) => {
+                                setItems((prev) => prev.map((x) => x.id === s.id ? { ...x, ...patch, manual_override: true, parse_status: "parsed" } : x));
+                              }}
+                            />
+                          )}
+                          <div style={{ marginTop: 10 }}>
+
                            <span className="hud-label">transactions from this statement</span>
                            {txnsLoading ? <div className="hud-label" style={{ marginTop: 6 }}>loading…</div> :
                             txns.length === 0 ? <div className="hud-label" style={{ marginTop: 6 }}>none extracted</div> :

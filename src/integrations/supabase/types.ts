@@ -1819,6 +1819,7 @@ export type Database = {
         Row: {
           bank_slug: string
           created_at: string
+          field_hints: Json | null
           id: string
           last_learn_at: string | null
           layout_fingerprint: string
@@ -1839,6 +1840,7 @@ export type Database = {
         Insert: {
           bank_slug: string
           created_at?: string
+          field_hints?: Json | null
           id?: string
           last_learn_at?: string | null
           layout_fingerprint: string
@@ -1859,6 +1861,7 @@ export type Database = {
         Update: {
           bank_slug?: string
           created_at?: string
+          field_hints?: Json | null
           id?: string
           last_learn_at?: string | null
           layout_fingerprint?: string
@@ -1889,6 +1892,7 @@ export type Database = {
           credit_card_id: string | null
           credit_limit: number | null
           due_date: string | null
+          extracted_text: string | null
           file_path: string | null
           financial_account_id: string | null
           id: string
@@ -1896,6 +1900,9 @@ export type Database = {
           learn_attempts: number
           linked_bank_id: string | null
           loan_id: string | null
+          manual_fields: Json | null
+          manual_override: boolean
+          manual_override_at: string | null
           min_due: number | null
           paid_amount: number | null
           paid_on: string | null
@@ -1929,6 +1936,7 @@ export type Database = {
           credit_card_id?: string | null
           credit_limit?: number | null
           due_date?: string | null
+          extracted_text?: string | null
           file_path?: string | null
           financial_account_id?: string | null
           id?: string
@@ -1936,6 +1944,9 @@ export type Database = {
           learn_attempts?: number
           linked_bank_id?: string | null
           loan_id?: string | null
+          manual_fields?: Json | null
+          manual_override?: boolean
+          manual_override_at?: string | null
           min_due?: number | null
           paid_amount?: number | null
           paid_on?: string | null
@@ -1969,6 +1980,7 @@ export type Database = {
           credit_card_id?: string | null
           credit_limit?: number | null
           due_date?: string | null
+          extracted_text?: string | null
           file_path?: string | null
           financial_account_id?: string | null
           id?: string
@@ -1976,6 +1988,9 @@ export type Database = {
           learn_attempts?: number
           linked_bank_id?: string | null
           loan_id?: string | null
+          manual_fields?: Json | null
+          manual_override?: boolean
+          manual_override_at?: string | null
           min_due?: number | null
           paid_amount?: number | null
           paid_on?: string | null

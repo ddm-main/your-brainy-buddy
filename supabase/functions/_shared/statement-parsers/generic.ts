@@ -64,9 +64,23 @@ const LINE_ROW = /^\s*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[A-Za-z]{3,}(?:
 const LINE_AMT = /((?:[0-9]{1,3}(?:,[0-9]{2,3})+|[0-9]+)(?:\.[0-9]{2})?)\s*(Cr|CR|Dr|DR|Debit|Credit|C|D|\-|\+)?\s*$/i;
 const TYPED_AMT = /((?:[0-9]{1,3}(?:,[0-9]{2,3})+|[0-9]+)(?:\.[0-9]{2})?)\s*(Cr|CR|Dr|DR|Debit|Credit|C|D)\b/gi;
 
+// HDFC (and some other card statements) render rows as
+//   `31/05/2026| 20:38   EMI   DMART AVENUE ...   C 2,505.46   l`
+// pdftotext keeps the `|` glued to the date, prefixes amounts with the
+// rupee-glyph fallback `C`, and appends a trailing bullet `l`/`●`. Strip
+// those decorations up-front so the shared row regex keeps matching.
+function preprocessTxnLine(raw: string): string {
+  return raw
+    .replace(/^(\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4})\s*\|\s*\d{1,2}:\d{2}\s*/, "$1 ")
+    .replace(/\s+[l●•\u2022]+\s*$/i, "");
+}
+function stripTrailingCurrency(desc: string): string {
+  return desc.replace(/\s*(?:C|₹|Rs\.?|INR|`)\s*$/i, "").trim();
+}
+
 export function extractLines(text: string, fallbackYear?: number | null): StatementLine[] {
   const lines: StatementLine[] = [];
-  const rawLines = text.replace(/\r/g, "\n").split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  const rawLines = text.replace(/\r/g, "\n").split(/\n+/).map((s) => preprocessTxnLine(s.trim())).filter(Boolean);
   const chunks = rawLines.flatMap((ln) => ln.replace(new RegExp(`\\s+(?=${LINE_DATE_SRC}\\s+)`, "g"), "\n").split(/\n+/)).map((s) => s.trim()).filter(Boolean);
   const seen = new Set<string>();
   const addFromChunk = (chunk: string) => {
@@ -75,7 +89,7 @@ export function extractLines(text: string, fallbackYear?: number | null): Statem
     const rest = dm[2]; const typed = Array.from(rest.matchAll(TYPED_AMT)); const t = typed.at(-1);
     let am = t ? Object.assign([t[0], t[1], t[2]], { index: t.index ?? 0, input: rest }) as RegExpMatchArray : rest.match(LINE_AMT) as RegExpMatchArray | null;
     if (!am) return; const amount = Number(am[1].replace(/,/g, "")); if (!Number.isFinite(amount) || amount <= 0) return;
-    const desc = rest.slice(0, am.index ?? rest.length).trim(); if (!desc || desc.length < 2) return;
+    const desc = stripTrailingCurrency(rest.slice(0, am.index ?? rest.length).trim()); if (!desc || desc.length < 2) return;
     const d = String(am[2] ?? "").toLowerCase();
     const txn_type: "debit" | "credit" = d === "cr" || d === "credit" || d === "c" || d === "+" || (!d && /\b(refund|reversal|received|credit|salary|interest paid)\b/i.test(desc)) ? "credit" : "debit";
     const key = `${date}|${amount}|${desc.slice(0, 40).toLowerCase()}`; if (seen.has(key)) return;

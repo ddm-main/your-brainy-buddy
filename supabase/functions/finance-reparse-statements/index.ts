@@ -5,7 +5,7 @@
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { svcClient } from "../_shared/gmail.ts";
-import { ingestStatementAttachment, parseStoredStatementPdf, resolveLinks } from "../_shared/finance-extract-core.ts";
+import { ensureTerminalStatementStatus, ingestStatementAttachment, parseStoredStatementPdf, resolveLinks } from "../_shared/finance-extract-core.ts";
 import { guessBankSlugFromSender, parseFinanceEmail } from "../_shared/finance-parsers.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
 import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
@@ -167,6 +167,11 @@ Deno.serve(async (req) => {
             parse_reason: "No stored PDF or source email is available for this statement.",
           }).eq("id", st.id);
         }
+
+        await ensureTerminalStatementStatus(svc, st.id, {
+          parse_error: "reparse_no_terminal_status",
+          parse_reason: "Batch reparse finished without a parser result. Retry this row manually or attach the PDF.",
+        });
 
         const { data: updated } = await svc.from("statements")
           .select("parse_status, parse_error, transactions_found")

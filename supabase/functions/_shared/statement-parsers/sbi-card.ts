@@ -9,6 +9,12 @@ import { inferYear, toAmount, toIsoDate } from "./shared.ts";
 
 const DATE = /([0-9]{1,2}[./-][0-9]{1,2}[./-](?:[0-9]{4}|[0-9]{2})|[0-9]{1,2}[\s-]+[A-Za-z]{3,}(?:[\s-]+(?:[0-9]{4}|[0-9]{2}))?)/;
 const AMOUNT_ONLY = /^\s*(?:INR|Rs\.?|₹|`|\(|\)|\s)*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*(?:CR|DR|C|D)?\s*$/i;
+// SBI's statement summary is column-based: the label sits in the left column
+// and the numeric value in the right column, often on a different physical
+// line that also carries unrelated left-column text (STMT No., CKYC No.).
+// Match a decimal amount trailing the end of a line so we can pull `0.00`
+// off the ckyc line without picking up the digits of the ckyc number itself.
+const TRAILING_AMOUNT = /([0-9][0-9,]*\.[0-9]{2})\s*(?:CR|DR)?\s*$/i;
 
 function normalizedLines(text: string): string[] {
   return text
@@ -66,6 +72,11 @@ function amountAfterLabel(lines: string[], label: RegExp): number | null {
   const inlineAmount = toAmount(lines[idx].slice(cursor));
   if (inlineAmount !== null) return inlineAmount;
   for (let i = idx + 1; i <= Math.min(lines.length - 1, idx + 5); i++) {
+    // Column-aligned layout: the amount can appear at the end of a line
+    // whose left column carries unrelated text (STMT No., CKYC No., …).
+    // Prefer a trailing decimal amount before falling back to amount-only.
+    const trailing = lines[i].match(TRAILING_AMOUNT);
+    if (trailing) return toAmount(trailing[1]);
     if (/\b(stmt|statement\s+no|ckyc|credit\s+limit|available|pay\s+now|card\s+number)\b/i.test(lines[i])) continue;
     const amountOnly = lines[i].match(AMOUNT_ONLY);
     if (amountOnly) return toAmount(amountOnly[1]);
@@ -106,17 +117,20 @@ export const sbiCardParser = (text: string, ctx: ParserContext): ParserResult =>
 
   const compact = text.replace(/\r/g, "\n").replace(/\u00a0/g, " ");
   const lines = normalizedLines(compact);
-  const statementDateMatch = compact.match(new RegExp(`statement\\s*date\\s*[:\\s]*${DATE.source}`, "i"))
-    ?? compact.match(new RegExp(`date\\s*of\\s*statement\\s*[:\\s]*${DATE.source}`, "i"));
-  const dueDateMatch = compact.match(new RegExp(`(?:payment\\s*)?due\\s*date\\s*[:\\s]*${DATE.source}`, "i"))
-    ?? compact.match(new RegExp(`payment\\s*due\\s*on\\s*[:\\s]*${DATE.source}`, "i"));
+  // Constrain inline matches to a single line ([^\n]{0,N}) so the label
+  // regex cannot bleed into the next row and capture STMT No. / CKYC No.
+  // digits as the "amount" or "date".
+  const statementDateMatch = compact.match(new RegExp(`statement\\s*date[^\\n]{0,40}?${DATE.source}`, "i"))
+    ?? compact.match(new RegExp(`date\\s*of\\s*statement[^\\n]{0,40}?${DATE.source}`, "i"));
+  const dueDateMatch = compact.match(new RegExp(`(?:payment\\s*)?due\\s*date[^\\n]{0,40}?${DATE.source}`, "i"))
+    ?? compact.match(new RegExp(`payment\\s*due\\s*on[^\\n]{0,40}?${DATE.source}`, "i"));
   // Handle SBI's "NO PAYMENT REQUIRED" sentinel when the card has zero balance.
   const noPaymentRequired = /NO\s*PAYMENT\s*REQUIRED/i.test(compact);
-  const totalDueMatch = compact.match(/(?:total\s*(?:amount\s*)?due|total\s*payment\s*due|amount\s*payable)\s*[:\s]*(?:INR|Rs\.?|₹|`)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
-  const minDueMatch = compact.match(/(?:minimum\s*(?:amount\s*)?due|min\.?\s*due)\s*[:\s]*(?:INR|Rs\.?|₹|`)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
+  const totalDueMatch = compact.match(/(?:total\s*(?:amount\s*)?due|total\s*payment\s*due|amount\s*payable)[^\S\n]*[:\s]*(?:INR|Rs\.?|₹|`)?[^\S\n]*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
+  const minDueMatch = compact.match(/(?:minimum\s*(?:amount\s*)?due|min\.?\s*due)[^\S\n]*[:\s]*(?:INR|Rs\.?|₹|`)?[^\S\n]*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
   const periodMatch = compact.match(new RegExp(`(?:statement\\s*)?period\\s*[:\\s]*${DATE.source}\\s*(?:to|-|–)\\s*${DATE.source}`, "i"))
     ?? compact.match(new RegExp(`for\\s+the\\s+period\\s+${DATE.source}\\s*(?:to|-|–)\\s*${DATE.source}`, "i"));
-  const creditLimitMatch = compact.match(/credit\s*limit[^\n]*?[:\s]*(?:INR|Rs\.?|₹|`)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
+  const creditLimitMatch = compact.match(/credit\s*limit[^\n]{0,60}?[:\s]*(?:INR|Rs\.?|₹|`)?[^\S\n]*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
   const splitStatementDate = dateNearLabel(lines, /\bstatement\s*date\b/i, inferredYear);
   const splitDueDate = dateNearLabel(lines, /\bpayment\s*due\s*date\b|\bdue\s*date\b/i, inferredYear);
   const splitTotalDue = amountAfterLabel(lines, /\btotal\s*(?:amount\s*)?due\b/i);
