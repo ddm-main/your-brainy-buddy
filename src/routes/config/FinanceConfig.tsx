@@ -7,6 +7,7 @@ const CardsConfig = lazy(() => import("@/routes/config/CardsConfig"));
 const LoansConfig = lazy(() => import("@/routes/config/LoansConfig"));
 const GoalsConfig = lazy(() => import("@/routes/config/GoalsConfig"));
 const SubscriptionsConfig = lazy(() => import("@/routes/config/SubscriptionsConfig"));
+const StatementPasswordsConfig = lazy(() => import("@/routes/config/StatementPasswordsConfig"));
 
 const SUBTABS = [
   { to: "/config/finance", label: "Home", exact: true },
@@ -15,6 +16,7 @@ const SUBTABS = [
   { to: "/config/finance/loans", label: "Loans" },
   { to: "/config/finance/goals", label: "Goals" },
   { to: "/config/finance/subscriptions", label: "Subscriptions" },
+  { to: "/config/finance/passwords", label: "PDF Passwords" },
 ];
 
 export default function FinanceConfig() {
