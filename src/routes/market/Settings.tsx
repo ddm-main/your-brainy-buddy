@@ -48,6 +48,7 @@ export default function MarketSettings() {
   const [baseUrl, setBaseUrl] = useState(KOTAK_DEFAULT_BASE);
   const [wsUrl, setWsUrl] = useState(KOTAK_DEFAULT_WS);
   const [otp, setOtp] = useState("");
+  const [otpError, setOtpError] = useState<string | null>(null);
   const [pipeline, setPipeline] = useState<Record<string, unknown> | null>(null);
 
   const load = async () => {
