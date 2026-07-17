@@ -227,3 +227,29 @@ export function useScreenerMutations() {
   });
   return { save, remove };
 }
+
+export function useFundamentals(symbol: string | undefined, exchange = "NSE") {
+  return useQuery({
+    queryKey: ["market", "fundamentals", symbol ?? "", exchange],
+    queryFn: () => callMarketFn<{ fundamentals: any; cached: boolean; fetched_at: string }>(
+      "market-fundamentals", { symbol, exchange },
+    ),
+    enabled: !!symbol,
+    staleTime: 6 * 3600_000,
+  });
+}
+
+export function useOptionChain(symbol: string | undefined, expiry?: string) {
+  return useQuery({
+    queryKey: ["market", "optionchain", symbol ?? "", expiry ?? ""],
+    queryFn: () => callMarketFn<{
+      symbol: string; expiry: string; expiries: string[]; underlying: number;
+      pcr: number | null; total_call_oi: number; total_put_oi: number;
+      rows: Array<{ strike: number; call: any; put: any }>;
+    }>("market-option-chain", { symbol, expiry }),
+    enabled: !!symbol,
+    refetchInterval: marketOpen() ? 60_000 : false,
+    staleTime: 30_000,
+  });
+}
+
