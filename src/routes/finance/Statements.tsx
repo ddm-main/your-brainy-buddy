@@ -588,16 +588,11 @@ export default function Statements() {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead style={{ position: "sticky", top: 0, zIndex: 1, background: "var(--panel-tint-heavy)" }}>
              <tr style={{ color: "var(--text-dim)", textAlign: "left", fontSize: 10, fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
-               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>bank · card/account</th>
-               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>date</th>
-               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>period</th>
-               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>txns</th>
-               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>total due</th>
-               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>due</th>
-               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>min due</th>
-               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>limit</th>
-               <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>status</th>
-                <th style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>PDF</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)", width: "26%" }}>entity</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)", width: "20%" }}>period</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)", width: "18%", textAlign: "right" }}>amounts</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)", width: "18%" }}>status</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>actions</th>
              </tr>
            </thead>
            <tbody>
@@ -607,197 +602,175 @@ export default function Statements() {
                const dateStr = s.statement_date
                  ? new Date(s.statement_date).toLocaleDateString()
                  : em?.received_at ? new Date(em.received_at).toLocaleDateString() : "—";
-                const hint = explainParseError(s.parse_error);
-                const unlinkedReason = linkReason(s);
-                const rawErr = s.parse_error ?? "";
+               const hint = explainParseError(s.parse_error);
+               const unlinkedReason = linkReason(s);
+               const rawErr = s.parse_error ?? "";
+               const isCard = s.statement_type === "card";
+               const incomplete = s.parse_status === "parsed" && isCard && (
+                 s.statement_date == null || s.due_date == null || s.total_due == null ||
+                 Number(s.transactions_found ?? 0) === 0
+               );
+               const statusLabel = statementStatusLabel(s);
+               const statusToneVal = incomplete ? "warn" : statusTone(s.parse_status);
                return (
                  <Fragment key={s.id}>
                    <tr style={{ borderBottom: "1px solid rgba(127,233,255,0.06)", cursor: "pointer" }} onClick={() => toggleOpen(s)}>
-                     <td style={{ padding: "6px 8px", verticalAlign: "top" }}>
-                       <div style={{ color: "var(--text)", fontWeight: 500 }}>{bank ?? "Unknown bank"}</div>
-                       <div style={{ color: "var(--text-dim)", fontSize: 11 }}>
-                         {entity ?? <span style={{ color: "var(--warn)" }}>unlinked</span>}
-                         {" · "}<Chip>{s.statement_type}</Chip>
+                     <td style={{ padding: "4px 8px", verticalAlign: "middle" }}>
+                       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                         <span style={{ color: "var(--text)", fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{bank ?? "Unknown bank"}</span>
+                         <Chip>{s.statement_type}</Chip>
                        </div>
-                        {unlinkedReason && <div style={{ color: "var(--warn)", fontSize: 10, marginTop: 2 }}>{unlinkedReason}</div>}
+                       <div style={{ color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                         {entity ?? <span style={{ color: "var(--warn)" }}>unlinked</span>}
+                       </div>
+                       {unlinkedReason && <div style={{ color: "var(--warn)", fontSize: 9, marginTop: 1 }}>{unlinkedReason}</div>}
                      </td>
-                     <td style={{ padding: "6px 8px", color: "var(--text-dim)", verticalAlign: "top" }}>{dateStr}</td>
-                     <td style={{ padding: "6px 8px", color: "var(--text-dim)", verticalAlign: "top" }}>{s.period_start && s.period_end ? `${s.period_start} → ${s.period_end}` : "—"}</td>
-                     <td style={{ padding: "6px 8px", color: "var(--text-dim)", verticalAlign: "top" }}>{s.transactions_found ?? 0}</td>
-                     <td style={{ padding: "6px 8px", color: "var(--text)", verticalAlign: "top", textAlign: "right", whiteSpace: "nowrap" }}>{s.total_due != null ? inr(s.total_due) : "—"}</td>
-                     <td style={{ padding: "6px 8px", color: "var(--text-dim)", verticalAlign: "top", whiteSpace: "nowrap" }}>{s.due_date ? new Date(s.due_date).toLocaleDateString() : "—"}</td>
-                     <td style={{ padding: "6px 8px", color: "var(--text-dim)", verticalAlign: "top", textAlign: "right", whiteSpace: "nowrap" }}>{s.statement_type === "card" && s.min_due != null ? inr(s.min_due) : "—"}</td>
-                     <td style={{ padding: "6px 8px", color: "var(--text-dim)", verticalAlign: "top", textAlign: "right", whiteSpace: "nowrap" }}>{s.statement_type === "card" && s.credit_limit != null ? inr(s.credit_limit) : "—"}</td>
-                     <td style={{ padding: "6px 8px", verticalAlign: "top" }}>
-                        {(() => {
-                          const isCard = s.statement_type === "card";
-                          // Accounts are info-only: never flag them as
-                          // incomplete for missing card lifecycle fields,
-                          // and never for zero transactions (many account
-                          // statement PDFs just carry balances, not a txn
-                          // table).
-                          const incomplete = s.parse_status === "parsed" && isCard && (
-                            s.statement_date == null || s.due_date == null || s.total_due == null ||
-                            Number(s.transactions_found ?? 0) === 0
-                          );
-                          const label = statementStatusLabel(s);
-                          const tone = incomplete ? "warn" : statusTone(s.parse_status);
-                          return <Chip tone={tone}>{label}</Chip>;
-                        })()}
-                        {s.statement_type === "card" && s.payment_status && s.payment_status !== "na" && (
-                          <div style={{ marginTop: 3 }}>
-                            <Chip tone={s.payment_status === "paid" ? "ok" : s.payment_status === "overdue" ? "err" : "warn"}>{s.payment_status}</Chip>
-                          </div>
-                        )}
-                        {/* Payment actions sit with the payment chips rather than
-                            behind a row expand. */}
-                        {s.statement_type === "card" && s.parse_status === "parsed" && (
-                          <div style={{ marginTop: 3 }} onClick={(e) => e.stopPropagation()}>
-                            {s.payment_status !== "paid" ? (
-                              <Btn size="sm" variant="primary" onClick={() => markPaid(s)}>mark paid</Btn>
-                            ) : null}
-                            {(s.payment_status === "paid" || s.payment_status === "partial") && (
-                              <Btn size="sm" onClick={() => clearPayment(s)}>clear payment</Btn>
+                     <td style={{ padding: "4px 8px", color: "var(--text-dim)", verticalAlign: "middle", fontSize: 11, whiteSpace: "nowrap" }}>
+                       <div>{dateStr}</div>
+                       <div>{s.period_start && s.period_end ? `${s.period_start} → ${s.period_end}` : "—"}</div>
+                       <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 1 }}>{s.transactions_found ?? 0} txns</div>
+                     </td>
+                     <td style={{ padding: "4px 8px", verticalAlign: "middle", textAlign: "right", fontSize: 11, whiteSpace: "nowrap" }}>
+                       <div style={{ color: "var(--text)", fontWeight: 500 }}>{s.total_due != null ? inr(s.total_due) : (s.closing_balance != null ? inr(s.closing_balance) : "—")}</div>
+                       <div style={{ color: "var(--text-dim)" }}>
+                         {isCard ? (
+                           <>
+                             {s.min_due != null ? `min ${inr(s.min_due)}` : "—"}
+                             {" · "}
+                             {s.credit_limit != null ? `lim ${inr(s.credit_limit)}` : "—"}
+                           </>
+                         ) : (
+                           s.due_date ? `due ${new Date(s.due_date).toLocaleDateString()}` : "—"
+                         )}
+                       </div>
+                     </td>
+                     <td style={{ padding: "4px 8px", verticalAlign: "middle" }}>
+                       <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
+                         <Chip tone={statusToneVal}>{statusLabel}</Chip>
+                         {isCard && s.payment_status && s.payment_status !== "na" && (
+                           <Chip tone={s.payment_status === "paid" ? "ok" : s.payment_status === "overdue" ? "err" : "warn"}>{s.payment_status}</Chip>
+                         )}
+                       </div>
+                     </td>
+                     <td style={{ padding: "4px 8px", verticalAlign: "middle", textAlign: "right" }}>
+                       <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", flexWrap: "wrap" }}>
+                         {s.file_path ? (
+                           <Btn size="sm" onClick={(e: any) => { e.stopPropagation(); viewPdf(s); }}>PDF</Btn>
+                         ) : <span className="hud-label">—</span>}
+                         {(s.file_path || s.source_email_id || s.parse_status === "failed" || s.parse_status === "skipped") && (
+                           <Btn
+                             size="sm"
+                             disabled={rowRetryingId === s.id}
+                             onClick={(e: any) => { e.stopPropagation(); retryRow(s); }}
+                             title={s.file_path || s.source_email_id
+                               ? "Re-parse just this statement"
+                               : "Retry — attach a PDF first if none is linked"}
+                           >
+                             {rowRetryingId === s.id ? "…" : "retry"}
+                           </Btn>
+                         )}
+                       </div>
+                     </td>
+                   </tr>
+                    {openId === s.id && (
+                      <tr>
+                        <td colSpan={5} style={{ padding: "8px", background: "rgba(53,214,237,0.03)", borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                            {/* Compact metadata + quick actions bar */}
+                            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", fontSize: 11 }}>
+                              {isCard && s.parse_status === "parsed" && (
+                                <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 4 }}>
+                                  {s.payment_status !== "paid" && <Btn size="sm" variant="primary" onClick={() => markPaid(s)}>mark paid</Btn>}
+                                  {(s.payment_status === "paid" || s.payment_status === "partial") && <Btn size="sm" onClick={() => clearPayment(s)}>clear payment</Btn>}
+                                </div>
+                              )}
+                              {(() => {
+                                const v = validationFor(s, txns);
+                                const paid = isCard && s.paid_amount != null;
+                                const attach = s.parse_status === "skipped";
+                                if (!v && !paid && !attach) return null;
+                                return (
+                                  <>
+                                    {paid && <Fact label="paid" value={`${inr(s.paid_amount)}${s.paid_on ? ` · ${new Date(s.paid_on).toLocaleDateString()}` : ""}`} />}
+                                    {v && (
+                                      <span title={v.msg} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                                        <Chip tone={v.ok ? "ok" : "warn"}>{v.ok ? "validated" : "mismatch"}</Chip>
+                                        <span style={{ color: v.ok ? "var(--ok)" : "var(--warn)" }}>{v.msg}</span>
+                                      </span>
+                                    )}
+                                    {attach && <Btn size="sm" variant="primary" onClick={() => startAttachToRow(s)}>attach PDF →</Btn>}
+                                  </>
+                                );
+                              })()}
+                              {s.parse_status === "parsed" && (() => {
+                                let missing: string[] = [];
+                                const mErr = /missing_fields:([\w,]+)/i.exec(s.parse_error ?? "");
+                                if (mErr) missing = mErr[1].split(",").filter(Boolean);
+                                else missing = missingFieldsFor(s) as string[];
+                                if (Number(s.transactions_found ?? 0) === 0 && s.statement_type !== "loan") missing.push("transactions");
+                                if (missing.length === 0) return null;
+                                return <span style={{ color: "var(--warn)" }}>missing: {missing.join(", ")}</span>;
+                              })()}
+                              {!s.skeleton_id && Number(s.learn_attempts ?? 0) > 0 && (
+                                <span style={{ color: "var(--warn)", fontSize: 10 }}>learn: {s.learn_attempts}×</span>
+                              )}
+                              {hint && s.parse_status !== "parsed" && hint !== s.parse_reason && hint !== s.parse_error && (
+                                <span style={{ color: "var(--warn)", fontSize: 10 }}>{hint}</span>
+                              )}
+                            </div>
+                            {(hint || rawErr) && s.parse_status !== "parsed" && (
+                              <div style={{ padding: "4px 8px", background: "rgba(255,107,107,0.08)", border: "1px solid rgba(255,107,107,0.25)", borderRadius: 4, color: "var(--warn)", fontSize: 11 }}>
+                                <span className="hud-label" style={{ color: "var(--warn)" }}>{rawErr || "parse_error"}</span>
+                                {hint && hint !== rawErr ? <> · {hint}</> : null}
+                              </div>
+                            )}
+                            {(s.parse_status === "failed" || s.parse_status === "pending" || needsReparse(s) || (!s.credit_card_id && !s.financial_account_id && !s.loan_id)) && (
+                              <div style={{ display: "flex", gap: 6, alignItems: "end", flexWrap: "wrap" }}>
+                                <div style={{ minWidth: 240 }}>
+                                  <label style={labelStyle}>link to card / account</label>
+                                  <HudSelect value={retryLinkId} onChange={setRetryLinkId} placeholder="—" options={[
+                                    ...cards.map((c: any) => ({ value: c.id, label: `${c.card_name} (card${c.banks?.name ? ` · ${c.banks.name}` : ""})` })),
+                                    ...accounts.map((a: any) => ({ value: a.id, label: `${a.nickname} (account${a.banks?.name ? ` · ${a.banks.name}` : ""})` })),
+                                  ]} />
+                                </div>
+                                <div>
+                                  <label style={labelStyle}>password</label>
+                                  <input type="password" value={retryPassword} onChange={(e) => setRetryPassword(e.target.value)} placeholder="auto-try saved" style={{ ...inputStyle, width: 160 }} />
+                                </div>
+                                <Btn size="sm" variant="primary" disabled={retrying} onClick={() => retryStatement(s)}>{retrying ? "retrying…" : "retry"}</Btn>
+                                <Btn size="sm" disabled={retrying || !retryLinkId} onClick={() => saveLinkOnly(s)} title="Save the chosen card/account without re-parsing the PDF">save link only</Btn>
+                              </div>
+                            )}
+                            {(missingFieldsFor(s).length > 0 || Number(s.transactions_found ?? 0) === 0) && s.parse_status !== "pending" && (
+                              <StatementReviewPanel
+                                statement={s}
+                                onSaved={(patch) => {
+                                  setItems((prev) => prev.map((x) => x.id === s.id ? { ...x, ...patch, manual_override: true, parse_status: "parsed" } : x));
+                                }}
+                              />
+                            )}
+                            <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
+                              <span className="hud-label" style={{ flex: "0 0 auto" }}>txns ({s.transactions_found ?? 0})</span>
+                              {txnsLoading ? <span className="hud-label">loading…</span> :
+                               txns.length === 0 ? <span className="hud-label">none extracted</span> :
+                               <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
+                                 {txns.map((t: any) => (
+                                   <div key={t.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 11 }}>
+                                     <span style={{ color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{new Date(t.txn_date).toLocaleDateString()} · {t.merchant ?? "—"}</span>
+                                     <span style={{ color: t.txn_type === "debit" ? "var(--warn)" : "var(--ok)", flex: "0 0 auto" }}>{t.txn_type === "debit" ? "-" : "+"}{inr(t.amount)}</span>
+                                   </div>
+                                 ))}
+                               </div>}
+                            </div>
+                            {s.ai_summary && (
+                              <div style={{ padding: 6, border: "1px solid var(--edge)", background: "rgba(53,214,237,0.04)", whiteSpace: "pre-wrap", fontSize: 11, color: "var(--text)" }}>
+                                <span className="hud-label">AI summary</span> {s.ai_summary}
+                              </div>
                             )}
                           </div>
-                        )}
-                        {!s.skeleton_id && Number(s.learn_attempts ?? 0) > 0 && (
-                          <div style={{ marginTop: 3 }} title={`Learner attempted ${s.learn_attempts} time(s) without persisting a skeleton`}>
-                            <Chip tone="warn">learn: {s.learn_attempts}×</Chip>
-                          </div>
-                        )}
-                         {s.parse_status === "parsed" && (() => {
-                           // List EVERY missing field explicitly — for cards
-                           // and accounts alike. Prefer the parse_error
-                           // payload when the parser said so, else derive
-                           // from the row.
-                           let missing: string[] = [];
-                           const mErr = /missing_fields:([\w,]+)/i.exec(s.parse_error ?? "");
-                           if (mErr) missing = mErr[1].split(",").filter(Boolean);
-                           else missing = missingFieldsFor(s) as string[];
-                           if (Number(s.transactions_found ?? 0) === 0 && s.statement_type !== "loan") missing.push("transactions");
-                           if (missing.length === 0) return null;
-                           return (
-                             <div style={{ fontSize: 10, color: "var(--warn)", marginTop: 2, maxWidth: 260, lineHeight: 1.35 }}>
-                               missing: {missing.join(", ")}
-                               <br />
-                               <span style={{ color: "var(--text-dim)" }}>expand row → review &amp; fix</span>
-                             </div>
-                           );
-                         })()}
-
-                        {hint && s.parse_status !== "parsed" && hint !== s.parse_reason && hint !== s.parse_error && (
-                          <div style={{ fontSize: 10, color: "var(--warn)", marginTop: 2, maxWidth: 220 }}>{hint}</div>
-                        )}
-                     </td>
-                       <td style={{ padding: "6px 8px", verticalAlign: "top", textAlign: "right" }}>
-                         <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-end" }}>
-                           {s.file_path ? (
-                             <Btn size="sm" onClick={(e: any) => { e.stopPropagation(); viewPdf(s); }}>view PDF</Btn>
-                           ) : <span className="hud-label">—</span>}
-                           {(s.file_path || s.source_email_id || s.parse_status === "failed" || s.parse_status === "skipped") && (
-                             <Btn
-                               size="sm"
-                               disabled={rowRetryingId === s.id}
-                               onClick={(e: any) => { e.stopPropagation(); retryRow(s); }}
-                               title={s.file_path || s.source_email_id
-                                 ? "Re-parse just this statement"
-                                 : "Retry — attach a PDF first if none is linked"}
-                             >
-                               {rowRetryingId === s.id ? "retrying…" : "retry"}
-                             </Btn>
-                           )}
-                         </div>
-                       </td>
-
-                   </tr>
-                   {openId === s.id && (
-                     <tr>
-                        <td colSpan={10} style={{ padding: "10px 8px", background: "rgba(53,214,237,0.03)", borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
-                         {/* Facts (total due / due / min due / limit) now live as
-                             main-row columns. What stays here needs the loaded
-                             txns (validation) or is rare (paid detail, attach). */}
-                         {(() => {
-                           const v = validationFor(s, txns);
-                           const paid = s.statement_type === "card" && s.paid_amount != null;
-                           const attach = s.parse_status === "skipped";
-                           if (!v && !paid && !attach) return null;
-                           return (
-                             <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center", fontSize: 11, color: "var(--text-dim)", marginBottom: 8 }}>
-                               {paid && (
-                                 <Fact label="paid" value={`${inr(s.paid_amount)}${s.paid_on ? ` · ${new Date(s.paid_on).toLocaleDateString()}` : ""}`} />
-                               )}
-                               {v && (
-                                 <span title={v.msg} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-                                   <Chip tone={v.ok ? "ok" : "warn"}>{v.ok ? "validated" : "mismatch"}</Chip>
-                                   <span style={{ color: v.ok ? "var(--ok)" : "var(--warn)" }}>{v.msg}</span>
-                                 </span>
-                               )}
-                               {attach && (
-                                 <span style={{ marginLeft: "auto" }}>
-                                   <Btn size="sm" variant="primary" onClick={() => startAttachToRow(s)}>attach PDF →</Btn>
-                                 </span>
-                               )}
-                             </div>
-                           );
-                         })()}
-                         {s.ai_summary && (
-                           <div style={{ marginTop: 8, padding: 8, border: "1px solid var(--edge)", background: "rgba(53,214,237,0.04)", whiteSpace: "pre-wrap", fontSize: 11, color: "var(--text)" }}>
-                             <div className="hud-label" style={{ marginBottom: 4 }}>AI summary</div>
-                             {s.ai_summary}
-                           </div>
-                         )}
-                          {(hint || rawErr) && s.parse_status !== "parsed" && (
-                            <div style={{ marginTop: 8, padding: "6px 8px", background: "rgba(255,107,107,0.08)", border: "1px solid rgba(255,107,107,0.25)", borderRadius: 4, color: "var(--warn)", fontSize: 11 }}>
-                              <span className="hud-label" style={{ color: "var(--warn)" }}>{rawErr || "parse_error"}</span>
-                              {hint && hint !== rawErr ? <> · {hint}</> : null}
-                            </div>
-                          )}
-                          {(s.parse_status === "failed" || s.parse_status === "pending" || needsReparse(s) || (!s.credit_card_id && !s.financial_account_id && !s.loan_id)) && (
-                           <div style={{ display: "flex", gap: 6, marginTop: 10, alignItems: "end", flexWrap: "wrap" }}>
-                             <div style={{ minWidth: 240 }}>
-                               <label style={labelStyle}>link to card / account</label>
-                               <HudSelect value={retryLinkId} onChange={setRetryLinkId} placeholder="—" options={[
-                                 ...cards.map((c: any) => ({ value: c.id, label: `${c.card_name} (card${c.banks?.name ? ` · ${c.banks.name}` : ""})` })),
-                                 ...accounts.map((a: any) => ({ value: a.id, label: `${a.nickname} (account${a.banks?.name ? ` · ${a.banks.name}` : ""})` })),
-                               ]} />
-                             </div>
-                             <div>
-                               <label style={labelStyle}>password (optional)</label>
-                               <input type="password" value={retryPassword} onChange={(e) => setRetryPassword(e.target.value)} placeholder="auto-try saved" style={{ ...inputStyle, width: 160 }} />
-                             </div>
-                             <Btn size="sm" variant="primary" disabled={retrying} onClick={() => retryStatement(s)}>{retrying ? "retrying…" : "retry"}</Btn>
-                              <Btn size="sm" disabled={retrying || !retryLinkId} onClick={() => saveLinkOnly(s)} title="Save the chosen card/account without re-parsing the PDF">
-                                save link only
-                              </Btn>
-                            </div>
-                          )}
-                          {(missingFieldsFor(s).length > 0 || Number(s.transactions_found ?? 0) === 0) && s.parse_status !== "pending" && (
-                            <StatementReviewPanel
-                              statement={s}
-                              onSaved={(patch) => {
-                                setItems((prev) => prev.map((x) => x.id === s.id ? { ...x, ...patch, manual_override: true, parse_status: "parsed" } : x));
-                              }}
-                            />
-                          )}
-                          {/* Row 2 — transactions, label inline so the whole
-                              section reads as a single row. */}
-                          <div style={{ display: "flex", gap: 10, marginTop: 8, alignItems: "baseline" }}>
-                           <span className="hud-label" style={{ flex: "0 0 auto" }}>txns</span>
-                           {txnsLoading ? <span className="hud-label">loading…</span> :
-                            txns.length === 0 ? <span className="hud-label">none extracted</span> :
-                            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
-                              {txns.map((t: any) => (
-                                <div key={t.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 11 }}>
-                                  <span style={{ color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{new Date(t.txn_date).toLocaleDateString()} · {t.merchant ?? "—"}</span>
-                                  <span style={{ color: t.txn_type === "debit" ? "var(--warn)" : "var(--ok)", flex: "0 0 auto" }}>{t.txn_type === "debit" ? "-" : "+"}{inr(t.amount)}</span>
-                                </div>
-                              ))}
-                            </div>}
-                         </div>
-                       </td>
-                     </tr>
-                   )}
+                        </td>
+                      </tr>
+                    )}
                  </Fragment>
                );
              })}
