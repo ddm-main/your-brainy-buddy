@@ -3,6 +3,8 @@ const ALLOWED_ORIGINS = new Set<string>([
   "http://localhost:8080",
   "http://localhost:5173",
   "https://jarvis.lovable.app",
+  "https://your-brainy-buddy.lovable.app",
+  "https://jarvis.ferfier.app",
 ]);
 
 // Also allow any *.lovable.app / *.lovableproject.com preview by suffix
