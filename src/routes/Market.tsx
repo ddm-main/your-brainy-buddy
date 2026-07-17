@@ -12,6 +12,8 @@ const Analysis = lazy(() => import("@/routes/market/Analysis"));
 const Alerts = lazy(() => import("@/routes/market/Alerts"));
 const Backtesting = lazy(() => import("@/routes/market/Backtesting"));
 const MarketSettings = lazy(() => import("@/routes/market/Settings"));
+const OptionChain = lazy(() => import("@/routes/market/OptionChain"));
+
 
 type Sub = { to: string; label: string };
 type Group = {
