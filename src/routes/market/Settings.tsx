@@ -41,6 +41,8 @@ export default function MarketSettings() {
   const [mobile, setMobile] = useState("");
   const [password, setPassword] = useState("");
   const [mpin, setMpin] = useState("");
+  const [ucc, setUcc] = useState("");
+  const [totpSecret, setTotpSecret] = useState("");
   const [baseUrl, setBaseUrl] = useState(KOTAK_DEFAULT_BASE);
   const [wsUrl, setWsUrl] = useState(KOTAK_DEFAULT_WS);
   const [otp, setOtp] = useState("");
@@ -54,6 +56,7 @@ export default function MarketSettings() {
     const cur = map[provider];
     if (cur) {
       setConsumerKey(cur.consumer_key ?? "");
+      setUcc(cur.ucc ?? "");
       setBaseUrl(cur.base_url ?? KOTAK_DEFAULT_BASE);
       setWsUrl(cur.ws_url ?? KOTAK_DEFAULT_WS);
     }
@@ -63,6 +66,7 @@ export default function MarketSettings() {
     const cur = rows[provider];
     if (cur) {
       setConsumerKey(cur.consumer_key ?? "");
+      setUcc(cur.ucc ?? "");
       setBaseUrl(cur.base_url ?? KOTAK_DEFAULT_BASE);
       setWsUrl(cur.ws_url ?? KOTAK_DEFAULT_WS);
     }
@@ -86,9 +90,11 @@ export default function MarketSettings() {
         mobile_number: mobile || null,
         password: password || null,
         mpin: mpin || null,
+        totp_secret: totpSecret || null,
+        ucc: ucc || undefined,
         base_url: baseUrl || null, ws_url: wsUrl || null,
       });
-      setConsumerSecret(""); setPassword(""); setMpin(""); setMobile("");
+      setConsumerSecret(""); setPassword(""); setMpin(""); setMobile(""); setTotpSecret("");
       push("Configuration saved", "ok");
       await load();
     } catch (e) { push(toSafeError(e, "Save failed").message, "err"); }
@@ -109,9 +115,27 @@ export default function MarketSettings() {
     setBusy("login");
     try {
       const r = await callFn("market-kotak-login-start", {});
-      push(r?.message ?? "OTP requested — check your Kotak app / SMS", "ok");
+      if (r?.auto) {
+        push(`Connected as ${r?.greeting_name ?? "Kotak user"} (auto TOTP)`, "ok");
+      } else if (r?.needs_totp) {
+        push("Enter the 6-digit TOTP from your authenticator app below", "ok");
+      } else {
+        push(r?.message ?? "Login started", "ok");
+      }
       await load();
     } catch (e) { push(toSafeError(e, "Login failed").message, "err"); }
+    finally { setBusy(null); }
+  };
+
+  const refreshSession = async () => {
+    setBusy("refresh");
+    try {
+      const r = await callFn("market-kotak-refresh", {});
+      const me = r?.refreshed?.[0];
+      if (me?.ok) push(`Session refreshed — ${me.greeting_name ?? "connected"}`, "ok");
+      else push(me?.error ?? "Refresh failed (is the TOTP secret saved?)", "err");
+      await load();
+    } catch (e) { push(toSafeError(e, "Refresh failed").message, "err"); }
     finally { setBusy(null); }
   };
 
@@ -184,14 +208,16 @@ export default function MarketSettings() {
       {isKotak && (
         <HudPanel title="Kotak Neo Credentials" index="MK.S2">
           <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12 }}>
-            Store credentials once (encrypted at rest). Sessions expire daily around midnight IST — complete OTP each morning to mint a fresh token.
+            Store credentials once (encrypted at rest). Sessions expire daily around midnight IST — save the
+            TOTP secret (from Kotak Neo app → API TOTP setup) and JARVIS re-logs-in automatically every morning.
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <Field label="Consumer Key" value={consumerKey} setValue={setConsumerKey} placeholder="From Kotak Neo API portal" />
-            <Field label="Consumer Secret" value={consumerSecret} setValue={setConsumerSecret} placeholder="(leave blank to keep existing)" type="password" />
+            <Field label="Consumer Key" value={consumerKey} setValue={setConsumerKey} placeholder="From Kotak Neo app → Trade API" />
+            <Field label="UCC (Client Code)" value={ucc} setValue={setUcc} placeholder="e.g. ABC123" />
             <Field label="Mobile Number" value={mobile} setValue={setMobile} placeholder="+91XXXXXXXXXX (leave blank to keep)" />
-            <Field label="Password" value={password} setValue={setPassword} placeholder="(leave blank to keep existing)" type="password" />
-            <Field label="MPIN" value={mpin} setValue={setMpin} placeholder="(leave blank to keep existing)" type="password" />
+            <Field label="MPIN" value={mpin} setValue={setMpin} placeholder="6-digit (leave blank to keep existing)" type="password" />
+            <Field label="TOTP Secret" value={totpSecret} setValue={setTotpSecret} placeholder="Base32 secret for auto-login (optional)" type="password" />
+            <Field label="Consumer Secret" value={consumerSecret} setValue={setConsumerSecret} placeholder="(optional, v2 API doesn't need it)" type="password" />
             <Field label="Base URL" value={baseUrl} setValue={setBaseUrl} />
             <Field label="WebSocket URL" value={wsUrl} setValue={setWsUrl} />
           </div>
@@ -200,20 +226,23 @@ export default function MarketSettings() {
               {busy === "save" ? "saving…" : "Save configuration"}
             </Btn>
             <Btn onClick={startLogin} disabled={busy !== null}>
-              {busy === "login" ? "requesting OTP…" : "Start login (request OTP)"}
+              {busy === "login" ? "logging in…" : "Login to Kotak"}
+            </Btn>
+            <Btn onClick={refreshSession} disabled={busy !== null}>
+              {busy === "refresh" ? "refreshing…" : "Refresh session"}
             </Btn>
           </div>
         </HudPanel>
       )}
 
       {isKotak && cur?.connection_status === "pending_otp" && (
-        <HudPanel title="Complete OTP" index="MK.S3">
+        <HudPanel title="Complete Login — TOTP" index="MK.S3">
           <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 8 }}>
-            OTP sent to your registered mobile / Kotak Neo app. Enter it below.
+            Enter the current 6-digit TOTP from your authenticator app (Kotak Neo → API TOTP).
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
             <div style={{ flex: 1, maxWidth: 200 }}>
-              <div style={labelStyle}>OTP</div>
+              <div style={labelStyle}>TOTP code</div>
               <input value={otp} onChange={(e) => setOtp(e.target.value)} style={inputStyle} inputMode="numeric" autoFocus />
             </div>
             <Btn onClick={completeOtp} disabled={busy !== null} variant="primary">

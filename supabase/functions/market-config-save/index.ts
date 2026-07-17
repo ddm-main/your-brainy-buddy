@@ -22,6 +22,8 @@ Deno.serve(async (req) => {
     if (b?.mobile_number) patch.mobile_number_enc = await enc(b.mobile_number);
     if (b?.password) patch.password_enc = await enc(b.password);
     if (b?.mpin) patch.mpin_enc = await enc(b.mpin);
+    if (b?.totp_secret) patch.totp_secret_enc = await enc(String(b.totp_secret).replace(/\s+/g, ""));
+    if (b?.ucc !== undefined) patch.ucc = String(b.ucc).trim().toUpperCase() || null;
     if (b?.base_url !== undefined) patch.base_url = b.base_url;
     if (b?.ws_url !== undefined) patch.ws_url = b.ws_url;
 

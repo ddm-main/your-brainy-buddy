@@ -8,16 +8,19 @@ import { authFetch } from "@/lib/authFetch";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { Plus, RefreshCw, Trash2 } from "lucide-react";
+import { ScoreBadge } from "@/components/market/ScoreBadge";
 
 type Watchlist = { id: string; name: string; color: string | null };
 type Item = { id: string; watchlist_id: string; symbol: string; exchange: string; priority: number | null; notes: string | null; tags: string[] | null };
 type QuoteMap = Record<string, { ltp: number; change_pct: number | null }>;
+type ScoreMap = Record<string, { breakout_score: number | null; prebreakout_score: number | null; score_components: any }>;
 
 export default function Watchlist() {
   const push = useUi((s) => s.push);
   const [lists, setLists] = useState<Watchlist[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [quotes, setQuotes] = useState<QuoteMap>({});
+  const [scores, setScores] = useState<ScoreMap>({});
   const [active, setActive] = useState<string | null>(null);
   const [newList, setNewList] = useState("");
   const [newSym, setNewSym] = useState("");
@@ -43,6 +46,15 @@ export default function Watchlist() {
     setLists(l);
     setItems((it ?? []) as Item[]);
     if (!active && l.length) setActive(l[0].id);
+    const symbols = [...new Set((it ?? []).map((i: any) => i.symbol))];
+    if (symbols.length > 0) {
+      const { data: sc } = await supabase.from("market_stock_scores")
+        .select("symbol,breakout_score,prebreakout_score,score_components")
+        .in("symbol", symbols);
+      const map: ScoreMap = {};
+      for (const s of (sc ?? []) as any[]) map[s.symbol] = s;
+      setScores(map);
+    }
   };
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
@@ -146,7 +158,7 @@ export default function Watchlist() {
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
                   <tr style={{ textAlign: "left", color: "var(--text-dim)" }}>
-                    {["Symbol", "LTP", "Day %", "Priority", "Notes", ""].map((h) => (
+                    {["Symbol", "LTP", "Day %", "Breakout", "Pre-BO", "Priority", "Notes", ""].map((h) => (
                       <th key={h} style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", fontWeight: 400, textTransform: "uppercase", letterSpacing: "0.1em", fontSize: 10 }}>{h}</th>
                     ))}
                   </tr>
@@ -164,6 +176,12 @@ export default function Watchlist() {
                         <td style={{ padding: "6px 8px", color: (q?.change_pct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
                           {q?.change_pct == null ? "—" : `${q.change_pct >= 0 ? "+" : ""}${q.change_pct.toFixed(2)}%`}
                         </td>
+                        <td style={{ padding: "6px 8px" }}>
+                          <ScoreBadge score={scores[i.symbol]?.breakout_score} components={scores[i.symbol]?.score_components?.breakout} label="breakout components" />
+                        </td>
+                        <td style={{ padding: "6px 8px" }}>
+                          <ScoreBadge score={scores[i.symbol]?.prebreakout_score} components={scores[i.symbol]?.score_components?.prebreakout} label="pre-breakout components" />
+                        </td>
                         <td style={{ padding: "6px 8px" }}>{i.priority ?? 0}</td>
                         <td style={{ padding: "6px 8px", color: "var(--text-dim)" }}>{i.notes ?? ""}</td>
                         <td style={{ padding: "6px 8px" }}>
@@ -173,7 +191,7 @@ export default function Watchlist() {
                     );
                   })}
                   {activeItems.length === 0 && (
-                    <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "var(--text-dim)" }}>Empty watchlist — add a symbol above.</td></tr>
+                    <tr><td colSpan={8} style={{ padding: 20, textAlign: "center", color: "var(--text-dim)" }}>Empty watchlist — add a symbol above.</td></tr>
                   )}
                 </tbody>
               </table>

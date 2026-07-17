@@ -24,23 +24,5 @@ export function errorResponse(req: Request, message: string, status = 400): Resp
   return jsonResponse(req, { error: message }, status);
 }
 
-// Yahoo Finance quote fetch — no auth required. Used as fallback for indices.
-export async function yahooQuote(symbols: string[]): Promise<Array<{ symbol: string; name: string; price: number; change_pct: number | null; change_abs: number | null }>> {
-  if (symbols.length === 0) return [];
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols.join(","))}`;
-  try {
-    const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-    if (!r.ok) return [];
-    const j = await r.json();
-    const rows = j?.quoteResponse?.result ?? [];
-    return rows.map((q: any) => ({
-      symbol: q.symbol,
-      name: q.shortName ?? q.symbol,
-      price: q.regularMarketPrice ?? 0,
-      change_abs: q.regularMarketChange ?? null,
-      change_pct: q.regularMarketChangePercent ?? null,
-    }));
-  } catch {
-    return [];
-  }
-}
+// Yahoo helpers live in yahooClient.ts; re-exported for existing consumers.
+export { yahooQuote } from "./yahooClient.ts";

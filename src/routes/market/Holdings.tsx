@@ -8,12 +8,14 @@ import { authFetch } from "@/lib/authFetch";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { Plus, RefreshCw, Trash2, Download } from "lucide-react";
+import { ScoreBadge } from "@/components/market/ScoreBadge";
 
 type Holding = {
   id: string; symbol: string; exchange: string; quantity: number; avg_price: number;
   buy_date: string | null; investment_type: string | null; notes: string | null; source: string;
 };
 type QuoteMap = Record<string, { ltp: number; change_pct: number | null; day_change: number | null }>;
+type ScoreMap = Record<string, { breakout_score: number | null; prebreakout_score: number | null; score_components: any }>;
 
 const empty = { symbol: "", exchange: "NSE", quantity: "", avg_price: "", buy_date: "", investment_type: "long_term", notes: "" };
 
@@ -21,6 +23,7 @@ export default function Holdings() {
   const push = useUi((s) => s.push);
   const [rows, setRows] = useState<Holding[]>([]);
   const [quotes, setQuotes] = useState<QuoteMap>({});
+  const [scores, setScores] = useState<ScoreMap>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [form, setForm] = useState({ ...empty });
   const [showForm, setShowForm] = useState(false);
@@ -42,6 +45,15 @@ export default function Holdings() {
     if (error) push(error.message, "err");
     setRows((data ?? []) as Holding[]);
     setConnected((st?.[0] as any)?.active_provider ?? null);
+    const symbols = [...new Set((data ?? []).map((h: any) => h.symbol))];
+    if (symbols.length > 0) {
+      const { data: sc } = await supabase.from("market_stock_scores")
+        .select("symbol,breakout_score,prebreakout_score,score_components")
+        .in("symbol", symbols);
+      const map: ScoreMap = {};
+      for (const s of (sc ?? []) as any[]) map[s.symbol] = s;
+      setScores(map);
+    }
   };
 
   const refreshQuotes = async (holdings: Holding[]) => {
@@ -94,7 +106,7 @@ export default function Holdings() {
     setBusy("sync");
     try {
       const r = await callFn("market-sync-holdings", {});
-      push(`Synced ${r?.upserted ?? 0} holdings from ${r?.provider}`, "ok");
+      push(`Kotak sync: ${r?.inserted ?? 0} new, ${r?.updated ?? 0} updated${r?.removed ? `, ${r.removed} removed` : ""}`, "ok");
       await load();
     } catch (e) { push(toSafeError(e, "Sync failed").message, "err"); }
     finally { setBusy(null); }
@@ -168,7 +180,7 @@ export default function Holdings() {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead>
               <tr style={{ textAlign: "left", color: "var(--text-dim)" }}>
-                {["Symbol", "Qty", "Avg Buy", "LTP", "Invested", "Current", "P&L", "P&L %", "Today", "Source", ""].map((h) => (
+                {["Symbol", "Qty", "Avg Buy", "LTP", "Invested", "Current", "P&L", "P&L %", "Today", "Breakout", "Source", ""].map((h) => (
                   <th key={h} style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", fontWeight: 400, textTransform: "uppercase", letterSpacing: "0.1em", fontSize: 10 }}>{h}</th>
                 ))}
               </tr>
@@ -196,6 +208,9 @@ export default function Holdings() {
                     <td style={{ ...td, color: pnl >= 0 ? "var(--ok)" : "var(--danger)" }}>{inr(pnl)}</td>
                     <td style={{ ...td, color: pnlPct >= 0 ? "var(--ok)" : "var(--danger)" }}>{pnlPct.toFixed(2)}%</td>
                     <td style={{ ...td, color: (day ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>{day == null ? "—" : inr(day)}</td>
+                    <td style={td}>
+                      <ScoreBadge score={scores[h.symbol]?.breakout_score} components={scores[h.symbol]?.score_components?.breakout} label="breakout components" />
+                    </td>
                     <td style={td}><Chip tone={h.source === "manual" ? "neutral" : "accent"}>{h.source}</Chip></td>
                     <td style={td}>
                       <button onClick={() => remove(h.id)} className="hud-btn" data-variant="ghost" data-size="sm" title="Delete">
@@ -206,7 +221,7 @@ export default function Holdings() {
                 );
               })}
               {rows.length === 0 && (
-                <tr><td colSpan={11} style={{ padding: 20, textAlign: "center", color: "var(--text-dim)" }}>No holdings yet.</td></tr>
+                <tr><td colSpan={12} style={{ padding: 20, textAlign: "center", color: "var(--text-dim)" }}>No holdings yet.</td></tr>
               )}
             </tbody>
           </table>

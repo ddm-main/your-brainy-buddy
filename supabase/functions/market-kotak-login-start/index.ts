@@ -1,6 +1,9 @@
-// Stub Kotak endpoints — return informative "not yet implemented" so UI doesn't 404.
-// Real Kotak Neo two-step OTP login will be wired in Phase 1.5.
+// market-kotak-login-start — real Kotak Neo v2 login.
+// If a TOTP secret is stored we log in unattended (auto: true).
+// Otherwise we mark pending_otp and the UI collects the app's TOTP code.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
+import { KOTAK_SETTINGS_COLS, type KotakSettings, kotakAutoLogin, persistSession } from "../_shared/market/kotakClient.ts";
+import { encryptValue } from "../_shared/market/provider.ts";
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
@@ -9,14 +12,32 @@ Deno.serve(async (req) => {
   try {
     const svc = svcClient();
     const { data, error } = await svc.from("market_api_settings")
-      .select("consumer_key,mobile_number_enc,password_enc").eq("user_id", auth.userId).eq("active_provider", "kotak_neo").maybeSingle();
+      .select(KOTAK_SETTINGS_COLS)
+      .eq("user_id", auth.userId).eq("active_provider", "kotak_neo").maybeSingle();
     if (error) return errorResponse(req, error.message);
-    if (!data?.consumer_key || !data?.mobile_number_enc || !data?.password_enc) {
-      return errorResponse(req, "Save Kotak credentials (consumer key, mobile, password, MPIN) before starting login.");
+    const s = data as KotakSettings | null;
+    if (!s?.consumer_key || !s?.mobile_number_enc || !s?.mpin_enc || !s?.ucc) {
+      return errorResponse(req, "Save Kotak credentials first: consumer key, mobile, UCC and MPIN.");
     }
-    await svc.from("market_api_settings").update({ connection_status: "pending_otp", last_error: null })
-      .eq("user_id", auth.userId).eq("active_provider", "kotak_neo");
-    return jsonResponse(req, { ok: true, message: "OTP flow pending real Kotak integration — enter any 6-digit OTP for now to complete the pending_otp state." });
+
+    if (s.totp_secret_enc) {
+      try {
+        const sess = await kotakAutoLogin(s);
+        await persistSession(svc, s, sess, encryptValue);
+        return jsonResponse(req, { ok: true, auto: true, greeting_name: sess.greetingName });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        await svc.from("market_api_settings")
+          .update({ connection_status: "error", last_error: msg })
+          .eq("id", s.id);
+        return errorResponse(req, `Auto-login failed: ${msg}`, 502);
+      }
+    }
+
+    await svc.from("market_api_settings")
+      .update({ connection_status: "pending_otp", last_error: null })
+      .eq("id", s.id);
+    return jsonResponse(req, { ok: true, needs_totp: true, message: "Enter the 6-digit TOTP from your authenticator app." });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }

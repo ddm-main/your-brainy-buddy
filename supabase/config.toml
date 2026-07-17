@@ -95,3 +95,23 @@ verify_jwt = true
 
 [functions.market-morning-insight]
 verify_jwt = true
+
+[functions.market-sync-positions]
+verify_jwt = true
+
+[functions.market-candles]
+verify_jwt = true
+
+# Cron-invoked functions: verify_jwt=false, guarded in-code by x-cron-secret
+# (also callable by authenticated users — they check the Supabase JWT then).
+[functions.market-kotak-refresh]
+verify_jwt = false
+
+[functions.market-scrips-sync]
+verify_jwt = false
+
+[functions.market-pipeline-eod]
+verify_jwt = false
+
+[functions.market-pipeline-aggregates]
+verify_jwt = false
