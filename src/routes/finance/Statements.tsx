@@ -120,11 +120,43 @@ function Fact({ label, value }: { label: string; value: string }) {
   );
 }
 
+// DD-MM-YYYY formatter — accepts ISO or Date-parseable string.
+function fmtDMY(d: string | Date | null | undefined): string {
+  if (!d) return "—";
+  const dt = typeof d === "string" ? new Date(d) : d;
+  if (!(dt instanceof Date) || isNaN(dt.getTime())) return "—";
+  const dd = String(dt.getDate()).padStart(2, "0");
+  const mm = String(dt.getMonth() + 1).padStart(2, "0");
+  return `${dd}-${mm}-${dt.getFullYear()}`;
+}
+
+// Display "XX 6560" from a masked_number like "434155XXXXXX6560" or a raw last4.
+function cardNoDisplay(s: any): string {
+  const raw: string = s.credit_cards?.masked_number ?? s.card_last4 ?? "";
+  if (!raw) return "—";
+  const m = String(raw).match(/(\d{4})\s*$/);
+  return m ? `XX ${m[1]}` : String(raw);
+}
+
+// Compute Yes/No validated + reason for a card row (without needing txns loaded).
+function cardValidated(s: any): { ok: boolean; reason: string } {
+  if (s.parse_status !== "parsed") return { ok: false, reason: s.parse_status ?? "not parsed" };
+  const missing: string[] = [];
+  if (s.statement_date == null) missing.push("statement date");
+  if (s.due_date == null) missing.push("due date");
+  if (s.total_due == null) missing.push("total due");
+  if (Number(s.transactions_found ?? 0) === 0) missing.push("transactions");
+  if (missing.length > 0) return { ok: false, reason: `missing ${missing.join(", ")}` };
+  return { ok: true, reason: "" };
+}
+
 export default function Statements() {
   const push = useUi((s) => s.push);
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [txnsModalId, setTxnsModalId] = useState<string | null>(null);
+  const [fixModalId, setFixModalId] = useState<string | null>(null);
   const [txns, setTxns] = useState<any[]>([]);
   const [txnsLoading, setTxnsLoading] = useState(false);
   const [cards, setCards] = useState<any[]>([]);
