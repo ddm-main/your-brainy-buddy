@@ -352,6 +352,11 @@ export default function MarketSettings() {
               {busy === "otp" ? "validating…" : "Complete login"}
             </Btn>
           </div>
+          {otpError && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "var(--danger)", wordBreak: "break-word" }}>
+              {otpError}
+            </div>
+          )}
         </HudPanel>
       )}
     </div>
