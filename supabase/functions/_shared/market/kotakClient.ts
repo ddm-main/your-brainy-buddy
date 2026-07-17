@@ -7,7 +7,9 @@ import { decryptStatementPassword, type StatementPasswordRule } from "../crypto.
 import { totp } from "./totp.ts";
 
 const NEO_FIN_KEY = "neotradeapi";
-const DEFAULT_BASE = "https://gw-napi.kotaksecurities.com";
+// Login endpoints live on a fixed host; every post-login call uses the
+// `baseUrl` returned by tradeApiValidate (stored in market_api_settings.base_url).
+const LOGIN_HOST = "https://mis.kotaksecurities.com";
 
 export interface KotakSettings {
   id: string;
@@ -34,9 +36,12 @@ async function dec(encJson: string | null): Promise<string | null> {
   return decryptStatementPassword(JSON.parse(encJson) as StatementPasswordRule);
 }
 
-function base(s: KotakSettings): string {
-  return (s.base_url || DEFAULT_BASE).replace(/\/+$/, "");
+function apiBase(s: KotakSettings): string {
+  const b = (s.base_url ?? "").replace(/\/+$/, "");
+  if (!b) throw new KotakError("Kotak session has no baseUrl — login again", 401);
+  return b;
 }
+
 
 // Next midnight IST expressed in UTC — Kotak sessions die around then.
 export function nextIstMidnightIso(): string {
@@ -82,9 +87,12 @@ export interface KotakSession {
   dataCenter: string | null;
   greetingName: string | null;
   ucc: string | null;
+  apiBase: string;
 }
 
-// Step 1+2: TOTP login then MPIN validate. Returns full session material.
+// Kotak Neo v2 login. Two-step: tradeApiLogin (TOTP) then tradeApiValidate (MPIN).
+// Both hit https://mis.kotaksecurities.com. The validate response carries the
+// `baseUrl` used for every subsequent authenticated call.
 export async function kotakLogin(
   s: KotakSettings,
   totpCode: string,
@@ -98,7 +106,7 @@ export async function kotakLogin(
 
   const mobileNumber = mobile.startsWith("+") ? mobile : `+91${mobile.replace(/^0+/, "")}`;
 
-  const login = await kotakFetch(`${base(s)}/login/1.0/login/v6/totp/login`, {
+  const login = await kotakFetch(`${LOGIN_HOST}/login/1.0/tradeApiLogin`, {
     method: "POST",
     headers: {
       Authorization: s.consumer_key,
@@ -113,7 +121,7 @@ export async function kotakLogin(
     throw new KotakError("Kotak login: no token in response", 502, JSON.stringify(login).slice(0, 500));
   }
 
-  const validate = await kotakFetch(`${base(s)}/login/1.0/login/v6/totp/validate`, {
+  const validate = await kotakFetch(`${LOGIN_HOST}/login/1.0/tradeApiValidate`, {
     method: "POST",
     headers: {
       Authorization: s.consumer_key,
@@ -126,22 +134,28 @@ export async function kotakLogin(
   });
   const editToken = validate?.data?.token;
   const editSid = validate?.data?.sid;
-  const hsServerId = validate?.data?.hsServerId ?? login?.data?.hsServerId;
+  const hsServerId = validate?.data?.hsServerId ?? login?.data?.hsServerId ?? "";
+  const baseUrl = String(validate?.data?.baseUrl ?? "").replace(/\/+$/, "");
   if (!editToken || !editSid) {
     throw new KotakError("Kotak validate: no session token", 502, JSON.stringify(validate).slice(0, 500));
+  }
+  if (!baseUrl) {
+    throw new KotakError("Kotak validate: no baseUrl in response", 502, JSON.stringify(validate).slice(0, 500));
   }
 
   return {
     viewToken,
     editToken,
     editSid,
-    hsServerId: hsServerId ?? "",
+    hsServerId,
     rid: validate?.data?.rid ?? null,
     dataCenter: validate?.data?.dataCenter ?? null,
     greetingName: validate?.data?.greetingName ?? login?.data?.greetingName ?? null,
     ucc: validate?.data?.ucc ?? login?.data?.ucc ?? s.ucc,
+    apiBase: baseUrl,
   };
 }
+
 
 // Login using the stored TOTP secret (unattended path).
 export async function kotakAutoLogin(s: KotakSettings): Promise<KotakSession> {
@@ -164,50 +178,51 @@ async function sessionHeaders(s: KotakSettings): Promise<Record<string, string>>
 
 export async function kotakHoldings(s: KotakSettings): Promise<any[]> {
   const h = await sessionHeaders(s);
-  const j = await kotakFetch(
-    `${base(s)}/Portfolio/1.0/portfolio/v1/holdings?sId=${encodeURIComponent(s.hs_server_id ?? "")}`,
-    { headers: h },
-  );
+  const j = await kotakFetch(`${apiBase(s)}/portfolio/v1/holdings`, { headers: h });
   return j?.data ?? [];
 }
 
 export async function kotakPositions(s: KotakSettings): Promise<any[]> {
   const h = await sessionHeaders(s);
-  const j = await kotakFetch(
-    `${base(s)}/Orders/2.0/quick/user/positions?sId=${encodeURIComponent(s.hs_server_id ?? "")}`,
-    { headers: h },
-  );
+  const j = await kotakFetch(`${apiBase(s)}/quick/user/positions`, { headers: h });
   return j?.data ?? [];
 }
 
 export async function kotakLimits(s: KotakSettings): Promise<any> {
   const h = await sessionHeaders(s);
-  return kotakFetch(`${base(s)}/Orders/2.0/quick/user/limits`, { headers: h });
+  return kotakFetch(`${apiBase(s)}/quick/user/limits`, {
+    method: "POST",
+    headers: { ...h, "Content-Type": "application/json" },
+    body: JSON.stringify({ seg: "ALL", exch: "ALL", prod: "ALL" }),
+  });
 }
 
-// Quotes need only the consumer key. neoSymbols like "nse_cm|11536".
+// Quotes need an active session and go through the per-user baseUrl.
+// neoSymbols look like "nse_cm|11536".
 export async function kotakQuotes(
   s: KotakSettings,
   neoSymbols: string[],
   quoteType: "ltp" | "ohlc" | "all" = "all",
 ): Promise<any[]> {
-  if (!s.consumer_key) throw new KotakError("Consumer key not configured", 400);
   if (neoSymbols.length === 0) return [];
+  const h = await sessionHeaders(s);
   const path = encodeURIComponent(neoSymbols.join(","));
-  const j = await kotakFetch(`${base(s)}/apim/quotes/1.0/quotes/neosymbol/${path}/${quoteType}`, {
-    headers: { Authorization: s.consumer_key, accept: "application/json" },
-  });
+  const j = await kotakFetch(
+    `${apiBase(s)}/script-details/1.0/quotes/neosymbol/${path}/${quoteType}`,
+    { headers: { ...h, accept: "application/json" } },
+  );
   const d = j?.data ?? j;
   return Array.isArray(d) ? d : [d].filter(Boolean);
 }
 
 export async function kotakScripFilePaths(s: KotakSettings): Promise<string[]> {
-  if (!s.consumer_key) throw new KotakError("Consumer key not configured", 400);
-  const j = await kotakFetch(`${base(s)}/Files/1.0/masterscrip/v2/file-paths`, {
-    headers: { Authorization: s.consumer_key, accept: "application/json" },
+  const h = await sessionHeaders(s);
+  const j = await kotakFetch(`${apiBase(s)}/script-details/1.0/masterscrip/file-paths`, {
+    headers: { ...h, accept: "application/json" },
   });
-  return j?.data?.filesPaths ?? [];
+  return j?.data?.filesPaths ?? j?.filesPaths ?? [];
 }
+
 
 // Persist a fresh session onto the settings row (encrypting tokens).
 export async function persistSession(
@@ -227,6 +242,7 @@ export async function persistSession(
       data_center: sess.dataCenter,
       greeting_name: sess.greetingName,
       ucc: sess.ucc,
+      base_url: sess.apiBase,
       connection_status: "connected",
       token_expires_at: nextIstMidnightIso(),
       last_error: null,
@@ -235,8 +251,10 @@ export async function persistSession(
   // reflect in the in-memory object so follow-up calls in the same invocation work
   s.sid = sess.editSid;
   s.hs_server_id = sess.hsServerId;
+  s.base_url = sess.apiBase;
   s.connection_status = "connected";
 }
+
 
 // Run an authenticated call; on 401 retry once after unattended re-login.
 export async function withKotakSession<T>(
@@ -255,6 +273,7 @@ export async function withKotakSession<T>(
         ...s,
         sid: sess.editSid,
         hs_server_id: sess.hsServerId,
+        base_url: sess.apiBase,
         session_token_enc: await encrypt(sess.editToken),
       };
       return await fn(fresh);

@@ -48,6 +48,7 @@ export default function MarketSettings() {
   const [baseUrl, setBaseUrl] = useState(KOTAK_DEFAULT_BASE);
   const [wsUrl, setWsUrl] = useState(KOTAK_DEFAULT_WS);
   const [otp, setOtp] = useState("");
+  const [otpError, setOtpError] = useState<string | null>(null);
   const [pipeline, setPipeline] = useState<Record<string, unknown> | null>(null);
 
   const load = async () => {
@@ -171,14 +172,33 @@ export default function MarketSettings() {
   const completeOtp = async () => {
     if (!otp.trim()) { push("Enter OTP", "warn"); return; }
     setBusy("otp");
+    setOtpError(null);
+    const trimmed = otp.trim();
+    const attempt = () => callFn("market-kotak-login-otp", { otp: trimmed });
     try {
-      const r = await callFn("market-kotak-login-otp", { otp: otp.trim() });
+      let r: any;
+      try {
+        r = await attempt();
+      } catch (err) {
+        // Kotak APIM occasionally 502s transiently — retry once.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/\b502\b/.test(msg)) {
+          await new Promise((res) => setTimeout(res, 1500));
+          r = await attempt();
+        } else {
+          throw err;
+        }
+      }
       setOtp("");
       push(`Connected as ${r?.greeting_name ?? "Kotak user"}`, "ok");
       await load();
-    } catch (e) { push(toSafeError(e, "OTP validation failed").message, "err"); }
-    finally { setBusy(null); }
+    } catch (e) {
+      const msg = toSafeError(e, "OTP validation failed").message;
+      setOtpError(msg);
+      push(msg, "err");
+    } finally { setBusy(null); }
   };
+
 
   const testConnection = async () => {
     setBusy("test");
@@ -275,8 +295,9 @@ export default function MarketSettings() {
             <Field label="MPIN" value={mpin} setValue={setMpin} placeholder="6-digit (leave blank to keep existing)" type="password" />
             <Field label="TOTP Secret" value={totpSecret} setValue={setTotpSecret} placeholder="Base32 secret for auto-login (optional)" type="password" />
             <Field label="Consumer Secret" value={consumerSecret} setValue={setConsumerSecret} placeholder="(optional, v2 API doesn't need it)" type="password" />
-            <Field label="Base URL" value={baseUrl} setValue={setBaseUrl} />
-            <Field label="WebSocket URL" value={wsUrl} setValue={setWsUrl} />
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 8 }}>
+            The Kotak API base URL is auto-discovered per session on login — no manual entry needed.
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
             <Btn onClick={saveConfig} disabled={busy !== null} variant="primary">
@@ -331,6 +352,11 @@ export default function MarketSettings() {
               {busy === "otp" ? "validating…" : "Complete login"}
             </Btn>
           </div>
+          {otpError && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "var(--danger)", wordBreak: "break-word" }}>
+              {otpError}
+            </div>
+          )}
         </HudPanel>
       )}
     </div>
