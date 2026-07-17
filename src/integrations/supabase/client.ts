@@ -2,69 +2,15 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from './types';
 
-const PROJECT_SUPABASE_URL = "https://ybtaxgstmxnlwurkritg.supabase.co";
-const PROJECT_SUPABASE_PUBLISHABLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlidGF4Z3N0bXhubHd1cmtyaXRnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM0MDkzNDEsImV4cCI6MjA5ODk4NTM0MX0.TfbxLQcLT70i0ssgwzZhsUfdjZp5j8IPK6dWytiHeuI";
-
-const SUPABASE_URL =
-  (import.meta.env.VITE_SUPABASE_URL as string | undefined) || PROJECT_SUPABASE_URL;
-// Accept either the current publishable-key name or the legacy anon-key name
-// so environments that only inject one of the two still boot instead of
-// silently white-screening on undefined credentials.
-const SUPABASE_PUBLISHABLE_KEY = (
-  (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string | undefined) ??
-  (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined) ??
-  PROJECT_SUPABASE_PUBLISHABLE_KEY
-);
-
-export const supabaseConfigOk = Boolean(SUPABASE_URL && SUPABASE_PUBLISHABLE_KEY);
-// Exported so callEdgeFunction / authFetch can reach the project even when
-// VITE_SUPABASE_* env vars are stripped from the built bundle.
-export const SAFE_SUPABASE_URL = SUPABASE_URL;
-export const SAFE_SUPABASE_KEY = SUPABASE_PUBLISHABLE_KEY;
-
-if (!supabaseConfigOk) {
-  // eslint-disable-next-line no-console
-  console.error(
-    "[JARVIS] Supabase env vars missing — set VITE_SUPABASE_URL and " +
-    "VITE_SUPABASE_PUBLISHABLE_KEY (or VITE_SUPABASE_ANON_KEY) in your .env. " +
-    "A safe placeholder client is active so the preview can still render.",
-  );
-}
-
-
-function isNewSupabaseApiKey(value: string): boolean {
-  return value.startsWith('sb_publishable_') || value.startsWith('sb_secret_');
-}
-
-function createSupabaseFetch(supabaseKey: string): typeof fetch {
-  return (input, init) => {
-    const headers = new Headers(
-      typeof Request !== 'undefined' && input instanceof Request ? input.headers : undefined,
-    );
-
-    if (init?.headers) {
-      new Headers(init.headers).forEach((value, key) => headers.set(key, value));
-    }
-
-    // New Supabase API keys are opaque strings, not bearer JWTs.
-    if (isNewSupabaseApiKey(supabaseKey) && headers.get('Authorization') === `Bearer ${supabaseKey}`) {
-      headers.delete('Authorization');
-    }
-
-    headers.set('apikey', supabaseKey);
-    return fetch(input, { ...init, headers });
-  };
-}
+const SUPABASE_URL = "https://ybtaxgstmxnlwurkritg.supabase.co";
+const SUPABASE_PUBLISHABLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlidGF4Z3N0bXhubHd1cmtyaXRnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM0MDkzNDEsImV4cCI6MjA5ODk4NTM0MX0.TfbxLQcLT70i0ssgwzZhsUfdjZp5j8IPK6dWytiHeuI";
 
 // Import the supabase client like this:
 // import { supabase } from "@/integrations/supabase/client";
 
-export const supabase = createClient<Database>(SAFE_SUPABASE_URL, SAFE_SUPABASE_KEY, {
-  global: {
-    fetch: createSupabaseFetch(SAFE_SUPABASE_KEY),
-  },
+export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: {
-    storage: typeof window !== 'undefined' ? window.localStorage : undefined,
+    storage: localStorage,
     persistSession: true,
     autoRefreshToken: true,
   }
