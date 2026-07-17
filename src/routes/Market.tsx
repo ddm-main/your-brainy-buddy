@@ -12,6 +12,8 @@ const Analysis = lazy(() => import("@/routes/market/Analysis"));
 const Alerts = lazy(() => import("@/routes/market/Alerts"));
 const Backtesting = lazy(() => import("@/routes/market/Backtesting"));
 const MarketSettings = lazy(() => import("@/routes/market/Settings"));
+const OptionChain = lazy(() => import("@/routes/market/OptionChain"));
+
 
 type Sub = { to: string; label: string };
 type Group = {
@@ -31,12 +33,14 @@ const GROUPS: Group[] = [
       { to: "/market/watchlist", label: "Watchlist" },
     ] },
   { key: "research", label: "Research", to: "/market/screener",
-    match: (p) => /^\/market\/(screener|analysis|backtesting)/.test(p),
+    match: (p) => /^\/market\/(screener|analysis|backtesting|options)/.test(p),
     subs: [
       { to: "/market/screener", label: "Screener" },
       { to: "/market/analysis", label: "Analysis" },
+      { to: "/market/options", label: "Options" },
       { to: "/market/backtesting", label: "Backtesting" },
     ] },
+
   { key: "alerts", label: "Alerts", to: "/market/alerts",
     match: (p) => /^\/market\/alerts/.test(p), subs: [] },
   { key: "settings", label: "Settings", to: "/market/settings",
@@ -127,6 +131,9 @@ export default function Market() {
             <Route path="analysis/:symbol" element={<Analysis />} />
             <Route path="alerts" element={<Alerts />} />
             <Route path="backtesting" element={<Backtesting />} />
+            <Route path="options" element={<OptionChain />} />
+            <Route path="options/:symbol" element={<OptionChain />} />
+
             <Route path="settings" element={<MarketSettings />} />
             <Route path="*" element={<Navigate to="/market" replace />} />
           </Routes>

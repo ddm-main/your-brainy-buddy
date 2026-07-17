@@ -1700,6 +1700,36 @@ export type Database = {
         }
         Relationships: []
       }
+      market_fundamentals: {
+        Row: {
+          created_at: string
+          exchange: string
+          fetched_at: string
+          id: string
+          payload: Json
+          symbol: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          exchange?: string
+          fetched_at?: string
+          id?: string
+          payload: Json
+          symbol: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          exchange?: string
+          fetched_at?: string
+          id?: string
+          payload?: Json
+          symbol?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       market_holdings: {
         Row: {
           avg_price: number
@@ -1841,6 +1871,36 @@ export type Database = {
           published_at?: string
           source?: string | null
           url?: string | null
+        }
+        Relationships: []
+      }
+      market_option_chain_snapshots: {
+        Row: {
+          captured_at: string
+          expiry: string
+          id: string
+          payload: Json
+          symbol: string
+          underlying_price: number | null
+          user_id: string
+        }
+        Insert: {
+          captured_at?: string
+          expiry: string
+          id?: string
+          payload: Json
+          symbol: string
+          underlying_price?: number | null
+          user_id: string
+        }
+        Update: {
+          captured_at?: string
+          expiry?: string
+          id?: string
+          payload?: Json
+          symbol?: string
+          underlying_price?: number | null
+          user_id?: string
         }
         Relationships: []
       }

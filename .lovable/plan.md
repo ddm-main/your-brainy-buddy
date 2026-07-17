@@ -1,71 +1,66 @@
-## Root cause of the 502
 
-The current client hits deprecated v1 endpoints on `gw-napi.kotaksecurities.com`. The Kotak Neo API v2 docs confirm the real endpoints and hosts have all changed:
+# Full Market Data Buildout on Kotak Neo (+ fundamentals via Yahoo)
 
-| Call | Current (broken) | Correct v2 |
+Kotak Neo is now authenticated. It gives us **real trading-grade data** (quotes, candles, depth, option chain, orders, holdings, margins) but **not fundamentals** — those still come from Yahoo. Plan below covers everything reachable across both.
+
+## What Kotak Neo actually exposes (source of truth for scope)
+
+| Category | Endpoint(s) | We currently use? |
 |---|---|---|
-| Login (TOTP) | `gw-napi.../login/1.0/login/v6/totp/login` | `mis.kotaksecurities.com/login/1.0/tradeApiLogin` |
-| Validate MPIN | `gw-napi.../login/1.0/login/v6/totp/validate` | `mis.kotaksecurities.com/login/1.0/tradeApiValidate` |
-| Holdings | `gw-napi.../Portfolio/1.0/portfolio/v1/holdings?sId=` | `<baseUrl>/portfolio/v1/holdings` (GET) |
-| Positions | `gw-napi.../Orders/2.0/quick/user/positions?sId=` | `<baseUrl>/quick/user/positions` (GET) |
-| Limits | `gw-napi.../Orders/2.0/quick/user/limits` (GET) | `<baseUrl>/quick/user/limits` (POST) |
-| Quotes | `gw-napi.../apim/quotes/1.0/quotes/neosymbol/…` | `<baseUrl>/script-details/1.0/quotes/neosymbol/<query>[/<filter>]` (GET) |
-| Scrip files | `gw-napi.../Files/1.0/masterscrip/v2/file-paths` | `<baseUrl>/script-details/1.0/masterscrip/file-paths` (GET) |
+| Login / session refresh | `/login/1.0/tradeApiLogin`, `tradeApiValidate` | Yes |
+| Holdings | `/portfolio/v1/holdings` | Yes |
+| Positions | `/quick/user/positions` | Yes |
+| Margins / limits | `/quick/user/limits` | Yes |
+| LTP / OHLC quotes (batch) | `/quotes` | Yes |
+| Historical candles (1m–1d, up to years) | `/charts/v2/history` | **No — using Yahoo** |
+| Level-2 market depth | `/depth` | No |
+| Option chain (strikes, greeks, OI) | `/optionchain` | No |
+| Scrip master (instrument list) | `/masterscrip/file-paths` | Yes (sync) |
+| Orders / trades / order book | `/orders`, `/trades` | No |
+| Live streaming (WebSocket) | `wss://mlhsm.kotaksecurities.com` | No |
 
-Critical detail we're missing: **the `baseUrl` for all post-login calls is returned by `tradeApiValidate`** (e.g. `https://cis.kotaksecurities.com` or `https://neo-gw.kotaksecurities.com/xyz`). Today we hardcode `gw-napi` for everything, so once the login is fixed the follow-up calls would still 404.
+Fundamentals (P/E, EPS, sector, market cap, ratios, financials) are **not** in Kotak Neo — Yahoo `quoteSummary` fills that.
 
-That's why every login attempt returns 502 and no amount of retrying, timing, or TOTP re-registration fixes it.
+## Phase 1 — Kotak-native pricing (highest signal)
 
-## Fix
+1. **Historical candles from Kotak** — new `_shared/market/kotakClient.ts::kotakCandles(symbol, exchange, from, to, interval)` hitting `/charts/v2/history`. Route `market-candles` through the active provider (Kotak first, Yahoo fallback) so charts on Analysis/Watchlist/Screener use the same feed as quotes.
+2. **Market depth** — new edge function `market-depth` returning bid/ask ladder from `/depth`. Show a 5-level depth panel on `Analysis.tsx`.
+3. **Option chain** — new edge function `market-option-chain` (`/optionchain`) + new route `src/routes/market/OptionChain.tsx` with expiry selector, strike ladder, OI change, IV, and greeks. Add to Market top-tabs.
+4. **Live quotes stream** — Kotak Neo HSM WebSocket. New edge function `market-ws-token` mints the session token; a client hook `useKotakStream(symbols[])` subscribes and pushes tick updates into a Zustand slice consumed by Dashboard / Watchlist / Analysis.
 
-### 1. `supabase/functions/_shared/market/kotakClient.ts`
-- Constants:
-  - `LOGIN_HOST = "https://mis.kotaksecurities.com"` (fixed, used only for login + validate).
-  - Drop `DEFAULT_BASE` for post-login calls; use a per-session `apiBase` returned by validate.
-- `kotakLogin`:
-  - `POST ${LOGIN_HOST}/login/1.0/tradeApiLogin` with the existing headers/body.
-  - `POST ${LOGIN_HOST}/login/1.0/tradeApiValidate` with the same headers plus `sid`/`Auth` from step 1.
-  - Extract `baseUrl` from the validate response and return it as `apiBase` on `KotakSession`.
-- `KotakSession` gains `apiBase: string`.
-- `persistSession`:
-  - Write `apiBase` into `market_api_settings.base_url` (repurpose that column — it already exists) so subsequent invocations pick it up.
-- `sessionHeaders`: unchanged, but callers now build URLs from `s.base_url` (the validated `apiBase`, not `gw-napi`).
-- Update callers to the new paths:
-  - `kotakHoldings` → `GET ${base}/portfolio/v1/holdings` (no `sId` query).
-  - `kotakPositions` → `GET ${base}/quick/user/positions`.
-  - `kotakLimits` → `POST ${base}/quick/user/limits` with `{ seg: "ALL", exch: "ALL", prod: "ALL" }`.
-  - `kotakQuotes` → `GET ${base}/script-details/1.0/quotes/neosymbol/<query>/<filter>` (filter defaults to `ohlc`/`ltp`/all as today).
-  - `kotakScripFilePaths` → `GET ${base}/script-details/1.0/masterscrip/file-paths`.
-- `KotakError` message: already surfaces raw body; keep as-is.
-- Keep `withKotakSession` auto re-login on 401/403.
+## Phase 2 — Fundamentals & richer instrument profile
 
-### 2. `supabase/functions/market-kotak-login-start/index.ts` & `market-kotak-login-otp/index.ts`
-- No structural change; they already return `KotakError.message` verbatim. Confirm the message now includes real Kotak text (e.g. "Invalid credentials or TOTP.") rather than "Kotak API 502".
-- Once the request goes to `mis.kotaksecurities.com`, the transient `gw-napi` 502s disappear.
+5. **Fundamentals via Yahoo `quoteSummary`** — new `market-fundamentals` edge function pulling `summaryDetail`, `defaultKeyStatistics`, `financialData`, `incomeStatementHistory`, `earnings`, `assetProfile`. Cache in a new `market_fundamentals` table (1-day TTL). Surface on Analysis: P/E, PEG, EPS TTM/fwd, ROE, margins, debt/equity, dividend yield, revenue/EPS growth, sector/industry, 52-week range, beta, shares outstanding.
+6. **Corporate actions / earnings calendar** — reuse Yahoo `calendarEvents`; store next earnings date + last dividend on each stock row. Display on Watchlist and Analysis.
+7. **News** — already have `market_news`; extend `market-morning-insight` to also pull per-symbol news via Yahoo `news` endpoint. Show on Analysis.
 
-### 3. Base-URL migration
-- The `base_url` column on `market_api_settings` currently stores the user-entered `gw-napi.kotaksecurities.com`. After the fix it stores the `apiBase` from validate. On first successful login the column is overwritten automatically. The Settings UI "Base URL" input becomes a stale display value:
-  - Hide the "Base URL" and "WebSocket URL" inputs from `src/routes/market/Settings.tsx` (they were user-editable overrides for the v1 API and are no longer relevant — apiBase is discovered per session).
-  - Backend still accepts a user-provided `base_url` on save (harmless; overwritten by validate).
+## Phase 3 — Screener & Analysis expansion
 
-### 4. Frontend resilience (Settings + TOTP panel)
-- `src/routes/market/Settings.tsx`:
-  - TOTP submit: auto-retry once on 502 with a 1.5 s delay before surfacing the error (Kotak APIM occasionally hiccups).
-  - Show the raw error inline below the TOTP input (persistent) in addition to the toast, so users can screenshot/copy it.
-  - Reset the inline error on the next submit.
+8. **Expand `market_stock_scores` / screener inputs** with the new fields: fundamentals (P/E, ROE, growth), Kotak-derived technicals from real candles (RSI, MACD, ADX, ATR, Bollinger, volume surge), option-flow signals (PCR, IV rank), and depth imbalance snapshot.
+9. **Screener presets**: "High Growth Value", "Momentum Breakout" (real Kotak candles), "Oversold Quality", "Unusual Options Activity", "Delivery Volume Surge". Each is a saved `market_saved_screeners` row shipped seeded.
+10. **Analysis page overhaul** — one page per symbol with: header (LTP, day range, 52w, market cap), Kotak candle chart with SMA/EMA/BB overlays, indicators table, fundamentals block, option-chain snapshot (ATM ±5), depth ladder, news list, holdings/positions if held.
 
-### 5. Deploy + verify
-- Deploy `market-kotak-login-start`, `market-kotak-login-otp`, `market-sync-holdings`, `market-sync-positions`, `market-quotes`, `market-scrips-sync`, `market-test-connection`, `market-kotak-refresh` (any function that transitively imports `kotakClient.ts`).
-- Verification:
-  - Save credentials → Login to Kotak → enter TOTP → expect `connected` status and populated `hs_server_id`/`base_url`.
-  - Test Connection → expect ok.
-  - Sync Holdings → expect rows.
+## Phase 4 — Orders & broker actions (optional, ask before enabling)
 
-## Files touched
-- `supabase/functions/_shared/market/kotakClient.ts` (rewrite endpoints + session shape)
-- `src/routes/market/Settings.tsx` (hide legacy URL inputs, TOTP retry + inline error)
-- No DB migration needed; `base_url` column reused.
+11. Read-only `market-orders` / `market-trades` endpoints to show today's order book and executions on Positions. Order placement is intentionally excluded unless you explicitly ask — that's a separate risk conversation.
 
-## Out of scope
-- WebSocket URL discovery (docs still list the WSS host as static; no user-visible feature depends on it today).
-- Order-placement endpoints (not used by the app).
+## Database changes
+
+- `market_fundamentals` (user_id, symbol, exchange, payload jsonb, fetched_at) + RLS + GRANTs.
+- Add columns to `market_stocks`: `sector`, `industry`, `market_cap`, `pe_ttm`, `roe`, `next_earnings_at`.
+- Add `market_option_chain_snapshots` (symbol, expiry, captured_at, payload jsonb) with 7-day retention.
+- Every new public table gets `GRANT` + RLS scoped to `auth.uid()`.
+
+## Technical notes
+
+- All new edge functions go through `_shared/market/provider.ts` so Kotak → Yahoo fallback is uniform and observable via `connection_status`.
+- Rate-limit Kotak calls to the `rate_limit` already stored on `market_api_settings` (default 10 rps) using a small token bucket in `_shared/market/kotakClient.ts`.
+- Cache: quotes 15s, depth 3s, option chain 30s, candles 5m, fundamentals 24h. Cache is per-user via existing `market_indicators_cache` or new dedicated tables where payload is large.
+- No `service_role` key leaves the server; front-end continues to invoke via `supabase.functions.invoke` with the anon key.
+- WebSocket lives in a single `useEffect` and cleans up with `supabase.removeChannel`/`ws.close`, per project rule.
+
+## Recommended order
+
+Phase 1 first (biggest visible upgrade: real Kotak charts + option chain + depth + live ticks). Phase 2 next (fundamentals — needed for a serious screener). Phase 3 to make the screener/analysis pages worth opening. Phase 4 only if you want it.
+
+Confirm this scope (or trim — e.g. "skip WebSocket for now", "no option chain yet") and I'll start on Phase 1.
