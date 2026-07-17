@@ -242,6 +242,7 @@ export async function persistSession(
       data_center: sess.dataCenter,
       greeting_name: sess.greetingName,
       ucc: sess.ucc,
+      base_url: sess.apiBase,
       connection_status: "connected",
       token_expires_at: nextIstMidnightIso(),
       last_error: null,
@@ -250,8 +251,10 @@ export async function persistSession(
   // reflect in the in-memory object so follow-up calls in the same invocation work
   s.sid = sess.editSid;
   s.hs_server_id = sess.hsServerId;
+  s.base_url = sess.apiBase;
   s.connection_status = "connected";
 }
+
 
 // Run an authenticated call; on 401 retry once after unattended re-login.
 export async function withKotakSession<T>(
