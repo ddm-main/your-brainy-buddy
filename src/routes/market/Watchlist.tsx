@@ -116,7 +116,7 @@ export default function Watchlist() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <HudPanel title="Watchlists" index="MK.W1">
+      <HudPanel flow title="Watchlists" index="MK.W1">
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
           {lists.map((l) => (
             <button key={l.id} onClick={() => setActive(l.id)} className="hud-btn"

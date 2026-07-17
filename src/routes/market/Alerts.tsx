@@ -77,7 +77,7 @@ export default function Alerts() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <HudPanel title="Alerts" index="MK.ALR"
+      <HudPanel flow title="Alerts" index="MK.ALR"
         actions={<Btn size="sm" variant="primary" onClick={() => setCreating(true)}><Plus size={11} style={{ marginRight: 4 }}/> new alert</Btn>}>
         <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 10 }}>
           <div>

@@ -101,7 +101,7 @@ export default function MarketDashboard() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <HudPanel title="Market Summary" index="MK.D1" live={indicesFetching ? "warn" : "ok"} actions={
+      <HudPanel flow title="Market Summary" index="MK.D1" live={indicesFetching ? "warn" : "ok"} actions={
         <Btn size="sm" onClick={() => refetchIndices()} disabled={indicesFetching}>
           <RefreshCw size={11} style={{ marginRight: 4 }} /> {indicesFetching ? "refreshing…" : "refresh"}
         </Btn>
@@ -141,7 +141,7 @@ export default function MarketDashboard() {
       </HudPanel>
 
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12, alignItems: "start" }}>
-        <HudPanel title="Top Breakout Stocks" index="MK.D2">
+        <HudPanel flow title="Top Breakout Stocks" index="MK.D2">
           <DataTable
             columns={breakoutColumns}
             data={topBreakouts}
@@ -153,7 +153,7 @@ export default function MarketDashboard() {
         </HudPanel>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <HudPanel title="Sector Strength" index="MK.D3">
+          <HudPanel flow title="Sector Strength" index="MK.D3">
             {sectors.length === 0 ? (
               <div className="hud-label" style={{ color: "var(--text-dim)" }}>pipeline pending</div>
             ) : (
@@ -172,7 +172,7 @@ export default function MarketDashboard() {
             )}
           </HudPanel>
 
-          <HudPanel title="Portfolio Pulse" index="MK.D4">
+          <HudPanel flow title="Portfolio Pulse" index="MK.D4">
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               <StatTile label="Holdings" value={String(counts?.holdings ?? 0)} to="/market/holdings" />
               <StatTile label="Watchlist" value={String(counts?.watchlist ?? 0)} to="/market/watchlist" />
@@ -185,7 +185,7 @@ export default function MarketDashboard() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, alignItems: "start" }}>
-        <HudPanel title="Pre-Breakout Watch" index="MK.D5">
+        <HudPanel flow title="Pre-Breakout Watch" index="MK.D5">
           {preBreakouts.filter((s) => (s.prebreakout_score ?? 0) > 0).length === 0 ? (
             <div className="hud-label" style={{ color: "var(--text-dim)" }}>no coiled setups yet — pipeline pending</div>
           ) : (
@@ -208,7 +208,7 @@ export default function MarketDashboard() {
           )}
         </HudPanel>
 
-        <HudPanel title="AI Daily Insight" index="MK.D6" actions={
+        <HudPanel flow title="AI Daily Insight" index="MK.D6" actions={
           <Btn size="sm" onClick={loadInsight} disabled={busy !== null}>
             <Sparkles size={11} style={{ marginRight: 4 }} /> {busy === "insight" ? "generating…" : "generate"}
           </Btn>

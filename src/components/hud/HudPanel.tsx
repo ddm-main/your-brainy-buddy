@@ -13,6 +13,14 @@ interface HudPanelProps extends HTMLAttributes<HTMLElement> {
   updatedKey?: string | number;
   children: ReactNode;
   bodyClass?: string;
+  /**
+   * Content-height mode. The default panel body is `flex:1 1 0` with
+   * `overflow:hidden` so it fills a fixed-height grid cell and scrolls
+   * internally. In a plain content-flow page (no definite height) that
+   * starves the body to zero and clips everything. Set `flow` for those
+   * pages so the panel grows to its content instead of collapsing.
+   */
+  flow?: boolean;
 }
 
 export function HudPanel({
@@ -24,6 +32,7 @@ export function HudPanel({
   children,
   className,
   bodyClass,
+  flow = false,
   ...rest
 }: HudPanelProps) {
   const [pinging, setPinging] = useState(false);
@@ -41,7 +50,13 @@ export function HudPanel({
   return (
     <section
       className={cn("hud-panel mounted", className)}
-      style={{ display: "flex", flexDirection: "column", minHeight: 0, ...(style || {}) }}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 0,
+        ...(flow ? { overflow: "visible" } : null),
+        ...(style || {}),
+      }}
       {...restNoStyle}
     >
       <span className="hud-corner tl" />
@@ -75,12 +90,12 @@ export function HudPanel({
       <div
         className={cn("relative", bodyClass)}
         style={{
-          flex: "1 1 0",
+          flex: flow ? "0 0 auto" : "1 1 0",
           minHeight: 0,
           padding: 12,
           display: "flex",
           flexDirection: "column",
-          overflow: "hidden",
+          overflow: flow ? "visible" : "hidden",
         }}
       >
         {children}

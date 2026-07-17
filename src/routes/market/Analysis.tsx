@@ -39,7 +39,7 @@ export default function Analysis() {
   if (!sym) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <HudPanel title="Stock Analysis" index="MK.ANL">
+        <HudPanel flow title="Stock Analysis" index="MK.ANL">
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end", maxWidth: 400 }}>
             <div style={{ flex: 1 }}>
               <div style={labelStyle}>Symbol</div>
@@ -64,6 +64,7 @@ export default function Analysis() {
       {/* Chart column */}
       <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
         <HudPanel
+          flow
           title={`${sym} · ${tf}`}
           index="MK.ANL"
           live={isLoading ? "warn" : "ok"}
@@ -95,7 +96,7 @@ export default function Analysis() {
 
       {/* Right rail */}
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <HudPanel title="Quote" index="A1">
+        <HudPanel flow title="Quote" index="A1">
           <div style={{ fontFamily: "var(--font-display)", fontSize: 26, color: "var(--accent)" }}>
             {ltp != null ? `₹${fmtNum(ltp)}` : "—"}
           </div>
@@ -106,7 +107,7 @@ export default function Analysis() {
           {score?.sector && <div style={{ marginTop: 6 }}><Chip tone="accent">{score.sector}</Chip></div>}
         </HudPanel>
 
-        <HudPanel title="Breakout Intelligence" index="A2">
+        <HudPanel flow title="Breakout Intelligence" index="A2">
           <Row label="Breakout">
             <ScoreBadge score={score?.breakout_score} components={score?.score_components?.breakout} label="breakout components" />
           </Row>
@@ -126,7 +127,7 @@ export default function Analysis() {
           <Row label="Support" mono>{fmtNum(score?.support_level)}</Row>
         </HudPanel>
 
-        <HudPanel title="Indicators (Daily)" index="A3">
+        <HudPanel flow title="Indicators (Daily)" index="A3">
           <Row label="RSI (14)" mono>{fmtNum(score?.rsi14, 1)}</Row>
           <Row label="MACD" mono>{fmtNum(score?.macd, 2)} / {fmtNum(score?.macd_signal, 2)}</Row>
           <Row label="ADX (14)" mono>{fmtNum(score?.adx14, 1)}</Row>
@@ -136,7 +137,7 @@ export default function Analysis() {
           <Row label="Volume" mono>{fmtInt(score?.volume)}</Row>
         </HudPanel>
 
-        <HudPanel title="Range & Strength" index="A4">
+        <HudPanel flow title="Range & Strength" index="A4">
           <Row label="52w High" mono>{fmtNum(score?.high_52w)}</Row>
           <Row label="52w Low" mono>{fmtNum(score?.low_52w)}</Row>
           <Row label="From 52w High" mono>

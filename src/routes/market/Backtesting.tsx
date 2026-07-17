@@ -93,7 +93,7 @@ export default function Backtesting() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <HudPanel title="Strategies" index="MK.BT1"
+      <HudPanel flow title="Strategies" index="MK.BT1"
         actions={<Btn size="sm" variant="primary" onClick={() => setCreating(true)}><Plus size={11} style={{ marginRight: 4 }}/> new</Btn>}>
         {strategies.length === 0 ? (
           <EmptyState hint="Create a rule-based strategy (EMA cross, RSI reversion, breakout) to backtest on historical NSE candles.">no strategies saved</EmptyState>
@@ -121,7 +121,7 @@ export default function Backtesting() {
         )}
       </HudPanel>
 
-      <HudPanel title="Run" index="MK.BT2">
+      <HudPanel flow title="Run" index="MK.BT2">
         <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
           <div>
             <div style={labelStyle}>Window</div>
@@ -138,7 +138,7 @@ export default function Backtesting() {
         </div>
       </HudPanel>
 
-      <HudPanel title="Latest Result" index="MK.BT3">
+      <HudPanel flow title="Latest Result" index="MK.BT3">
         {!latest ? (
           <EmptyState hint="Run a backtest to see equity curve, win rate, Sharpe, drawdown, and monthly returns.">no results yet</EmptyState>
         ) : (

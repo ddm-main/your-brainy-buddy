@@ -61,8 +61,14 @@ async function kotakFetch(url: string, init: RequestInit): Promise<any> {
     /* non-JSON body */
   }
   if (!r.ok) {
-    const msg = json?.error?.[0]?.message ?? json?.message ?? json?.errMsg ?? `Kotak API ${r.status}`;
-    throw new KotakError(String(msg), r.status, text.slice(0, 500));
+    // Kotak's APIM gateway often returns 5xx with the real reason only in the
+    // raw body (fault string, maintenance notice, rate-limit), and no parseable
+    // error field. Surface that body instead of collapsing to "Kotak API 502".
+    const apiMsg =
+      json?.error?.[0]?.message ?? json?.message ?? json?.errMsg ?? json?.fault?.message;
+    const bodySnippet = text ? text.replace(/\s+/g, " ").trim().slice(0, 300) : "";
+    const detail = apiMsg ? String(apiMsg) : bodySnippet || `HTTP ${r.status}`;
+    throw new KotakError(`Kotak API ${r.status}: ${detail}`, r.status, text.slice(0, 500));
   }
   return json;
 }

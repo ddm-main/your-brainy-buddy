@@ -58,7 +58,7 @@ export function DataTable<T>({
   if (data.length === 0) return <EmptyState hint={emptyHint}>{emptyLabel}</EmptyState>;
 
   return (
-    <div style={{ overflow: "auto", minHeight: 0, flex: "1 1 0", maxHeight }}>
+    <div style={{ overflow: "auto", minHeight: 0, flex: "1 1 auto", maxHeight: maxHeight ?? "70vh" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
         <thead>
           {table.getHeaderGroups().map((hg) => (

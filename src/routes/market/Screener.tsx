@@ -134,7 +134,7 @@ export default function Screener() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <HudPanel title="Filter Builder" index="MK.SC1" actions={
+      <HudPanel flow title="Filter Builder" index="MK.SC1" actions={
         <div style={{ display: "flex", gap: 6 }}>
           {PRESETS.map((p) => (
             <Btn key={p.name} size="sm" onClick={() => { setGroups(p.groups); setApplied(p.groups); }}>{p.name}</Btn>
@@ -222,7 +222,7 @@ export default function Screener() {
       </HudPanel>
 
       {saved.length > 0 && (
-        <HudPanel title="Saved Screeners" index="MK.SC2">
+        <HudPanel flow title="Saved Screeners" index="MK.SC2">
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {saved.map((s) => (
               <span key={s.id} style={{ display: "inline-flex", alignItems: "center", gap: 4, border: "1px solid var(--edge)", padding: "4px 8px" }}>
@@ -240,7 +240,7 @@ export default function Screener() {
         </HudPanel>
       )}
 
-      <HudPanel title={`Results ${rows.length ? `· ${rows.length}` : ""}`} index="MK.SC3" live={isFetching ? "warn" : "ok"}>
+      <HudPanel flow title={`Results ${rows.length ? `· ${rows.length}` : ""}`} index="MK.SC3" live={isFetching ? "warn" : "ok"}>
         <DataTable
           columns={columns}
           data={rows}

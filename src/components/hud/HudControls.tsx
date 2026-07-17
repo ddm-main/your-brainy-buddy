@@ -3,15 +3,16 @@ import type { CSSProperties, ReactNode } from "react";
 /** Shared HUD form/UI atoms — restyled via .hud-* classes in styles.css. */
 
 export const inputStyle: CSSProperties = {
-  padding: "8px 2px",
-  border: "none",
-  borderBottom: "1px solid var(--edge)",
-  background: "transparent",
+  padding: "10px 12px",
+  border: "1px solid var(--edge)",
+  background: "rgba(255,255,255,0.02)",
   color: "var(--text)",
   fontSize: 13,
   fontFamily: "var(--font-hud)",
   outline: "none",
-  borderRadius: 0,
+  borderRadius: 4,
+  boxSizing: "border-box",
+  minWidth: 0,
   transition: "border-color 180ms, box-shadow 180ms, color 180ms",
 };
 export const labelStyle: CSSProperties = {

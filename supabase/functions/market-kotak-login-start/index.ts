@@ -16,8 +16,14 @@ Deno.serve(async (req) => {
       .eq("user_id", auth.userId).eq("active_provider", "kotak_neo").maybeSingle();
     if (error) return errorResponse(req, error.message);
     const s = data as KotakSettings | null;
-    if (!s?.consumer_key || !s?.mobile_number_enc || !s?.mpin_enc || !s?.ucc) {
-      return errorResponse(req, "Save Kotak credentials first: consumer key, mobile, UCC and MPIN.");
+    const missing = [
+      !s?.consumer_key && "consumer key",
+      !s?.mobile_number_enc && "mobile number",
+      !s?.mpin_enc && "MPIN",
+      !s?.ucc && "UCC",
+    ].filter(Boolean);
+    if (missing.length) {
+      return errorResponse(req, `Save Kotak credentials first — missing: ${missing.join(", ")}.`);
     }
 
     if (s.totp_secret_enc) {

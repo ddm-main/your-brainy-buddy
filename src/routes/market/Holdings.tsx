@@ -130,7 +130,7 @@ export default function Holdings() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <HudPanel title="Portfolio Summary" index="MK.H1" actions={
+      <HudPanel flow title="Portfolio Summary" index="MK.H1" actions={
         <div style={{ display: "flex", gap: 6 }}>
           <Btn size="sm" onClick={() => refreshQuotes(rows)} disabled={busy !== null}>
             <RefreshCw size={11} style={{ marginRight: 4 }} /> refresh quotes
@@ -152,7 +152,7 @@ export default function Holdings() {
         </div>
       </HudPanel>
 
-      <HudPanel title="Holdings" index="MK.H2" actions={
+      <HudPanel flow title="Holdings" index="MK.H2" actions={
         <Btn size="sm" onClick={() => setShowForm((v) => !v)}>
           <Plus size={11} style={{ marginRight: 4 }} /> {showForm ? "cancel" : "add"}
         </Btn>
@@ -250,7 +250,7 @@ function Input({ label, value, onChange, placeholder, type = "text" }: { label: 
   return (
     <div>
       <div style={labelStyle}>{label}</div>
-      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} type={type} style={inputStyle} />
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} type={type} style={{ ...inputStyle, width: "100%" }} />
     </div>
   );
 }
@@ -258,7 +258,7 @@ function Select({ label, value, options, onChange }: { label: string; value: str
   return (
     <div>
       <div style={labelStyle}>{label}</div>
-      <select value={value} onChange={(e) => onChange(e.target.value)} style={{ ...inputStyle, padding: "6px 4px" }}>
+      <select value={value} onChange={(e) => onChange(e.target.value)} style={{ ...inputStyle, width: "100%" }}>
         {options.map((o) => <option key={o} value={o}>{o}</option>)}
       </select>
     </div>

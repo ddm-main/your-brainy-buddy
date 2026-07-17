@@ -125,6 +125,24 @@ export default function MarketSettings() {
   const startLogin = async () => {
     setBusy("login");
     try {
+      // Persist whatever is currently in the form before logging in. login-start
+      // reads credentials from the DB, so typed-but-unsaved fields (mobile, MPIN,
+      // TOTP — which never repopulate on reload for security) would otherwise be
+      // missing and the login rejects with "Save Kotak credentials first".
+      // `undefined` fields are skipped server-side, so this never clears stored
+      // secrets the user left blank this session.
+      await callFn("market-config-save", {
+        provider,
+        consumer_key: consumerKey || undefined,
+        mobile_number: mobile || undefined,
+        mpin: mpin || undefined,
+        totp_secret: totpSecret || undefined,
+        consumer_secret: consumerSecret || undefined,
+        ucc: ucc || undefined,
+        base_url: baseUrl || undefined,
+        ws_url: wsUrl || undefined,
+      });
+      setConsumerSecret(""); setPassword(""); setMpin(""); setMobile(""); setTotpSecret("");
       const r = await callFn("market-kotak-login-start", {});
       if (r?.auto) {
         push(`Connected as ${r?.greeting_name ?? "Kotak user"} (auto TOTP)`, "ok");
@@ -198,12 +216,12 @@ export default function MarketSettings() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <HudPanel title="Market Data Provider" index="MK.S1" live={liveProvider === "kotak_neo" ? "ok" : "idle"}>
+      <HudPanel flow title="Market Data Provider" index="MK.S1" live={liveProvider === "kotak_neo" ? "ok" : "idle"}>
         <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <div>
             <div style={labelStyle}>Provider</div>
             <select value={provider} onChange={(e) => setProvider(e.target.value as Provider)}
-              style={{ ...inputStyle, padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>
+              style={{ ...inputStyle, minWidth: 200 }}>
               <option value="kotak_neo">Kotak Neo</option>
               <option value="yahoo">Yahoo Finance</option>
               <option value="zerodha" disabled>Zerodha Kite (not enabled)</option>
@@ -245,7 +263,7 @@ export default function MarketSettings() {
       </HudPanel>
 
       {isKotak && (
-        <HudPanel title="Kotak Neo Credentials" index="MK.S2">
+        <HudPanel flow title="Kotak Neo Credentials" index="MK.S2">
           <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12 }}>
             Store credentials once (encrypted at rest). Sessions expire daily around midnight IST — save the
             TOTP secret (from Kotak Neo app → API TOTP setup) and JARVIS re-logs-in automatically every morning.
@@ -275,7 +293,7 @@ export default function MarketSettings() {
         </HudPanel>
       )}
 
-      <HudPanel title="Data Pipeline" index="MK.S4">
+      <HudPanel flow title="Data Pipeline" index="MK.S4">
         <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12 }}>
           Run these when the dashboard/screener show empty data. Start with Universe, then EOD Batch, then Aggregates.
         </div>
@@ -300,14 +318,14 @@ export default function MarketSettings() {
       </HudPanel>
 
       {isKotak && cur?.connection_status === "pending_otp" && (
-        <HudPanel title="Complete Login — TOTP" index="MK.S3">
+        <HudPanel flow title="Complete Login — TOTP" index="MK.S3">
           <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 8 }}>
             Enter the current 6-digit TOTP from your authenticator app (Kotak Neo → API TOTP).
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
             <div style={{ flex: 1, maxWidth: 200 }}>
               <div style={labelStyle}>TOTP code</div>
-              <input value={otp} onChange={(e) => setOtp(e.target.value)} style={inputStyle} inputMode="numeric" autoFocus />
+              <input value={otp} onChange={(e) => setOtp(e.target.value)} style={{ ...inputStyle, width: "100%" }} inputMode="numeric" autoFocus />
             </div>
             <Btn onClick={completeOtp} disabled={busy !== null} variant="primary">
               {busy === "otp" ? "validating…" : "Complete login"}
@@ -323,7 +341,7 @@ function Field({ label, value, setValue, placeholder, type = "text" }: { label: 
   return (
     <div>
       <div style={labelStyle}>{label}</div>
-      <input type={type} value={value} onChange={(e) => setValue(e.target.value)} placeholder={placeholder} style={inputStyle} autoComplete="off" />
+      <input type={type} value={value} onChange={(e) => setValue(e.target.value)} placeholder={placeholder} style={{ ...inputStyle, width: "100%" }} autoComplete="off" />
     </div>
   );
 }

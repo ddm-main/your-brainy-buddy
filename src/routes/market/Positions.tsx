@@ -179,7 +179,7 @@ export default function Positions() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <HudPanel title="Positions Summary" index="MK.P1" actions={
+      <HudPanel flow title="Positions Summary" index="MK.P1" actions={
         <div style={{ display: "flex", gap: 6 }}>
           {connected && (
             <Btn size="sm" onClick={sync} disabled={syncMut.isPending}>
@@ -200,7 +200,7 @@ export default function Positions() {
       </HudPanel>
 
       {showForm && (
-        <HudPanel title="New Position" index="MK.P2">
+        <HudPanel flow title="New Position" index="MK.P2">
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
             <Input label="Symbol" value={form.symbol} onChange={(v) => setForm({ ...form, symbol: v })} placeholder="RELIANCE" />
             <Select label="Side" value={form.side} options={["long", "short"]} onChange={(v) => setForm({ ...form, side: v })} />
@@ -216,7 +216,7 @@ export default function Positions() {
         </HudPanel>
       )}
 
-      <HudPanel title="Open Positions" index="MK.P3">
+      <HudPanel flow title="Open Positions" index="MK.P3">
         <DataTable
           columns={columns}
           data={open}
@@ -226,7 +226,7 @@ export default function Positions() {
       </HudPanel>
 
       {closed.length > 0 && (
-        <HudPanel title="Closed Positions" index="MK.P4">
+        <HudPanel flow title="Closed Positions" index="MK.P4">
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
@@ -272,7 +272,7 @@ function Input({ label, value, onChange, placeholder, type = "text" }: { label: 
   return (
     <div>
       <div style={labelStyle}>{label}</div>
-      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} type={type} style={inputStyle} />
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} type={type} style={{ ...inputStyle, width: "100%" }} />
     </div>
   );
 }
@@ -280,7 +280,7 @@ function Select({ label, value, options, onChange }: { label: string; value: str
   return (
     <div>
       <div style={labelStyle}>{label}</div>
-      <select value={value} onChange={(e) => onChange(e.target.value)} style={{ ...inputStyle, padding: "6px 4px" }}>
+      <select value={value} onChange={(e) => onChange(e.target.value)} style={{ ...inputStyle, width: "100%" }}>
         {options.map((o) => <option key={o} value={o}>{o}</option>)}
       </select>
     </div>
