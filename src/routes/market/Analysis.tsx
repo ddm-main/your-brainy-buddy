@@ -156,10 +156,49 @@ export default function Analysis() {
             <span style={{ fontSize: 10 }}>{fmtNum(score?.ema20, 0)} / {fmtNum(score?.ema50, 0)} / {fmtNum(score?.ema200, 0)}</span>
           </Row>
         </HudPanel>
+
+        <HudPanel flow title="Fundamentals" index="A5">
+          {!f ? (
+            <div className="hud-label" style={{ fontSize: 11, padding: 6 }}>loading fundamentals…</div>
+          ) : (
+            <>
+              <Row label="Market Cap" mono>{fmtCrore(f.market_cap)}</Row>
+              <Row label="P/E (TTM)" mono>{fmtNum(f.pe_ttm, 2)}</Row>
+              <Row label="P/E (Fwd)" mono>{fmtNum(f.pe_forward, 2)}</Row>
+              <Row label="P/B" mono>{fmtNum(f.price_to_book, 2)}</Row>
+              <Row label="EPS (TTM)" mono>{fmtNum(f.eps_ttm, 2)}</Row>
+              <Row label="ROE" mono>{fmtPct((f.roe ?? 0) * 100)}</Row>
+              <Row label="Debt/Equity" mono>{fmtNum(f.debt_to_equity, 2)}</Row>
+              <Row label="Profit Margin" mono>{fmtPct((f.profit_margin ?? 0) * 100)}</Row>
+              <Row label="Rev Growth" mono>
+                <span style={{ color: (f.revenue_growth ?? 0) > 0 ? "var(--ok)" : "var(--danger)" }}>
+                  {fmtPct((f.revenue_growth ?? 0) * 100)}
+                </span>
+              </Row>
+              <Row label="Dividend Yield" mono>{fmtPct((f.dividend_yield ?? 0) * 100)}</Row>
+              <Row label="Beta" mono>{fmtNum(f.beta, 2)}</Row>
+              {f.industry && <Row label="Industry"><span style={{ fontSize: 10 }}>{f.industry}</span></Row>}
+              {f.next_earnings_at && (
+                <Row label="Next Earnings">
+                  <span style={{ fontSize: 10 }}>{new Date(f.next_earnings_at).toLocaleDateString()}</span>
+                </Row>
+              )}
+            </>
+          )}
+        </HudPanel>
       </div>
     </div>
   );
 }
+
+function fmtCrore(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  const cr = n / 1e7;
+  if (cr >= 1e5) return `₹${(cr / 1e5).toFixed(2)} L Cr`;
+  if (cr >= 1000) return `₹${(cr / 1000).toFixed(2)} K Cr`;
+  return `₹${cr.toFixed(2)} Cr`;
+}
+
 
 function Row({ label, children, mono }: { label: string; children: React.ReactNode; mono?: boolean }) {
   return (
