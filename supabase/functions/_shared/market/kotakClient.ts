@@ -157,6 +157,14 @@ export async function kotakLogin(
 }
 
 
+// Login using the stored TOTP secret (unattended path).
+export async function kotakAutoLogin(s: KotakSettings): Promise<KotakSession> {
+  const secret = await dec(s.totp_secret_enc);
+  if (!secret) throw new KotakError("TOTP secret not configured", 400);
+  const code = await totp(secret);
+  return kotakLogin(s, code);
+}
+
 async function sessionHeaders(s: KotakSettings): Promise<Record<string, string>> {
   const editToken = await dec(s.session_token_enc);
   if (!editToken || !s.sid) throw new KotakError("No active Kotak session", 401);
@@ -170,50 +178,51 @@ async function sessionHeaders(s: KotakSettings): Promise<Record<string, string>>
 
 export async function kotakHoldings(s: KotakSettings): Promise<any[]> {
   const h = await sessionHeaders(s);
-  const j = await kotakFetch(
-    `${base(s)}/Portfolio/1.0/portfolio/v1/holdings?sId=${encodeURIComponent(s.hs_server_id ?? "")}`,
-    { headers: h },
-  );
+  const j = await kotakFetch(`${apiBase(s)}/portfolio/v1/holdings`, { headers: h });
   return j?.data ?? [];
 }
 
 export async function kotakPositions(s: KotakSettings): Promise<any[]> {
   const h = await sessionHeaders(s);
-  const j = await kotakFetch(
-    `${base(s)}/Orders/2.0/quick/user/positions?sId=${encodeURIComponent(s.hs_server_id ?? "")}`,
-    { headers: h },
-  );
+  const j = await kotakFetch(`${apiBase(s)}/quick/user/positions`, { headers: h });
   return j?.data ?? [];
 }
 
 export async function kotakLimits(s: KotakSettings): Promise<any> {
   const h = await sessionHeaders(s);
-  return kotakFetch(`${base(s)}/Orders/2.0/quick/user/limits`, { headers: h });
+  return kotakFetch(`${apiBase(s)}/quick/user/limits`, {
+    method: "POST",
+    headers: { ...h, "Content-Type": "application/json" },
+    body: JSON.stringify({ seg: "ALL", exch: "ALL", prod: "ALL" }),
+  });
 }
 
-// Quotes need only the consumer key. neoSymbols like "nse_cm|11536".
+// Quotes need an active session and go through the per-user baseUrl.
+// neoSymbols look like "nse_cm|11536".
 export async function kotakQuotes(
   s: KotakSettings,
   neoSymbols: string[],
   quoteType: "ltp" | "ohlc" | "all" = "all",
 ): Promise<any[]> {
-  if (!s.consumer_key) throw new KotakError("Consumer key not configured", 400);
   if (neoSymbols.length === 0) return [];
+  const h = await sessionHeaders(s);
   const path = encodeURIComponent(neoSymbols.join(","));
-  const j = await kotakFetch(`${base(s)}/apim/quotes/1.0/quotes/neosymbol/${path}/${quoteType}`, {
-    headers: { Authorization: s.consumer_key, accept: "application/json" },
-  });
+  const j = await kotakFetch(
+    `${apiBase(s)}/script-details/1.0/quotes/neosymbol/${path}/${quoteType}`,
+    { headers: { ...h, accept: "application/json" } },
+  );
   const d = j?.data ?? j;
   return Array.isArray(d) ? d : [d].filter(Boolean);
 }
 
 export async function kotakScripFilePaths(s: KotakSettings): Promise<string[]> {
-  if (!s.consumer_key) throw new KotakError("Consumer key not configured", 400);
-  const j = await kotakFetch(`${base(s)}/Files/1.0/masterscrip/v2/file-paths`, {
-    headers: { Authorization: s.consumer_key, accept: "application/json" },
+  const h = await sessionHeaders(s);
+  const j = await kotakFetch(`${apiBase(s)}/script-details/1.0/masterscrip/file-paths`, {
+    headers: { ...h, accept: "application/json" },
   });
-  return j?.data?.filesPaths ?? [];
+  return j?.data?.filesPaths ?? j?.filesPaths ?? [];
 }
+
 
 // Persist a fresh session onto the settings row (encrypting tokens).
 export async function persistSession(
