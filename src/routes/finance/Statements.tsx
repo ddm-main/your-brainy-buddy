@@ -269,16 +269,8 @@ export default function Statements() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const toggleOpen = async (s: any) => {
-    if (openId === s.id) { setOpenId(null); return; }
-    setOpenId(s.id);
-    setRetryLinkId("");
-    setRetryPassword("");
-    setTxnsLoading(true);
-    try { setTxns(await db.statements.transactions(s.id)); }
-    catch (e: any) { push(e?.message ?? "failed to load transactions", "err"); }
-    finally { setTxnsLoading(false); }
-  };
+
+
 
   const openTxnsModal = async (s: any) => {
     setTxnsModalId(s.id);
