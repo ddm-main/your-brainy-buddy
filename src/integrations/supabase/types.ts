@@ -1778,6 +1778,33 @@ export type Database = {
         }
         Relationships: []
       }
+      market_index_members: {
+        Row: {
+          exchange: string
+          index_key: string
+          rank: number | null
+          symbol: string
+          updated_at: string
+          weight: number | null
+        }
+        Insert: {
+          exchange?: string
+          index_key: string
+          rank?: number | null
+          symbol: string
+          updated_at?: string
+          weight?: number | null
+        }
+        Update: {
+          exchange?: string
+          index_key?: string
+          rank?: number | null
+          symbol?: string
+          updated_at?: string
+          weight?: number | null
+        }
+        Relationships: []
+      }
       market_indicators_cache: {
         Row: {
           computed_at: string
@@ -2144,6 +2171,7 @@ export type Database = {
           close: number | null
           computed_at: string
           delivery_pct: number | null
+          depth_imbalance: number | null
           ema100: number | null
           ema20: number | null
           ema200: number | null
@@ -2152,16 +2180,21 @@ export type Database = {
           high_52w: number | null
           higher_lows: boolean | null
           id: string
+          iv_rank: number | null
           low_52w: number | null
           macd: number | null
           macd_hist: number | null
           macd_signal: number | null
           near_resistance: boolean | null
+          pcr: number | null
           pct_from_52w_high: number | null
+          pe_ttm: number | null
           prebreakout_score: number | null
           rel_strength_nifty: number | null
           rel_volume: number | null
           resistance_level: number | null
+          revenue_growth: number | null
+          roe: number | null
           rsi14: number | null
           score_components: Json | null
           sector: string | null
@@ -2186,6 +2219,7 @@ export type Database = {
           close?: number | null
           computed_at?: string
           delivery_pct?: number | null
+          depth_imbalance?: number | null
           ema100?: number | null
           ema20?: number | null
           ema200?: number | null
@@ -2194,16 +2228,21 @@ export type Database = {
           high_52w?: number | null
           higher_lows?: boolean | null
           id?: string
+          iv_rank?: number | null
           low_52w?: number | null
           macd?: number | null
           macd_hist?: number | null
           macd_signal?: number | null
           near_resistance?: boolean | null
+          pcr?: number | null
           pct_from_52w_high?: number | null
+          pe_ttm?: number | null
           prebreakout_score?: number | null
           rel_strength_nifty?: number | null
           rel_volume?: number | null
           resistance_level?: number | null
+          revenue_growth?: number | null
+          roe?: number | null
           rsi14?: number | null
           score_components?: Json | null
           sector?: string | null
@@ -2228,6 +2267,7 @@ export type Database = {
           close?: number | null
           computed_at?: string
           delivery_pct?: number | null
+          depth_imbalance?: number | null
           ema100?: number | null
           ema20?: number | null
           ema200?: number | null
@@ -2236,16 +2276,21 @@ export type Database = {
           high_52w?: number | null
           higher_lows?: boolean | null
           id?: string
+          iv_rank?: number | null
           low_52w?: number | null
           macd?: number | null
           macd_hist?: number | null
           macd_signal?: number | null
           near_resistance?: boolean | null
+          pcr?: number | null
           pct_from_52w_high?: number | null
+          pe_ttm?: number | null
           prebreakout_score?: number | null
           rel_strength_nifty?: number | null
           rel_volume?: number | null
           resistance_level?: number | null
+          revenue_growth?: number | null
+          roe?: number | null
           rsi14?: number | null
           score_components?: Json | null
           sector?: string | null
@@ -2272,6 +2317,10 @@ export type Database = {
           isin: string | null
           last_price_sync_at: string | null
           lot_size: number | null
+          market_cap: number | null
+          next_earnings_at: string | null
+          pe_ttm: number | null
+          roe: number | null
           sector: string | null
           series: string | null
           symbol: string
@@ -2293,6 +2342,10 @@ export type Database = {
           isin?: string | null
           last_price_sync_at?: string | null
           lot_size?: number | null
+          market_cap?: number | null
+          next_earnings_at?: string | null
+          pe_ttm?: number | null
+          roe?: number | null
           sector?: string | null
           series?: string | null
           symbol: string
@@ -2314,6 +2367,10 @@ export type Database = {
           isin?: string | null
           last_price_sync_at?: string | null
           lot_size?: number | null
+          market_cap?: number | null
+          next_earnings_at?: string | null
+          pe_ttm?: number | null
+          roe?: number | null
           sector?: string | null
           series?: string | null
           symbol?: string

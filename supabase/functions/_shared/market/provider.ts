@@ -6,6 +6,8 @@ import { encryptStatementPassword } from "../crypto.ts";
 import {
   KOTAK_SETTINGS_COLS,
   type KotakSettings,
+  kotakCandles,
+  kotakDepth,
   kotakHoldings,
   kotakLimits,
   kotakPositions,
@@ -14,6 +16,13 @@ import {
 } from "./kotakClient.ts";
 import { toYahooSymbol, yahooChartRetry, yahooQuote } from "./yahooClient.ts";
 import type { Candle } from "./indicators.ts";
+
+export type DepthLadder = {
+  bids: Array<{ price: number; qty: number; orders: number }>;
+  asks: Array<{ price: number; qty: number; orders: number }>;
+  ltp: number | null;
+  source: "kotak" | "yahoo" | "unavailable";
+};
 
 export interface QuoteRow {
   key: string; // "NSE:SYMBOL" as requested by the caller
@@ -43,6 +52,7 @@ export interface MarketProvider {
   name: string;
   getQuotes(keys: string[]): Promise<QuoteRow[]>;
   getOHLCV(symbol: string, exchange: string, range: string, interval: string): Promise<Candle[]>;
+  getDepth(symbol: string, exchange: string): Promise<DepthLadder>;
   getHoldings(): Promise<HoldingRow[]>;
   getPositions(): Promise<PositionRow[]>;
   testAuth(): Promise<{ ok: boolean; detail?: string }>;
@@ -84,6 +94,9 @@ function yahooProvider(): MarketProvider {
     },
     getOHLCV(symbol, exchange, range, interval) {
       return yahooChartRetry(toYahooSymbol(symbol, exchange), range, interval);
+    },
+    async getDepth() {
+      return { bids: [], asks: [], ltp: null, source: "unavailable" };
     },
     getHoldings() {
       return Promise.reject(new Error("Holdings sync requires a broker provider (Kotak Neo)."));
@@ -157,9 +170,43 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       if (remaining.length > 0) out.push(...(await yahoo.getQuotes(remaining)));
       return out;
     },
-    // Kotak Neo has no historical-candles REST endpoint — delegate to Yahoo.
-    getOHLCV(symbol, exchange, range, interval) {
-      return yahoo.getOHLCV(symbol, exchange, range, interval);
+    // Kotak historical candles when we have an instrument token; else Yahoo.
+    async getOHLCV(symbol, exchange, range, interval) {
+      const seg = exchange === "BSE" ? "bse_cm" : "nse_cm";
+      const { data: stock } = await svc
+        .from("market_stocks").select("token")
+        .eq("symbol", symbol).eq("exchange", exchange)
+        .not("token", "is", null).maybeSingle();
+      const token = stock?.token as string | undefined;
+      if (!token) return yahoo.getOHLCV(symbol, exchange, range, interval);
+      // range like "2y","60d","30d"; interval like "1d","1h","15m"
+      const now = Math.floor(Date.now() / 1000);
+      const rangeSec: Record<string, number> = { "1d": 86400, "5d": 5 * 86400, "30d": 30 * 86400, "60d": 60 * 86400, "1y": 365 * 86400, "2y": 730 * 86400 };
+      const fromEpoch = now - (rangeSec[range] ?? 730 * 86400);
+      const kotakInterval = interval === "1d" ? "D" : interval === "1h" ? "60" : interval === "15m" ? "15" : interval === "5m" ? "5" : "D";
+      try {
+        const c = await withKotakSession(svc, s, encryptValue, (ss) => kotakCandles(ss, token, seg, fromEpoch, now, kotakInterval));
+        if (c.length === 0) return yahoo.getOHLCV(symbol, exchange, range, interval);
+        return c;
+      } catch {
+        return yahoo.getOHLCV(symbol, exchange, range, interval);
+      }
+    },
+    async getDepth(symbol, exchange) {
+      const seg = exchange === "BSE" ? "bse_cm" : "nse_cm";
+      const { data: stock } = await svc
+        .from("market_stocks").select("token")
+        .eq("symbol", symbol).eq("exchange", exchange)
+        .not("token", "is", null).maybeSingle();
+      const token = stock?.token as string | undefined;
+      if (!token) return { bids: [], asks: [], ltp: null, source: "unavailable" };
+      try {
+        const d = await withKotakSession(svc, s, encryptValue, (ss) => kotakDepth(ss, token, seg));
+        if (!d) return { bids: [], asks: [], ltp: null, source: "unavailable" };
+        return { ...d, source: "kotak" };
+      } catch {
+        return { bids: [], asks: [], ltp: null, source: "unavailable" };
+      }
     },
     async getHoldings() {
       const raw = await withKotakSession(svc, s, encryptValue, (ss) => kotakHoldings(ss));

@@ -1,7 +1,7 @@
 // Market Dashboard — "what are the best stocks to buy today?"
 // Indices + real breadth, sector strength, top breakout stocks, pre-breakout watch,
 // watchlist pulse, AI daily insight.
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import type { ColumnDef } from "@tanstack/react-table";
 import { HudPanel } from "@/components/hud/HudPanel";
@@ -11,7 +11,7 @@ import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "@/lib/market/api";
 import { useBreadth, useIndices, useMarketSettings, useSectorStrength, useStockScores } from "@/lib/market/hooks";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { RefreshCw, Sparkles } from "lucide-react";
@@ -20,8 +20,16 @@ import type { StockScore } from "@/lib/market/types";
 export default function MarketDashboard() {
   const push = useUi((s) => s.push);
   const nav = useNavigate();
+  const qc = useQueryClient();
   const [insight, setInsight] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handler = () => qc.invalidateQueries({ queryKey: ["market"] });
+    window.addEventListener("market:refresh", handler);
+    return () => window.removeEventListener("market:refresh", handler);
+  }, [qc]);
+
 
   const { data: indicesData, refetch: refetchIndices, isFetching: indicesFetching } = useIndices();
   const { data: breadth } = useBreadth();
@@ -67,6 +75,33 @@ export default function MarketDashboard() {
     finally { setBusy(null); }
   };
 
+  // Bootstrap the data pipeline on demand so the dashboard fills without
+  // waiting for the evening cron. Runs the same steps cron would run.
+  const primeData = async () => {
+    setBusy("prime");
+    const steps: Array<{ label: string; fn: string }> = [
+      { label: "Syncing scrip master", fn: "market-scrips-sync" },
+      { label: "Running EOD pipeline", fn: "market-pipeline-eod" },
+      { label: "Computing aggregates", fn: "market-pipeline-aggregates" },
+      { label: "Refreshing indices", fn: "market-indices" },
+    ];
+    try {
+      for (const s of steps) {
+        push(`${s.label}…`, "info");
+        await callMarketFn(s.fn);
+      }
+      push("Market data primed", "ok");
+      await refetchIndices();
+      // Invalidate the react-query caches the dashboard reads from.
+      window.dispatchEvent(new Event("market:refresh"));
+    } catch (e) {
+      push(toSafeError(e, "Prime failed").message, "err");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+
   const breakoutColumns = useMemo<ColumnDef<StockScore, any>[]>(() => [
     {
       header: "Symbol", accessorKey: "symbol",
@@ -102,9 +137,14 @@ export default function MarketDashboard() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <HudPanel flow title="Market Summary" index="MK.D1" live={indicesFetching ? "warn" : "ok"} actions={
-        <Btn size="sm" onClick={() => refetchIndices()} disabled={indicesFetching}>
-          <RefreshCw size={11} style={{ marginRight: 4 }} /> {indicesFetching ? "refreshing…" : "refresh"}
-        </Btn>
+        <div style={{ display: "flex", gap: 6 }}>
+          <Btn size="sm" onClick={primeData} disabled={busy !== null}>
+            <Sparkles size={11} style={{ marginRight: 4 }} /> {busy === "prime" ? "priming…" : "prime data"}
+          </Btn>
+          <Btn size="sm" onClick={() => refetchIndices()} disabled={indicesFetching}>
+            <RefreshCw size={11} style={{ marginRight: 4 }} /> {indicesFetching ? "refreshing…" : "refresh"}
+          </Btn>
+        </div>
       }>
         {!connected && (
           <div style={{ marginBottom: 12, padding: 10, border: "1px dashed var(--edge)", fontSize: 12, color: "var(--text-dim)" }}>

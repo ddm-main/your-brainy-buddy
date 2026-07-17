@@ -1,8 +1,9 @@
 // market-candles — candles for the Analysis chart.
-// 1D: serve from market_daily_prices (Yahoo backfill when thin).
-// 15m/1h: Yahoo intraday, cached in market_intraday_prices (15-min staleness).
+// 1D: cached in market_daily_prices (Kotak-first backfill via provider, Yahoo fallback).
+// 15m/1h: intraday provider fetch, cached in market_intraday_prices (15-min staleness).
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { yahooChartRetry, toYahooSymbol } from "../_shared/market/yahooClient.ts";
+import { getActiveProvider } from "../_shared/market/provider.ts";
 
 const INTRADAY: Record<string, { interval: string; range: string }> = {
   "15m": { interval: "15m", range: "30d" },
@@ -29,9 +30,15 @@ Deno.serve(async (req) => {
         .limit(600);
       let rows = data ?? [];
       if (rows.length < 100) {
-        // Backfill from Yahoo
+        // Backfill: prefer active provider (Kotak when connected), fall back to Yahoo.
         try {
-          const candles = await yahooChartRetry(toYahooSymbol(symbol, exchange), "2y", "1d");
+          const { provider } = await getActiveProvider(svc, auth.userId);
+          let candles;
+          try {
+            candles = await provider.getOHLCV(symbol, exchange, "2y", "1d");
+          } catch {
+            candles = await yahooChartRetry(toYahooSymbol(symbol, exchange), "2y", "1d");
+          }
           const upserts = candles.map((c) => ({
             symbol, exchange,
             trade_date: new Date(c.time * 1000).toISOString().slice(0, 10),
@@ -72,7 +79,13 @@ Deno.serve(async (req) => {
     const fresh = newest && Date.now() - new Date(newest.ts).getTime() < 15 * 60_000;
 
     if (!fresh) {
-      const candles = await yahooChartRetry(toYahooSymbol(symbol, exchange), cfg.range, cfg.interval);
+      let candles;
+      try {
+        const { provider } = await getActiveProvider(svc, auth.userId);
+        candles = await provider.getOHLCV(symbol, exchange, cfg.range, cfg.interval);
+      } catch {
+        candles = await yahooChartRetry(toYahooSymbol(symbol, exchange), cfg.range, cfg.interval);
+      }
       const upserts = candles.map((c) => ({
         symbol, exchange,
         ts: new Date(c.time * 1000).toISOString(),

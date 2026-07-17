@@ -2,6 +2,7 @@
 import { useEffect, useRef } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { lazy, Suspense } from "react";
+import ErrorBoundary from "@/components/hud/ErrorBoundary";
 
 const Dashboard = lazy(() => import("@/routes/market/Dashboard"));
 const Holdings = lazy(() => import("@/routes/market/Holdings"));
@@ -120,24 +121,25 @@ export default function Market() {
         <SubTabStrip subs={activeGroup.subs} currentPath={loc.pathname} />
       )}
       <div style={{ flex: 1, minHeight: 0, minWidth: 0, overflow: "auto" }}>
-        <Suspense fallback={<div className="hud-label">loading…</div>}>
-          <Routes>
-            <Route index element={<Dashboard />} />
-            <Route path="holdings" element={<Holdings />} />
-            <Route path="positions" element={<Positions />} />
-            <Route path="watchlist" element={<Watchlist />} />
-            <Route path="screener" element={<Screener />} />
-            <Route path="analysis" element={<Analysis />} />
-            <Route path="analysis/:symbol" element={<Analysis />} />
-            <Route path="alerts" element={<Alerts />} />
-            <Route path="backtesting" element={<Backtesting />} />
-            <Route path="options" element={<OptionChain />} />
-            <Route path="options/:symbol" element={<OptionChain />} />
-
-            <Route path="settings" element={<MarketSettings />} />
-            <Route path="*" element={<Navigate to="/market" replace />} />
-          </Routes>
-        </Suspense>
+        <ErrorBoundary key={loc.pathname}>
+          <Suspense fallback={<div className="hud-label">loading…</div>}>
+            <Routes>
+              <Route index element={<Dashboard />} />
+              <Route path="holdings" element={<Holdings />} />
+              <Route path="positions" element={<Positions />} />
+              <Route path="watchlist" element={<Watchlist />} />
+              <Route path="screener" element={<Screener />} />
+              <Route path="analysis" element={<Analysis />} />
+              <Route path="analysis/:symbol" element={<Analysis />} />
+              <Route path="alerts" element={<Alerts />} />
+              <Route path="backtesting" element={<Backtesting />} />
+              <Route path="options" element={<OptionChain />} />
+              <Route path="options/:symbol" element={<OptionChain />} />
+              <Route path="settings" element={<MarketSettings />} />
+              <Route path="*" element={<Navigate to="/market" replace />} />
+            </Routes>
+          </Suspense>
+        </ErrorBoundary>
       </div>
     </div>
   );

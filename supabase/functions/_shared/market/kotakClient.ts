@@ -223,6 +223,91 @@ export async function kotakScripFilePaths(s: KotakSettings): Promise<string[]> {
   return j?.data?.filesPaths ?? j?.filesPaths ?? [];
 }
 
+// Historical candles via /charts/v2/history. Returns [{time,open,high,low,close,volume}]
+// where `time` is unix seconds. Intervals: "1","5","15","60","D","W","M".
+export async function kotakCandles(
+  s: KotakSettings,
+  instrumentToken: string,
+  exchangeSegment: string, // "nse_cm" | "bse_cm" | "nse_fo"
+  fromEpoch: number,
+  toEpoch: number,
+  interval: string,
+): Promise<Array<{ time: number; open: number; high: number; low: number; close: number; volume: number }>> {
+  const h = await sessionHeaders(s);
+  const body = {
+    exch: exchangeSegment.startsWith("bse") ? "BSE" : exchangeSegment.startsWith("nse_fo") ? "NFO" : "NSE",
+    token: String(instrumentToken),
+    fromDate: String(fromEpoch),
+    toDate: String(toEpoch),
+    interval,
+  };
+  const j = await kotakFetch(`${apiBase(s)}/charts/v2/history`, {
+    method: "POST",
+    headers: { ...h, "Content-Type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  const raw = j?.data?.candles ?? j?.candles ?? j?.data ?? [];
+  if (!Array.isArray(raw)) return [];
+  // Kotak returns rows either as arrays [t,o,h,l,c,v] or objects.
+  return raw
+    .map((r: any) => {
+      if (Array.isArray(r)) {
+        return { time: Number(r[0]), open: Number(r[1]), high: Number(r[2]), low: Number(r[3]), close: Number(r[4]), volume: Number(r[5] ?? 0) };
+      }
+      return {
+        time: Number(r.time ?? r.t ?? 0),
+        open: Number(r.open ?? r.o ?? 0),
+        high: Number(r.high ?? r.h ?? 0),
+        low: Number(r.low ?? r.l ?? 0),
+        close: Number(r.close ?? r.c ?? 0),
+        volume: Number(r.volume ?? r.v ?? 0),
+      };
+    })
+    .filter((c) => Number.isFinite(c.time) && c.time > 0 && Number.isFinite(c.close));
+}
+
+// Level-2 market depth (best 5 bid/ask).
+export async function kotakDepth(
+  s: KotakSettings,
+  instrumentToken: string,
+  exchangeSegment = "nse_cm",
+): Promise<{ bids: Array<{ price: number; qty: number; orders: number }>; asks: Array<{ price: number; qty: number; orders: number }>; ltp: number | null } | null> {
+  const h = await sessionHeaders(s);
+  const neoSym = `${exchangeSegment}|${instrumentToken}`;
+  const path = encodeURIComponent(neoSym);
+  const j = await kotakFetch(
+    `${apiBase(s)}/script-details/1.0/quotes/neosymbol/${path}/depth`,
+    { headers: { ...h, accept: "application/json" } },
+  );
+  const d = Array.isArray(j?.data) ? j.data[0] : (j?.data ?? j);
+  if (!d) return null;
+  const bidsRaw = d.bids ?? d.bid ?? d.buy ?? [];
+  const asksRaw = d.asks ?? d.ask ?? d.sell ?? [];
+  const toRow = (r: any) => ({
+    price: Number(r.price ?? r.p ?? 0),
+    qty: Number(r.quantity ?? r.qty ?? r.q ?? 0),
+    orders: Number(r.orders ?? r.n ?? 0),
+  });
+  return {
+    bids: (Array.isArray(bidsRaw) ? bidsRaw : []).map(toRow).filter((r) => r.price > 0).slice(0, 5),
+    asks: (Array.isArray(asksRaw) ? asksRaw : []).map(toRow).filter((r) => r.price > 0).slice(0, 5),
+    ltp: Number(d.last_traded_price ?? d.ltp ?? 0) || null,
+  };
+}
+
+// Orders + trades (today).
+export async function kotakOrders(s: KotakSettings): Promise<any[]> {
+  const h = await sessionHeaders(s);
+  const j = await kotakFetch(`${apiBase(s)}/orders/1.0/orders`, { headers: { ...h, accept: "application/json" } });
+  return j?.data ?? j?.orders ?? [];
+}
+
+export async function kotakTrades(s: KotakSettings): Promise<any[]> {
+  const h = await sessionHeaders(s);
+  const j = await kotakFetch(`${apiBase(s)}/orders/1.0/trades`, { headers: { ...h, accept: "application/json" } });
+  return j?.data ?? j?.trades ?? [];
+}
+
 
 // Persist a fresh session onto the settings row (encrypting tokens).
 export async function persistSession(
