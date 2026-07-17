@@ -172,14 +172,33 @@ export default function MarketSettings() {
   const completeOtp = async () => {
     if (!otp.trim()) { push("Enter OTP", "warn"); return; }
     setBusy("otp");
+    setOtpError(null);
+    const trimmed = otp.trim();
+    const attempt = () => callFn("market-kotak-login-otp", { otp: trimmed });
     try {
-      const r = await callFn("market-kotak-login-otp", { otp: otp.trim() });
+      let r: any;
+      try {
+        r = await attempt();
+      } catch (err) {
+        // Kotak APIM occasionally 502s transiently — retry once.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/\b502\b/.test(msg)) {
+          await new Promise((res) => setTimeout(res, 1500));
+          r = await attempt();
+        } else {
+          throw err;
+        }
+      }
       setOtp("");
       push(`Connected as ${r?.greeting_name ?? "Kotak user"}`, "ok");
       await load();
-    } catch (e) { push(toSafeError(e, "OTP validation failed").message, "err"); }
-    finally { setBusy(null); }
+    } catch (e) {
+      const msg = toSafeError(e, "OTP validation failed").message;
+      setOtpError(msg);
+      push(msg, "err");
+    } finally { setBusy(null); }
   };
+
 
   const testConnection = async () => {
     setBusy("test");
