@@ -76,7 +76,11 @@ export default function Holdings() {
 
   const add = async () => {
     if (!form.symbol.trim() || !form.quantity || !form.avg_price) { push("Symbol, quantity, avg price required", "warn"); return; }
+    const { data: session } = await supabase.auth.getSession();
+    const userId = session.session?.user.id;
+    if (!userId) { push("Sign in required", "err"); return; }
     const payload = {
+      user_id: userId,
       symbol: form.symbol.trim().toUpperCase(),
       exchange: form.exchange,
       quantity: Number(form.quantity),

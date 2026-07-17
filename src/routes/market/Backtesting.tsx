@@ -1,6 +1,6 @@
 // Market Backtesting — strategy library + past results.
 // Reads market_saved_strategies and market_backtest_results.
-// "Run" tries the market-backtest-run edge function; if unavailable, surfaces the error.
+// "Run" executes the market-backtest-run edge function and stores a result row.
 import { useMemo, useState } from "react";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
@@ -64,7 +64,7 @@ export default function Backtesting() {
       await callMarketFn("market-backtest-run", { strategy_id: selectedId, period_years: years });
       push("Backtest complete", "ok");
       qc.invalidateQueries({ queryKey: ["market", "backtests"] });
-    } catch (e) { push(toSafeError(e, "run failed — engine may not be deployed yet").message, "err"); }
+    } catch (e) { push(toSafeError(e, "run failed").message, "err"); }
     finally { setRunning(false); }
   };
   const remove = async (s: Strategy) => {

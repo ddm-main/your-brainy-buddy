@@ -1,11 +1,13 @@
 // Market Settings — API Configuration for provider (Kotak Neo primary)
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { HudPanel } from "@/components/hud/HudPanel";
-import { Btn, inputStyle, labelStyle } from "@/components/hud/HudControls";
+import { Btn, Chip, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { supabase, SAFE_SUPABASE_URL } from "@/integrations/supabase/client";
 import { authFetch } from "@/lib/authFetch";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
+import { Database, LockKeyhole, Play, RefreshCw, TestTube2 } from "lucide-react";
 
 type Provider = "kotak_neo" | "yahoo" | "zerodha" | "dhan";
 
@@ -46,6 +48,7 @@ export default function MarketSettings() {
   const [baseUrl, setBaseUrl] = useState(KOTAK_DEFAULT_BASE);
   const [wsUrl, setWsUrl] = useState(KOTAK_DEFAULT_WS);
   const [otp, setOtp] = useState("");
+  const [pipeline, setPipeline] = useState<Record<string, unknown> | null>(null);
 
   const load = async () => {
     const { data, error } = await supabase.from("market_api_settings").select("*");
@@ -53,7 +56,9 @@ export default function MarketSettings() {
     const map: Record<Provider, Settings | null> = { kotak_neo: null, yahoo: null, zerodha: null, dhan: null };
     for (const r of (data ?? []) as any[]) map[r.active_provider as Provider] = r as Settings;
     setRows(map);
-    const cur = map[provider];
+    const activeProvider: Provider = map.kotak_neo?.connection_status === "connected" ? "kotak_neo" : "yahoo";
+    setProvider((prev) => (prev === "kotak_neo" && activeProvider === "yahoo" ? prev : activeProvider));
+    const cur = map[activeProvider] ?? map[provider];
     if (cur) {
       setConsumerKey(cur.consumer_key ?? "");
       setUcc(cur.ucc ?? "");
@@ -104,8 +109,14 @@ export default function MarketSettings() {
   const setActive = async () => {
     setBusy("activate");
     try {
-      await callFn("market-config-save", { provider, activate: true });
-      push(`Active provider: ${provider}`, "ok");
+      if (provider === "yahoo") {
+        push("Yahoo Finance is always available for quotes and charts", "ok");
+      } else if (provider === "kotak_neo") {
+        await callFn("market-config-save", { provider, consumer_key: consumerKey || undefined, ucc: ucc || undefined, base_url: baseUrl || undefined, ws_url: wsUrl || undefined });
+        push("Kotak Neo selected — save credentials and login to activate broker sync", "ok");
+      } else {
+        push("This broker connector is not implemented yet", "warn");
+      }
       await load();
     } catch (e) { push(toSafeError(e, "Activate failed").message, "err"); }
     finally { setBusy(null); }
@@ -154,20 +165,40 @@ export default function MarketSettings() {
   const testConnection = async () => {
     setBusy("test");
     try {
-      const r = await callFn("market-test-connection", {});
-      push(r?.ok ? `Connection OK (${r?.provider})` : "Connection failed", r?.ok ? "ok" : "err");
+      const r = await callFn("market-test-connection", { provider });
+      push(r?.ok ? `Connection OK (${r?.provider})` : `Connection failed${r?.detail ? `: ${r.detail}` : ""}`, r?.ok ? "ok" : "err");
       await load();
     } catch (e) { push(toSafeError(e, "Test failed").message, "err"); }
     finally { setBusy(null); }
   };
 
+  const runPipeline = async (fn: string, label: string) => {
+    setBusy(fn);
+    try {
+      const r = await callFn(fn, {});
+      setPipeline({ step: label, ...r });
+      push(`${label} complete`, "ok");
+    } catch (e) { push(toSafeError(e, `${label} failed`).message, "err"); }
+    finally { setBusy(null); }
+  };
+
   const cur = rows[provider];
-  const active = Object.values(rows).find((r) => r?.connection_status === "connected");
+  const kotak = rows.kotak_neo;
+  const liveProvider = kotak?.connection_status === "connected" ? "kotak_neo" : "yahoo";
   const isKotak = provider === "kotak_neo";
+  const needsKotakBasics = !consumerKey.trim() || !ucc.trim();
+  const pipelineSummary = useMemo(() => {
+    if (!pipeline) return null;
+    return Object.entries(pipeline)
+      .filter(([k]) => !["ok", "step"].includes(k))
+      .slice(0, 8)
+      .map(([k, v]) => `${k.replace(/_/g, " ")}: ${typeof v === "object" ? JSON.stringify(v) : String(v)}`)
+      .join(" · ");
+  }, [pipeline]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <HudPanel title="Active Provider" index="MK.S1">
+      <HudPanel title="Market Data Provider" index="MK.S1" live={liveProvider === "kotak_neo" ? "ok" : "idle"}>
         <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <div>
             <div style={labelStyle}>Provider</div>
@@ -175,13 +206,13 @@ export default function MarketSettings() {
               style={{ ...inputStyle, padding: "6px 8px", borderBottom: "1px solid var(--edge)" }}>
               <option value="kotak_neo">Kotak Neo</option>
               <option value="yahoo">Yahoo Finance</option>
-              <option value="zerodha">Zerodha Kite (coming soon)</option>
-              <option value="dhan">Dhan (coming soon)</option>
+              <option value="zerodha" disabled>Zerodha Kite (not enabled)</option>
+              <option value="dhan" disabled>Dhan (not enabled)</option>
             </select>
           </div>
           <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
             Status: <b style={{ color: cur?.connection_status === "connected" ? "var(--ok)" : "var(--text-dim)" }}>
-              {cur?.connection_status ?? "not configured"}
+              {provider === "yahoo" ? "available" : (cur?.connection_status ?? "not configured")}
             </b>
             {cur?.token_expires_at && (
               <span style={{ marginLeft: 12 }}>· token expires {new Date(cur.token_expires_at).toLocaleString()}</span>
@@ -190,12 +221,20 @@ export default function MarketSettings() {
               <span style={{ marginLeft: 12 }}>· last sync {new Date(cur.last_sync_at).toLocaleString()}</span>
             )}
           </div>
-          <Btn onClick={setActive} disabled={busy !== null}>Make active</Btn>
-          <Btn onClick={testConnection} disabled={busy !== null}>Test connection</Btn>
+          <Btn onClick={setActive} disabled={busy !== null || provider === "zerodha" || provider === "dhan"}>Make active</Btn>
+          <Btn onClick={testConnection} disabled={busy !== null}>
+            <TestTube2 size={11} style={{ marginRight: 4 }} /> Test connection
+          </Btn>
         </div>
-        {active && (
+        <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <Chip tone={liveProvider === "kotak_neo" ? "ok" : "neutral"}>live: {liveProvider === "kotak_neo" ? "Kotak Neo" : "Yahoo Finance"}</Chip>
+          <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
+            Yahoo handles public quotes/charts; Kotak unlocks holdings, positions and broker sessions.
+          </span>
+        </div>
+        {kotak?.connection_status === "connected" && (
           <div style={{ marginTop: 8, fontSize: 12, color: "var(--accent-soft)" }}>
-            Live provider currently in use: <b style={{ color: "var(--accent)" }}>{active.active_provider}</b>
+            Connected broker: <b style={{ color: "var(--accent)" }}>{kotak.greeting_name || kotak.ucc || "Kotak Neo"}</b>
           </div>
         )}
         {cur?.last_error && (
@@ -223,9 +262,10 @@ export default function MarketSettings() {
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
             <Btn onClick={saveConfig} disabled={busy !== null} variant="primary">
+              <LockKeyhole size={11} style={{ marginRight: 4 }} />
               {busy === "save" ? "saving…" : "Save configuration"}
             </Btn>
-            <Btn onClick={startLogin} disabled={busy !== null}>
+            <Btn onClick={startLogin} disabled={busy !== null || needsKotakBasics} title={needsKotakBasics ? "Save Consumer Key and UCC first" : undefined}>
               {busy === "login" ? "logging in…" : "Login to Kotak"}
             </Btn>
             <Btn onClick={refreshSession} disabled={busy !== null}>
@@ -234,6 +274,30 @@ export default function MarketSettings() {
           </div>
         </HudPanel>
       )}
+
+      <HudPanel title="Data Pipeline" index="MK.S4">
+        <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12 }}>
+          Run these when the dashboard/screener show empty data. Start with Universe, then EOD Batch, then Aggregates.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <Btn onClick={() => runPipeline("market-scrips-sync", "Universe sync")} disabled={busy !== null}>
+            <Database size={11} style={{ marginRight: 4 }} /> {busy === "market-scrips-sync" ? "syncing…" : "Sync universe"}
+          </Btn>
+          <Btn onClick={() => runPipeline("market-pipeline-eod", "EOD batch")} disabled={busy !== null}>
+            <Play size={11} style={{ marginRight: 4 }} /> {busy === "market-pipeline-eod" ? "running…" : "Run EOD batch"}
+          </Btn>
+          <Btn onClick={() => runPipeline("market-pipeline-aggregates", "Aggregates")} disabled={busy !== null}>
+            <RefreshCw size={11} style={{ marginRight: 4 }} /> {busy === "market-pipeline-aggregates" ? "finalizing…" : "Finalize aggregates"}
+          </Btn>
+          <Btn onClick={() => runPipeline("market-indices", "Index refresh")} disabled={busy !== null}>Refresh indices</Btn>
+        </div>
+        {pipelineSummary && (
+          <div style={{ marginTop: 10, fontSize: 11, color: "var(--accent-soft)", lineHeight: 1.5 }}>{pipelineSummary}</div>
+        )}
+        <div style={{ marginTop: 10, fontSize: 11, color: "var(--text-muted)" }}>
+          After the first EOD batch, open <Link to="/market/screener" style={{ color: "var(--accent)" }}>Screener</Link> or <Link to="/market" style={{ color: "var(--accent)" }}>Dashboard</Link> to verify results.
+        </div>
+      </HudPanel>
 
       {isKotak && cur?.connection_status === "pending_otp" && (
         <HudPanel title="Complete Login — TOTP" index="MK.S3">

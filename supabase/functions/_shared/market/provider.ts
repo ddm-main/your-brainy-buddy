@@ -105,7 +105,7 @@ const num = (v: unknown): number => {
   return Number.isFinite(n) ? n : 0;
 };
 
-function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProvider {
+export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProvider {
   const yahoo = yahooProvider();
   return {
     name: "kotak_neo",
