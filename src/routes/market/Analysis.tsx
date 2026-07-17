@@ -6,7 +6,7 @@ import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/
 import { CandleChart } from "@/components/market/CandleChart";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { fmtNum, fmtInt, fmtPct } from "@/components/hud/DataTable";
-import { useCandles, useQuotes, useSectorStrength, useStockScores } from "@/lib/market/hooks";
+import { useCandles, useFundamentals, useQuotes, useSectorStrength, useStockScores } from "@/lib/market/hooks";
 
 const TIMEFRAMES = ["1D", "1h", "15m"];
 
