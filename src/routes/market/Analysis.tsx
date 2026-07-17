@@ -24,10 +24,13 @@ export default function Analysis() {
   const { data: quotesData } = useQuotes(sym ? [`NSE:${sym}`] : []);
   const quote = quotesData?.quotes?.[0];
   const { data: sectors = [] } = useSectorStrength();
+  const { data: fundData } = useFundamentals(sym);
+  const f = fundData?.fundamentals;
   const sectorRow = useMemo(
     () => sectors.find((s) => s.sector === score?.sector),
     [sectors, score],
   );
+
 
   const priceLines = useMemo(() => {
     const lines: Array<{ price: number; label: string; color: string }> = [];
