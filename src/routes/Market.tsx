@@ -33,12 +33,14 @@ const GROUPS: Group[] = [
       { to: "/market/watchlist", label: "Watchlist" },
     ] },
   { key: "research", label: "Research", to: "/market/screener",
-    match: (p) => /^\/market\/(screener|analysis|backtesting)/.test(p),
+    match: (p) => /^\/market\/(screener|analysis|backtesting|options)/.test(p),
     subs: [
       { to: "/market/screener", label: "Screener" },
       { to: "/market/analysis", label: "Analysis" },
+      { to: "/market/options", label: "Options" },
       { to: "/market/backtesting", label: "Backtesting" },
     ] },
+
   { key: "alerts", label: "Alerts", to: "/market/alerts",
     match: (p) => /^\/market\/alerts/.test(p), subs: [] },
   { key: "settings", label: "Settings", to: "/market/settings",
