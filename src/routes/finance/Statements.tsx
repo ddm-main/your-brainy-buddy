@@ -146,7 +146,7 @@ export default function Statements() {
   const push = useUi((s) => s.push);
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [openId, setOpenId] = useState<string | null>(null);
+  
   const [txnsModalId, setTxnsModalId] = useState<string | null>(null);
   const [fixModalId, setFixModalId] = useState<string | null>(null);
   const [txns, setTxns] = useState<any[]>([]);
