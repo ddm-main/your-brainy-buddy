@@ -16,17 +16,20 @@ Deno.serve(async (req) => {
     const { provider } = await getActiveProvider(svc, auth.userId);
     const rows = await provider.getQuotes(symbols);
     const byKey = new Map(rows.map((r) => [r.key, r]));
-    const out = symbols.map((key) => {
-      const [ex, sym] = key.includes(":") ? key.split(":") : ["NSE", key];
+    // Symbols the provider couldn't quote are omitted entirely — fabricating
+    // ltp:0 rows made the UI compute nonsense like -100% P&L on holdings.
+    const out = symbols.flatMap((key) => {
       const q = byKey.get(key);
-      return {
+      if (!q || !q.price) return [];
+      const [ex, sym] = key.includes(":") ? key.split(":") : ["NSE", key];
+      return [{
         symbol: sym,
         exchange: ex,
-        ltp: q?.price ?? 0,
-        change_pct: q?.change_pct ?? null,
-        day_change: q?.change_abs ?? null,
-        source: q?.source ?? null,
-      };
+        ltp: q.price,
+        change_pct: q.change_pct ?? null,
+        day_change: q.change_abs ?? null,
+        source: q.source,
+      }];
     });
     return jsonResponse(req, { quotes: out, source: provider.name });
   } catch (e) {

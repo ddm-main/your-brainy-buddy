@@ -20,25 +20,43 @@ export interface YahooQuoteRow {
   prev_close?: number | null;
 }
 
+// The v7/finance/quote endpoint now requires Yahoo's crumb+cookie auth and
+// returns 401 for anonymous callers, so quotes are read from the v8 chart
+// meta instead (same anonymous access the pipeline's yahooChart relies on).
 export async function yahooQuote(symbols: string[]): Promise<YahooQuoteRow[]> {
   if (symbols.length === 0) return [];
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols.join(","))}`;
-  try {
-    const r = await fetch(url, { headers: UA });
-    if (!r.ok) return [];
-    const j = await r.json();
-    const rows = j?.quoteResponse?.result ?? [];
-    return rows.map((q: any) => ({
-      symbol: q.symbol,
-      name: q.shortName ?? q.symbol,
-      price: q.regularMarketPrice ?? 0,
-      change_abs: q.regularMarketChange ?? null,
-      change_pct: q.regularMarketChangePercent ?? null,
-      volume: q.regularMarketVolume ?? null,
-      prev_close: q.regularMarketPreviousClose ?? null,
-    }));
-  } catch {
-    return [];
+  // One chart call per symbol now, so cap concurrency to stay under Yahoo's
+  // anonymous rate limits when quoting a whole watchlist.
+  const CHUNK = 8;
+  const rows: (YahooQuoteRow | null)[] = [];
+  for (let i = 0; i < symbols.length; i += CHUNK) {
+    rows.push(...await Promise.all(symbols.slice(i, i + CHUNK).map(fetchOne)));
+  }
+  return rows.filter((r): r is YahooQuoteRow => r !== null);
+
+  async function fetchOne(symbol: string): Promise<YahooQuoteRow | null> {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1d`;
+    try {
+      const r = await fetch(url, { headers: UA });
+      if (!r.ok) return null;
+      const j = await r.json();
+      const meta = j?.chart?.result?.[0]?.meta;
+      const price = meta?.regularMarketPrice;
+      if (price == null) return null;
+      const prev = meta?.chartPreviousClose ?? meta?.previousClose ?? null;
+      const changeAbs = prev != null ? price - prev : null;
+      return {
+        symbol: meta.symbol ?? symbol,
+        name: meta.longName ?? meta.shortName ?? symbol,
+        price,
+        change_abs: changeAbs,
+        change_pct: changeAbs != null && prev ? (changeAbs / prev) * 100 : null,
+        volume: meta.regularMarketVolume ?? null,
+        prev_close: prev,
+      };
+    } catch {
+      return null;
+    }
   }
 }
 
