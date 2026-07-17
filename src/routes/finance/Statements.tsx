@@ -632,6 +632,106 @@ export default function Statements() {
         {loading ? <div className="hud-label">loading…</div> :
          filtered.length === 0 ? <EmptyState hint="click 'fetch statements' above, or upload a PDF manually">no statements match</EmptyState> :
           <div className="stmt-scroll" style={{ flex: "1 1 0", minHeight: 0, maxHeight: "100%", overflowY: "auto", overflowX: "auto", scrollbarGutter: "stable", borderTop: "1px solid rgba(127,233,255,0.12)", borderBottom: "1px solid rgba(127,233,255,0.12)" }}>
+          {filterType === "card" ? (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead style={{ position: "sticky", top: 0, zIndex: 1, background: "var(--panel-tint-heavy)" }}>
+             <tr style={{ color: "var(--text-dim)", textAlign: "left", fontSize: 10, fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)" }}>card name</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)" }}>card no</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>credit limit</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)" }}>stmt date</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)" }}>billing period</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>total due</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)" }}>due date</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>txns</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)" }}>status</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)" }}>validated</th>
+               <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>actions</th>
+             </tr>
+           </thead>
+           <tbody>
+             {filtered.map((s: any) => {
+               const { bank } = rowIdentity(s);
+               const cardName = s.credit_cards?.card_name ?? (bank ? `${bank} card` : "Unlinked card");
+               const statusLabel = statementStatusLabel(s);
+               const incomplete = s.parse_status === "parsed" && (
+                 s.statement_date == null || s.due_date == null || s.total_due == null ||
+                 Number(s.transactions_found ?? 0) === 0
+               );
+               const statusToneVal = incomplete ? "warn" : statusTone(s.parse_status);
+               const validated = cardValidated(s);
+               const today = new Date(); today.setHours(0, 0, 0, 0);
+               const dueDt = s.due_date ? new Date(s.due_date) : null;
+               const overdue = dueDt && dueDt < today && s.payment_status !== "paid";
+               const txnCount = Number(s.transactions_found ?? 0);
+               const canFix = s.parse_status === "failed" || s.parse_status === "pending" || s.parse_status === "skipped" || needsReparse(s) || (!s.credit_card_id && !s.financial_account_id);
+               return (
+                 <tr key={s.id} style={{ borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle" }}>
+                     <div style={{ color: "var(--text)", fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 180 }} title={cardName}>{cardName}</div>
+                     {bank && s.credit_cards?.card_name && <div style={{ color: "var(--text-dim)", fontSize: 10, whiteSpace: "nowrap" }}>{bank}</div>}
+                   </td>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle", fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap", fontFamily: "var(--font-hud)" }}>{cardNoDisplay(s)}</td>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle", textAlign: "right", fontSize: 11, whiteSpace: "nowrap", color: "var(--text-dim)" }}>{s.credit_limit != null ? inr(s.credit_limit) : "—"}</td>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle", fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap" }}>{fmtDMY(s.statement_date)}</td>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle", fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
+                     {s.period_start && s.period_end ? `${fmtDMY(s.period_start)} → ${fmtDMY(s.period_end)}` : "—"}
+                   </td>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle", textAlign: "right", fontSize: 11, whiteSpace: "nowrap" }}>
+                     <div style={{ color: "var(--text)", fontWeight: 500 }}>{s.total_due != null ? inr(s.total_due) : "—"}</div>
+                     {s.min_due != null && <div style={{ color: "var(--text-dim)", fontSize: 10 }}>min {inr(s.min_due)}</div>}
+                   </td>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle", fontSize: 11, whiteSpace: "nowrap", color: overdue ? "var(--err)" : "var(--text-dim)" }}>{fmtDMY(s.due_date)}</td>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle", textAlign: "right" }}>
+                     {txnCount > 0 ? (
+                       <button onClick={() => openTxnsModal(s)}
+                         style={{ background: "transparent", border: "1px solid var(--edge)", color: "var(--accent)", padding: "2px 8px", borderRadius: 2, cursor: "pointer", fontFamily: "var(--font-hud)", fontSize: 11 }}
+                         title="View transactions">{txnCount}</button>
+                     ) : <span style={{ color: "var(--text-muted)", fontSize: 11 }}>0</span>}
+                   </td>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle" }}>
+                     <div style={{ display: "flex", flexWrap: "wrap", gap: 3, alignItems: "center" }}>
+                       <Chip tone={statusToneVal}>{statusLabel}</Chip>
+                       {s.payment_status && s.payment_status !== "na" && (
+                         <Chip tone={s.payment_status === "paid" ? "ok" : s.payment_status === "overdue" ? "err" : "warn"}>{s.payment_status}</Chip>
+                       )}
+                     </div>
+                   </td>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle" }}>
+                     {validated.ok ? (
+                       <Chip tone="ok">Yes</Chip>
+                     ) : (
+                       <div style={{ display: "flex", flexDirection: "column", gap: 2 }} title={validated.reason}>
+                         <Chip tone="warn">No</Chip>
+                         <span style={{ color: "var(--warn)", fontSize: 10, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{validated.reason}</span>
+                       </div>
+                     )}
+                   </td>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle", textAlign: "right" }}>
+                     <div style={{ display: "flex", gap: 3, justifyContent: "flex-end", flexWrap: "wrap" }}>
+                       {s.file_path && <Btn size="sm" onClick={() => viewPdf(s)}>PDF</Btn>}
+                       {s.parse_status === "parsed" && s.payment_status !== "paid" && s.total_due != null && (
+                         <Btn size="sm" variant="primary" onClick={() => markPaid(s)}>paid</Btn>
+                       )}
+                       {(s.payment_status === "paid" || s.payment_status === "partial") && (
+                         <Btn size="sm" onClick={() => clearPayment(s)}>reset</Btn>
+                       )}
+                       {(s.file_path || s.source_email_id) && (
+                         <Btn size="sm" disabled={rowRetryingId === s.id} onClick={() => retryRow(s)}
+                           title="Re-parse this statement">{rowRetryingId === s.id ? "…" : "retry"}</Btn>
+                       )}
+                       {s.parse_status === "skipped" && !s.file_path && (
+                         <Btn size="sm" variant="primary" onClick={() => startAttachToRow(s)}>attach</Btn>
+                       )}
+                       {canFix && <Btn size="sm" onClick={() => openFixModal(s)}>fix</Btn>}
+                     </div>
+                   </td>
+                 </tr>
+               );
+             })}
+           </tbody>
+          </table>
+          ) : (
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead style={{ position: "sticky", top: 0, zIndex: 1, background: "var(--panel-tint-heavy)" }}>
              <tr style={{ color: "var(--text-dim)", textAlign: "left", fontSize: 10, fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
@@ -645,13 +745,7 @@ export default function Statements() {
            <tbody>
              {filtered.map((s: any) => {
                const { bank, entity } = rowIdentity(s);
-               const em = s.emails ?? null;
-               const dateStr = s.statement_date
-                 ? new Date(s.statement_date).toLocaleDateString()
-                 : em?.received_at ? new Date(em.received_at).toLocaleDateString() : "—";
-               const hint = explainParseError(s.parse_error);
                const unlinkedReason = linkReason(s);
-               const rawErr = s.parse_error ?? "";
                const isCard = s.statement_type === "card";
                const incomplete = s.parse_status === "parsed" && isCard && (
                  s.statement_date == null || s.due_date == null || s.total_due == null ||
@@ -660,171 +754,158 @@ export default function Statements() {
                const statusLabel = statementStatusLabel(s);
                const statusToneVal = incomplete ? "warn" : statusTone(s.parse_status);
                return (
-                 <Fragment key={s.id}>
-                   <tr style={{ borderBottom: "1px solid rgba(127,233,255,0.06)", cursor: "pointer" }} onClick={() => toggleOpen(s)}>
-                     <td style={{ padding: "4px 8px", verticalAlign: "middle" }}>
-                       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                         <span style={{ color: "var(--text)", fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{bank ?? "Unknown bank"}</span>
-                         <Chip>{s.statement_type}</Chip>
-                       </div>
-                       <div style={{ color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                         {entity ?? <span style={{ color: "var(--warn)" }}>unlinked</span>}
-                       </div>
-                       {unlinkedReason && <div style={{ color: "var(--warn)", fontSize: 9, marginTop: 1 }}>{unlinkedReason}</div>}
-                     </td>
-                     <td style={{ padding: "4px 8px", color: "var(--text-dim)", verticalAlign: "middle", fontSize: 11, whiteSpace: "nowrap" }}>
-                       <div>{dateStr}</div>
-                       <div>{s.period_start && s.period_end ? `${s.period_start} → ${s.period_end}` : "—"}</div>
-                       <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 1 }}>{s.transactions_found ?? 0} txns</div>
-                     </td>
-                     <td style={{ padding: "4px 8px", verticalAlign: "middle", textAlign: "right", fontSize: 11, whiteSpace: "nowrap" }}>
-                       <div style={{ color: "var(--text)", fontWeight: 500 }}>{s.total_due != null ? inr(s.total_due) : (s.closing_balance != null ? inr(s.closing_balance) : "—")}</div>
-                       <div style={{ color: "var(--text-dim)" }}>
-                         {isCard ? (
-                           <>
-                             {s.min_due != null ? `min ${inr(s.min_due)}` : "—"}
-                             {" · "}
-                             {s.credit_limit != null ? `lim ${inr(s.credit_limit)}` : "—"}
-                           </>
-                         ) : (
-                           s.due_date ? `due ${new Date(s.due_date).toLocaleDateString()}` : "—"
-                         )}
-                       </div>
-                     </td>
-                     <td style={{ padding: "4px 8px", verticalAlign: "middle" }}>
-                       <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
-                         <Chip tone={statusToneVal}>{statusLabel}</Chip>
-                         {isCard && s.payment_status && s.payment_status !== "na" && (
-                           <Chip tone={s.payment_status === "paid" ? "ok" : s.payment_status === "overdue" ? "err" : "warn"}>{s.payment_status}</Chip>
-                         )}
-                       </div>
-                     </td>
-                     <td style={{ padding: "4px 8px", verticalAlign: "middle", textAlign: "right" }}>
-                       <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", flexWrap: "wrap" }}>
-                         {s.file_path ? (
-                           <Btn size="sm" onClick={(e: any) => { e.stopPropagation(); viewPdf(s); }}>PDF</Btn>
-                         ) : <span className="hud-label">—</span>}
-                         {(s.file_path || s.source_email_id || s.parse_status === "failed" || s.parse_status === "skipped") && (
-                           <Btn
-                             size="sm"
-                             disabled={rowRetryingId === s.id}
-                             onClick={(e: any) => { e.stopPropagation(); retryRow(s); }}
-                             title={s.file_path || s.source_email_id
-                               ? "Re-parse just this statement"
-                               : "Retry — attach a PDF first if none is linked"}
-                           >
-                             {rowRetryingId === s.id ? "…" : "retry"}
-                           </Btn>
-                         )}
-                       </div>
-                     </td>
-                   </tr>
-                    {openId === s.id && (
-                      <tr>
-                        <td colSpan={5} style={{ padding: "8px", background: "rgba(53,214,237,0.03)", borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
-                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                            {/* Compact metadata + quick actions bar */}
-                            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", fontSize: 11 }}>
-                              {isCard && s.parse_status === "parsed" && (
-                                <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 4 }}>
-                                  {s.payment_status !== "paid" && <Btn size="sm" variant="primary" onClick={() => markPaid(s)}>mark paid</Btn>}
-                                  {(s.payment_status === "paid" || s.payment_status === "partial") && <Btn size="sm" onClick={() => clearPayment(s)}>clear payment</Btn>}
-                                </div>
-                              )}
-                              {(() => {
-                                const v = validationFor(s, txns);
-                                const paid = isCard && s.paid_amount != null;
-                                const attach = s.parse_status === "skipped";
-                                if (!v && !paid && !attach) return null;
-                                return (
-                                  <>
-                                    {paid && <Fact label="paid" value={`${inr(s.paid_amount)}${s.paid_on ? ` · ${new Date(s.paid_on).toLocaleDateString()}` : ""}`} />}
-                                    {v && (
-                                      <span title={v.msg} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                                        <Chip tone={v.ok ? "ok" : "warn"}>{v.ok ? "validated" : "mismatch"}</Chip>
-                                        <span style={{ color: v.ok ? "var(--ok)" : "var(--warn)" }}>{v.msg}</span>
-                                      </span>
-                                    )}
-                                    {attach && <Btn size="sm" variant="primary" onClick={() => startAttachToRow(s)}>attach PDF →</Btn>}
-                                  </>
-                                );
-                              })()}
-                              {s.parse_status === "parsed" && (() => {
-                                let missing: string[] = [];
-                                const mErr = /missing_fields:([\w,]+)/i.exec(s.parse_error ?? "");
-                                if (mErr) missing = mErr[1].split(",").filter(Boolean);
-                                else missing = missingFieldsFor(s) as string[];
-                                if (Number(s.transactions_found ?? 0) === 0 && s.statement_type !== "loan") missing.push("transactions");
-                                if (missing.length === 0) return null;
-                                return <span style={{ color: "var(--warn)" }}>missing: {missing.join(", ")}</span>;
-                              })()}
-                              {!s.skeleton_id && Number(s.learn_attempts ?? 0) > 0 && (
-                                <span style={{ color: "var(--warn)", fontSize: 10 }}>learn: {s.learn_attempts}×</span>
-                              )}
-                              {hint && s.parse_status !== "parsed" && hint !== s.parse_reason && hint !== s.parse_error && (
-                                <span style={{ color: "var(--warn)", fontSize: 10 }}>{hint}</span>
-                              )}
-                            </div>
-                            {(hint || rawErr) && s.parse_status !== "parsed" && (
-                              <div style={{ padding: "4px 8px", background: "rgba(255,107,107,0.08)", border: "1px solid rgba(255,107,107,0.25)", borderRadius: 4, color: "var(--warn)", fontSize: 11 }}>
-                                <span className="hud-label" style={{ color: "var(--warn)" }}>{rawErr || "parse_error"}</span>
-                                {hint && hint !== rawErr ? <> · {hint}</> : null}
-                              </div>
-                            )}
-                            {(s.parse_status === "failed" || s.parse_status === "pending" || needsReparse(s) || (!s.credit_card_id && !s.financial_account_id && !s.loan_id)) && (
-                              <div style={{ display: "flex", gap: 6, alignItems: "end", flexWrap: "wrap" }}>
-                                <div style={{ minWidth: 240 }}>
-                                  <label style={labelStyle}>link to card / account</label>
-                                  <HudSelect value={retryLinkId} onChange={setRetryLinkId} placeholder="—" options={[
-                                    ...cards.map((c: any) => ({ value: c.id, label: `${c.card_name} (card${c.banks?.name ? ` · ${c.banks.name}` : ""})` })),
-                                    ...accounts.map((a: any) => ({ value: a.id, label: `${a.nickname} (account${a.banks?.name ? ` · ${a.banks.name}` : ""})` })),
-                                  ]} />
-                                </div>
-                                <div>
-                                  <label style={labelStyle}>password</label>
-                                  <input type="password" value={retryPassword} onChange={(e) => setRetryPassword(e.target.value)} placeholder="auto-try saved" style={{ ...inputStyle, width: 160 }} />
-                                </div>
-                                <Btn size="sm" variant="primary" disabled={retrying} onClick={() => retryStatement(s)}>{retrying ? "retrying…" : "retry"}</Btn>
-                                <Btn size="sm" disabled={retrying || !retryLinkId} onClick={() => saveLinkOnly(s)} title="Save the chosen card/account without re-parsing the PDF">save link only</Btn>
-                              </div>
-                            )}
-                            {(missingFieldsFor(s).length > 0 || Number(s.transactions_found ?? 0) === 0) && s.parse_status !== "pending" && (
-                              <StatementReviewPanel
-                                statement={s}
-                                onSaved={(patch) => {
-                                  setItems((prev) => prev.map((x) => x.id === s.id ? { ...x, ...patch, manual_override: true, parse_status: "parsed" } : x));
-                                }}
-                              />
-                            )}
-                            <div style={{ display: "flex", gap: 10, alignItems: "baseline" }}>
-                              <span className="hud-label" style={{ flex: "0 0 auto" }}>txns ({s.transactions_found ?? 0})</span>
-                              {txnsLoading ? <span className="hud-label">loading…</span> :
-                               txns.length === 0 ? <span className="hud-label">none extracted</span> :
-                               <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
-                                 {txns.map((t: any) => (
-                                   <div key={t.id} style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 11 }}>
-                                     <span style={{ color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{new Date(t.txn_date).toLocaleDateString()} · {t.merchant ?? "—"}</span>
-                                     <span style={{ color: t.txn_type === "debit" ? "var(--warn)" : "var(--ok)", flex: "0 0 auto" }}>{t.txn_type === "debit" ? "-" : "+"}{inr(t.amount)}</span>
-                                   </div>
-                                 ))}
-                               </div>}
-                            </div>
-                            {s.ai_summary && (
-                              <div style={{ padding: 6, border: "1px solid var(--edge)", background: "rgba(53,214,237,0.04)", whiteSpace: "pre-wrap", fontSize: 11, color: "var(--text)" }}>
-                                <span className="hud-label">AI summary</span> {s.ai_summary}
-                              </div>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                 </Fragment>
+                 <tr key={s.id} style={{ borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle" }}>
+                     <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                       <span style={{ color: "var(--text)", fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{bank ?? "Unknown bank"}</span>
+                       <Chip>{s.statement_type}</Chip>
+                     </div>
+                     <div style={{ color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                       {entity ?? <span style={{ color: "var(--warn)" }}>unlinked</span>}
+                     </div>
+                     {unlinkedReason && <div style={{ color: "var(--warn)", fontSize: 9, marginTop: 1 }}>{unlinkedReason}</div>}
+                   </td>
+                   <td style={{ padding: "4px 8px", color: "var(--text-dim)", verticalAlign: "middle", fontSize: 11, whiteSpace: "nowrap" }}>
+                     <div>{fmtDMY(s.statement_date)}</div>
+                     <div>{s.period_start && s.period_end ? `${fmtDMY(s.period_start)} → ${fmtDMY(s.period_end)}` : "—"}</div>
+                     <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 1 }}>
+                       {Number(s.transactions_found ?? 0) > 0 ? (
+                         <button onClick={() => openTxnsModal(s)} style={{ background: "transparent", border: "none", padding: 0, color: "var(--accent)", cursor: "pointer", fontFamily: "inherit", fontSize: 10 }}>{s.transactions_found} txns</button>
+                       ) : "0 txns"}
+                     </div>
+                   </td>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle", textAlign: "right", fontSize: 11, whiteSpace: "nowrap" }}>
+                     <div style={{ color: "var(--text)", fontWeight: 500 }}>{s.total_due != null ? inr(s.total_due) : (s.closing_balance != null ? inr(s.closing_balance) : "—")}</div>
+                     <div style={{ color: "var(--text-dim)" }}>
+                       {s.due_date ? `due ${fmtDMY(s.due_date)}` : "—"}
+                     </div>
+                   </td>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle" }}>
+                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
+                       <Chip tone={statusToneVal}>{statusLabel}</Chip>
+                     </div>
+                   </td>
+                   <td style={{ padding: "4px 8px", verticalAlign: "middle", textAlign: "right" }}>
+                     <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", flexWrap: "wrap" }}>
+                       {s.file_path && <Btn size="sm" onClick={() => viewPdf(s)}>PDF</Btn>}
+                       {(s.file_path || s.source_email_id) && (
+                         <Btn size="sm" disabled={rowRetryingId === s.id} onClick={() => retryRow(s)}>{rowRetryingId === s.id ? "…" : "retry"}</Btn>
+                       )}
+                       {s.parse_status === "skipped" && !s.file_path && (
+                         <Btn size="sm" variant="primary" onClick={() => startAttachToRow(s)}>attach</Btn>
+                       )}
+                       <Btn size="sm" onClick={() => openFixModal(s)}>fix</Btn>
+                     </div>
+                   </td>
+                 </tr>
                );
              })}
            </tbody>
           </table>
+          )}
           </div>}
       </HudPanel>
+
+      {/* Transactions modal */}
+      {txnsModalId && (() => {
+        const s = items.find((x) => x.id === txnsModalId);
+        if (!s) return null;
+        const { bank } = rowIdentity(s);
+        const title = `${s.credit_cards?.card_name ?? bank ?? "Statement"} · ${s.period_start && s.period_end ? `${fmtDMY(s.period_start)} → ${fmtDMY(s.period_end)}` : fmtDMY(s.statement_date)}`;
+        return (
+          <div role="dialog" aria-modal="true" onClick={() => setTxnsModalId(null)}
+            style={{ position: "fixed", inset: 0, zIndex: 80, background: "rgba(0,0,0,0.72)", display: "flex", flexDirection: "column", padding: 24 }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", border: "1px solid var(--edge)", background: "var(--panel-tint-heavy)" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="hud-label">transactions</div>
+                <div style={{ color: "var(--text)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
+              </div>
+              <Btn size="sm" onClick={() => setTxnsModalId(null)}>close</Btn>
+            </div>
+            <div onClick={(e) => e.stopPropagation()} style={{ flex: 1, minHeight: 0, overflowY: "auto", border: "1px solid var(--edge)", borderTop: "none", background: "var(--bg)", padding: 10 }}>
+              {txnsLoading ? <div className="hud-label">loading…</div> :
+               txns.length === 0 ? <div className="hud-label">no transactions extracted</div> : (
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ color: "var(--text-dim)", textAlign: "left", fontSize: 10, fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
+                      <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)" }}>date</th>
+                      <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)" }}>description</th>
+                      <th style={{ padding: "4px 8px", borderBottom: "1px solid var(--edge)", textAlign: "right" }}>amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {txns.map((t: any) => (
+                      <tr key={t.id} style={{ borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
+                        <td style={{ padding: "4px 8px", color: "var(--text-dim)", whiteSpace: "nowrap" }}>{fmtDMY(t.txn_date)}</td>
+                        <td style={{ padding: "4px 8px", color: "var(--text)" }}>{t.merchant ?? t.description ?? "—"}</td>
+                        <td style={{ padding: "4px 8px", textAlign: "right", whiteSpace: "nowrap", color: t.txn_type === "debit" ? "var(--warn)" : "var(--ok)" }}>
+                          {t.txn_type === "debit" ? "-" : "+"}{inr(t.amount)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Fix / link modal */}
+      {fixModalId && (() => {
+        const s = items.find((x) => x.id === fixModalId);
+        if (!s) return null;
+        const hint = explainParseError(s.parse_error);
+        const rawErr = s.parse_error ?? "";
+        return (
+          <div role="dialog" aria-modal="true" onClick={() => setFixModalId(null)}
+            style={{ position: "fixed", inset: 0, zIndex: 80, background: "rgba(0,0,0,0.72)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: "var(--bg)", border: "1px solid var(--edge)", padding: 14, width: "min(720px, 95vw)", maxHeight: "85vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <div className="hud-label">fix statement</div>
+                  <div style={{ color: "var(--text)", fontSize: 12 }}>{s.credit_cards?.card_name ?? s.financial_accounts?.nickname ?? rowIdentity(s).bank ?? "Unlinked"}</div>
+                </div>
+                <Btn size="sm" onClick={() => setFixModalId(null)}>close</Btn>
+              </div>
+              {(hint || rawErr) && s.parse_status !== "parsed" && (
+                <div style={{ padding: "4px 8px", background: "rgba(255,107,107,0.08)", border: "1px solid rgba(255,107,107,0.25)", borderRadius: 4, color: "var(--warn)", fontSize: 11 }}>
+                  <span className="hud-label" style={{ color: "var(--warn)" }}>{rawErr || "parse_error"}</span>
+                  {hint && hint !== rawErr ? <> · {hint}</> : null}
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 6, alignItems: "end", flexWrap: "wrap" }}>
+                <div style={{ minWidth: 240, flex: 1 }}>
+                  <label style={labelStyle}>link to card / account</label>
+                  <HudSelect value={retryLinkId} onChange={setRetryLinkId} placeholder="—" options={[
+                    ...cards.map((c: any) => ({ value: c.id, label: `${c.card_name} (card${c.banks?.name ? ` · ${c.banks.name}` : ""})` })),
+                    ...accounts.map((a: any) => ({ value: a.id, label: `${a.nickname} (account${a.banks?.name ? ` · ${a.banks.name}` : ""})` })),
+                  ]} />
+                </div>
+                <div>
+                  <label style={labelStyle}>password</label>
+                  <input type="password" value={retryPassword} onChange={(e) => setRetryPassword(e.target.value)} placeholder="auto-try saved" style={{ ...inputStyle, width: 160 }} />
+                </div>
+                <Btn size="sm" variant="primary" disabled={retrying} onClick={() => retryStatement(s)}>{retrying ? "retrying…" : "retry"}</Btn>
+                <Btn size="sm" disabled={retrying || !retryLinkId} onClick={() => saveLinkOnly(s)}>save link only</Btn>
+              </div>
+              {(missingFieldsFor(s).length > 0 || Number(s.transactions_found ?? 0) === 0) && s.parse_status !== "pending" && (
+                <StatementReviewPanel
+                  statement={s}
+                  onSaved={(patch) => {
+                    setItems((prev) => prev.map((x) => x.id === s.id ? { ...x, ...patch, manual_override: true, parse_status: "parsed" } : x));
+                  }}
+                />
+              )}
+              {s.ai_summary && (
+                <div style={{ padding: 6, border: "1px solid var(--edge)", background: "rgba(53,214,237,0.04)", whiteSpace: "pre-wrap", fontSize: 11, color: "var(--text)" }}>
+                  <span className="hud-label">AI summary</span> {s.ai_summary}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
