@@ -109,16 +109,8 @@ function needsReparse(s: any): boolean {
   return Number(s.transactions_found ?? 0) === 0;
 }
 
-/** One inline label+value pair in the expanded statement row. Inline (not
- * stacked over a <br/>) so the whole fact set fits on a single line. */
-function Fact({ label, value }: { label: string; value: string }) {
-  return (
-    <span style={{ display: "inline-flex", alignItems: "baseline", gap: 5, whiteSpace: "nowrap" }}>
-      <span className="hud-label">{label}</span>
-      <span style={{ color: "var(--text)" }}>{value}</span>
-    </span>
-  );
-}
+
+
 
 // DD-MM-YYYY formatter — accepts ISO or Date-parseable string.
 function fmtDMY(d: string | Date | null | undefined): string {
