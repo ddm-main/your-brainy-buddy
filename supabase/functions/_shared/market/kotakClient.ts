@@ -87,9 +87,12 @@ export interface KotakSession {
   dataCenter: string | null;
   greetingName: string | null;
   ucc: string | null;
+  apiBase: string;
 }
 
-// Step 1+2: TOTP login then MPIN validate. Returns full session material.
+// Kotak Neo v2 login. Two-step: tradeApiLogin (TOTP) then tradeApiValidate (MPIN).
+// Both hit https://mis.kotaksecurities.com. The validate response carries the
+// `baseUrl` used for every subsequent authenticated call.
 export async function kotakLogin(
   s: KotakSettings,
   totpCode: string,
@@ -103,7 +106,7 @@ export async function kotakLogin(
 
   const mobileNumber = mobile.startsWith("+") ? mobile : `+91${mobile.replace(/^0+/, "")}`;
 
-  const login = await kotakFetch(`${base(s)}/login/1.0/login/v6/totp/login`, {
+  const login = await kotakFetch(`${LOGIN_HOST}/login/1.0/tradeApiLogin`, {
     method: "POST",
     headers: {
       Authorization: s.consumer_key,
@@ -118,7 +121,7 @@ export async function kotakLogin(
     throw new KotakError("Kotak login: no token in response", 502, JSON.stringify(login).slice(0, 500));
   }
 
-  const validate = await kotakFetch(`${base(s)}/login/1.0/login/v6/totp/validate`, {
+  const validate = await kotakFetch(`${LOGIN_HOST}/login/1.0/tradeApiValidate`, {
     method: "POST",
     headers: {
       Authorization: s.consumer_key,
@@ -131,30 +134,28 @@ export async function kotakLogin(
   });
   const editToken = validate?.data?.token;
   const editSid = validate?.data?.sid;
-  const hsServerId = validate?.data?.hsServerId ?? login?.data?.hsServerId;
+  const hsServerId = validate?.data?.hsServerId ?? login?.data?.hsServerId ?? "";
+  const baseUrl = String(validate?.data?.baseUrl ?? "").replace(/\/+$/, "");
   if (!editToken || !editSid) {
     throw new KotakError("Kotak validate: no session token", 502, JSON.stringify(validate).slice(0, 500));
+  }
+  if (!baseUrl) {
+    throw new KotakError("Kotak validate: no baseUrl in response", 502, JSON.stringify(validate).slice(0, 500));
   }
 
   return {
     viewToken,
     editToken,
     editSid,
-    hsServerId: hsServerId ?? "",
+    hsServerId,
     rid: validate?.data?.rid ?? null,
     dataCenter: validate?.data?.dataCenter ?? null,
     greetingName: validate?.data?.greetingName ?? login?.data?.greetingName ?? null,
     ucc: validate?.data?.ucc ?? login?.data?.ucc ?? s.ucc,
+    apiBase: baseUrl,
   };
 }
 
-// Login using the stored TOTP secret (unattended path).
-export async function kotakAutoLogin(s: KotakSettings): Promise<KotakSession> {
-  const secret = await dec(s.totp_secret_enc);
-  if (!secret) throw new KotakError("TOTP secret not configured", 400);
-  const code = await totp(secret);
-  return kotakLogin(s, code);
-}
 
 async function sessionHeaders(s: KotakSettings): Promise<Record<string, string>> {
   const editToken = await dec(s.session_token_enc);
