@@ -340,7 +340,7 @@ export default function Statements() {
       }
       const fresh = await db.statements.list();
       setItems(fresh);
-      if (openId === s.id) {
+      if (txnsModalId === s.id) {
         try { setTxns(await db.statements.transactions(s.id)); } catch { /* ignore */ }
       }
     } catch (e: any) {
