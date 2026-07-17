@@ -273,6 +273,7 @@ export async function withKotakSession<T>(
         ...s,
         sid: sess.editSid,
         hs_server_id: sess.hsServerId,
+        base_url: sess.apiBase,
         session_token_enc: await encrypt(sess.editToken),
       };
       return await fn(fresh);
