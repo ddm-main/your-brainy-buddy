@@ -119,8 +119,10 @@ Deno.serve(async (req) => {
     const rule = String(s.strategy?.rule ?? "ema_cross_20_50");
     if (!symbol) return errorResponse(req, "Strategy has no symbol", 400);
 
-    const range = years >= 10 ? "10y" : years >= 5 ? "5y" : years >= 3 ? "3y" : "1y";
-    const candles = await yahooChartRetry(toYahooSymbol(symbol, exchange), range, "1d", 3);
+    const range = years >= 10 ? "10y" : years >= 3 ? "5y" : "1y";
+    const allCandles = await yahooChartRetry(toYahooSymbol(symbol, exchange), range, "1d", 3);
+    const cutoff = Math.floor(Date.now() / 1000 - years * 365.25 * 86_400);
+    const candles = allCandles.filter((c) => c.time >= cutoff);
     if (candles.length < 80) return errorResponse(req, "Not enough candle history for backtest", 400);
 
     const { equityCurve, trades } = runRule(candles, rule);
