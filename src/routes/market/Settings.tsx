@@ -56,7 +56,9 @@ export default function MarketSettings() {
     const map: Record<Provider, Settings | null> = { kotak_neo: null, yahoo: null, zerodha: null, dhan: null };
     for (const r of (data ?? []) as any[]) map[r.active_provider as Provider] = r as Settings;
     setRows(map);
-    const cur = map[provider];
+    const activeProvider: Provider = map.kotak_neo?.connection_status === "connected" ? "kotak_neo" : "yahoo";
+    setProvider((prev) => (prev === "kotak_neo" && activeProvider === "yahoo" ? prev : activeProvider));
+    const cur = map[activeProvider] ?? map[provider];
     if (cur) {
       setConsumerKey(cur.consumer_key ?? "");
       setUcc(cur.ucc ?? "");
@@ -163,7 +165,7 @@ export default function MarketSettings() {
   const testConnection = async () => {
     setBusy("test");
     try {
-      const r = await callFn("market-test-connection", {});
+      const r = await callFn("market-test-connection", { provider });
       push(r?.ok ? `Connection OK (${r?.provider})` : `Connection failed${r?.detail ? `: ${r.detail}` : ""}`, r?.ok ? "ok" : "err");
       await load();
     } catch (e) { push(toSafeError(e, "Test failed").message, "err"); }
@@ -184,6 +186,7 @@ export default function MarketSettings() {
   const kotak = rows.kotak_neo;
   const liveProvider = kotak?.connection_status === "connected" ? "kotak_neo" : "yahoo";
   const isKotak = provider === "kotak_neo";
+  const needsKotakBasics = !consumerKey.trim() || !ucc.trim();
   const pipelineSummary = useMemo(() => {
     if (!pipeline) return null;
     return Object.entries(pipeline)
@@ -262,7 +265,7 @@ export default function MarketSettings() {
               <LockKeyhole size={11} style={{ marginRight: 4 }} />
               {busy === "save" ? "saving…" : "Save configuration"}
             </Btn>
-            <Btn onClick={startLogin} disabled={busy !== null}>
+            <Btn onClick={startLogin} disabled={busy !== null || needsKotakBasics} title={needsKotakBasics ? "Save Consumer Key and UCC first" : undefined}>
               {busy === "login" ? "logging in…" : "Login to Kotak"}
             </Btn>
             <Btn onClick={refreshSession} disabled={busy !== null}>
