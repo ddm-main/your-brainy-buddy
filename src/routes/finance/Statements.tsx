@@ -288,6 +288,21 @@ export default function Statements() {
     finally { setTxnsLoading(false); }
   };
 
+  const openTxnsModal = async (s: any) => {
+    setTxnsModalId(s.id);
+    setTxnsLoading(true);
+    try { setTxns(await db.statements.transactions(s.id)); }
+    catch (e: any) { push(e?.message ?? "failed to load transactions", "err"); }
+    finally { setTxnsLoading(false); }
+  };
+
+  const openFixModal = (s: any) => {
+    setFixModalId(s.id);
+    setRetryLinkId(s.credit_card_id ?? s.financial_account_id ?? "");
+    setRetryPassword("");
+  };
+
+
   const viewPdf = async (s: any) => {
     const title = s.emails?.subject ?? rowIdentity(s).entity ?? "Statement PDF";
     setPdfViewer({ statementId: s.id, title, url: null, password: null, loading: true, error: null });
