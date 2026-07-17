@@ -131,6 +131,9 @@ export default function Market() {
             <Route path="analysis/:symbol" element={<Analysis />} />
             <Route path="alerts" element={<Alerts />} />
             <Route path="backtesting" element={<Backtesting />} />
+            <Route path="options" element={<OptionChain />} />
+            <Route path="options/:symbol" element={<OptionChain />} />
+
             <Route path="settings" element={<MarketSettings />} />
             <Route path="*" element={<Navigate to="/market" replace />} />
           </Routes>
