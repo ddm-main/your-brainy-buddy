@@ -295,8 +295,9 @@ export default function MarketSettings() {
             <Field label="MPIN" value={mpin} setValue={setMpin} placeholder="6-digit (leave blank to keep existing)" type="password" />
             <Field label="TOTP Secret" value={totpSecret} setValue={setTotpSecret} placeholder="Base32 secret for auto-login (optional)" type="password" />
             <Field label="Consumer Secret" value={consumerSecret} setValue={setConsumerSecret} placeholder="(optional, v2 API doesn't need it)" type="password" />
-            <Field label="Base URL" value={baseUrl} setValue={setBaseUrl} />
-            <Field label="WebSocket URL" value={wsUrl} setValue={setWsUrl} />
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 8 }}>
+            The Kotak API base URL is auto-discovered per session on login — no manual entry needed.
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
             <Btn onClick={saveConfig} disabled={busy !== null} variant="primary">
