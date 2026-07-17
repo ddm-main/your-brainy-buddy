@@ -7,7 +7,9 @@ import { decryptStatementPassword, type StatementPasswordRule } from "../crypto.
 import { totp } from "./totp.ts";
 
 const NEO_FIN_KEY = "neotradeapi";
-const DEFAULT_BASE = "https://gw-napi.kotaksecurities.com";
+// Login endpoints live on a fixed host; every post-login call uses the
+// `baseUrl` returned by tradeApiValidate (stored in market_api_settings.base_url).
+const LOGIN_HOST = "https://mis.kotaksecurities.com";
 
 export interface KotakSettings {
   id: string;
@@ -34,9 +36,12 @@ async function dec(encJson: string | null): Promise<string | null> {
   return decryptStatementPassword(JSON.parse(encJson) as StatementPasswordRule);
 }
 
-function base(s: KotakSettings): string {
-  return (s.base_url || DEFAULT_BASE).replace(/\/+$/, "");
+function apiBase(s: KotakSettings): string {
+  const b = (s.base_url ?? "").replace(/\/+$/, "");
+  if (!b) throw new KotakError("Kotak session has no baseUrl — login again", 401);
+  return b;
 }
+
 
 // Next midnight IST expressed in UTC — Kotak sessions die around then.
 export function nextIstMidnightIso(): string {
