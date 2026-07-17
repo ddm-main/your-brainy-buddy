@@ -42,17 +42,19 @@ export default function MarketDashboard() {
     },
   });
 
-  // Watchlist pulse from scores
+  // Watchlist pulse — intersect with already-fetched top/pre breakout scores;
+  // avoids fetching 1000 rows just to compute three counts.
   const watchSet = useMemo(() => new Set(counts?.watchSymbols ?? []), [counts]);
-  const { data: allScores = [] } = useStockScores({ orderBy: "breakout_score", limit: 1000 });
   const watchPulse = useMemo(() => {
-    const w = allScores.filter((s) => watchSet.has(s.symbol));
+    const bySymbol = new Map<string, StockScore>();
+    for (const s of [...topBreakouts, ...preBreakouts]) if (!bySymbol.has(s.symbol)) bySymbol.set(s.symbol, s);
+    const w = Array.from(bySymbol.values()).filter((s) => watchSet.has(s.symbol));
     return {
       ready: w.filter((s) => (s.breakout_score ?? 0) >= 70).length,
       near: w.filter((s) => (s.prebreakout_score ?? 0) >= 70).length,
       weak: w.filter((s) => s.breakout_score != null && s.breakout_score < 40).length,
     };
-  }, [allScores, watchSet]);
+  }, [topBreakouts, preBreakouts, watchSet]);
 
   const connected = settings.find((s) => s.connection_status === "connected")?.active_provider ?? null;
 

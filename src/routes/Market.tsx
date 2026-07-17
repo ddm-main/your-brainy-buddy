@@ -1,4 +1,6 @@
-import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
+// Market — top-tab layout mirroring Finance (no left sidebar).
+import { useEffect, useRef } from "react";
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { lazy, Suspense } from "react";
 
 const Dashboard = lazy(() => import("@/routes/market/Dashboard"));
@@ -11,41 +13,109 @@ const Alerts = lazy(() => import("@/routes/market/Alerts"));
 const Backtesting = lazy(() => import("@/routes/market/Backtesting"));
 const MarketSettings = lazy(() => import("@/routes/market/Settings"));
 
-const TABS: { to: string; label: string; exact?: boolean }[] = [
-  { to: "/market", label: "Dashboard", exact: true },
-  { to: "/market/holdings", label: "Holdings" },
-  { to: "/market/positions", label: "Positions" },
-  { to: "/market/watchlist", label: "Watchlist" },
-  { to: "/market/screener", label: "Screener" },
-  { to: "/market/analysis", label: "Analysis" },
-  { to: "/market/alerts", label: "Alerts" },
-  { to: "/market/backtesting", label: "Backtesting" },
-  { to: "/market/settings", label: "Settings" },
+type Sub = { to: string; label: string };
+type Group = {
+  key: string; label: string; to: string;
+  match: (p: string) => boolean;
+  subs: Sub[];
+};
+
+const GROUPS: Group[] = [
+  { key: "overview", label: "Overview", to: "/market",
+    match: (p) => p === "/market" || p === "/market/", subs: [] },
+  { key: "portfolio", label: "Portfolio", to: "/market/holdings",
+    match: (p) => /^\/market\/(holdings|positions|watchlist)/.test(p),
+    subs: [
+      { to: "/market/holdings", label: "Holdings" },
+      { to: "/market/positions", label: "Positions" },
+      { to: "/market/watchlist", label: "Watchlist" },
+    ] },
+  { key: "research", label: "Research", to: "/market/screener",
+    match: (p) => /^\/market\/(screener|analysis|backtesting)/.test(p),
+    subs: [
+      { to: "/market/screener", label: "Screener" },
+      { to: "/market/analysis", label: "Analysis" },
+      { to: "/market/backtesting", label: "Backtesting" },
+    ] },
+  { key: "alerts", label: "Alerts", to: "/market/alerts",
+    match: (p) => /^\/market\/alerts/.test(p), subs: [] },
+  { key: "settings", label: "Settings", to: "/market/settings",
+    match: (p) => /^\/market\/settings/.test(p), subs: [] },
 ];
+
+const tabBase: React.CSSProperties = {
+  padding: "6px 12px", fontFamily: "var(--font-hud)", fontSize: 10,
+  letterSpacing: "0.18em", textTransform: "uppercase", textDecoration: "none",
+  borderRadius: 2, cursor: "pointer", transition: "background 120ms, color 120ms",
+};
+
+function SubTabStrip({ subs, currentPath }: { subs: Sub[]; currentPath: string }) {
+  const nav = useNavigate();
+  const refs = useRef<(HTMLAnchorElement | null)[]>([]);
+  const activeIdx = Math.max(
+    0,
+    subs.findIndex((s) => currentPath === s.to || currentPath.startsWith(s.to + "/")),
+  );
+
+  const onKey = (e: React.KeyboardEvent, idx: number) => {
+    let next = idx;
+    if (e.key === "ArrowRight") next = (idx + 1) % subs.length;
+    else if (e.key === "ArrowLeft") next = (idx - 1 + subs.length) % subs.length;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = subs.length - 1;
+    else return;
+    e.preventDefault();
+    refs.current[next]?.focus();
+    nav(subs[next].to);
+  };
+
+  return (
+    <div role="tablist" aria-label="Market sub-navigation"
+      style={{ display: "flex", gap: 2, flexWrap: "wrap", paddingLeft: 2, borderBottom: "1px solid var(--edge)" }}>
+      {subs.map((s, i) => {
+        const active = i === activeIdx;
+        return (
+          <NavLink key={s.to} to={s.to} role="tab" aria-selected={active}
+            tabIndex={active ? 0 : -1}
+            ref={(el) => (refs.current[i] = el)}
+            onKeyDown={(e) => onKey(e, i)}
+            style={{
+              ...tabBase, padding: "5px 10px",
+              borderBottom: `2px solid ${active ? "var(--accent)" : "transparent"}`,
+              color: active ? "var(--accent)" : "var(--text-dim)",
+              marginBottom: -1,
+            }}>{s.label}</NavLink>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function Market() {
   const loc = useLocation();
+  const activeGroup = GROUPS.find((g) => g.match(loc.pathname)) ?? GROUPS[0];
+  useEffect(() => { document.title = `Market · ${activeGroup.label}`; }, [activeGroup.key]);
+
   return (
-    <div style={{ padding: 12, height: "100%", display: "grid", gridTemplateColumns: "180px 1fr", gap: 12, minHeight: 0 }}>
-      <nav style={{ display: "flex", flexDirection: "column", gap: 4, borderRight: "1px solid var(--edge)", paddingRight: 8 }}>
-        <div className="hud-label" style={{ padding: "4px 8px", color: "var(--accent)" }}>Market</div>
-        {TABS.map((t) => {
-          const active = t.exact
-            ? loc.pathname === t.to || loc.pathname === t.to + "/"
-            : loc.pathname === t.to || loc.pathname.startsWith(t.to + "/");
+    <div style={{ padding: 12, height: "100%", display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
+      <div role="tablist" aria-label="Market sections" style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+        {GROUPS.map((g) => {
+          const active = g.key === activeGroup.key;
           return (
-            <NavLink key={t.to} to={t.to} style={{
-              padding: "8px 10px", textDecoration: "none",
-              border: `1px solid ${active ? "var(--edge-strong)" : "transparent"}`,
-              background: active ? "rgba(53,214,237,0.08)" : "transparent",
-              color: active ? "var(--accent)" : "var(--text-dim)",
-              fontFamily: "var(--font-hud)", fontSize: 11, letterSpacing: "0.18em", textTransform: "uppercase",
-              borderRadius: 2,
-            }}>{t.label}</NavLink>
+            <NavLink key={g.key} to={g.to} end={g.to === "/market"} role="tab" aria-selected={active}
+              style={{
+                ...tabBase,
+                border: `1px solid ${active ? "var(--edge-strong)" : "var(--edge)"}`,
+                background: active ? "rgba(53,214,237,0.08)" : "transparent",
+                color: active ? "var(--accent)" : "var(--text-dim)",
+              }}>{g.label}</NavLink>
           );
         })}
-      </nav>
-      <div style={{ minHeight: 0, minWidth: 0, overflow: "auto" }}>
+      </div>
+      {activeGroup.subs.length > 0 && (
+        <SubTabStrip subs={activeGroup.subs} currentPath={loc.pathname} />
+      )}
+      <div style={{ flex: 1, minHeight: 0, minWidth: 0, overflow: "auto" }}>
         <Suspense fallback={<div className="hud-label">loading…</div>}>
           <Routes>
             <Route index element={<Dashboard />} />
