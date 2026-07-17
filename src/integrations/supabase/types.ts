@@ -922,6 +922,51 @@ export type Database = {
           },
         ]
       }
+      gmail_sync_runs: {
+        Row: {
+          account_id: string
+          created_at: string
+          error: string | null
+          finished_at: string | null
+          id: string
+          inserted: number
+          scanned: number
+          source: string
+          started_at: string
+          statements_extracted: number
+          txns_extracted: number
+          user_id: string
+        }
+        Insert: {
+          account_id: string
+          created_at?: string
+          error?: string | null
+          finished_at?: string | null
+          id?: string
+          inserted?: number
+          scanned?: number
+          source?: string
+          started_at?: string
+          statements_extracted?: number
+          txns_extracted?: number
+          user_id: string
+        }
+        Update: {
+          account_id?: string
+          created_at?: string
+          error?: string | null
+          finished_at?: string | null
+          id?: string
+          inserted?: number
+          scanned?: number
+          source?: string
+          started_at?: string
+          statements_extracted?: number
+          txns_extracted?: number
+          user_id?: string
+        }
+        Relationships: []
+      }
       holding_transactions: {
         Row: {
           amount: number | null
@@ -1377,6 +1422,344 @@ export type Database = {
           },
         ]
       }
+      market_alerts: {
+        Row: {
+          alert_type: string
+          channel: Database["public"]["Enums"]["market_alert_channel"]
+          config: Json | null
+          created_at: string
+          exchange: string
+          id: string
+          is_active: boolean
+          last_error: string | null
+          symbol: string
+          threshold: number | null
+          triggered_at: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          alert_type: string
+          channel?: Database["public"]["Enums"]["market_alert_channel"]
+          config?: Json | null
+          created_at?: string
+          exchange?: string
+          id?: string
+          is_active?: boolean
+          last_error?: string | null
+          symbol: string
+          threshold?: number | null
+          triggered_at?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          alert_type?: string
+          channel?: Database["public"]["Enums"]["market_alert_channel"]
+          config?: Json | null
+          created_at?: string
+          exchange?: string
+          id?: string
+          is_active?: boolean
+          last_error?: string | null
+          symbol?: string
+          threshold?: number | null
+          triggered_at?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      market_api_settings: {
+        Row: {
+          access_token_enc: string | null
+          active_provider: Database["public"]["Enums"]["market_provider"]
+          base_url: string | null
+          connection_status: Database["public"]["Enums"]["market_connection_status"]
+          consumer_key: string | null
+          consumer_secret_enc: string | null
+          created_at: string
+          exchange: string | null
+          greeting_name: string | null
+          hs_server_id: string | null
+          id: string
+          last_error: string | null
+          last_sync_at: string | null
+          mobile_number_enc: string | null
+          mpin_enc: string | null
+          password_enc: string | null
+          rate_limit: number | null
+          session_token_enc: string | null
+          sid: string | null
+          token_expires_at: string | null
+          ucc: string | null
+          updated_at: string
+          user_id: string
+          view_token_enc: string | null
+          ws_url: string | null
+        }
+        Insert: {
+          access_token_enc?: string | null
+          active_provider?: Database["public"]["Enums"]["market_provider"]
+          base_url?: string | null
+          connection_status?: Database["public"]["Enums"]["market_connection_status"]
+          consumer_key?: string | null
+          consumer_secret_enc?: string | null
+          created_at?: string
+          exchange?: string | null
+          greeting_name?: string | null
+          hs_server_id?: string | null
+          id?: string
+          last_error?: string | null
+          last_sync_at?: string | null
+          mobile_number_enc?: string | null
+          mpin_enc?: string | null
+          password_enc?: string | null
+          rate_limit?: number | null
+          session_token_enc?: string | null
+          sid?: string | null
+          token_expires_at?: string | null
+          ucc?: string | null
+          updated_at?: string
+          user_id: string
+          view_token_enc?: string | null
+          ws_url?: string | null
+        }
+        Update: {
+          access_token_enc?: string | null
+          active_provider?: Database["public"]["Enums"]["market_provider"]
+          base_url?: string | null
+          connection_status?: Database["public"]["Enums"]["market_connection_status"]
+          consumer_key?: string | null
+          consumer_secret_enc?: string | null
+          created_at?: string
+          exchange?: string | null
+          greeting_name?: string | null
+          hs_server_id?: string | null
+          id?: string
+          last_error?: string | null
+          last_sync_at?: string | null
+          mobile_number_enc?: string | null
+          mpin_enc?: string | null
+          password_enc?: string | null
+          rate_limit?: number | null
+          session_token_enc?: string | null
+          sid?: string | null
+          token_expires_at?: string | null
+          ucc?: string | null
+          updated_at?: string
+          user_id?: string
+          view_token_enc?: string | null
+          ws_url?: string | null
+        }
+        Relationships: []
+      }
+      market_backtest_results: {
+        Row: {
+          created_at: string
+          equity_curve: Json | null
+          id: string
+          metrics: Json | null
+          period_years: number | null
+          ran_at: string
+          strategy_id: string | null
+          trades: Json | null
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          equity_curve?: Json | null
+          id?: string
+          metrics?: Json | null
+          period_years?: number | null
+          ran_at?: string
+          strategy_id?: string | null
+          trades?: Json | null
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          equity_curve?: Json | null
+          id?: string
+          metrics?: Json | null
+          period_years?: number | null
+          ran_at?: string
+          strategy_id?: string | null
+          trades?: Json | null
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "market_backtest_results_strategy_id_fkey"
+            columns: ["strategy_id"]
+            isOneToOne: false
+            referencedRelation: "market_saved_strategies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      market_daily_prices: {
+        Row: {
+          close: number | null
+          created_at: string
+          delivery_pct: number | null
+          delivery_qty: number | null
+          exchange: string
+          high: number | null
+          id: string
+          low: number | null
+          open: number | null
+          symbol: string
+          trade_date: string
+          volume: number | null
+        }
+        Insert: {
+          close?: number | null
+          created_at?: string
+          delivery_pct?: number | null
+          delivery_qty?: number | null
+          exchange: string
+          high?: number | null
+          id?: string
+          low?: number | null
+          open?: number | null
+          symbol: string
+          trade_date: string
+          volume?: number | null
+        }
+        Update: {
+          close?: number | null
+          created_at?: string
+          delivery_pct?: number | null
+          delivery_qty?: number | null
+          exchange?: string
+          high?: number | null
+          id?: string
+          low?: number | null
+          open?: number | null
+          symbol?: string
+          trade_date?: string
+          volume?: number | null
+        }
+        Relationships: []
+      }
+      market_holdings: {
+        Row: {
+          avg_price: number
+          buy_date: string | null
+          created_at: string
+          exchange: string
+          external_id: string | null
+          id: string
+          investment_type: string | null
+          notes: string | null
+          quantity: number
+          source: Database["public"]["Enums"]["market_holding_source"]
+          symbol: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          avg_price: number
+          buy_date?: string | null
+          created_at?: string
+          exchange?: string
+          external_id?: string | null
+          id?: string
+          investment_type?: string | null
+          notes?: string | null
+          quantity: number
+          source?: Database["public"]["Enums"]["market_holding_source"]
+          symbol: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          avg_price?: number
+          buy_date?: string | null
+          created_at?: string
+          exchange?: string
+          external_id?: string | null
+          id?: string
+          investment_type?: string | null
+          notes?: string | null
+          quantity?: number
+          source?: Database["public"]["Enums"]["market_holding_source"]
+          symbol?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      market_indicators_cache: {
+        Row: {
+          computed_at: string
+          exchange: string
+          id: string
+          indicator: string
+          symbol: string
+          timeframe: string
+          value: Json
+        }
+        Insert: {
+          computed_at?: string
+          exchange?: string
+          id?: string
+          indicator: string
+          symbol: string
+          timeframe: string
+          value: Json
+        }
+        Update: {
+          computed_at?: string
+          exchange?: string
+          id?: string
+          indicator?: string
+          symbol?: string
+          timeframe?: string
+          value?: Json
+        }
+        Relationships: []
+      }
+      market_intraday_prices: {
+        Row: {
+          close: number | null
+          created_at: string
+          exchange: string
+          high: number | null
+          id: string
+          low: number | null
+          open: number | null
+          symbol: string
+          ts: string
+          volume: number | null
+        }
+        Insert: {
+          close?: number | null
+          created_at?: string
+          exchange: string
+          high?: number | null
+          id?: string
+          low?: number | null
+          open?: number | null
+          symbol: string
+          ts: string
+          volume?: number | null
+        }
+        Update: {
+          close?: number | null
+          created_at?: string
+          exchange?: string
+          high?: number | null
+          id?: string
+          low?: number | null
+          open?: number | null
+          symbol?: string
+          ts?: string
+          volume?: number | null
+        }
+        Relationships: []
+      }
       market_news: {
         Row: {
           created_at: string
@@ -1401,6 +1784,93 @@ export type Database = {
           published_at?: string
           source?: string | null
           url?: string | null
+        }
+        Relationships: []
+      }
+      market_portfolio_notes: {
+        Row: {
+          created_at: string
+          id: string
+          note: string
+          symbol: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          note: string
+          symbol: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          note?: string
+          symbol?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      market_positions: {
+        Row: {
+          closed_at: string | null
+          created_at: string
+          entry_price: number
+          exchange: string
+          exit_price: number | null
+          id: string
+          journal_notes: string | null
+          opened_at: string
+          pnl: number | null
+          quantity: number
+          side: Database["public"]["Enums"]["market_position_side"]
+          stop_loss: number | null
+          symbol: string
+          target: number | null
+          trailing_stop: number | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          closed_at?: string | null
+          created_at?: string
+          entry_price: number
+          exchange?: string
+          exit_price?: number | null
+          id?: string
+          journal_notes?: string | null
+          opened_at?: string
+          pnl?: number | null
+          quantity: number
+          side?: Database["public"]["Enums"]["market_position_side"]
+          stop_loss?: number | null
+          symbol: string
+          target?: number | null
+          trailing_stop?: number | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          closed_at?: string | null
+          created_at?: string
+          entry_price?: number
+          exchange?: string
+          exit_price?: number | null
+          id?: string
+          journal_notes?: string | null
+          opened_at?: string
+          pnl?: number | null
+          quantity?: number
+          side?: Database["public"]["Enums"]["market_position_side"]
+          stop_loss?: number | null
+          symbol?: string
+          target?: number | null
+          trailing_stop?: number | null
+          updated_at?: string
+          user_id?: string
         }
         Relationships: []
       }
@@ -1440,6 +1910,251 @@ export type Database = {
           source?: string
           symbol?: string
           updated_at?: string
+        }
+        Relationships: []
+      }
+      market_saved_screeners: {
+        Row: {
+          created_at: string
+          description: string | null
+          filters: Json
+          id: string
+          name: string
+          sort: Json | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          description?: string | null
+          filters?: Json
+          id?: string
+          name: string
+          sort?: Json | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          description?: string | null
+          filters?: Json
+          id?: string
+          name?: string
+          sort?: Json | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      market_saved_strategies: {
+        Row: {
+          created_at: string
+          description: string | null
+          id: string
+          name: string
+          strategy: Json
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          description?: string | null
+          id?: string
+          name: string
+          strategy: Json
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          description?: string | null
+          id?: string
+          name?: string
+          strategy?: Json
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      market_stocks: {
+        Row: {
+          company_name: string | null
+          created_at: string
+          exchange: string
+          face_value: number | null
+          id: string
+          industry: string | null
+          instrument_type: string | null
+          is_active: boolean
+          isin: string | null
+          lot_size: number | null
+          sector: string | null
+          series: string | null
+          symbol: string
+          tick_size: number | null
+          token: string | null
+          updated_at: string
+        }
+        Insert: {
+          company_name?: string | null
+          created_at?: string
+          exchange: string
+          face_value?: number | null
+          id?: string
+          industry?: string | null
+          instrument_type?: string | null
+          is_active?: boolean
+          isin?: string | null
+          lot_size?: number | null
+          sector?: string | null
+          series?: string | null
+          symbol: string
+          tick_size?: number | null
+          token?: string | null
+          updated_at?: string
+        }
+        Update: {
+          company_name?: string | null
+          created_at?: string
+          exchange?: string
+          face_value?: number | null
+          id?: string
+          industry?: string | null
+          instrument_type?: string | null
+          is_active?: boolean
+          isin?: string | null
+          lot_size?: number | null
+          sector?: string | null
+          series?: string | null
+          symbol?: string
+          tick_size?: number | null
+          token?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      market_user_prefs: {
+        Row: {
+          brokerage_pct: number | null
+          created_at: string
+          default_risk_pct: number | null
+          default_timeframe: string | null
+          id: string
+          notification_prefs: Json | null
+          portfolio_size: number | null
+          refresh_seconds: number | null
+          slippage_pct: number | null
+          theme: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          brokerage_pct?: number | null
+          created_at?: string
+          default_risk_pct?: number | null
+          default_timeframe?: string | null
+          id?: string
+          notification_prefs?: Json | null
+          portfolio_size?: number | null
+          refresh_seconds?: number | null
+          slippage_pct?: number | null
+          theme?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          brokerage_pct?: number | null
+          created_at?: string
+          default_risk_pct?: number | null
+          default_timeframe?: string | null
+          id?: string
+          notification_prefs?: Json | null
+          portfolio_size?: number | null
+          refresh_seconds?: number | null
+          slippage_pct?: number | null
+          theme?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      market_watchlist_items: {
+        Row: {
+          color: string | null
+          created_at: string
+          exchange: string
+          id: string
+          notes: string | null
+          priority: number | null
+          symbol: string
+          tags: string[] | null
+          updated_at: string
+          user_id: string
+          watchlist_id: string
+        }
+        Insert: {
+          color?: string | null
+          created_at?: string
+          exchange?: string
+          id?: string
+          notes?: string | null
+          priority?: number | null
+          symbol: string
+          tags?: string[] | null
+          updated_at?: string
+          user_id: string
+          watchlist_id: string
+        }
+        Update: {
+          color?: string | null
+          created_at?: string
+          exchange?: string
+          id?: string
+          notes?: string | null
+          priority?: number | null
+          symbol?: string
+          tags?: string[] | null
+          updated_at?: string
+          user_id?: string
+          watchlist_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "market_watchlist_items_watchlist_id_fkey"
+            columns: ["watchlist_id"]
+            isOneToOne: false
+            referencedRelation: "market_watchlists"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      market_watchlists: {
+        Row: {
+          color: string | null
+          created_at: string
+          id: string
+          name: string
+          sort_order: number | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          color?: string | null
+          created_at?: string
+          id?: string
+          name: string
+          sort_order?: number | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          color?: string | null
+          created_at?: string
+          id?: string
+          name?: string
+          sort_order?: number | null
+          updated_at?: string
+          user_id?: string
         }
         Relationships: []
       }
@@ -2404,6 +3119,20 @@ export type Database = {
         | "other"
       email_purpose: "work" | "finance" | "personal" | "other"
       jarvis_action_status: "pending" | "success" | "error"
+      market_alert_channel: "browser" | "email" | "telegram" | "whatsapp"
+      market_connection_status:
+        | "disconnected"
+        | "pending_otp"
+        | "connected"
+        | "expired"
+        | "error"
+      market_holding_source:
+        | "manual"
+        | "kotak_sync"
+        | "zerodha_sync"
+        | "dhan_sync"
+      market_position_side: "long" | "short"
+      market_provider: "kotak_neo" | "yahoo" | "zerodha" | "dhan"
       note_type:
         | "general"
         | "project"
@@ -2571,6 +3300,22 @@ export const Constants = {
       ],
       email_purpose: ["work", "finance", "personal", "other"],
       jarvis_action_status: ["pending", "success", "error"],
+      market_alert_channel: ["browser", "email", "telegram", "whatsapp"],
+      market_connection_status: [
+        "disconnected",
+        "pending_otp",
+        "connected",
+        "expired",
+        "error",
+      ],
+      market_holding_source: [
+        "manual",
+        "kotak_sync",
+        "zerodha_sync",
+        "dhan_sync",
+      ],
+      market_position_side: ["long", "short"],
+      market_provider: ["kotak_neo", "yahoo", "zerodha", "dhan"],
       note_type: [
         "general",
         "project",

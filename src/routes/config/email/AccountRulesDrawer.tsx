@@ -3,6 +3,7 @@ import { Btn, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { db, type EmailAccount } from "@/lib/db";
 import { useUi } from "@/store/uiStore";
 import { X } from "lucide-react";
+import { useEscapeClose } from "@/lib/useEscapeClose";
 
 const FINANCE_DOMAINS = [
   "hdfcbank.net","hdfcbank.com","icicibank.com","axisbank.com","sbi.co.in","kotak.com",
@@ -34,6 +35,7 @@ export default function AccountRulesDrawer({
   const [permDirty, setPermDirty] = useState(false);
 
   useEffect(() => { setDraft(account); setPermDirty(false); }, [account.id]);
+  useEscapeClose(true, onClose);
 
   const patch = async (key: string, value: any) => {
     const prev = (draft as any)[key];

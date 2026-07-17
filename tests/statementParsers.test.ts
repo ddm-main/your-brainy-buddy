@@ -67,6 +67,42 @@ describe("statement parsers — real PDF fixtures", () => {
     expect(r.fields.lines.length).toBeGreaterThanOrEqual(12);
     expect(r.fields.closing_balance).toBe(23683.39);
   });
+  it("icici-savings: column-anchored parser reads DEPOSITS/WITHDRAWALS/BALANCE correctly", () => {
+    const r = dispatchStatementParser(fixture("icici-savings.txt"), { bank_slug: "icici", statement_type: "account", subject: "ICICI Bank Statement" });
+    const carLoan = r.fields.lines.find((l) => /Used Car Loan/i.test(l.description));
+    expect(carLoan?.amount).toBe(14905);
+    expect(carLoan?.txn_type).toBe("debit");
+    const homeLoan = r.fields.lines.find((l) => /Home Loan/i.test(l.description));
+    expect(homeLoan?.amount).toBe(21039);
+    expect(homeLoan?.txn_type).toBe("debit");
+    const salary = r.fields.lines.find((l) => /RealThingks\s+Salary/i.test(l.description));
+    expect(salary?.amount).toBe(109258);
+    expect(salary?.txn_type).toBe("credit");
+    const interest = r.fields.lines.find((l) => /Int\.Pd/i.test(l.description));
+    expect(interest?.amount).toBe(102);
+    expect(interest?.txn_type).toBe("credit");
+    const canara = r.fields.lines.find((l) => /CANARA\s*ROBECO/i.test(l.description));
+    expect(canara?.amount).toBe(40074.13);
+    expect(canara?.txn_type).toBe("credit");
+    for (const l of r.fields.lines) {
+      expect(l.amount).not.toBe(23683.39);
+      expect(l.amount).not.toBe(25184.45);
+      expect(l.amount).not.toBe(4145.45);
+    }
+  });
+  it("kotak-savings: column-anchored parser separates Withdrawal / Deposit / Balance", () => {
+    const r = dispatchStatementParser(fixture("kotak-savings.txt"), { bank_slug: "kotak", statement_type: "account", subject: "Kotak Account Statement" });
+    expect(r.fields.lines.length).toBeGreaterThan(0);
+    const neft = r.fields.lines.find((l) => /NEFT.*DEEPAK/i.test(l.description));
+    expect(neft?.amount).toBe(10000);
+    expect(neft?.txn_type).toBe("credit");
+    const upi = r.fields.lines.find((l) => /GROWW/i.test(l.description));
+    expect(upi?.amount).toBe(1000);
+    expect(upi?.txn_type).toBe("debit");
+    for (const l of r.fields.lines) {
+      expect(String(l.amount)).not.toMatch(/^(21400\.67|31400\.67|30400\.67|15767\.88)$/);
+    }
+  });
 });
 
 // End-to-end fixtures captured from Deepak's real bank/card PDFs (2026-07):

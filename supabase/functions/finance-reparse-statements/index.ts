@@ -86,6 +86,25 @@ Deno.serve(async (req) => {
       rows = [...rows, ...(incompleteRows ?? [])];
     }
 
+    // Explicit opt-in: re-parse `parsed` ACCOUNT statements too. Used after
+    // deploying a column-anchored parser fix that could reclassify rows the
+    // previous heuristic mis-bucketed (e.g. balance → amount on ICICI).
+    const reparseAccounts = body?.reparse_accounts === true;
+    if (reparseAccounts && rows.length < cap) {
+      const { data: acctRows, error: acctErr } = await svc.from("statements")
+        .select("id, user_id, statement_type, source_email_id, file_path, parse_status, credit_card_id, financial_account_id, loan_id, linked_bank_id, learn_attempts")
+        .eq("user_id", uid)
+        .eq("parse_status", "parsed")
+        .eq("statement_type", "account")
+        .gte("created_at", cutoff)
+        .lt("learn_attempts", MAX_AUTO_LEARN_ATTEMPTS)
+        .or(`last_learn_at.is.null,last_learn_at.lt.${cooldownCutoff}`)
+        .order("updated_at", { ascending: true, nullsFirst: true })
+        .limit(cap - rows.length);
+      if (acctErr) throw acctErr;
+      rows = [...rows, ...(acctRows ?? [])];
+    }
+
     let parsed = 0;
     let failed = 0;
     let stillUnresolved = 0;

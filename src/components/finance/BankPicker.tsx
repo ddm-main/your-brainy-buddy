@@ -6,6 +6,7 @@
 // flow.
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useEscapeClose } from "@/lib/useEscapeClose";
 import { db, type Bank } from "@/lib/db";
 import { INDIAN_BANKS } from "@/data/indianBanks";
 import { inputStyle } from "@/components/hud/HudControls";
@@ -22,6 +23,7 @@ export default function BankPicker({ value, onChange, placeholder = "type or pic
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  useEscapeClose(open, () => setOpen(false));
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { db.banks.list().then(setBanks).catch(() => {}); }, []);

@@ -834,11 +834,12 @@ export const db = {
       const { error } = await supabase.from("statements").update(update).eq("id", id);
       if (error) throw error;
     },
-    reparseAll: async (opts?: { limit?: number; since_days?: number; include_incomplete_parsed?: boolean }) =>
+    reparseAll: async (opts?: { limit?: number; since_days?: number; include_incomplete_parsed?: boolean; reparse_accounts?: boolean }) =>
       callEdgeFunction("finance-reparse-statements", {
         limit: opts?.limit ?? 3,
         since_days: opts?.since_days ?? 3650,
         include_incomplete_parsed: opts?.include_incomplete_parsed ?? true,
+        reparse_accounts: opts?.reparse_accounts ?? false,
       }),
 
     summarize: async (id: string) => {

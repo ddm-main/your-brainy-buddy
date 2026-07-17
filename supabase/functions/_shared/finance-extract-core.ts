@@ -1201,6 +1201,42 @@ export async function applyParsedStatementResult(
   }
   if (attachmentId) await svc.from("email_attachments").update({ parse_status: "parsed" }).eq("id", attachmentId);
 
+  // Post-parse dedupe: once we know the real statement_date + entity link,
+  // collapse any sibling row that pre-existed (e.g. a bank + a forwarded
+  // resend created two rows before we could see the date). Keep the row
+  // with the richer parse; delete the other.
+  try {
+    if (result.statement_date && (links.credit_card_id || links.financial_account_id || links.loan_id)) {
+      const dupQ = svc.from("statements")
+        .select("id, parse_status, transactions_found, file_path, source_email_id, created_at")
+        .eq("user_id", userId)
+        .eq("statement_date", result.statement_date)
+        .neq("id", statementId);
+      if (links.credit_card_id) dupQ.eq("credit_card_id", links.credit_card_id);
+      else if (links.financial_account_id) dupQ.eq("financial_account_id", links.financial_account_id);
+      else if (links.loan_id) dupQ.eq("loan_id", links.loan_id);
+      const { data: dups } = await dupQ;
+      for (const d of dups ?? []) {
+        const winnerScore =
+          (fullUpdate.parse_status === "parsed" ? 100 : 0)
+          + Number(fullUpdate.transactions_found ?? 0);
+        const loserScore =
+          (d.parse_status === "parsed" ? 100 : 0)
+          + Number(d.transactions_found ?? 0);
+        if (winnerScore >= loserScore) {
+          await svc.from("statements").delete().eq("id", d.id);
+        } else {
+          // The other row is richer — mark ours redundant instead of destroying data.
+          await svc.from("statements").delete().eq("id", statementId);
+          break;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("post-parse dedupe skipped", (e as any)?.message);
+  }
+
+
   // Card lifecycle: mirror the latest statement onto the linked credit_card
   // so Cards list can show due-date/total-due/payment_status without
   // re-scanning statements.
@@ -1414,29 +1450,58 @@ export async function extractFinanceForAccount(
     if (!linkedBankId && (links as any).linked_bank_id) linkedBankId = (links as any).linked_bank_id;
 
     if (parsed.kind === "statement") {
-      const { data: newStatement, error: se } = await svc.from("statements").insert({
-        user_id: em.user_id,
-        statement_type: parsed.statement_type,
-        statement_date: parsed.statement_date,
-        period_start: parsed.period_start,
-        period_end: parsed.period_end,
-        source_email_id: em.id,
-        credit_card_id: links.credit_card_id ?? null,
-        financial_account_id: links.financial_account_id ?? null,
-        loan_id: links.loan_id ?? null,
-        linked_bank_id: linkedBankId,
-        source: "email",
-        confidence: parsed.confidence,
-        parse_error: links.credit_card_id || links.financial_account_id || links.loan_id ? null : "unlinked_no_entity_match",
-      }).select("id").single();
-      if (!se && newStatement) {
-        statements++;
-        await ingestStatementAttachment(svc, account, em, newStatement.id, links, {
+      // Ingest-side dedupe: if a row already exists for the same
+      // (user, entity, statement_date), reuse it instead of inserting.
+      // The DB has a partial unique index enforcing this too, so any race
+      // still surfaces as a duplicate error which we catch below.
+      let reusedId: string | null = null;
+      if (parsed.statement_date && (links.credit_card_id || links.financial_account_id || links.loan_id)) {
+        const dupQ = svc.from("statements").select("id").eq("user_id", em.user_id).eq("statement_date", parsed.statement_date);
+        if (links.credit_card_id) dupQ.eq("credit_card_id", links.credit_card_id);
+        else if (links.financial_account_id) dupQ.eq("financial_account_id", links.financial_account_id);
+        else if (links.loan_id) dupQ.eq("loan_id", links.loan_id);
+        const { data: dupRow } = await dupQ.maybeSingle();
+        if (dupRow?.id) reusedId = dupRow.id;
+      }
+
+      if (reusedId) {
+        await svc.from("statements").update({
+          source_email_id: em.id,
+          linked_bank_id: linkedBankId,
+        }).eq("id", reusedId);
+        await ingestStatementAttachment(svc, account, em, reusedId, links, {
           statement_type: parsed.statement_type,
           bank_slug: bankSlug,
         });
-      } else if (se && !String(se.message).includes("duplicate")) {
-        console.warn("statement insert", se.message);
+        skipped++;
+      } else {
+        const { data: newStatement, error: se } = await svc.from("statements").insert({
+          user_id: em.user_id,
+          statement_type: parsed.statement_type,
+          statement_date: parsed.statement_date,
+          period_start: parsed.period_start,
+          period_end: parsed.period_end,
+          source_email_id: em.id,
+          credit_card_id: links.credit_card_id ?? null,
+          financial_account_id: links.financial_account_id ?? null,
+          loan_id: links.loan_id ?? null,
+          linked_bank_id: linkedBankId,
+          source: "email",
+          confidence: parsed.confidence,
+          parse_error: links.credit_card_id || links.financial_account_id || links.loan_id ? null : "unlinked_no_entity_match",
+        }).select("id").single();
+        if (!se && newStatement) {
+          statements++;
+          await ingestStatementAttachment(svc, account, em, newStatement.id, links, {
+            statement_type: parsed.statement_type,
+            bank_slug: bankSlug,
+          });
+        } else if (se && (String(se.message).toLowerCase().includes("duplicate") || String((se as any).code) === "23505")) {
+          // Unique index caught a duplicate — treat as reused, best-effort attach.
+          skipped++;
+        } else if (se) {
+          console.warn("statement insert", se.message);
+        }
       }
     } else {
       const { error: te } = await svc.from("transactions").insert({

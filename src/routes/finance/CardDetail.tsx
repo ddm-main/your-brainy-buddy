@@ -257,8 +257,9 @@ export default function CardDetail() {
                   <td style={{ padding: "6px 8px" }}>{s.statement_date ?? "—"}</td>
                   <td style={{ padding: "6px 8px" }}>{s.due_date ?? "—"}</td>
                   <td style={{ padding: "6px 8px" }}>{s.total_due != null ? inr(s.total_due) : "—"}</td>
-                  <td style={{ padding: "6px 8px" }}>
-                    <Chip tone={s.parse_status === "parsed" ? "ok" : s.parse_status === "failed" ? "err" : "warn"}>{s.parse_status ?? "—"}</Chip>
+                  <td style={{ padding: "6px 8px" }} title={s.parse_error ?? undefined}>
+                    {s.parse_status === "parsed" ? null :
+                      <Chip tone={s.parse_status === "failed" ? "err" : "warn"}>{s.parse_error ?? s.parse_status ?? "pending"}</Chip>}
                   </td>
                 </tr>
               ))}

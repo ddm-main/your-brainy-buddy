@@ -5,8 +5,59 @@ import { HudSelect } from "@/components/hud/HudSelect";
 import { PdfCanvasViewer } from "@/components/finance/PdfCanvasViewer";
 import { db, inr } from "@/lib/db";
 import { gmail } from "@/lib/gmail";
+import { supabase } from "@/integrations/supabase/client";
 import { useUi } from "@/store/uiStore";
+import { useEscapeClose } from "@/lib/useEscapeClose";
 import { StatementReviewPanel, missingFieldsFor } from "./StatementReviewPanel";
+
+// Compact relative-time helper for the sync diagnostics strip.
+function relTime(iso: string | null | undefined): string {
+  if (!iso) return "never";
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return "never";
+  const diff = Date.now() - t;
+  const s = Math.round(diff / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+function frequencyMinutes(freq: string | null | undefined): number | null {
+  switch ((freq ?? "").toLowerCase()) {
+    case "15m": case "15min": return 15;
+    case "hourly": return 60;
+    case "6h": return 360;
+    case "12h": return 720;
+    case "daily": return 1440;
+    case "weekly": return 10080;
+    default: return null;
+  }
+}
+
+// Short error bucket for the failed-row secondary filter.
+function errorBucket(err: string | null | undefined): string | null {
+  if (!err) return null;
+  const e = err.toLowerCase();
+  if (/password/.test(e)) return "password";
+  if (/no_pdf|no_pdf_available|no_pdf_attachment/.test(e)) return "no_pdf";
+  if (/gmail|attachment_download|storage_upload/.test(e)) return "download";
+  if (/unlinked|entity_match/.test(e)) return "unlinked";
+  if (/schema_cache|statement_update_failed|ingest_crashed|reparse_crashed|retry_crashed/.test(e)) return "internal";
+  if (/file_too_large|too_many_pages/.test(e)) return "pdf_limits";
+  return "other";
+}
+const BUCKET_LABEL: Record<string, string> = {
+  password: "Password required",
+  no_pdf: "No PDF",
+  download: "Download / storage",
+  unlinked: "Unlinked",
+  internal: "Internal error",
+  pdf_limits: "PDF limits",
+  other: "Other",
+};
+
 
 
 // ---------- Statements ----------
@@ -74,6 +125,12 @@ function explainParseError(err: string | null | undefined): string | null {
       return "Internal bookkeeping error for this attachment — retry the row.";
     case "ingest_crashed":
       return "Ingestion crashed unexpectedly — retry, or attach the PDF manually.";
+    case "retry_no_terminal_status":
+      return "Retry finished without a parser result — reconnect Gmail or attach the PDF and try again.";
+    case "retry_crashed":
+      return "The retry crashed unexpectedly — try again in a moment.";
+    case "reparse_no_terminal_status":
+      return "Batch reparse finished without a result — try again or attach the PDF manually.";
     default:
       return err;
   }
@@ -160,7 +217,7 @@ export default function Statements() {
   const [retryPassword, setRetryPassword] = useState("");
   const [retrying, setRetrying] = useState(false);
   const [retryingAll, setRetryingAll] = useState(false);
-  const [rowRetryingId, setRowRetryingId] = useState<string | null>(null);
+  // kept as compatibility alias — new code uses retryingIds (Set) below.
 
   const [pdfViewer, setPdfViewer] = useState<{ statementId: string; title: string; url: string | null; password: string | null; loading: boolean; error: string | null } | null>(null);
 
@@ -172,14 +229,27 @@ export default function Statements() {
   const [uploading, setUploading] = useState(false);
   const [attachTargetId, setAttachTargetId] = useState<string | null>(null); // existing_statement_id when attaching
 
-  const [filterStatus, setFilterStatus] = useState<string>("");
   const [filterType, setFilterType] = useState<string>("card");
-  const [filterUnlinked, setFilterUnlinked] = useState<boolean>(false);
-
-
   const [fetchAccountId, setFetchAccountId] = useState<string>("");
-  const [fetchPeriodDays, setFetchPeriodDays] = useState<string>("90");
+  const [fetchPeriodDays, setFetchPeriodDays] = useState<string>("7");
   const [fetching, setFetching] = useState(false);
+  const [validationModalId, setValidationModalId] = useState<string | null>(null);
+  // Quick filter for triage: all | attention | failed | incomplete | unlinked
+  const [quickFilter, setQuickFilter] = useState<"all" | "attention" | "failed" | "incomplete" | "unlinked">("all");
+  const [errorBucketFilter, setErrorBucketFilter] = useState<string | "">("");
+  const [sortKey, setSortKey] = useState<"stmt_desc" | "stmt_asc" | "due_asc" | "updated_desc">("stmt_desc");
+  // Set of statement ids currently being retried (bulk or manual).
+  const [retryingIds, setRetryingIds] = useState<Set<string>>(new Set());
+  // Latest gmail sync run per selected account, for the diagnostics strip.
+  const [lastRun, setLastRun] = useState<any | null>(null);
+
+  useEscapeClose(!!pdfViewer, () => setPdfViewer(null));
+  useEscapeClose(showUpload, () => {
+    setShowUpload(false); setUploadEntityId(""); setUploadFile(null); setUploadPassword(""); setAttachTargetId(null);
+  });
+  useEscapeClose(!!txnsModalId, () => setTxnsModalId(null));
+  useEscapeClose(!!fixModalId, () => setFixModalId(null));
+  useEscapeClose(!!validationModalId, () => setValidationModalId(null));
 
   const load = async () => {
     setLoading(true);
@@ -196,7 +266,7 @@ export default function Statements() {
       push("Syncing Gmail…", "ok");
       const s = await gmail.sync(fetchAccountId, 200);
       push(`Gmail: ${s.inserted} new / ${s.total} scanned`, "ok");
-      const days = Math.max(1, Math.min(365, Number(fetchPeriodDays) || 90));
+      const days = Math.max(1, Math.min(365, Number(fetchPeriodDays) || 7));
       const r: any = await db.finance.extract({ account_id: fetchAccountId, since_days: days, limit: 500 });
       push(`Extract: ${r.transactions ?? 0} txns · ${r.statements ?? 0} statements`, "ok");
       await load();
@@ -211,44 +281,48 @@ export default function Statements() {
   };
 
   // Re-parse unresolved rows using server-side password rotation.
-  // 'skipped' rows have no PDF attached — bulk retry can't help them, they
-  // need a manual "attach PDF". Only bulk-retry rows the server can act on.
+  // Bypass the server-side cool-down/attempt cap by issuing per-row manual
+  // retries — the server's batch endpoint honours cool-down (`last_learn_at`)
+  // and returns `scanned=0` if every candidate is throttled, which was
+  // making "re-parse incomplete" appear to do nothing.
   const reparseUnresolved = async () => {
     const targets = items.filter(needsReparse);
     if (targets.length === 0) return;
     setRetryingAll(true);
+    push(`Re-parsing ${targets.length} row${targets.length === 1 ? "" : "s"}…`, "ok");
+    let parsed = 0, failed = 0, done = 0;
     try {
-      // The edge function processes a tiny batch per call (CPU-bound PDF
-      // parsing hits the worker's ~2s limit). Loop until nothing's left, or
-      // we detect no forward progress — a broken row would otherwise churn
-      // 40 batches producing 40 identical toasts.
-      let totalParsed = 0;
-      let totalScanned = 0;
-      let remaining = targets.length;
-      let throttled = 0;
-      let lastRemaining = -1;
-      let noProgress = 0;
-      for (let i = 0; i < 20; i++) {
-        const res: any = await db.statements.reparseAll({ limit: 3 });
-        totalParsed += res?.parsed ?? 0;
-        totalScanned += res?.scanned ?? 0;
-        remaining = res?.remaining_after ?? 0;
-        throttled = res?.throttled ?? 0;
-        if (!remaining || (res?.scanned ?? 0) === 0) break;
-        // Everything left is on cool-down or over the attempt cap.
-        if (remaining > 0 && remaining === throttled) break;
-        // Two consecutive no-progress batches → stop.
-        if ((res?.parsed ?? 0) === 0 && remaining === lastRemaining) {
-          noProgress++;
-          if (noProgress >= 2) break;
-        } else {
-          noProgress = 0;
+      const queue = [...targets];
+      const runOne = async () => {
+        while (queue.length) {
+          const s = queue.shift();
+          if (!s) break;
+          const label = s.credit_cards?.card_name ?? s.financial_accounts?.nickname ?? rowIdentity(s).bank ?? "Statement";
+          markRetrying(s.id, true);
+          try {
+            const res: any = await db.statements.retry(s.id);
+            if (res?.parse_status === "parsed") {
+              parsed++;
+              push(`${label}: parsed`, "ok");
+            } else if (res?.parse_status === "failed") {
+              failed++;
+              push(`${label}: ${explainParseError(res?.parse_error) ?? "failed"}`, "err");
+            } else {
+              failed++;
+              push(`${label}: ${res?.parse_reason ?? res?.parse_status ?? "no result"}`, "warn");
+            }
+          } catch (e: any) {
+            failed++;
+            push(`${label}: ${e?.message ?? "retry failed"}`, "err");
+          } finally {
+            markRetrying(s.id, false);
+            done++;
+          }
         }
-        lastRemaining = remaining;
-      }
-      const tone = remaining === 0 ? "ok" : throttled >= remaining ? "info" : "warn";
-      const suffix = throttled > 0 && remaining > 0 ? ` (${throttled} throttled — retry manually)` : "";
-      push(`Reparse done · ${totalParsed}/${totalScanned} parsed · ${remaining} left${suffix}`, tone);
+      };
+      await Promise.all([runOne(), runOne(), runOne()]);
+      const tone = failed === 0 ? "ok" : parsed > 0 ? "warn" : "err";
+      push(`Reparse done · ${parsed}/${targets.length} parsed${failed ? ` · ${failed} still failing` : ""}`, tone);
       await load();
     } finally { setRetryingAll(false); }
   };
@@ -268,6 +342,24 @@ export default function Statements() {
     }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Diagnostics: load latest gmail_sync_runs row for the selected mailbox.
+  useEffect(() => {
+    let cancelled = false;
+    if (!fetchAccountId) { setLastRun(null); return; }
+    (async () => {
+      try {
+        const { data } = await supabase.from("gmail_sync_runs")
+          .select("started_at, finished_at, scanned, inserted, statements_extracted, txns_extracted, error, source")
+          .eq("account_id", fetchAccountId)
+          .order("started_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (!cancelled) setLastRun(data ?? null);
+      } catch { if (!cancelled) setLastRun(null); }
+    })();
+    return () => { cancelled = true; };
+  }, [fetchAccountId, items]);
 
 
 
@@ -327,16 +419,24 @@ export default function Statements() {
   // Per-row quick retry — no link override, no password. Uses whatever's
   // already saved on the statement (bank + link + stored password). Lets
   // the user re-parse ONE row without expanding it or bulk-retrying all.
+  const markRetrying = (id: string, on: boolean) => {
+    setRetryingIds((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id); else next.delete(id);
+      return next;
+    });
+  };
   const retryRow = async (s: any) => {
-    setRowRetryingId(s.id);
+    markRetrying(s.id, true);
     try {
       const res: any = await db.statements.retry(s.id);
+      const label = s.credit_cards?.card_name ?? s.financial_accounts?.nickname ?? rowIdentity(s).bank ?? "Statement";
       if (res?.parse_status === "failed") {
-        push(`Retry failed: ${explainParseError(res?.parse_error) ?? "unknown error"}`, "err");
+        push(`${label}: ${explainParseError(res?.parse_error) ?? "retry failed"}`, "err");
       } else if (res?.parse_status === "parsed") {
-        push("Parsed", "ok");
+        push(`${label}: parsed`, "ok");
       } else {
-        push(`Retry did not finish: ${res?.parse_reason ?? res?.parse_status ?? "unknown"}`, "warn");
+        push(`${label}: ${res?.parse_reason ?? res?.parse_status ?? "no result"}`, "warn");
       }
       const fresh = await db.statements.list();
       setItems(fresh);
@@ -347,7 +447,7 @@ export default function Statements() {
       push(e?.message ?? "retry failed", "err");
       try { setItems(await db.statements.list()); } catch { /* keep current rows */ }
     }
-    finally { setRowRetryingId(null); }
+    finally { markRetrying(s.id, false); }
   };
 
 
@@ -414,12 +514,35 @@ export default function Statements() {
     : uploadType === "account" ? accounts.map((a: any) => ({ value: a.id, label: a.nickname }))
     : loans.map((l: any) => ({ value: l.id, label: l.lender_name }));
 
-  const filtered = useMemo(() => items.filter((s) => {
-    if (filterStatus && (s.parse_status ?? "manual") !== filterStatus) return false;
-    if (filterType && s.statement_type !== filterType) return false;
-    if (filterUnlinked && (s.credit_card_id || s.financial_account_id || s.loan_id)) return false;
-    return true;
-  }), [items, filterStatus, filterType, filterUnlinked]);
+  const filtered = useMemo(() => {
+    const isUnlinked = (s: any) => !s.credit_card_id && !s.financial_account_id && !s.loan_id;
+    const isFailed = (s: any) => ["pending", "failed", "skipped"].includes(s.parse_status ?? "");
+    const isIncomplete = (s: any) => needsReparse(s) && !isFailed(s);
+    let list = items.filter((s) => {
+      if (filterType && s.statement_type !== filterType) return false;
+      if (quickFilter === "attention" && !needsReparse(s) && !isUnlinked(s)) return false;
+      if (quickFilter === "failed" && !isFailed(s)) return false;
+      if (quickFilter === "incomplete" && !isIncomplete(s)) return false;
+      if (quickFilter === "unlinked" && !isUnlinked(s)) return false;
+      if (quickFilter === "failed" && errorBucketFilter && errorBucket(s.parse_error) !== errorBucketFilter) return false;
+      return true;
+    });
+    const timeOf = (s: any, key: string): number => {
+      const v = s[key]; if (!v) return 0;
+      const t = new Date(v).getTime(); return Number.isFinite(t) ? t : 0;
+    };
+    const cmpDesc = (a: any, b: any, k: string) => timeOf(b, k) - timeOf(a, k);
+    const cmpAsc = (a: any, b: any, k: string) => timeOf(a, k) - timeOf(b, k);
+    list = [...list].sort((a, b) => {
+      switch (sortKey) {
+        case "stmt_asc": return cmpAsc(a, b, "statement_date") || cmpDesc(a, b, "created_at");
+        case "due_asc": return cmpAsc(a, b, "due_date") || cmpDesc(a, b, "statement_date");
+        case "updated_desc": return cmpDesc(a, b, "updated_at") || cmpDesc(a, b, "created_at");
+        default: return cmpDesc(a, b, "statement_date") || cmpDesc(a, b, "created_at");
+      }
+    });
+    return list;
+  }, [items, filterType, quickFilter, errorBucketFilter, sortKey]);
 
   const typeCounts = useMemo(() => {
     const c = { card: 0, account: 0, loan: 0 };
@@ -522,22 +645,14 @@ export default function Statements() {
       )}
       <HudPanel title="Statements" index="STM" live="ok" style={{ flex: 1, minHeight: 0 }} bodyClass="overflow-hidden flex flex-col"
         actions={<>
-          {unresolvedCount > 0 && (
-            <Btn size="sm" onClick={reparseUnresolved} disabled={retryingAll}>
-              {retryingAll ? "re-parsing…" : `re-parse incomplete (${unresolvedCount})`}
-            </Btn>
+          {emailAccounts.length > 1 && (
+            <HudSelect value={fetchAccountId} onChange={setFetchAccountId}
+              placeholder="mailbox"
+              style={{ maxWidth: 160 }}
+              options={emailAccounts.map((a) => ({ value: a.id, label: a.email_address }))} />
           )}
-          <Btn size="sm" onClick={() => { setAttachTargetId(null); setShowUpload((v) => !v); }}>+ upload statement</Btn>
-        </>}>
-
-        {/* Single-row toolbar: fetch + type tabs + filters */}
-        <div style={{ display: "flex", gap: 4, alignItems: "center", padding: "4px 6px", marginBottom: 8, border: "1px solid var(--edge)", borderRadius: 2, overflow: "hidden" }}>
-          <HudSelect value={fetchAccountId} onChange={setFetchAccountId}
-            placeholder={emailAccounts.length ? "mailbox" : "no mailbox"}
-            style={{ maxWidth: 140, flex: "0 1 auto" }}
-            options={emailAccounts.map((a) => ({ value: a.id, label: a.email_address }))} />
           <HudSelect value={fetchPeriodDays} onChange={setFetchPeriodDays}
-            style={{ width: 56, flex: "0 0 auto" }}
+            style={{ width: 64 }}
             options={[
               { value: "7", label: "7d" },
               { value: "30", label: "30d" },
@@ -548,7 +663,6 @@ export default function Statements() {
           <Btn size="sm" variant="primary" disabled={fetching || !fetchAccountId} onClick={fetchFromGmail}>
             {fetching ? "…" : "fetch"}
           </Btn>
-          <div style={{ width: 1, height: 18, background: "var(--edge)", margin: "0 2px", flex: "0 0 auto" }} />
           {([
             { key: "card",    label: `C ${typeCounts.card}` },
             { key: "account", label: `A ${typeCounts.account}` },
@@ -557,31 +671,101 @@ export default function Statements() {
           ] as const).map((t) => (
             <button key={t.key || "all"} onClick={() => setFilterType(t.key)}
               style={{
-                padding: "3px 7px",
+                padding: "3px 8px",
                 background: filterType === t.key ? "var(--panel-tint-heavy)" : "transparent",
                 color: filterType === t.key ? "var(--accent)" : "var(--text-dim)",
                 border: "1px solid " + (filterType === t.key ? "var(--accent)" : "var(--edge)"),
                 borderRadius: 2, fontSize: 10, fontFamily: "var(--font-hud)",
                 letterSpacing: "0.1em", textTransform: "uppercase", cursor: "pointer",
-                flex: "0 0 auto", whiteSpace: "nowrap",
+                whiteSpace: "nowrap",
               }}
             >{t.label}</button>
           ))}
-          <div style={{ width: 1, height: 18, background: "var(--edge)", margin: "0 2px", flex: "0 0 auto" }} />
-          <HudSelect value={filterStatus} onChange={setFilterStatus} placeholder="status"
-            style={{ width: 86, flex: "0 0 auto" }}
+          <HudSelect value={sortKey} onChange={(v) => setSortKey(v as any)}
+            style={{ width: 130 }}
             options={[
-              { value: "", label: "all" },
-              { value: "parsed", label: "parsed" },
-              { value: "failed", label: "failed" },
+              { value: "stmt_desc", label: "Newest" },
+              { value: "stmt_asc", label: "Oldest" },
+              { value: "due_asc", label: "Due soonest" },
+              { value: "updated_desc", label: "Recently updated" },
             ]} />
-          <Btn size="sm" variant={filterUnlinked ? "primary" : undefined} onClick={() => setFilterUnlinked((v) => !v)} style={{ padding: "3px 7px" }}>unlinked</Btn>
-          <div style={{ marginLeft: "auto", fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-hud)", letterSpacing: "0.12em", textTransform: "uppercase", flex: "0 0 auto" }}>
+          {([
+            { key: "all", label: "All" },
+            { key: "attention", label: `Attn ${items.filter((s) => needsReparse(s) || (!s.credit_card_id && !s.financial_account_id && !s.loan_id)).length}` },
+            { key: "failed", label: `Failed ${items.filter((s) => ["pending","failed","skipped"].includes(s.parse_status ?? "")).length}` },
+            { key: "incomplete", label: `Incomplete ${items.filter((s) => needsReparse(s) && !["pending","failed","skipped"].includes(s.parse_status ?? "")).length}` },
+            { key: "unlinked", label: `Unlinked ${items.filter((s) => !s.credit_card_id && !s.financial_account_id && !s.loan_id).length}` },
+          ] as const).map((q) => (
+            <button key={q.key} onClick={() => { setQuickFilter(q.key); if (q.key !== "failed") setErrorBucketFilter(""); }}
+              style={{
+                padding: "3px 8px",
+                background: quickFilter === q.key ? "rgba(255,107,107,0.10)" : "transparent",
+                color: quickFilter === q.key ? "var(--warn)" : "var(--text-dim)",
+                border: "1px solid " + (quickFilter === q.key ? "var(--warn)" : "var(--edge)"),
+                borderRadius: 2, fontSize: 10, fontFamily: "var(--font-hud)",
+                letterSpacing: "0.1em", textTransform: "uppercase", cursor: "pointer",
+                whiteSpace: "nowrap",
+              }}
+            >{q.label}</button>
+          ))}
+          <span style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-hud)", letterSpacing: "0.12em", textTransform: "uppercase" }}>
             {filtered.length}/{items.length}
-          </div>
-        </div>
+          </span>
+          {unresolvedCount > 0 && (
+            <Btn size="sm" onClick={reparseUnresolved} disabled={retryingAll}>
+              {retryingAll ? "re-parsing…" : `re-parse incomplete (${unresolvedCount})`}
+            </Btn>
+          )}
+          <Btn size="sm" onClick={() => { setAttachTargetId(null); setShowUpload((v) => !v); }}>+ upload statement</Btn>
+        </>}>
 
+        {/* Diagnostics strip: last sync + next-run ETA + last-run counts */}
+        {fetchAccountId && (() => {
+          const acc = emailAccounts.find((a) => a.id === fetchAccountId);
+          const freqMin = frequencyMinutes(acc?.sync_frequency);
+          const lastAt = lastRun?.started_at ?? acc?.last_synced_at ?? null;
+          const nextAt = lastAt && freqMin ? new Date(new Date(lastAt).getTime() + freqMin * 60_000) : null;
+          const nextLabel = nextAt ? (nextAt.getTime() < Date.now() ? "due now" : relTime(nextAt.toISOString()).replace(" ago", "")) : "manual";
+          return (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", padding: "6px 10px", marginBottom: 8, border: "1px solid var(--edge)", background: "rgba(53,214,237,0.03)", fontSize: 11, color: "var(--text-dim)" }}>
+              <span className="hud-label">sync</span>
+              <span>last: <span style={{ color: "var(--text)" }}>{relTime(lastAt)}</span></span>
+              <span>next: <span style={{ color: "var(--text)" }}>{nextLabel}</span></span>
+              <span>auto: <span style={{ color: "var(--text)" }}>{acc?.sync_frequency ?? "manual"}</span></span>
+              {lastRun && (
+                <span style={{ marginLeft: "auto", display: "flex", gap: 10 }}>
+                  <span>scanned <span style={{ color: "var(--text)" }}>{lastRun.scanned ?? 0}</span></span>
+                  <span>new stmts <span style={{ color: "var(--accent)" }}>{lastRun.statements_extracted ?? 0}</span></span>
+                  <span>new txns <span style={{ color: "var(--accent)" }}>{lastRun.txns_extracted ?? 0}</span></span>
+                  {lastRun.error && <span style={{ color: "var(--warn)" }}>err: {String(lastRun.error).slice(0, 60)}</span>}
+                </span>
+              )}
+            </div>
+          );
+        })()}
 
+        {/* Error-type sub-filter chips — only when Failed is active */}
+        {quickFilter === "failed" && (() => {
+          const buckets = new Map<string, number>();
+          for (const s of items) {
+            if (!["pending","failed","skipped"].includes(s.parse_status ?? "")) continue;
+            const b = errorBucket(s.parse_error) ?? "other";
+            buckets.set(b, (buckets.get(b) ?? 0) + 1);
+          }
+          if (buckets.size === 0) return null;
+          return (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
+              <button onClick={() => setErrorBucketFilter("")}
+                style={{ padding: "2px 6px", background: !errorBucketFilter ? "rgba(255,107,107,0.12)" : "transparent", color: !errorBucketFilter ? "var(--warn)" : "var(--text-dim)", border: "1px solid " + (!errorBucketFilter ? "var(--warn)" : "var(--edge)"), fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase", cursor: "pointer", fontFamily: "var(--font-hud)" }}>Any</button>
+              {Array.from(buckets.entries()).map(([k, n]) => (
+                <button key={k} onClick={() => setErrorBucketFilter(k)}
+                  style={{ padding: "2px 6px", background: errorBucketFilter === k ? "rgba(255,107,107,0.12)" : "transparent", color: errorBucketFilter === k ? "var(--warn)" : "var(--text-dim)", border: "1px solid " + (errorBucketFilter === k ? "var(--warn)" : "var(--edge)"), fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase", cursor: "pointer", fontFamily: "var(--font-hud)" }}>
+                  {BUCKET_LABEL[k] ?? k} {n}
+                </button>
+              ))}
+            </div>
+          );
+        })()}
 
         {showUpload && (
           <div style={{ padding: 10, border: "1px dashed var(--edge)", marginBottom: 10, display: "flex", gap: 8, alignItems: "end", flexWrap: "wrap" }}>
@@ -675,21 +859,26 @@ export default function Statements() {
                    </td>
                    <td style={{ padding: "4px 8px", verticalAlign: "middle" }}>
                      <div style={{ display: "flex", flexWrap: "wrap", gap: 3, alignItems: "center" }}>
-                       <Chip tone={statusToneVal}>{statusLabel}</Chip>
+                        {retryingIds.has(s.id) ? (
+                          <Chip tone="warn">retrying…</Chip>
+                        ) : (s.parse_status !== "parsed" || incomplete) ? (
+                          <span title={explainParseError(s.parse_error) ?? undefined}>
+                            <Chip tone={statusToneVal}>
+                              {explainParseError(s.parse_error) ?? statusLabel}
+                            </Chip>
+                          </span>
+                        ) : null}
                        {s.payment_status && s.payment_status !== "na" && (
                          <Chip tone={s.payment_status === "paid" ? "ok" : s.payment_status === "overdue" ? "err" : "warn"}>{s.payment_status}</Chip>
                        )}
                      </div>
                    </td>
                    <td style={{ padding: "4px 8px", verticalAlign: "middle" }}>
-                     {validated.ok ? (
-                       <Chip tone="ok">Yes</Chip>
-                     ) : (
-                       <div style={{ display: "flex", flexDirection: "column", gap: 2 }} title={validated.reason}>
-                         <Chip tone="warn">No</Chip>
-                         <span style={{ color: "var(--warn)", fontSize: 10, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{validated.reason}</span>
-                       </div>
-                     )}
+                      <button onClick={() => setValidationModalId(s.id)}
+                        title="View validation details"
+                        style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer" }}>
+                        <Chip tone={validated.ok ? "ok" : "warn"}>{validated.ok ? "Yes" : "No"}</Chip>
+                      </button>
                    </td>
                    <td style={{ padding: "4px 8px", verticalAlign: "middle", textAlign: "right" }}>
                      <div style={{ display: "flex", gap: 3, justifyContent: "flex-end", flexWrap: "wrap" }}>
@@ -701,8 +890,8 @@ export default function Statements() {
                          <Btn size="sm" onClick={() => clearPayment(s)}>reset</Btn>
                        )}
                        {(s.file_path || s.source_email_id) && (
-                         <Btn size="sm" disabled={rowRetryingId === s.id} onClick={() => retryRow(s)}
-                           title="Re-parse this statement">{rowRetryingId === s.id ? "…" : "retry"}</Btn>
+                         <Btn size="sm" disabled={retryingIds.has(s.id)} onClick={() => retryRow(s)}
+                           title="Re-parse this statement">{retryingIds.has(s.id) ? "…" : "retry"}</Btn>
                        )}
                        {s.parse_status === "skipped" && !s.file_path && (
                          <Btn size="sm" variant="primary" onClick={() => startAttachToRow(s)}>attach</Btn>
@@ -766,14 +955,20 @@ export default function Statements() {
                    </td>
                    <td style={{ padding: "4px 8px", verticalAlign: "middle" }}>
                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
-                       <Chip tone={statusToneVal}>{statusLabel}</Chip>
+                       {retryingIds.has(s.id) ? (
+                         <Chip tone="warn">retrying…</Chip>
+                       ) : (s.parse_status !== "parsed" || incomplete) ? (
+                         <span title={explainParseError(s.parse_error) ?? undefined}>
+                           <Chip tone={statusToneVal}>{explainParseError(s.parse_error) ?? statusLabel}</Chip>
+                         </span>
+                       ) : null}
                      </div>
                    </td>
                    <td style={{ padding: "4px 8px", verticalAlign: "middle", textAlign: "right" }}>
                      <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", flexWrap: "wrap" }}>
                        {s.file_path && <Btn size="sm" onClick={() => viewPdf(s)}>PDF</Btn>}
                        {(s.file_path || s.source_email_id) && (
-                         <Btn size="sm" disabled={rowRetryingId === s.id} onClick={() => retryRow(s)}>{rowRetryingId === s.id ? "…" : "retry"}</Btn>
+                         <Btn size="sm" disabled={retryingIds.has(s.id)} onClick={() => retryRow(s)}>{retryingIds.has(s.id) ? "…" : "retry"}</Btn>
                        )}
                        {s.parse_status === "skipped" && !s.file_path && (
                          <Btn size="sm" variant="primary" onClick={() => startAttachToRow(s)}>attach</Btn>
@@ -886,6 +1081,54 @@ export default function Statements() {
                   <span className="hud-label">AI summary</span> {s.ai_summary}
                 </div>
               )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Validation details modal */}
+      {validationModalId && (() => {
+        const s = items.find((x) => x.id === validationModalId);
+        if (!s) return null;
+        const checks: Array<{ label: string; ok: boolean; detail?: string }> = [];
+        const isCard = s.statement_type === "card";
+        checks.push({ label: "Parsed successfully", ok: s.parse_status === "parsed", detail: s.parse_status ?? "manual" });
+        checks.push({ label: "Statement date present", ok: s.statement_date != null, detail: fmtDMY(s.statement_date) });
+        checks.push({ label: "Billing period present", ok: !!(s.period_start && s.period_end), detail: s.period_start && s.period_end ? `${fmtDMY(s.period_start)} → ${fmtDMY(s.period_end)}` : "—" });
+        if (isCard) {
+          checks.push({ label: "Due date present", ok: s.due_date != null, detail: fmtDMY(s.due_date) });
+          checks.push({ label: "Total due present", ok: s.total_due != null, detail: s.total_due != null ? inr(s.total_due) : "—" });
+          checks.push({ label: "Minimum due present", ok: s.min_due != null, detail: s.min_due != null ? inr(s.min_due) : "—" });
+          checks.push({ label: "Credit limit present", ok: s.credit_limit != null, detail: s.credit_limit != null ? inr(s.credit_limit) : "—" });
+        }
+        checks.push({ label: "Transactions extracted", ok: Number(s.transactions_found ?? 0) > 0, detail: `${s.transactions_found ?? 0} txns` });
+        checks.push({ label: "Linked to card/account", ok: !!(s.credit_card_id || s.financial_account_id || s.loan_id), detail: s.credit_cards?.card_name ?? s.financial_accounts?.nickname ?? s.loans?.lender_name ?? "unlinked" });
+        checks.push({ label: "Bank detected", ok: !!(s.banks?.name || s.credit_cards?.banks?.name || s.financial_accounts?.banks?.name), detail: rowIdentity(s).bank ?? "unknown" });
+        if (s.parse_error) checks.push({ label: "No parse error", ok: false, detail: explainParseError(s.parse_error) ?? s.parse_error });
+        return (
+          <div role="dialog" aria-modal="true" onClick={() => setValidationModalId(null)}
+            style={{ position: "fixed", inset: 0, zIndex: 80, background: "rgba(0,0,0,0.72)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: "var(--bg)", border: "1px solid var(--edge)", padding: 14, width: "min(560px, 95vw)", maxHeight: "85vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <div className="hud-label">validation details</div>
+                  <div style={{ color: "var(--text)", fontSize: 12 }}>{s.credit_cards?.card_name ?? s.financial_accounts?.nickname ?? rowIdentity(s).bank ?? "Statement"}</div>
+                </div>
+                <Btn size="sm" onClick={() => setValidationModalId(null)}>close</Btn>
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <tbody>
+                  {checks.map((c, i) => (
+                    <tr key={i} style={{ borderBottom: "1px solid rgba(127,233,255,0.06)" }}>
+                      <td style={{ padding: "6px 8px", width: 22 }}>
+                        <Chip tone={c.ok ? "ok" : "warn"}>{c.ok ? "✓" : "×"}</Chip>
+                      </td>
+                      <td style={{ padding: "6px 8px", color: "var(--text)" }}>{c.label}</td>
+                      <td style={{ padding: "6px 8px", color: "var(--text-dim)", textAlign: "right", fontSize: 11 }}>{c.detail ?? ""}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
         );

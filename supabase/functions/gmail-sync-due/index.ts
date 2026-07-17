@@ -5,6 +5,7 @@
 
 import { svcClient } from "../_shared/gmail.ts";
 import { runGmailSync, frequencyToMinutes } from "../_shared/gmail-sync-core.ts";
+import { extractFinanceForAccount } from "../_shared/finance-extract-core.ts";
 import { sanitizeError } from "../_shared/errors.ts";
 import { verifyCronSecret } from "../_shared/http.ts";
 
@@ -39,11 +40,44 @@ Deno.serve(async (req) => {
     const dueAt = last + minutes * 60_000;
     if (last && dueAt > now) continue;
 
+    const startedAt = new Date().toISOString();
     try {
       const r = await runGmailSync(svc, a);
-      results.push({ id: a.id, email: a.email_address, ...r });
+      // After Gmail sync, extract finance rows for the same account so the
+      // scheduled path parses statements/transactions the same way the
+      // manual "Fetch" button does.
+      let extract: any = null;
+      try {
+        const sinceDays = Math.max(2, Math.ceil(minutes / 1440) + 1);
+        extract = await extractFinanceForAccount(svc, a, { sinceDays, limit: 500 });
+      } catch (e) {
+        const safe = sanitizeError(e, "Scheduled extract failed", `gmail-sync-due:extract:${a.id}`);
+        extract = { error: safe.error };
+      }
+      // Log this run for the diagnostics strip.
+      await svc.from("gmail_sync_runs").insert({
+        user_id: a.user_id,
+        account_id: a.id,
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        scanned: r?.total ?? 0,
+        inserted: r?.inserted ?? 0,
+        statements_extracted: extract?.statements ?? 0,
+        txns_extracted: extract?.transactions ?? 0,
+        error: extract?.error ?? null,
+        source: "cron",
+      }).select("id").maybeSingle().then(() => {}).catch(() => {});
+      results.push({ id: a.id, email: a.email_address, ...r, extract });
     } catch (e) {
       const safe = sanitizeError(e, "Scheduled sync failed", `gmail-sync-due:${a.id}`);
+      await svc.from("gmail_sync_runs").insert({
+        user_id: a.user_id,
+        account_id: a.id,
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        error: safe.error,
+        source: "cron",
+      }).then(() => {}).catch(() => {});
       results.push({ id: a.id, email: a.email_address, error: safe.error });
     }
   }

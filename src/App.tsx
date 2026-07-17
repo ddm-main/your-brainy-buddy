@@ -23,7 +23,7 @@ const Finance = lazy(() => import("@/routes/Finance"));
 const Projects = lazy(() => import("@/routes/Projects"));
 const Config = lazy(() => import("@/routes/Config"));
 const Tasks = lazy(() => import("@/routes/Tasks"));
-const Notes = lazy(() => import("@/routes/Notes"));
+const Market = lazy(() => import("@/routes/Market"));
 const NotFound = lazy(() => import("@/routes/NotFound"));
 const Auth = lazy(() => import("@/routes/Auth"));
 const ResetPassword = lazy(() => import("@/routes/ResetPassword"));
@@ -130,7 +130,8 @@ function AnimatedRoutes() {
 
           <Route path="/" element={<Home />} />
           <Route path="/tasks" element={<Tasks />} />
-          <Route path="/notes" element={<Notes />} />
+          <Route path="/market/*" element={<Market />} />
+          <Route path="/notes" element={<Navigate to="/market" replace />} />
           <Route path="/workspace" element={<Navigate to="/tasks" replace />} />
           <Route path="/decisions" element={<Navigate to="/tasks" replace />} />
           <Route path="/inbox" element={<Inbox />} />

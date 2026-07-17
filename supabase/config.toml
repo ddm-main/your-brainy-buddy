@@ -71,3 +71,27 @@ verify_jwt = true
 
 [functions.jarvis-finance-insight]
 verify_jwt = true
+
+[functions.market-indices]
+verify_jwt = true
+
+[functions.market-quotes]
+verify_jwt = true
+
+[functions.market-config-save]
+verify_jwt = true
+
+[functions.market-kotak-login-start]
+verify_jwt = true
+
+[functions.market-kotak-login-otp]
+verify_jwt = true
+
+[functions.market-test-connection]
+verify_jwt = true
+
+[functions.market-sync-holdings]
+verify_jwt = true
+
+[functions.market-morning-insight]
+verify_jwt = true

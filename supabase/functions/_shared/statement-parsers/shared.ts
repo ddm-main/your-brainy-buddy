@@ -158,3 +158,108 @@ export function stackedValue(
   }
   return null;
 }
+
+// --------------------------------------------------------------------------
+// Column-position aware amount extraction.
+//
+// `pdftotext -layout` (which we rely on for account statements) preserves
+// horizontal alignment: numeric values right-align under their header word.
+// For a table like
+//
+//     DEPOSITS      WITHDRAWALS      BALANCE
+//                    14,905.00       25,184.45
+//
+// the "last two numbers" heuristic works only when both cells are populated
+// inline; anything a narrative contains ("XX55381", UTRs, reference IDs)
+// derails it. `bucketRowByHeader` instead assigns each numeric token to the
+// header column whose right-edge sits closest to the token's right-edge,
+// discarding tokens that fall inside the PARTICULARS region.
+// --------------------------------------------------------------------------
+
+export interface HeaderColumn {
+  /** Canonical column name, e.g. `deposits`, `withdrawals`, `balance`. */
+  name: string;
+  /** Column of the LAST character of the header word (numbers right-align here). */
+  rightCol: number;
+}
+
+/**
+ * Find the given header labels in the raw text and return their column
+ * end-positions. Returns null when any label is missing (caller can fall
+ * back to a different parsing strategy).
+ */
+export function findHeaderColumns(
+  text: string,
+  labels: Array<{ name: string; pattern: RegExp }>,
+): { headerLine: string; columns: HeaderColumn[] } | null {
+  const lines = text.split(/\n+/);
+  for (const line of lines) {
+    if (!labels.every((l) => l.pattern.test(line))) continue;
+    const columns: HeaderColumn[] = [];
+    for (const { name, pattern } of labels) {
+      const m = line.match(pattern);
+      if (!m || m.index == null) return null;
+      columns.push({ name, rightCol: m.index + m[0].length });
+    }
+    return { headerLine: line, columns };
+  }
+  return null;
+}
+
+export interface BucketedRow {
+  /** value per column name, e.g. `{deposits: "10,000.00", ...}` */
+  values: Record<string, string | null>;
+  /** the substring of `row` that sits BEFORE the first amount column — the description */
+  descriptionRegion: string;
+}
+
+/**
+ * Bucket every numeric token on `row` into the nearest header column, using
+ * right-edge proximity. Tokens sitting far to the left of the first amount
+ * column (i.e. inside PARTICULARS / MODE) are ignored — those are usually
+ * reference numbers embedded in the narrative.
+ *
+ * `tolerance` controls how far (in characters) a token's right-edge may
+ * drift from a column's right-edge and still be accepted. Defaults to 12,
+ * which safely covers pdftotext -layout jitter without letting a token from
+ * an adjacent column bleed in.
+ */
+export function bucketRowByHeader(
+  row: string,
+  columns: HeaderColumn[],
+  opts: { tolerance?: number } = {},
+): BucketedRow {
+  const tolerance = opts.tolerance ?? 12;
+  const values: Record<string, string | null> = {};
+  for (const c of columns) values[c.name] = null;
+
+  const firstCol = columns[0].rightCol;
+  const numRx = /-?[0-9][0-9,]*(?:\.[0-9]{1,2})?/g;
+  const boundary = firstCol - 20; // anything ending before here is narrative
+  let descEndIdx = row.length;
+  let m: RegExpExecArray | null;
+  while ((m = numRx.exec(row)) !== null) {
+    const tok = m[0];
+    // Filter fragment tokens (single digits, 2-digit ints without punctuation) —
+    // they're almost always parts of ref numbers or dates.
+    if (tok.length < 3 && !tok.includes(",") && !tok.includes(".")) continue;
+    // Also skip integer-only 4-digit tokens like "2026" (years) if they end
+    // well before any column — those are dates embedded in the narrative.
+    const endCol = m.index + tok.length;
+    if (endCol < boundary) continue;
+    // Find the header column with the nearest right-edge.
+    let best: HeaderColumn | null = null;
+    let bestDist = Infinity;
+    for (const c of columns) {
+      const d = Math.abs(c.rightCol - endCol);
+      if (d < bestDist) { bestDist = d; best = c; }
+    }
+    if (!best || bestDist > tolerance) continue;
+    // First token wins per column (defensive against duplicates).
+    if (values[best.name] == null) {
+      values[best.name] = tok;
+      if (m.index < descEndIdx) descEndIdx = m.index;
+    }
+  }
+  return { values, descriptionRegion: row.slice(0, descEndIdx) };
+}

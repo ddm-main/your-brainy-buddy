@@ -5,6 +5,7 @@ import { db, type EmailAccount } from "@/lib/db";
 import { gmail, GmailApiError } from "@/lib/gmail";
 import { useUi } from "@/store/uiStore";
 import { Trash2, RefreshCw, Link2, Settings, X, Copy, AlertTriangle } from "lucide-react";
+import { useEscapeClose } from "@/lib/useEscapeClose";
 import AccountRulesDrawer from "./AccountRulesDrawer";
 
 type ErrInfo = { message: string; status?: number; details?: string; hint?: string };
@@ -83,6 +84,7 @@ function ErrorPanel({ err, onRetry, onDismiss, retrying }: { err: ErrInfo; onRet
 function DeleteDialog({ account, onCancel, onConfirm }: { account: EmailAccount; onCancel: () => void; onConfirm: () => void }) {
   const [text, setText] = useState("");
   const ok = text.trim().toLowerCase() === account.email_address.toLowerCase();
+  useEscapeClose(true, onCancel);
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 110, display: "grid", placeItems: "center" }} onClick={onCancel}>
       <div onClick={(e) => e.stopPropagation()} style={{ width: "min(420px,90%)", padding: 16, background: "var(--bg, #0b1117)", border: "1px solid var(--edge-strong)", display: "flex", flexDirection: "column", gap: 10 }}>
