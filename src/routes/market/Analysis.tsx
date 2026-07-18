@@ -10,6 +10,7 @@ import { TradingViewChart, tvInterval } from "@/components/market/TradingViewCha
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { fmtNum, fmtInt, fmtPct } from "@/components/hud/DataTable";
 import { useCandles, useDepth, useFundamentals, useQuotes, useSectorStrength, useStockScores } from "@/lib/market/hooks";
+import { ExternalLink } from "lucide-react";
 
 const TIMEFRAMES = ["1D", "1h", "15m", "5m"];
 const CHART_TYPES: Array<{ key: ChartType; label: string }> = [
@@ -116,6 +117,20 @@ export default function Analysis() {
               )}
               <span style={{ width: 1, background: "var(--edge)", margin: "0 2px" }} />
               <Btn size="sm" variant={tvMode ? "primary" : "ghost"} onClick={() => setTvMode((v) => !v)}>TradingView</Btn>
+              {tvMode && (
+                <a
+                  href={`https://www.tradingview.com/chart/?symbol=NSE:${sym}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hud-btn focus-outline"
+                  data-variant="ghost"
+                  data-size="sm"
+                  title="Open real-time NSE chart on tradingview.com (uses your TradingView login)"
+                  style={{ textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 4 }}
+                >
+                  Real-time <ExternalLink size={11} />
+                </a>
+              )}
             </div>
           }
         >

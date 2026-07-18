@@ -18,7 +18,10 @@ export function tvInterval(tf: string): string {
 
 export function TradingViewChart({
   symbol,
-  exchange = "NSE",
+  // BSE, not NSE: NSE is not licensed for TradingView widgets (renders
+  // "symbol doesn't exist"), while BSE is available at EOD level. Large-cap
+  // tickers are dual-listed on BSE with the same symbol.
+  exchange = "BSE",
   interval,
 }: {
   symbol: string;
