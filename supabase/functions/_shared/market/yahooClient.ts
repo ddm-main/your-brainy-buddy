@@ -18,7 +18,17 @@ export interface YahooQuoteRow {
   change_pct: number | null;
   volume?: number | null;
   prev_close?: number | null;
+  prev_close_as_of?: string | null;
+  as_of?: string | null;
 }
+
+const istDateKey = (d: Date): string =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
 
 // The v7/finance/quote endpoint now requires Yahoo's crumb+cookie auth and
 // returns 401 for anonymous callers, so quotes are read from the v8 chart
@@ -48,19 +58,21 @@ export async function yahooQuote(symbols: string[]): Promise<YahooQuoteRow[]> {
       const price = meta?.regularMarketPrice;
       if (price == null) return null;
 
-      // Derive prev close from the last completed daily bar before today.
+      // Derive prev close from the completed daily bar before the quote's own
+      // trading date. This avoids Yahoo's occasionally stale chartPreviousClose
+      // and also makes non-trading-day "today" changes settle to zero upstream.
       let prev: number | null = null;
+      let prevDate: string | null = null;
       const ts: number[] = res?.timestamp ?? [];
       const closes: (number | null)[] = res?.indicators?.quote?.[0]?.close ?? [];
-      const todayUtc = new Date();
-      const todayKey = `${todayUtc.getUTCFullYear()}-${todayUtc.getUTCMonth()}-${todayUtc.getUTCDate()}`;
+      const quoteDate = meta?.regularMarketTime ? istDateKey(new Date(Number(meta.regularMarketTime) * 1000)) : istDateKey(new Date());
       for (let i = ts.length - 1; i >= 0; i--) {
         const c = closes[i];
         if (c == null) continue;
-        const d = new Date(ts[i] * 1000);
-        const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
-        if (key === todayKey) continue; // skip current in-progress bar
+        const key = istDateKey(new Date(ts[i] * 1000));
+        if (key >= quoteDate) continue;
         prev = Number(c);
+        prevDate = key;
         break;
       }
       if (prev == null) {
@@ -75,6 +87,8 @@ export async function yahooQuote(symbols: string[]): Promise<YahooQuoteRow[]> {
         change_pct: changeAbs != null && prev ? (changeAbs / prev) * 100 : null,
         volume: meta.regularMarketVolume ?? null,
         prev_close: prev,
+        prev_close_as_of: prevDate,
+        as_of: quoteDate,
       };
     } catch {
       return null;

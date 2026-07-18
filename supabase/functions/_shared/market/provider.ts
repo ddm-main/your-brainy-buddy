@@ -27,10 +27,13 @@ export type DepthLadder = {
 export interface QuoteRow {
   key: string; // "NSE:SYMBOL" as requested by the caller
   price: number;
+  previous_close: number | null;
   change_abs: number | null;
   change_pct: number | null;
   volume: number | null;
-  source: "kotak" | "yahoo";
+  source: "kotak" | "yahoo" | "cache";
+  as_of?: string | null;
+  previous_close_as_of?: string | null;
 }
 
 export interface HoldingRow {
@@ -85,10 +88,13 @@ function yahooProvider(): MarketProvider {
         return [{
           key: k,
           price: r.price,
+          previous_close: r.prev_close ?? null,
           change_abs: r.change_abs,
           change_pct: r.change_pct,
           volume: r.volume ?? null,
           source: "yahoo" as const,
+          as_of: r.as_of ?? null,
+          previous_close_as_of: r.prev_close_as_of ?? null,
         }];
       });
     },
@@ -116,6 +122,26 @@ function yahooProvider(): MarketProvider {
 const num = (v: unknown): number => {
   const n = typeof v === "string" ? parseFloat(v) : typeof v === "number" ? v : NaN;
   return Number.isFinite(n) ? n : 0;
+};
+
+const firstNum = (obj: any, paths: string[]): number | null => {
+  for (const path of paths) {
+    const value = path.split(".").reduce((acc, key) => acc?.[key], obj);
+    const n = num(value);
+    if (n > 0) return n;
+  }
+  return null;
+};
+
+const parseKotakDate = (obj: any): string | null => {
+  const raw = obj?.last_traded_time ?? obj?.lastTradeTime ?? obj?.ltt ?? obj?.tradeTime ?? obj?.time;
+  if (!raw) return null;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  const d = Number.isFinite(n)
+    ? new Date(n > 9_999_999_999 ? n : n * 1000)
+    : new Date(String(raw).replace(/(\d{2})-(\d{2})-(\d{4})/, "$3-$2-$1"));
+  if (Number.isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 };
 
 export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProvider {
@@ -149,15 +175,29 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
           for (const p of withToken) {
             const r = byToken.get(String(tokenBySymbol.get(p.symbol)));
             if (!r) continue;
-            const price = num(r.last_traded_price ?? r.ltp ?? r.lastPrice);
-            const prevClose = num(r.close ?? r.closing_price ?? r.prevClose);
+            const price = firstNum(r, ["last_traded_price", "ltp", "lastPrice", "last_price", "lp"]);
+            const prevClose = firstNum(r, [
+              "previous_close",
+              "prev_close",
+              "previousClose",
+              "prevClose",
+              "ohlc.close",
+              "ohlc.c",
+              "closing_price",
+              "close",
+              "c",
+            ]);
+            if (!price) continue;
             out.push({
               key: p.key,
               price,
+              previous_close: prevClose,
               change_abs: prevClose ? price - prevClose : null,
               change_pct: prevClose ? ((price - prevClose) / prevClose) * 100 : null,
               volume: num(r.volume ?? r.vol_traded_today) || null,
               source: "kotak",
+              as_of: parseKotakDate(r),
+              previous_close_as_of: null,
             });
           }
         } catch {
