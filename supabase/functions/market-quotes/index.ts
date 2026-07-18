@@ -22,6 +22,16 @@ function expectedTradingDate(): string {
   return istDateKey(new Date(ist.getTime() - 5.5 * 3600_000));
 }
 
+function currentIstDate(): string {
+  return istDateKey(new Date());
+}
+
+function isCurrentIstTradingDay(): boolean {
+  const ist = new Date(Date.now() + 5.5 * 3600_000);
+  const day = ist.getUTCDay();
+  return day !== 0 && day !== 6;
+}
+
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
   try {
@@ -96,19 +106,22 @@ Deno.serve(async (req) => {
     }
 
     const expected = expectedTradingDate();
+    const today = currentIstDate();
+    const allowDayMove = isCurrentIstTradingDay();
 
     const out = symbols.flatMap((key) => {
       const q = byKey.get(key);
       if (!q || !q.price) return [];
       const [ex, sym] = key.includes(":") ? key.split(":") : ["NSE", key];
       const stale = q.as_of != null && q.as_of < expected;
+      const dayUnavailable = !allowDayMove || !q.as_of || q.as_of !== today;
       return [{
         symbol: sym,
         exchange: ex,
         ltp: q.price,
-        previous_close: stale ? null : q.previous_close ?? null,
-        change_pct: stale ? null : q.change_pct ?? null,
-        day_change: stale ? null : q.change_abs ?? null,
+        previous_close: stale || dayUnavailable ? null : q.previous_close ?? null,
+        change_pct: stale || dayUnavailable ? null : q.change_pct ?? null,
+        day_change: stale || dayUnavailable ? null : q.change_abs ?? null,
         source: q.source,
         as_of: q.as_of ?? null,
         previous_close_as_of: q.previous_close_as_of ?? null,
