@@ -10,12 +10,13 @@ import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "@/lib/market/api";
-import { useBreadth, useIndices, useMarketSettings, useSectorStrength, useStockScores } from "@/lib/market/hooks";
+import { useBreadth, useCandles, useIndices, useMarketSettings, useSectorStrength, useStockScores } from "@/lib/market/hooks";
+import { CandleChart } from "@/components/market/CandleChart";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { RefreshCw, Sparkles } from "lucide-react";
-import type { Quote, StockScore } from "@/lib/market/types";
+import { RefreshCw, Sparkles, X } from "lucide-react";
+import type { IndexQuote, Quote, StockScore } from "@/lib/market/types";
 import { holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 
 export default function MarketDashboard() {
@@ -24,6 +25,7 @@ export default function MarketDashboard() {
   const qc = useQueryClient();
   const [insight, setInsight] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [selIdx, setSelIdx] = useState<IndexQuote | null>(null);
 
   useEffect(() => {
     const handler = () => qc.invalidateQueries({ queryKey: ["market"] });
@@ -186,15 +188,26 @@ export default function MarketDashboard() {
         )}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: 8 }}>
           {(indicesData?.quotes ?? []).map((q) => (
-            <div key={q.symbol} style={{ padding: 10, border: "1px solid var(--edge)" }}>
+            <button
+              key={q.symbol}
+              onClick={() => setSelIdx(q)}
+              title={`${q.name} — view details`}
+              style={{
+                padding: 10, border: "1px solid var(--edge)", background: "transparent",
+                textAlign: "left", cursor: "pointer", borderRadius: 2,
+                transition: "border-color 120ms, background 120ms",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--edge-strong)"; e.currentTarget.style.background = "rgba(53,214,237,0.05)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--edge)"; e.currentTarget.style.background = "transparent"; }}
+            >
               <div className="hud-label" style={{ color: "var(--text-dim)" }}>{q.name}</div>
-              <div style={{ fontFamily: "var(--font-display)", fontSize: 18 }}>
+              <div style={{ fontFamily: "var(--font-display)", fontSize: 18, color: "var(--text)" }}>
                 {Number(q.price).toLocaleString(undefined, { maximumFractionDigits: 2 })}
               </div>
               <div style={{ fontSize: 11, color: (q.change_pct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
                 {q.change_pct == null ? "—" : `${q.change_pct >= 0 ? "+" : ""}${q.change_pct.toFixed(2)}%`}
               </div>
-            </div>
+            </button>
           ))}
         </div>
         {breadth && (
@@ -297,6 +310,105 @@ export default function MarketDashboard() {
             : <div className="hud-label" style={{ color: "var(--text-dim)" }}>Tap generate — JARVIS reads today's breadth, your holdings and watchlist, and briefs you.</div>}
         </HudPanel>
       </div>
+
+      {selIdx && <IndexDetailModal quote={selIdx} onClose={() => setSelIdx(null)} />}
+    </div>
+  );
+}
+
+function IndexDetailModal({ quote, onClose }: { quote: IndexQuote; onClose: () => void }) {
+  const { data, isLoading } = useCandles(quote.symbol, "1D");
+  const candles = data?.candles ?? [];
+
+  const s = useMemo(() => {
+    if (candles.length === 0) return null;
+    const last = candles[candles.length - 1];
+    const prev = candles[candles.length - 2];
+    const window = candles.slice(-252); // ~1 trading year
+    const hi52 = Math.max(...window.map((c) => c.high));
+    const lo52 = Math.min(...window.map((c) => c.low));
+    const vols = candles.slice(-20).map((c) => c.volume).filter((v) => v > 0);
+    const avgVol = vols.length ? vols.reduce((a, b) => a + b, 0) / vols.length : 0;
+    const prevClose = prev?.close ?? last.open;
+    const dayAbs = last.close - prevClose;
+    return {
+      last, open: last.open, high: last.high, low: last.low, close: last.close,
+      prevClose, dayAbs, dayPct: prevClose ? (dayAbs / prevClose) * 100 : 0,
+      hi52, lo52, fromHi: hi52 ? ((last.close - hi52) / hi52) * 100 : 0,
+      fromLo: lo52 ? ((last.close - lo52) / lo52) * 100 : 0,
+      vol: last.volume, avgVol,
+    };
+  }, [candles]);
+
+  const chgPct = quote.change_pct ?? s?.dayPct ?? null;
+
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100,
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width: "min(760px, 96vw)", maxHeight: "90vh", overflowY: "auto",
+        background: "var(--bg)", border: "1px solid var(--edge-strong)",
+        padding: 16, display: "flex", flexDirection: "column", gap: 12,
+      }}>
+        {/* header */}
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+          <div>
+            <div className="hud-label" style={{ color: "var(--accent)", letterSpacing: "0.2em" }}>{quote.name}</div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 4 }}>
+              <span style={{ fontFamily: "var(--font-display)", fontSize: 28 }}>
+                {Number(quote.price).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              </span>
+              <span style={{ fontSize: 14, color: (chgPct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
+                {chgPct == null ? "—" : `${chgPct >= 0 ? "+" : ""}${chgPct.toFixed(2)}%`}
+                {s && <span style={{ marginLeft: 6 }}>({s.dayAbs >= 0 ? "+" : ""}{fmtNum(s.dayAbs)})</span>}
+              </span>
+            </div>
+            <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>{quote.symbol} · daily · EOD</div>
+          </div>
+          <button onClick={onClose} className="hud-btn focus-outline" data-variant="ghost" data-size="sm" title="Close">
+            <X size={14} />
+          </button>
+        </div>
+
+        {/* chart */}
+        <div style={{ height: 320, border: "1px solid var(--edge)" }}>
+          {isLoading ? (
+            <div className="hud-label" style={{ padding: 24, textAlign: "center" }}>loading chart…</div>
+          ) : candles.length === 0 ? (
+            <div className="hud-label" style={{ padding: 24, textAlign: "center" }}>no chart data for this index</div>
+          ) : (
+            <CandleChart candles={candles} fill chartType="candles" indicators={{ ema20: true, ema50: true, volume: true }} />
+          )}
+        </div>
+
+        {/* stats */}
+        {s && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 8 }}>
+            <IdxStat label="Open" value={fmtNum(s.open)} />
+            <IdxStat label="Prev Close" value={fmtNum(s.prevClose)} />
+            <IdxStat label="Day High" value={fmtNum(s.high)} />
+            <IdxStat label="Day Low" value={fmtNum(s.low)} />
+            <IdxStat label="52W High" value={fmtNum(s.hi52)} />
+            <IdxStat label="52W Low" value={fmtNum(s.lo52)} />
+            <IdxStat label="From 52W High" value={`${s.fromHi >= 0 ? "+" : ""}${s.fromHi.toFixed(2)}%`} tone={s.fromHi >= -5 ? "ok" : undefined} />
+            <IdxStat label="From 52W Low" value={`${s.fromLo >= 0 ? "+" : ""}${s.fromLo.toFixed(2)}%`} tone="ok" />
+            {s.vol > 0 && <IdxStat label="Volume" value={fmtInt(s.vol)} />}
+            {s.avgVol > 0 && <IdxStat label="Avg Vol (20d)" value={fmtInt(s.avgVol)} />}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function IdxStat({ label, value, tone }: { label: string; value: string; tone?: "ok" | "err" }) {
+  const color = tone === "ok" ? "var(--ok)" : tone === "err" ? "var(--danger)" : "var(--text)";
+  return (
+    <div style={{ padding: "8px 10px", border: "1px solid var(--edge)" }}>
+      <div className="hud-label" style={{ color: "var(--text-dim)" }}>{label}</div>
+      <div style={{ fontFamily: "var(--font-display)", fontSize: 16, color, fontVariantNumeric: "tabular-nums" }}>{value}</div>
     </div>
   );
 }
