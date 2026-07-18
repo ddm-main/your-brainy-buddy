@@ -2,8 +2,8 @@
 // Cached in market_fundamentals for 24h per user.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { toYahooSymbol } from "../_shared/market/yahooClient.ts";
+import { yahooQuoteSummary } from "../_shared/market/yahooCrumb.ts";
 
-const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" };
 const MODULES = [
   "summaryDetail",
   "defaultKeyStatistics",
@@ -117,12 +117,9 @@ function normalize(symbol: string, exchange: string, r: any): Fundamentals {
 
 async function fetchYahooFundamentals(symbol: string, exchange: string): Promise<Fundamentals> {
   const y = toYahooSymbol(symbol, exchange);
-  const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(y)}?modules=${MODULES}`;
-  const r = await fetch(url, { headers: UA });
-  if (!r.ok) throw new Error(`Yahoo quoteSummary ${y}: HTTP ${r.status}`);
-  const j = await r.json();
-  const result = j?.quoteSummary?.result?.[0];
-  if (!result) throw new Error(`Yahoo quoteSummary ${y}: empty result`);
+  // Crumb-authenticated — anonymous v10 quoteSummary now returns 401.
+  const result = await yahooQuoteSummary(y, MODULES);
+  if (!result) throw new Error(`Yahoo quoteSummary ${y}: unavailable (crumb/auth)`);
   return normalize(symbol, exchange, result);
 }
 

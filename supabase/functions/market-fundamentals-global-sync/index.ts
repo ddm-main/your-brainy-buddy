@@ -8,12 +8,11 @@ import { preflight, jsonResponse, errorResponse, svcClient } from "../_shared/ma
 import { requireCronSecret } from "../_shared/market/cron.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { toYahooSymbol } from "../_shared/market/yahooClient.ts";
-import { safeFetch } from "../_shared/http.ts";
+import { yahooQuoteSummary } from "../_shared/market/yahooCrumb.ts";
 
 const CHUNK = 40;
 const CONCURRENCY = 4;
 const STALE_INTERVAL = "7 days";
-const HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"];
 const MODULES = "summaryDetail,defaultKeyStatistics,financialData,price,assetProfile,incomeStatementHistory,balanceSheetHistory,majorHoldersBreakdown";
 
 interface QSResult {
@@ -52,20 +51,8 @@ interface QSResult {
 }
 
 async function fetchOne(symbol: string): Promise<QSResult | null> {
-  const path = `/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=${MODULES}`;
-  for (const host of HOSTS) {
-    const r = await safeFetch(`https://${host}${path}`, {
-      timeoutMs: 6000, maxBytes: 512 * 1024, allowHosts: HOSTS,
-      headers: { "User-Agent": "Mozilla/5.0 (Jarvis global-fundamentals-sync)" },
-    });
-    if (!r.ok) continue;
-    try {
-      const j = JSON.parse(new TextDecoder().decode(r.bytes));
-      const result = j?.quoteSummary?.result?.[0];
-      if (result) return result as QSResult;
-    } catch { /* try next host */ }
-  }
-  return null;
+  // Crumb-authenticated quoteSummary — anonymous v10 calls now 401.
+  return (await yahooQuoteSummary(symbol, MODULES)) as QSResult | null;
 }
 
 Deno.serve(async (req) => {

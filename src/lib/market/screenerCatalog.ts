@@ -71,7 +71,6 @@ export const FILTERS: FilterDef[] = [
 
   // Profitability
   { id: "roe",                label: "ROE",               category: "profitability", kind: "number", unit: "%", min: -50, max: 80, step: 1, fundamental: true },
-  { id: "roce",               label: "ROCE",              category: "profitability", kind: "number", unit: "%", min: -50, max: 80, step: 1, fundamental: true, hint: "Populated where available" },
 
   // Growth
   { id: "revenue_growth_yoy", label: "Revenue Growth YoY", category: "growth",    kind: "number", unit: "%", min: -50, max: 200, step: 1, fundamental: true },
@@ -213,8 +212,6 @@ export const PRESETS: Preset[] = [
     filters: [{ id: "eps_growth_yoy", min: 30 }], requires: ["eps_growth_yoy"] },
 
   // ===== Quality =====
-  { id: "high_roce_low_debt", name: "High ROCE, Low Debt", group: "Fundamental", desc: "Efficient capital, clean balance sheet",
-    filters: [{ id: "roce", min: 20 }, { id: "debt_to_equity", max: 0.3 }], requires: ["roce", "debt_to_equity"] },
   { id: "zero_debt", name: "Zero-Debt Compounders", group: "Fundamental", desc: "Debt-free with strong returns",
     filters: [{ id: "debt_to_equity", max: 0.05 }, { id: "roe", min: 15 }], requires: ["debt_to_equity", "roe"] },
   { id: "consistent_roe", name: "Consistent ROE > 20%", group: "Fundamental", desc: "Elite return on equity",
