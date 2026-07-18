@@ -59,7 +59,6 @@ const COLUMNS: ColSpec[] = [
   { id: "rsi14",              label: "RSI",           align: "right" },
   { id: "adx14",              label: "ADX",           align: "right" },
   { id: "pct_from_52w_high",  label: "52w Δ",         align: "right", default: true },
-  { id: "delivery_pct",       label: "Deliv %",       align: "right" },
   { id: "breakout_score",     label: "Breakout",      align: "right", default: true },
   { id: "prebreakout_score",  label: "Pre-BO",        align: "right" },
   { id: "setup",              label: "Setup" },
@@ -272,9 +271,6 @@ export default function Screener() {
       rsi14: { header: "RSI", accessorKey: "rsi14", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 0) },
       adx14: { header: "ADX", accessorKey: "adx14", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 0) },
       pct_from_52w_high: { header: "52w Δ", accessorKey: "pct_from_52w_high", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
-      delivery_pct: { header: "Deliv %", accessorKey: "delivery_pct", meta: { align: "right" }, cell: ({ getValue }) => {
-        const v = getValue() as number | null; return v == null ? "—" : `${v.toFixed(0)}%`;
-      }},
       breakout_score: {
         header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },
         cell: ({ row }) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" />,

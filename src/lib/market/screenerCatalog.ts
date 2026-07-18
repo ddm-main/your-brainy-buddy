@@ -91,17 +91,13 @@ export const FILTERS: FilterDef[] = [
   { id: "rsi14",              label: "RSI (14)",          category: "technicals", kind: "number", min: 0, max: 100, step: 1 },
   { id: "adx14",              label: "ADX (14)",          category: "technicals", kind: "number", min: 0, max: 100, step: 1 },
   { id: "macd_hist",          label: "MACD Hist",         category: "technicals", kind: "number", min: -50, max: 50, step: 0.1 },
-  { id: "mfi14",              label: "MFI (14)",          category: "technicals", kind: "number", min: 0, max: 100, step: 1 },
-  { id: "bb_percent_b",       label: "BB %B",             category: "technicals", kind: "number", min: -0.5, max: 1.5, step: 0.05 },
   { id: "bb_width",           label: "BB Width",          category: "technicals", kind: "number", min: 0, max: 1, step: 0.01 },
   { id: "atr_pct",            label: "ATR %",             category: "technicals", kind: "number", unit: "%", min: 0, max: 20, step: 0.1 },
-  { id: "supertrend_dir",     label: "Supertrend Dir",    category: "technicals", kind: "number", min: -1, max: 1, step: 1, hint: "1 = up, -1 = down" },
   { id: "above_ema200",       label: "Above 200 EMA",     category: "technicals", kind: "boolean" },
 
   // Momentum & Volume
   { id: "change_pct",         label: "Change %",          category: "momentum",   kind: "number", unit: "%", min: -20, max: 20, step: 0.1 },
   { id: "rel_volume",         label: "Rel Volume",        category: "momentum",   kind: "number", unit: "x", min: 0, max: 20, step: 0.1 },
-  { id: "delivery_pct",       label: "Delivery %",        category: "momentum",   kind: "number", unit: "%", min: 0, max: 100, step: 1 },
   { id: "rel_strength_nifty", label: "RS vs NIFTY",       category: "momentum",   kind: "number", unit: "%", min: -50, max: 50, step: 1 },
   { id: "sector_strength",    label: "Sector Strength",   category: "momentum",   kind: "number", min: 0, max: 1, step: 0.05 },
 
@@ -275,10 +271,6 @@ export const PRESETS: Preset[] = [
     filters: [{ id: "rsi14", min: 70 }, { id: "adx14", min: 25 }, { id: "above_ema200", bool: true }] },
   { id: "adx_trend", name: "Trending Stocks (ADX)", group: "Technical", desc: "ADX ≥ 25 signals a strong trend",
     filters: [{ id: "adx14", min: 25 }] },
-  { id: "supertrend_up", name: "Supertrend Up", group: "Technical", desc: "Supertrend flipped positive",
-    filters: [{ id: "supertrend_dir", min: 1, max: 1 }] },
-  { id: "delivery_spike", name: "Delivery Spike", group: "Technical", desc: "High delivery % — real accumulation",
-    filters: [{ id: "delivery_pct", min: 60 }, { id: "change_pct", min: 0 }] },
   { id: "higher_lows_setup", name: "Higher Lows Setup", group: "Technical", desc: "Constructive price structure",
     filters: [{ id: "higher_lows", bool: true }, { id: "above_ema200", bool: true }] },
   { id: "near_resistance_setup", name: "Testing Resistance", group: "Technical", desc: "Approaching supply zone",
