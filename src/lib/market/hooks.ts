@@ -185,6 +185,19 @@ export function useCandles(symbol: string | undefined, timeframe: string) {
   });
 }
 
+export interface DepthRow { price: number; qty: number; orders: number }
+export interface DepthResponse { bids: DepthRow[]; asks: DepthRow[]; ltp: number | null; source: string }
+
+export function useDepth(symbol: string | undefined) {
+  return useQuery({
+    queryKey: ["market", "depth", symbol ?? ""],
+    queryFn: () => callMarketFn<DepthResponse>("market-depth", { symbol }),
+    enabled: !!symbol,
+    refetchInterval: 15_000,
+    retry: false,
+  });
+}
+
 export function useSavedScreeners() {
   return useQuery({
     queryKey: ["market", "screeners"],

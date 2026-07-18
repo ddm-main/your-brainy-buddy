@@ -8,9 +8,9 @@ import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/
 import { CandleChart, type ChartType, type IndicatorFlags } from "@/components/market/CandleChart";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { fmtNum, fmtInt, fmtPct } from "@/components/hud/DataTable";
-import { useCandles, useFundamentals, useQuotes, useSectorStrength, useStockScores } from "@/lib/market/hooks";
+import { useCandles, useDepth, useFundamentals, useQuotes, useSectorStrength, useStockScores } from "@/lib/market/hooks";
 
-const TIMEFRAMES = ["1D", "1h", "15m"];
+const TIMEFRAMES = ["1D", "1h", "15m", "5m"];
 const CHART_TYPES: Array<{ key: ChartType; label: string }> = [
   { key: "candles", label: "Candles" },
   { key: "bars", label: "Bars" },
@@ -50,6 +50,7 @@ export default function Analysis() {
   const { data: quotesData } = useQuotes(sym ? [`NSE:${sym}`] : []);
   const quote = quotesData?.quotes?.[0];
   const { data: sectors = [] } = useSectorStrength();
+  const { data: depth } = useDepth(sym);
   const { data: fundData } = useFundamentals(sym);
   const f = fundData?.fundamentals;
   const sectorRow = useMemo(
@@ -154,6 +155,31 @@ export default function Analysis() {
           </div>
           {score?.sector && <div style={{ marginTop: 6 }}><Chip tone="accent">{score.sector}</Chip></div>}
         </HudPanel>
+
+        {depth && (depth.bids.length > 0 || depth.asks.length > 0) && (
+          <HudPanel flow title="Market Depth" index="A1.5">
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
+              <div>
+                <div className="hud-label" style={{ color: "var(--ok)", marginBottom: 4 }}>Bids</div>
+                {depth.bids.map((b, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", borderBottom: "1px solid var(--edge)" }}>
+                    <span style={{ color: "var(--ok)" }}>{b.price.toFixed(2)}</span>
+                    <span style={{ color: "var(--text-dim)" }}>{b.qty.toLocaleString("en-IN")}</span>
+                  </div>
+                ))}
+              </div>
+              <div>
+                <div className="hud-label" style={{ color: "var(--danger)", marginBottom: 4 }}>Asks</div>
+                {depth.asks.map((a, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", borderBottom: "1px solid var(--edge)" }}>
+                    <span style={{ color: "var(--danger)" }}>{a.price.toFixed(2)}</span>
+                    <span style={{ color: "var(--text-dim)" }}>{a.qty.toLocaleString("en-IN")}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </HudPanel>
+        )}
 
         <HudPanel flow title="Breakout Intelligence" index="A2">
           <Row label="Breakout">

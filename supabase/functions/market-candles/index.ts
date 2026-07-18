@@ -6,6 +6,7 @@ import { yahooChartRetry, toYahooSymbol } from "../_shared/market/yahooClient.ts
 import { getActiveProvider } from "../_shared/market/provider.ts";
 
 const INTRADAY: Record<string, { interval: string; range: string }> = {
+  "5m": { interval: "5m", range: "5d" },
   "15m": { interval: "15m", range: "30d" },
   "1h": { interval: "1h", range: "60d" },
 };
@@ -72,42 +73,21 @@ Deno.serve(async (req) => {
     const cfg = INTRADAY[timeframe];
     if (!cfg) return errorResponse(req, `Unsupported timeframe: ${timeframe}`);
 
-    // Cache check: newest cached bar within 15 minutes?
-    const { data: newest } = await svc.from("market_intraday_prices")
-      .select("ts").eq("symbol", symbol).eq("exchange", exchange)
-      .order("ts", { ascending: false }).limit(1).maybeSingle();
-    const fresh = newest && Date.now() - new Date(newest.ts).getTime() < 15 * 60_000;
-
-    if (!fresh) {
-      let candles;
-      try {
-        const { provider } = await getActiveProvider(svc, auth.userId);
-        candles = await provider.getOHLCV(symbol, exchange, cfg.range, cfg.interval);
-      } catch {
-        candles = await yahooChartRetry(toYahooSymbol(symbol, exchange), cfg.range, cfg.interval);
-      }
-      const upserts = candles.map((c) => ({
-        symbol, exchange,
-        ts: new Date(c.time * 1000).toISOString(),
-        open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
-      }));
-      for (let i = 0; i < upserts.length; i += 500) {
-        await svc.from("market_intraday_prices").upsert(upserts.slice(i, i + 500), { onConflict: "symbol,exchange,ts" });
-      }
+    // Intraday goes straight to the provider. The old market_intraday_prices
+    // cache had no interval column, so 5m/15m/1h bars for the same symbol
+    // collided in one (symbol,exchange,ts) keyspace and reads returned a mix.
+    // The client already caches responses for 5 minutes (react-query staleTime).
+    let raw;
+    try {
+      const { provider } = await getActiveProvider(svc, auth.userId);
+      raw = await provider.getOHLCV(symbol, exchange, cfg.range, cfg.interval);
+    } catch {
+      raw = await yahooChartRetry(toYahooSymbol(symbol, exchange), cfg.range, cfg.interval);
     }
-
-    const since = new Date(Date.now() - (timeframe === "1h" ? 60 : 30) * 86_400_000).toISOString();
-    const { data: rows } = await svc.from("market_intraday_prices")
-      .select("ts,open,high,low,close,volume")
-      .eq("symbol", symbol).eq("exchange", exchange)
-      .gte("ts", since)
-      .order("ts", { ascending: true })
-      .limit(3000);
-
-    const candles = (rows ?? []).map((r: any) => ({
-      time: Math.floor(new Date(r.ts).getTime() / 1000),
-      open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close),
-      volume: Number(r.volume ?? 0),
+    const candles = raw.map((c) => ({
+      time: c.time,
+      open: c.open, high: c.high, low: c.low, close: c.close,
+      volume: c.volume ?? 0,
     }));
     return jsonResponse(req, { candles, emas: {}, timeframe });
   } catch (e) {

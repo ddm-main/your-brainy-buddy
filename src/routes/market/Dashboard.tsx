@@ -41,14 +41,45 @@ export default function MarketDashboard() {
   const { data: counts } = useQuery({
     queryKey: ["market", "dash-counts"],
     queryFn: async () => {
-      const [{ count: hc }, { count: wc }, watchItems] = await Promise.all([
-        supabase.from("market_holdings").select("id", { head: true, count: "exact" }),
+      const [{ count: wc }, watchItems, holdingRows] = await Promise.all([
         supabase.from("market_watchlist_items").select("id", { head: true, count: "exact" }),
         supabase.from("market_watchlist_items").select("symbol"),
+        supabase.from("market_holdings").select("symbol,exchange,quantity,avg_price"),
       ]);
-      return { holdings: hc ?? 0, watchlist: wc ?? 0, watchSymbols: (watchItems.data ?? []).map((r: any) => r.symbol as string) };
+      return {
+        holdings: (holdingRows.data ?? []).length,
+        watchlist: wc ?? 0,
+        watchSymbols: (watchItems.data ?? []).map((r: any) => r.symbol as string),
+        holdingRows: (holdingRows.data ?? []) as Array<{ symbol: string; exchange: string; quantity: number; avg_price: number }>,
+      };
     },
   });
+
+  // Portfolio day P&L — quote the held symbols (refreshes with the 60s quote poll).
+  const { data: pfQuotes } = useQuery({
+    queryKey: ["market", "dash-pf-quotes", (counts?.holdingRows ?? []).map((h) => h.symbol).join(",")],
+    queryFn: async () => {
+      const keys = Array.from(new Set((counts!.holdingRows).map((h) => `${h.exchange}:${h.symbol}`)));
+      return callMarketFn<{ quotes: Array<{ symbol: string; exchange: string; ltp: number; day_change: number | null }> }>("market-quotes", { symbols: keys });
+    },
+    enabled: (counts?.holdingRows.length ?? 0) > 0,
+    refetchInterval: 60_000,
+  });
+  const pf = useMemo(() => {
+    const rows = counts?.holdingRows ?? [];
+    if (rows.length === 0) return null;
+    const byKey = new Map((pfQuotes?.quotes ?? []).map((q) => [`${q.exchange}:${q.symbol}`, q]));
+    let invested = 0, current = 0, day = 0;
+    for (const h of rows) {
+      const q = byKey.get(`${h.exchange}:${h.symbol}`);
+      // `|| avg_price`: an ltp of 0 means "no quote", never a real price
+      const ltp = q?.ltp || h.avg_price;
+      invested += h.avg_price * h.quantity;
+      current += ltp * h.quantity;
+      if (q?.day_change != null) day += q.day_change * h.quantity;
+    }
+    return { invested, current, pnl: current - invested, day };
+  }, [counts, pfQuotes]);
 
   // Watchlist pulse — intersect with already-fetched top/pre breakout scores;
   // avoids fetching 1000 rows just to compute three counts.
@@ -216,6 +247,13 @@ export default function MarketDashboard() {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               <StatTile label="Holdings" value={String(counts?.holdings ?? 0)} to="/market/holdings" />
               <StatTile label="Watchlist" value={String(counts?.watchlist ?? 0)} to="/market/watchlist" />
+              {pf && (
+                <>
+                  <StatTile label="Current value" value={`₹${Math.round(pf.current).toLocaleString("en-IN")}`} to="/market/holdings" />
+                  <StatTile label="Today's P&L" value={`${pf.day >= 0 ? "+" : ""}₹${Math.round(pf.day).toLocaleString("en-IN")}`} tone={pf.day >= 0 ? "ok" : "err"} />
+                  <StatTile label="Total P&L" value={`${pf.pnl >= 0 ? "+" : ""}₹${Math.round(pf.pnl).toLocaleString("en-IN")}`} tone={pf.pnl >= 0 ? "ok" : "err"} />
+                </>
+              )}
               <StatTile label="Ready to buy" value={pipelineEmpty ? "—" : String(watchPulse.ready)} tone="ok" />
               <StatTile label="Near breakout" value={pipelineEmpty ? "—" : String(watchPulse.near)} tone="accent" />
               <StatTile label="Weak stocks" value={pipelineEmpty ? "—" : String(watchPulse.weak)} tone="err" />

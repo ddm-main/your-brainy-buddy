@@ -56,9 +56,9 @@ export default function Holdings() {
     }
   };
 
-  const refreshQuotes = async (holdings: Holding[]) => {
+  const refreshQuotes = async (holdings: Holding[], opts: { silent?: boolean } = {}) => {
     if (holdings.length === 0) return;
-    setBusy("quotes");
+    if (!opts.silent) setBusy("quotes");
     try {
       const symbols = Array.from(new Set(holdings.map((h) => `${h.exchange}:${h.symbol}`)));
       const r = await callFn("market-quotes", { symbols });
@@ -67,12 +67,23 @@ export default function Holdings() {
         map[`${q.exchange}:${q.symbol}`] = { ltp: q.ltp, change_pct: q.change_pct, day_change: q.day_change };
       }
       setQuotes(map);
-    } catch (e) { push(toSafeError(e, "Quotes failed").message, "err"); }
-    finally { setBusy(null); }
+    } catch (e) {
+      // background polls fail silently — a toast every 30s would be noise
+      if (!opts.silent) push(toSafeError(e, "Quotes failed").message, "err");
+    } finally { if (!opts.silent) setBusy(null); }
   };
 
   useEffect(() => { load(); }, []);
   useEffect(() => { if (rows.length) refreshQuotes(rows); /* eslint-disable-next-line */ }, [rows.length]);
+  // Live-ish quotes: poll every 30s while the tab is visible.
+  useEffect(() => {
+    if (rows.length === 0) return;
+    const id = window.setInterval(() => {
+      if (!document.hidden) refreshQuotes(rows, { silent: true });
+    }, 30_000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line
+  }, [rows]);
 
   const add = async () => {
     if (!form.symbol.trim() || !form.quantity || !form.avg_price) { push("Symbol, quantity, avg price required", "warn"); return; }
@@ -120,7 +131,7 @@ export default function Holdings() {
     let invested = 0, current = 0, dayPnl = 0;
     for (const h of rows) {
       const q = quotes[`${h.exchange}:${h.symbol}`];
-      const ltp = q?.ltp ?? h.avg_price;
+      const ltp = q?.ltp || h.avg_price;
       invested += Number(h.avg_price) * Number(h.quantity);
       current += ltp * Number(h.quantity);
       if (q?.day_change != null) dayPnl += q.day_change * Number(h.quantity);
@@ -192,7 +203,7 @@ export default function Holdings() {
             <tbody>
               {rows.map((h) => {
                 const q = quotes[`${h.exchange}:${h.symbol}`];
-                const ltp = q?.ltp ?? h.avg_price;
+                const ltp = q?.ltp || h.avg_price;
                 const inv = Number(h.avg_price) * Number(h.quantity);
                 const cur = ltp * Number(h.quantity);
                 const pnl = cur - inv;
@@ -206,7 +217,7 @@ export default function Holdings() {
                     </td>
                     <td style={td}>{h.quantity}</td>
                     <td style={td}>{Number(h.avg_price).toFixed(2)}</td>
-                    <td style={td}>{q ? ltp.toFixed(2) : "—"}</td>
+                    <td style={td}>{q?.ltp ? ltp.toFixed(2) : "—"}</td>
                     <td style={td}>{inr(inv)}</td>
                     <td style={td}>{inr(cur)}</td>
                     <td style={{ ...td, color: pnl >= 0 ? "var(--ok)" : "var(--danger)" }}>{inr(pnl)}</td>

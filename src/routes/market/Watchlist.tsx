@@ -61,19 +61,29 @@ export default function Watchlist() {
 
   const activeItems = useMemo(() => items.filter((i) => i.watchlist_id === active), [items, active]);
 
-  const refreshQuotes = async () => {
+  const refreshQuotes = async (opts: { silent?: boolean } = {}) => {
     if (activeItems.length === 0) return;
-    setBusy("quotes");
+    if (!opts.silent) setBusy("quotes");
     try {
       const symbols = activeItems.map((i) => `${i.exchange}:${i.symbol}`);
       const r = await callFn("market-quotes", { symbols });
       const map: QuoteMap = {};
       for (const q of r?.quotes ?? []) map[`${q.exchange}:${q.symbol}`] = { ltp: q.ltp, change_pct: q.change_pct };
       setQuotes(map);
-    } catch (e) { push(toSafeError(e, "Quotes failed").message, "err"); }
-    finally { setBusy(null); }
+    } catch (e) {
+      if (!opts.silent) push(toSafeError(e, "Quotes failed").message, "err");
+    } finally { if (!opts.silent) setBusy(null); }
   };
   useEffect(() => { if (activeItems.length) refreshQuotes(); /* eslint-disable-next-line */ }, [active, activeItems.length]);
+  // Live-ish quotes: poll every 30s while the tab is visible.
+  useEffect(() => {
+    if (activeItems.length === 0) return;
+    const id = window.setInterval(() => {
+      if (!document.hidden) refreshQuotes({ silent: true });
+    }, 30_000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line
+  }, [activeItems]);
 
   const createList = async () => {
     if (!newList.trim()) return;
@@ -149,7 +159,7 @@ export default function Watchlist() {
                 </select>
               </div>
               <Btn onClick={addItem}><Plus size={11} style={{ marginRight: 4 }} /> add</Btn>
-              <Btn onClick={refreshQuotes} disabled={busy !== null}>
+              <Btn onClick={() => refreshQuotes()} disabled={busy !== null}>
                 <RefreshCw size={11} style={{ marginRight: 4 }} /> refresh
               </Btn>
             </div>
