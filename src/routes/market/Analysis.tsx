@@ -9,7 +9,7 @@ import { CandleChart, type ChartType, type IndicatorFlags } from "@/components/m
 import { TradingViewChart, tvInterval } from "@/components/market/TradingViewChart";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { fmtNum, fmtInt, fmtPct } from "@/components/hud/DataTable";
-import { useCandles, useDepth, useFundamentals, useQuotes, useSectorStrength, useStockScores } from "@/lib/market/hooks";
+import { useCandles, useDepth, useQuotes, useSectorStrength, useStockScores } from "@/lib/market/hooks";
 import { ExternalLink } from "lucide-react";
 
 const TIMEFRAMES = ["1D", "1h", "15m", "5m"];
@@ -54,8 +54,6 @@ export default function Analysis() {
   const quote = quotesData?.quotes?.[0];
   const { data: sectors = [] } = useSectorStrength();
   const { data: depth } = useDepth(sym);
-  const { data: fundData } = useFundamentals(sym);
-  const f = fundData?.fundamentals;
   const sectorRow = useMemo(
     () => sectors.find((s) => s.sector === score?.sector),
     [sectors, score],
@@ -91,7 +89,11 @@ export default function Analysis() {
     );
   }
 
-  const ltp = quote?.ltp ?? score?.close ?? null;
+  // `|| score.close`: a quote ltp of 0 means "no live quote" (Yahoo/Kotak
+  // unavailable) — fall back to the EOD close from the score row so the panel
+  // never shows ₹0. Change % falls back to the EOD change from the score.
+  const ltp = quote?.ltp || score?.close || null;
+  const chgPct = quote?.change_pct ?? score?.change_pct ?? null;
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 12, height: "100%", minHeight: 0 }}>
@@ -176,11 +178,16 @@ export default function Analysis() {
           <div style={{ fontFamily: "var(--font-display)", fontSize: 26, color: "var(--accent)" }}>
             {ltp != null ? `₹${fmtNum(ltp)}` : "—"}
           </div>
-          <div style={{ fontSize: 13, color: (quote?.change_pct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
-            {quote?.change_pct != null ? fmtPct(quote.change_pct) : "—"}
+          <div style={{ fontSize: 13, color: (chgPct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
+            {chgPct != null ? fmtPct(chgPct) : "—"}
             {quote?.day_change != null && <span style={{ marginLeft: 8 }}>({fmtNum(quote.day_change)})</span>}
           </div>
-          {score?.sector && <div style={{ marginTop: 6 }}><Chip tone="accent">{score.sector}</Chip></div>}
+          <div style={{ display: "flex", gap: 6, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
+            {score?.sector && <Chip tone="accent">{score.sector}</Chip>}
+            {!quote?.ltp && score?.close != null && (
+              <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.1em" }}>EOD</span>
+            )}
+          </div>
         </HudPanel>
 
         {depth && (depth.bids.length > 0 || depth.asks.length > 0) && (
@@ -208,6 +215,16 @@ export default function Analysis() {
           </HudPanel>
         )}
 
+        {!score ? (
+          <HudPanel flow title="Coverage" index="A2">
+            <div className="hud-label" style={{ fontSize: 11, lineHeight: 1.6, color: "var(--text-dim)" }}>
+              No screener data for <b style={{ color: "var(--accent)" }}>{sym}</b>. It isn't in the
+              tracked universe yet — run the pipeline from <span style={{ color: "var(--accent)" }}>Settings → Sync universe</span>,
+              or pick a covered symbol. The chart above still works.
+            </div>
+          </HudPanel>
+        ) : (
+        <>
         <HudPanel flow title="Breakout Intelligence" index="A2">
           <Row label="Breakout">
             <ScoreBadge score={score?.breakout_score} components={score?.score_components?.breakout} label="breakout components" />
@@ -254,47 +271,11 @@ export default function Analysis() {
             <span style={{ fontSize: 10 }}>{fmtNum(score?.ema20, 0)} / {fmtNum(score?.ema50, 0)} / {fmtNum(score?.ema200, 0)}</span>
           </Row>
         </HudPanel>
-
-        <HudPanel flow title="Fundamentals" index="A5">
-          {!f ? (
-            <div className="hud-label" style={{ fontSize: 11, padding: 6 }}>loading fundamentals…</div>
-          ) : (
-            <>
-              <Row label="Market Cap" mono>{fmtCrore(f.market_cap)}</Row>
-              <Row label="P/E (TTM)" mono>{fmtNum(f.pe_ttm, 2)}</Row>
-              <Row label="P/E (Fwd)" mono>{fmtNum(f.pe_forward, 2)}</Row>
-              <Row label="P/B" mono>{fmtNum(f.price_to_book, 2)}</Row>
-              <Row label="EPS (TTM)" mono>{fmtNum(f.eps_ttm, 2)}</Row>
-              <Row label="ROE" mono>{fmtPct((f.roe ?? 0) * 100)}</Row>
-              <Row label="Debt/Equity" mono>{fmtNum(f.debt_to_equity, 2)}</Row>
-              <Row label="Profit Margin" mono>{fmtPct((f.profit_margin ?? 0) * 100)}</Row>
-              <Row label="Rev Growth" mono>
-                <span style={{ color: (f.revenue_growth ?? 0) > 0 ? "var(--ok)" : "var(--danger)" }}>
-                  {fmtPct((f.revenue_growth ?? 0) * 100)}
-                </span>
-              </Row>
-              <Row label="Dividend Yield" mono>{fmtPct((f.dividend_yield ?? 0) * 100)}</Row>
-              <Row label="Beta" mono>{fmtNum(f.beta, 2)}</Row>
-              {f.industry && <Row label="Industry"><span style={{ fontSize: 10 }}>{f.industry}</span></Row>}
-              {f.next_earnings_at && (
-                <Row label="Next Earnings">
-                  <span style={{ fontSize: 10 }}>{new Date(f.next_earnings_at).toLocaleDateString()}</span>
-                </Row>
-              )}
-            </>
-          )}
-        </HudPanel>
+        </>
+        )}
       </div>
     </div>
   );
-}
-
-function fmtCrore(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  const cr = n / 1e7;
-  if (cr >= 1e5) return `₹${(cr / 1e5).toFixed(2)} L Cr`;
-  if (cr >= 1000) return `₹${(cr / 1000).toFixed(2)} K Cr`;
-  return `₹${cr.toFixed(2)} Cr`;
 }
 
 function Row({ label, children, mono }: { label: string; children: React.ReactNode; mono?: boolean }) {
