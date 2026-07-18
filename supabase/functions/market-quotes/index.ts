@@ -101,7 +101,7 @@ Deno.serve(async (req) => {
       const q = byKey.get(key);
       if (!q || !q.price) return [];
       const [ex, sym] = key.includes(":") ? key.split(":") : ["NSE", key];
-      const stale = q.source === "cache" && q.as_of != null && q.as_of < expected;
+      const stale = q.as_of != null && q.as_of < expected;
       return [{
         symbol: sym,
         exchange: ex,

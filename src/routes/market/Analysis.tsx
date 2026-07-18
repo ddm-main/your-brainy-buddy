@@ -10,6 +10,7 @@ import { TradingViewChart, tvInterval } from "@/components/market/TradingViewCha
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { fmtNum, fmtInt, fmtPct } from "@/components/hud/DataTable";
 import { useCandles, useDepth, useQuotes, useSectorStrength, useStockScores } from "@/lib/market/hooks";
+import { getTrustedDayChange } from "@/lib/market/pnl";
 import { ExternalLink } from "lucide-react";
 
 const TIMEFRAMES = ["1D", "1h", "15m", "5m"];
@@ -94,6 +95,7 @@ export default function Analysis() {
   // never shows ₹0. Change % falls back to the EOD change from the score.
   const ltp = quote?.ltp || score?.close || null;
   const chgPct = quote?.change_pct ?? score?.change_pct ?? null;
+  const dayChange = getTrustedDayChange(quote);
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 12, height: "100%", minHeight: 0 }}>
@@ -180,13 +182,14 @@ export default function Analysis() {
           </div>
           <div style={{ fontSize: 13, color: (chgPct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
             {chgPct != null ? fmtPct(chgPct) : "—"}
-            {quote?.day_change != null && <span style={{ marginLeft: 8 }}>({fmtNum(quote.day_change)})</span>}
+            {dayChange != null && <span style={{ marginLeft: 8 }}>({fmtNum(dayChange)})</span>}
           </div>
           <div style={{ display: "flex", gap: 6, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
             {score?.sector && <Chip tone="accent">{score.sector}</Chip>}
             {!quote?.ltp && score?.close != null && (
               <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.1em" }}>EOD</span>
             )}
+            {quote?.stale && <Chip tone="warn">stale</Chip>}
           </div>
         </HudPanel>
 
