@@ -30,15 +30,26 @@ Deno.serve(async (req) => {
         .order("trade_date", { ascending: true })
         .limit(600);
       let rows = data ?? [];
-      if (rows.length < 100) {
-        // Backfill: prefer active provider (Kotak when connected), fall back to Yahoo.
+      // Most recent expected trading day (IST, Mon–Fri; use 16:00 IST cutoff).
+      const nowUtc = new Date();
+      const ist = new Date(nowUtc.getTime() + 5.5 * 3600_000);
+      const expected = new Date(ist);
+      if (ist.getUTCHours() < 16) expected.setUTCDate(expected.getUTCDate() - 1);
+      while (expected.getUTCDay() === 0 || expected.getUTCDay() === 6) {
+        expected.setUTCDate(expected.getUTCDate() - 1);
+      }
+      const expectedStr = expected.toISOString().slice(0, 10);
+      const latestCached = rows.length ? String((rows[rows.length - 1] as any).trade_date).slice(0, 10) : "";
+      const stale = latestCached < expectedStr;
+      if (rows.length < 100 || stale) {
+        const range = rows.length < 100 ? "2y" : "30d";
         try {
           const { provider } = await getActiveProvider(svc, auth.userId);
           let candles;
           try {
-            candles = await provider.getOHLCV(symbol, exchange, "2y", "1d");
+            candles = await provider.getOHLCV(symbol, exchange, range, "1d");
           } catch {
-            candles = await yahooChartRetry(toYahooSymbol(symbol, exchange), "2y", "1d");
+            candles = await yahooChartRetry(toYahooSymbol(symbol, exchange), range, "1d");
           }
           const upserts = candles.map((c) => ({
             symbol, exchange,
@@ -48,7 +59,16 @@ Deno.serve(async (req) => {
           for (let i = 0; i < upserts.length; i += 500) {
             await svc.from("market_daily_prices").upsert(upserts.slice(i, i + 500), { onConflict: "symbol,exchange,trade_date" });
           }
-          rows = upserts;
+          if (rows.length < 100) {
+            rows = upserts;
+          } else {
+            const byDate = new Map<string, any>();
+            for (const r of rows) byDate.set(String((r as any).trade_date).slice(0, 10), r);
+            for (const u of upserts) byDate.set(u.trade_date, u);
+            rows = [...byDate.values()].sort((a: any, b: any) =>
+              String(a.trade_date).localeCompare(String(b.trade_date)),
+            );
+          }
         } catch (e) {
           if (rows.length === 0) throw e;
         }
