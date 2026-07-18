@@ -10,7 +10,7 @@ import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "@/lib/market/api";
-import { useBreadth, useCandles, useIndices, useMarketSettings, useSectorStrength, useStockScores } from "@/lib/market/hooks";
+import { useCandles, useIndices, useMarketSettings, useSectorStrength, useStockScores } from "@/lib/market/hooks";
 import { CandleChart } from "@/components/market/CandleChart";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
@@ -35,7 +35,6 @@ export default function MarketDashboard() {
 
 
   const { data: indicesData, refetch: refetchIndices, isFetching: indicesFetching } = useIndices();
-  const { data: breadth } = useBreadth();
   const { data: sectors = [] } = useSectorStrength();
   const { data: settings = [] } = useMarketSettings();
   const { data: topBreakouts = [] } = useStockScores({ orderBy: "breakout_score", limit: 15 });
@@ -210,19 +209,6 @@ export default function MarketDashboard() {
             </button>
           ))}
         </div>
-        {breadth && (
-          <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-            <Chip tone={breadth.regime === "bullish" ? "ok" : breadth.regime === "bearish" ? "err" : "neutral"}>
-              regime: {breadth.regime ?? "unknown"}
-            </Chip>
-            {breadth.advances != null && <Chip tone="ok">adv {breadth.advances}</Chip>}
-            {breadth.declines != null && <Chip tone="err">dec {breadth.declines}</Chip>}
-            {breadth.pct_above_ema50 != null && <Chip tone="neutral">&gt;50EMA {Math.round(breadth.pct_above_ema50)}%</Chip>}
-            {breadth.pct_above_ema200 != null && <Chip tone="neutral">&gt;200EMA {Math.round(breadth.pct_above_ema200)}%</Chip>}
-            {breadth.avg_rsi != null && <Chip tone="neutral">avg RSI {Math.round(breadth.avg_rsi)}</Chip>}
-            <span style={{ fontSize: 10, color: "var(--text-muted)" }}>as of {breadth.trade_date}</span>
-          </div>
-        )}
       </HudPanel>
 
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12, alignItems: "start" }}>

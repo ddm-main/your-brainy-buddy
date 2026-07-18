@@ -15,6 +15,7 @@ const Backtesting = lazy(() => import("@/routes/market/Backtesting"));
 const MarketSettings = lazy(() => import("@/routes/market/Settings"));
 const OptionChain = lazy(() => import("@/routes/market/OptionChain"));
 const Planner = lazy(() => import("@/routes/market/Planner"));
+const AIEngine = lazy(() => import("@/routes/market/AIEngine"));
 
 
 type Sub = { to: string; label: string };
@@ -26,26 +27,33 @@ type Group = {
 
 const GROUPS: Group[] = [
   { key: "overview", label: "Overview", to: "/market",
-    match: (p) => p === "/market" || p === "/market/", subs: [] },
+    match: (p) => p === "/market" || p === "/market/" || /^\/market\/index\//.test(p), subs: [] },
+  { key: "screener", label: "Screener", to: "/market/screener",
+    match: (p) => /^\/market\/screener/.test(p), subs: [] },
+  { key: "analysis", label: "Stock Analysis", to: "/market/analysis",
+    match: (p) => /^\/market\/(analysis|options)/.test(p),
+    subs: [
+      { to: "/market/analysis", label: "Analysis" },
+      { to: "/market/options", label: "Options" },
+    ] },
+  { key: "planner", label: "Trade Planner", to: "/market/planner",
+    match: (p) => /^\/market\/planner/.test(p), subs: [] },
   { key: "portfolio", label: "Portfolio", to: "/market/holdings",
-    match: (p) => /^\/market\/(holdings|positions|watchlist)/.test(p),
+    match: (p) => /^\/market\/(holdings|positions)/.test(p),
     subs: [
       { to: "/market/holdings", label: "Holdings" },
       { to: "/market/positions", label: "Positions" },
-      { to: "/market/watchlist", label: "Watchlist" },
     ] },
-  { key: "research", label: "Research", to: "/market/screener",
-    match: (p) => /^\/market\/(screener|analysis|backtesting|options|planner)/.test(p),
+  { key: "ai", label: "AI Analysis Engine", to: "/market/ai",
+    match: (p) => /^\/market\/ai/.test(p), subs: [] },
+  { key: "watch", label: "Watchlists & Alerts", to: "/market/watchlist",
+    match: (p) => /^\/market\/(watchlist|alerts)/.test(p),
     subs: [
-      { to: "/market/screener", label: "Screener" },
-      { to: "/market/analysis", label: "Analysis" },
-      { to: "/market/planner", label: "Planner" },
-      { to: "/market/options", label: "Options" },
-      { to: "/market/backtesting", label: "Backtesting" },
+      { to: "/market/watchlist", label: "Watchlists" },
+      { to: "/market/alerts", label: "Alerts" },
     ] },
-
-  { key: "alerts", label: "Alerts", to: "/market/alerts",
-    match: (p) => /^\/market\/alerts/.test(p), subs: [] },
+  { key: "backtesting", label: "Backtesting", to: "/market/backtesting",
+    match: (p) => /^\/market\/backtesting/.test(p), subs: [] },
   { key: "settings", label: "Settings", to: "/market/settings",
     match: (p) => /^\/market\/settings/.test(p), subs: [] },
 ];
@@ -136,6 +144,8 @@ export default function Market() {
               <Route path="alerts" element={<Alerts />} />
               <Route path="backtesting" element={<Backtesting />} />
               <Route path="planner" element={<Planner />} />
+              <Route path="ai" element={<AIEngine />} />
+              <Route path="ai/:symbol" element={<AIEngine />} />
               <Route path="options" element={<OptionChain />} />
               <Route path="options/:symbol" element={<OptionChain />} />
               <Route path="settings" element={<MarketSettings />} />
