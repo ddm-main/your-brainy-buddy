@@ -22,9 +22,13 @@ export interface Quote {
   symbol: string;
   exchange: string;
   ltp: number;
+  previous_close: number | null;
   change_pct: number | null;
   day_change: number | null;
   source?: string | null;
+  as_of?: string | null;
+  previous_close_as_of?: string | null;
+  stale?: boolean | null;
 }
 
 export interface IndexQuote {

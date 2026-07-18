@@ -11,7 +11,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { Download, Plus, Trash2, X } from "lucide-react";
-import type { Position } from "@/lib/market/types";
+import type { Position, Quote } from "@/lib/market/types";
+import { positionPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 
 const emptyForm = { symbol: "", exchange: "NSE", side: "long", quantity: "", entry_price: "", stop_loss: "", target: "", journal_notes: "" };
 
@@ -29,8 +30,8 @@ export default function Positions() {
   const keys = useMemo(() => [...new Set(open.map((p) => `${p.exchange}:${p.symbol}`))], [open]);
   const { data: quotesData } = useQuotes(keys);
   const quoteMap = useMemo(() => {
-    const m = new Map<string, { ltp: number; change_pct: number | null; day_change: number | null }>();
-    for (const q of quotesData?.quotes ?? []) m.set(`${q.exchange}:${q.symbol}`, q);
+    const m = new Map<string, Quote>();
+    for (const q of quotesData?.quotes ?? []) m.set(quoteKey(q.exchange, q.symbol), q);
     return m;
   }, [quotesData]);
 
@@ -63,7 +64,7 @@ export default function Positions() {
   };
 
   const closePosition = async (p: Position) => {
-    const q = quoteMap.get(`${p.exchange}:${p.symbol}`);
+    const q = quoteMap.get(quoteKey(p.exchange, p.symbol));
     const exitStr = prompt(`Exit price for ${p.symbol}?`, q?.ltp ? String(q.ltp) : "");
     if (exitStr == null) return;
     const exit = Number(exitStr);
@@ -92,13 +93,14 @@ export default function Positions() {
   };
 
   const totals = useMemo(() => {
-    let unrealized = 0, day = 0;
+    let unrealized = 0;
+    const dayPnls: Array<number | null> = [];
     for (const p of open) {
-      const q = quoteMap.get(`${p.exchange}:${p.symbol}`);
-      if (!q) continue;
-      unrealized += p.side === "long" ? (q.ltp - p.entry_price) * p.quantity : (p.entry_price - q.ltp) * p.quantity;
-      if (q.day_change != null) day += (p.side === "long" ? 1 : -1) * q.day_change * p.quantity;
+      const calc = positionPnl({ quantity: p.quantity, entryPrice: p.entry_price, side: p.side, quote: quoteMap.get(quoteKey(p.exchange, p.symbol)) });
+      if (calc.unrealized != null) unrealized += calc.unrealized;
+      dayPnls.push(calc.todayPnl);
     }
+    const day = sumNullable(dayPnls);
     const realized = closed.reduce((a, p) => a + (p.pnl ?? 0), 0);
     return { unrealized, day, realized };
   }, [open, closed, quoteMap]);
@@ -120,15 +122,13 @@ export default function Positions() {
     { header: "Entry", accessorKey: "entry_price", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue()) },
     {
       header: "LTP", id: "ltp", meta: { align: "right" },
-      accessorFn: (p) => quoteMap.get(`${p.exchange}:${p.symbol}`)?.ltp ?? null,
+      accessorFn: (p) => quoteMap.get(quoteKey(p.exchange, p.symbol))?.ltp ?? null,
       cell: ({ getValue }) => fmtNum(getValue()),
     },
     {
       header: "P&L", id: "pnl", meta: { align: "right" },
       accessorFn: (p) => {
-        const q = quoteMap.get(`${p.exchange}:${p.symbol}`);
-        if (!q) return null;
-        return p.side === "long" ? (q.ltp - p.entry_price) * p.quantity : (p.entry_price - q.ltp) * p.quantity;
+        return positionPnl({ quantity: p.quantity, entryPrice: p.entry_price, side: p.side, quote: quoteMap.get(quoteKey(p.exchange, p.symbol)) }).unrealized;
       },
       cell: ({ getValue }) => {
         const v = getValue() as number | null;
@@ -139,10 +139,7 @@ export default function Positions() {
     {
       header: "P&L %", id: "pnlPct", meta: { align: "right" },
       accessorFn: (p) => {
-        const q = quoteMap.get(`${p.exchange}:${p.symbol}`);
-        if (!q || !p.entry_price) return null;
-        const raw = p.side === "long" ? (q.ltp - p.entry_price) / p.entry_price : (p.entry_price - q.ltp) / p.entry_price;
-        return raw * 100;
+        return positionPnl({ quantity: p.quantity, entryPrice: p.entry_price, side: p.side, quote: quoteMap.get(quoteKey(p.exchange, p.symbol)) }).unrealizedPct;
       },
       cell: ({ getValue }) => <PctCell value={getValue() as number | null} />,
     },
@@ -194,7 +191,7 @@ export default function Positions() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 8 }}>
           <Stat label="Open Positions" value={String(open.length)} />
           <Stat label="Unrealized P&L" value={inr(totals.unrealized)} tone={totals.unrealized >= 0 ? "ok" : "err"} />
-          <Stat label="Today" value={inr(totals.day)} tone={totals.day >= 0 ? "ok" : "err"} />
+          <Stat label="Today" value={totals.day == null ? "—" : inr(totals.day)} tone={totals.day == null ? undefined : totals.day >= 0 ? "ok" : "err"} />
           <Stat label="Realized (closed)" value={inr(totals.realized)} tone={totals.realized >= 0 ? "ok" : "err"} />
         </div>
       </HudPanel>

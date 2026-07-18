@@ -1,32 +1,75 @@
-# Fix stale/incorrect prices across Market
+## Findings confirmed
 
-## Root cause
+- **Holdings UI is mathematically using different bases**:
+  - Total P&L = `(LTP - average buy price) × quantity`.
+  - Today’s P&L = `provider day_change × quantity`.
+- For NILKAMAL, database currently has:
+  - Average buy: `₹1467.0872`
+  - LTP shown: `₹1473.50`
+  - Total P&L: about `₹6.41`
+  - Cached previous daily close: `₹1341.10` from `market_daily_prices`, dated `2026-07-16`
+- That means Today’s P&L is being calculated against an incorrect/stale previous close path, which makes it larger than total P&L.
+- The same quote `day_change` value is reused in **Holdings**, **Market Dashboard**, and **Positions**, so this is not just a display bug.
 
-- `market_daily_prices` for NILKAMAL has 496 rows but latest is `2026-07-16` (Friday 07-17's close of ₹1473.50 was never cached). NILKAMAL is not in `market_stocks`, so the EOD pipeline never refreshes it.
-- `market-candles` for `1D` only backfills when `rows.length < 100`. With 496 stale rows it skips the fetch and returns 2026-07-16's close (₹1341.10) — the value the Analysis chart displays.
-- `market_holdings` has no `ltp` column; LTP is fetched live via `market-quotes`. NILKAMAL has no token in `market_stocks`, so `kotakProvider.getQuotes` routes it to Yahoo. If Yahoo returns null (rate limit / transient), the symbol is silently omitted → Holdings row shows `—` and computes P&L as 0.
+## Plan
 
-## Changes
+1. **Create one shared P&L calculation model**
+   - Add a market P&L utility used by Holdings, Dashboard, and Positions.
+   - Standardize:
+     - `invested = avg/entry price × quantity`
+     - `current = LTP × quantity`
+     - `totalPnl = current - invested`
+     - `todayPnl = (LTP - reliable previous close) × quantity`
+   - Prevent invalid states like stale/missing day-change producing misleading values.
 
-### 1. `supabase/functions/market-candles/index.ts` — always refresh stale 1D cache
-Compute the most recent expected trading day (IST, Mon–Fri, using 16:00 IST as EOD cutoff). If the latest cached `trade_date` is older than that, fetch a short recent range (`30d`, interval `1d`) from the active provider (Kotak → Yahoo fallback) and merge the fresh bars into the returned series in addition to upserting to cache. Keep the existing `< 100 rows` full-backfill path.
+2. **Fix quote payload quality at the edge function**
+   - Update `market-quotes` to return:
+     - `ltp`
+     - `previous_close`
+     - `day_change`
+     - `change_pct`
+     - `source`
+     - `stale` / `as_of` metadata when using cache.
+   - Do not expose `day_change` when the provider cannot supply a reliable previous close.
+   - For cache fallback, return LTP only unless a real prior close is known from fresh daily data.
 
-### 2. `supabase/functions/market-quotes/index.ts` — quote retry + never-fail rows
-- If Yahoo's per-symbol `fetchOne` returns null on first pass, retry once with a 400 ms delay (mitigates Yahoo's occasional 429s that made individual symbols disappear).
-- If a symbol still has no live quote, fall back to the latest `market_daily_prices.close` and emit it with `source: "cache"` and `change_pct/day_change: null`. Prevents `—` LTP and 0-P&L for symbols outside the Kotak universe.
+3. **Fix Kotak quote normalization**
+   - Deepen parsing of Kotak quote fields because `close`, `prevClose`, and LTP field names vary by endpoint.
+   - Ignore zero/empty previous-close values.
+   - Add guardrails so a bad previous close cannot create impossible Today’s P&L.
 
-### 3. `supabase/functions/market-sync-holdings/index.ts` — prime `market_stocks` for user holdings
-After syncing holdings from Kotak, upsert a stub row into `market_stocks` (symbol, exchange, token from Kotak's holding payload) for each holding so future quotes/candles use the Kotak fast path. Silently ignore rows that lack a token in Kotak's response.
+4. **Fix Yahoo previous-close derivation**
+   - Use exchange-local trading day logic for Indian symbols instead of UTC-only date comparison.
+   - Prefer the latest completed prior trading session from the chart bars.
+   - If Yahoo returns stale previous close, mark day change unavailable instead of using it blindly.
 
-### 4. `src/routes/market/Holdings.tsx` — surface cache/staleness
-When a quote's `source === "cache"`, render the LTP with a small `stale` chip so it's visibly distinguished from live quotes, and colour the Today's P&L cell neutral (not green/red) since it's unknown.
+5. **Update Holdings UI**
+   - Show Today as `—` when previous close is unavailable/untrusted.
+   - Add a compact source/stale indicator so Deepak can tell whether LTP came from Kotak, Yahoo, or cache.
+   - Recalculate summary totals only from trusted rows.
+
+6. **Update Dashboard and Positions**
+   - Replace their duplicated day-P&L math with the shared utility.
+   - Ensure Dashboard portfolio pulse and Positions “Today” match Holdings.
+
+7. **Validate with the NILKAMAL case**
+   - Expected after fix:
+     - LTP around `₹1473.50`
+     - Total P&L around `₹6.41`
+     - Today’s P&L is either based on a verified previous close or shown as unavailable, never falsely `₹132.4` from stale `₹1341.10`.
+
+## Technical files to change
+
+- `supabase/functions/market-quotes/index.ts`
+- `supabase/functions/_shared/market/provider.ts`
+- `supabase/functions/_shared/market/yahooClient.ts`
+- `src/routes/market/Holdings.tsx`
+- `src/routes/market/Dashboard.tsx`
+- `src/routes/market/Positions.tsx`
+- New shared frontend helper under `src/lib/market/` for quote/P&L normalization
 
 ## Verification
 
-- Reload `/market/analysis/NILKAMAL` — chart's last candle date should equal 2026-07-17 with close ≈ ₹1473.50.
-- Reload `/market/holdings` — NILKAMAL row LTP shows ₹1473.5, Current ≈ ₹1473.5 × qty, P&L ≈ +₹6.41 per share × qty.
-- Verify by tailing `market-candles` and `market-quotes` edge function logs during the refresh.
-
-## Out of scope
-
-- Adding NILKAMAL (and other user holdings outside NIFTY500) to the nightly EOD pipeline universe — the sync-holdings prime above is the minimum viable fix; a full universe overhaul can follow in a later pass.
+- Deploy/test the updated `market-quotes` function.
+- Query/call the NILKAMAL quote path and confirm stale `₹1341.10` is not used for Today’s P&L.
+- Verify Holdings, Dashboard, and Positions all show consistent P&L values.

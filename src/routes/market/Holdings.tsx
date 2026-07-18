@@ -9,12 +9,14 @@ import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { Plus, RefreshCw, Trash2, Download } from "lucide-react";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
+import { holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
+import type { Quote } from "@/lib/market/types";
 
 type Holding = {
   id: string; symbol: string; exchange: string; quantity: number; avg_price: number;
   buy_date: string | null; investment_type: string | null; notes: string | null; source: string;
 };
-type QuoteMap = Record<string, { ltp: number; change_pct: number | null; day_change: number | null }>;
+type QuoteMap = Record<string, Quote>;
 type ScoreMap = Record<string, { breakout_score: number | null; prebreakout_score: number | null; score_components: any }>;
 
 const empty = { symbol: "", exchange: "NSE", quantity: "", avg_price: "", buy_date: "", investment_type: "long_term", notes: "" };
@@ -64,7 +66,7 @@ export default function Holdings() {
       const r = await callFn("market-quotes", { symbols });
       const map: QuoteMap = {};
       for (const q of r?.quotes ?? []) {
-        map[`${q.exchange}:${q.symbol}`] = { ltp: q.ltp, change_pct: q.change_pct, day_change: q.day_change };
+        map[quoteKey(q.exchange, q.symbol)] = q;
       }
       setQuotes(map);
     } catch (e) {
@@ -128,14 +130,15 @@ export default function Holdings() {
   };
 
   const totals = useMemo(() => {
-    let invested = 0, current = 0, dayPnl = 0;
+    let invested = 0, current = 0;
+    const dayPnls: Array<number | null> = [];
     for (const h of rows) {
-      const q = quotes[`${h.exchange}:${h.symbol}`];
-      const ltp = q?.ltp || h.avg_price;
-      invested += Number(h.avg_price) * Number(h.quantity);
-      current += ltp * Number(h.quantity);
-      if (q?.day_change != null) dayPnl += q.day_change * Number(h.quantity);
+      const calc = holdingPnl({ quantity: h.quantity, avgPrice: h.avg_price, quote: quotes[quoteKey(h.exchange, h.symbol)] });
+      invested += calc.invested;
+      current += calc.current;
+      dayPnls.push(calc.todayPnl);
     }
+    const dayPnl = sumNullable(dayPnls);
     return { invested, current, pnl: current - invested, pnlPct: invested ? ((current - invested) / invested) * 100 : 0, dayPnl };
   }, [rows, quotes]);
 
@@ -158,7 +161,7 @@ export default function Holdings() {
           <Stat label="Current Value" value={inr(totals.current)} />
           <Stat label="Total P&L" value={inr(totals.pnl)} tone={totals.pnl >= 0 ? "ok" : "err"} />
           <Stat label="Return %" value={`${totals.pnlPct.toFixed(2)}%`} tone={totals.pnlPct >= 0 ? "ok" : "err"} />
-          <Stat label="Today's P&L" value={inr(totals.dayPnl)} tone={totals.dayPnl >= 0 ? "ok" : "err"} />
+          <Stat label="Today's P&L" value={totals.dayPnl == null ? "—" : inr(totals.dayPnl)} tone={totals.dayPnl == null ? undefined : totals.dayPnl >= 0 ? "ok" : "err"} />
           <Stat label="Holdings" value={rows.length.toString()} />
         </div>
       </HudPanel>
@@ -202,13 +205,8 @@ export default function Holdings() {
             </thead>
             <tbody>
               {rows.map((h) => {
-                const q = quotes[`${h.exchange}:${h.symbol}`];
-                const ltp = q?.ltp || h.avg_price;
-                const inv = Number(h.avg_price) * Number(h.quantity);
-                const cur = ltp * Number(h.quantity);
-                const pnl = cur - inv;
-                const pnlPct = inv ? (pnl / inv) * 100 : 0;
-                const day = q?.day_change != null ? q.day_change * Number(h.quantity) : null;
+                const q = quotes[quoteKey(h.exchange, h.symbol)];
+                const calc = holdingPnl({ quantity: h.quantity, avgPrice: h.avg_price, quote: q });
                 return (
                   <tr key={h.id} style={{ borderBottom: "1px solid var(--edge)" }}>
                     <td style={td}>
@@ -217,16 +215,16 @@ export default function Holdings() {
                     </td>
                     <td style={td}>{h.quantity}</td>
                     <td style={td}>{Number(h.avg_price).toFixed(2)}</td>
-                    <td style={td}>{q?.ltp ? ltp.toFixed(2) : "—"}</td>
-                    <td style={td}>{inr(inv)}</td>
-                    <td style={td}>{inr(cur)}</td>
-                    <td style={{ ...td, color: pnl >= 0 ? "var(--ok)" : "var(--danger)" }}>{inr(pnl)}</td>
-                    <td style={{ ...td, color: pnlPct >= 0 ? "var(--ok)" : "var(--danger)" }}>{pnlPct.toFixed(2)}%</td>
-                    <td style={{ ...td, color: (day ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>{day == null ? "—" : inr(day)}</td>
+                    <td style={td}>{q?.ltp ? calc.ltp.toFixed(2) : "—"}</td>
+                    <td style={td}>{inr(calc.invested)}</td>
+                    <td style={td}>{inr(calc.current)}</td>
+                    <td style={{ ...td, color: calc.totalPnl >= 0 ? "var(--ok)" : "var(--danger)" }}>{inr(calc.totalPnl)}</td>
+                    <td style={{ ...td, color: calc.totalPnlPct >= 0 ? "var(--ok)" : "var(--danger)" }}>{calc.totalPnlPct.toFixed(2)}%</td>
+                    <td style={{ ...td, color: (calc.todayPnl ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }} title={q?.stale ? "Quote is stale; today's P&L unavailable" : undefined}>{calc.todayPnl == null ? "—" : inr(calc.todayPnl)}</td>
                     <td style={td}>
                       <ScoreBadge score={scores[h.symbol]?.breakout_score} components={scores[h.symbol]?.score_components?.breakout} label="breakout components" />
                     </td>
-                    <td style={td}><Chip tone={h.source === "manual" ? "neutral" : "accent"}>{h.source}</Chip></td>
+                    <td style={td}><Chip tone={q?.stale ? "warn" : h.source === "manual" ? "neutral" : "accent"}>{q?.stale ? "stale" : h.source}</Chip></td>
                     <td style={td}>
                       <button onClick={() => remove(h.id)} className="hud-btn" data-variant="ghost" data-size="sm" title="Delete">
                         <Trash2 size={11} />

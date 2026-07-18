@@ -5,6 +5,33 @@
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { getActiveProvider } from "../_shared/market/provider.ts";
 
+const istDateKey = (d: Date): string =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+
+function expectedTradingDate(): string {
+  const d = new Date();
+  const ist = new Date(d.getTime() + 5.5 * 3600_000);
+  const day = ist.getUTCDay();
+  if (day === 0) ist.setUTCDate(ist.getUTCDate() - 2);
+  if (day === 6) ist.setUTCDate(ist.getUTCDate() - 1);
+  return istDateKey(new Date(ist.getTime() - 5.5 * 3600_000));
+}
+
+function currentIstDate(): string {
+  return istDateKey(new Date());
+}
+
+function isCurrentIstTradingDay(): boolean {
+  const ist = new Date(Date.now() + 5.5 * 3600_000);
+  const day = ist.getUTCDay();
+  return day !== 0 && day !== 6;
+}
+
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
   try {
@@ -49,37 +76,56 @@ Deno.serve(async (req) => {
         .in("symbol", uniqSymbols)
         .order("trade_date", { ascending: false })
         .limit(2000);
-      const latest = new Map<string, { close: number; trade_date: string }>();
+      const byKeyRows = new Map<string, Array<{ close: number; trade_date: string }>>();
       for (const r of (cache ?? []) as any[]) {
         const key = `${r.exchange}:${r.symbol}`;
-        if (!latest.has(key)) latest.set(key, { close: Number(r.close), trade_date: r.trade_date });
+        const list = byKeyRows.get(key) ?? [];
+        list.push({ close: Number(r.close), trade_date: r.trade_date });
+        byKeyRows.set(key, list);
       }
+      const expected = expectedTradingDate();
       for (const p of parsed) {
-        const hit = latest.get(p.key);
+        const rows = byKeyRows.get(p.key) ?? [];
+        const hit = rows[0];
+        const previous = rows.find((r) => r.trade_date < hit?.trade_date);
         if (hit && hit.close) {
+          const isStale = hit.trade_date < expected;
           byKey.set(p.key, {
             key: p.key,
             price: hit.close,
-            change_abs: null,
-            change_pct: null,
+            previous_close: !isStale && previous?.close ? previous.close : null,
+            change_abs: !isStale && previous?.close ? hit.close - previous.close : null,
+            change_pct: !isStale && previous?.close ? ((hit.close - previous.close) / previous.close) * 100 : null,
             volume: null,
             source: "cache" as any,
+            as_of: hit.trade_date,
+            previous_close_as_of: previous?.trade_date ?? null,
           });
         }
       }
     }
 
+    const expected = expectedTradingDate();
+    const today = currentIstDate();
+    const allowDayMove = isCurrentIstTradingDay();
+
     const out = symbols.flatMap((key) => {
       const q = byKey.get(key);
       if (!q || !q.price) return [];
       const [ex, sym] = key.includes(":") ? key.split(":") : ["NSE", key];
+      const stale = q.as_of != null && q.as_of < expected;
+      const dayUnavailable = !allowDayMove || !q.as_of || q.as_of !== today;
       return [{
         symbol: sym,
         exchange: ex,
         ltp: q.price,
-        change_pct: q.change_pct ?? null,
-        day_change: q.change_abs ?? null,
+        previous_close: stale || dayUnavailable ? null : q.previous_close ?? null,
+        change_pct: stale || dayUnavailable ? null : q.change_pct ?? null,
+        day_change: stale || dayUnavailable ? null : q.change_abs ?? null,
         source: q.source,
+        as_of: q.as_of ?? null,
+        previous_close_as_of: q.previous_close_as_of ?? null,
+        stale,
       }];
     });
     return jsonResponse(req, { quotes: out, source: provider.name });

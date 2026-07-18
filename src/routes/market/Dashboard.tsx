@@ -15,7 +15,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { RefreshCw, Sparkles } from "lucide-react";
-import type { StockScore } from "@/lib/market/types";
+import type { Quote, StockScore } from "@/lib/market/types";
+import { holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 
 export default function MarketDashboard() {
   const push = useUi((s) => s.push);
@@ -60,7 +61,7 @@ export default function MarketDashboard() {
     queryKey: ["market", "dash-pf-quotes", (counts?.holdingRows ?? []).map((h) => h.symbol).join(",")],
     queryFn: async () => {
       const keys = Array.from(new Set((counts!.holdingRows).map((h) => `${h.exchange}:${h.symbol}`)));
-      return callMarketFn<{ quotes: Array<{ symbol: string; exchange: string; ltp: number; day_change: number | null }> }>("market-quotes", { symbols: keys });
+      return callMarketFn<{ quotes: Quote[] }>("market-quotes", { symbols: keys });
     },
     enabled: (counts?.holdingRows.length ?? 0) > 0,
     refetchInterval: 60_000,
@@ -68,16 +69,16 @@ export default function MarketDashboard() {
   const pf = useMemo(() => {
     const rows = counts?.holdingRows ?? [];
     if (rows.length === 0) return null;
-    const byKey = new Map((pfQuotes?.quotes ?? []).map((q) => [`${q.exchange}:${q.symbol}`, q]));
-    let invested = 0, current = 0, day = 0;
+    const byKey = new Map((pfQuotes?.quotes ?? []).map((q) => [quoteKey(q.exchange, q.symbol), q]));
+    let invested = 0, current = 0;
+    const dayPnls: Array<number | null> = [];
     for (const h of rows) {
-      const q = byKey.get(`${h.exchange}:${h.symbol}`);
-      // `|| avg_price`: an ltp of 0 means "no quote", never a real price
-      const ltp = q?.ltp || h.avg_price;
-      invested += h.avg_price * h.quantity;
-      current += ltp * h.quantity;
-      if (q?.day_change != null) day += q.day_change * h.quantity;
+      const calc = holdingPnl({ quantity: h.quantity, avgPrice: h.avg_price, quote: byKey.get(quoteKey(h.exchange, h.symbol)) });
+      invested += calc.invested;
+      current += calc.current;
+      dayPnls.push(calc.todayPnl);
     }
+    const day = sumNullable(dayPnls);
     return { invested, current, pnl: current - invested, day };
   }, [counts, pfQuotes]);
 
@@ -250,7 +251,7 @@ export default function MarketDashboard() {
               {pf && (
                 <>
                   <StatTile label="Current value" value={`₹${Math.round(pf.current).toLocaleString("en-IN")}`} to="/market/holdings" />
-                  <StatTile label="Today's P&L" value={`${pf.day >= 0 ? "+" : ""}₹${Math.round(pf.day).toLocaleString("en-IN")}`} tone={pf.day >= 0 ? "ok" : "err"} />
+                  <StatTile label="Today's P&L" value={pf.day == null ? "—" : `${pf.day >= 0 ? "+" : ""}₹${Math.round(pf.day).toLocaleString("en-IN")}`} tone={pf.day == null ? "accent" : pf.day >= 0 ? "ok" : "err"} />
                   <StatTile label="Total P&L" value={`${pf.pnl >= 0 ? "+" : ""}₹${Math.round(pf.pnl).toLocaleString("en-IN")}`} tone={pf.pnl >= 0 ? "ok" : "err"} />
                 </>
               )}
