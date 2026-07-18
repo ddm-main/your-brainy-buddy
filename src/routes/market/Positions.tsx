@@ -64,7 +64,7 @@ export default function Positions() {
   };
 
   const closePosition = async (p: Position) => {
-    const q = quoteMap.get(`${p.exchange}:${p.symbol}`);
+    const q = quoteMap.get(quoteKey(p.exchange, p.symbol));
     const exitStr = prompt(`Exit price for ${p.symbol}?`, q?.ltp ? String(q.ltp) : "");
     if (exitStr == null) return;
     const exit = Number(exitStr);
@@ -122,7 +122,7 @@ export default function Positions() {
     { header: "Entry", accessorKey: "entry_price", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue()) },
     {
       header: "LTP", id: "ltp", meta: { align: "right" },
-      accessorFn: (p) => quoteMap.get(`${p.exchange}:${p.symbol}`)?.ltp ?? null,
+      accessorFn: (p) => quoteMap.get(quoteKey(p.exchange, p.symbol))?.ltp ?? null,
       cell: ({ getValue }) => fmtNum(getValue()),
     },
     {

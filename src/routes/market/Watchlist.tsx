@@ -9,10 +9,12 @@ import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
+import { getTrustedDayChange, quoteKey } from "@/lib/market/pnl";
+import type { Quote } from "@/lib/market/types";
 
 type Watchlist = { id: string; name: string; color: string | null };
 type Item = { id: string; watchlist_id: string; symbol: string; exchange: string; priority: number | null; notes: string | null; tags: string[] | null };
-type QuoteMap = Record<string, { ltp: number; change_pct: number | null }>;
+type QuoteMap = Record<string, Quote>;
 type ScoreMap = Record<string, { breakout_score: number | null; prebreakout_score: number | null; score_components: any }>;
 
 export default function Watchlist() {
@@ -68,7 +70,7 @@ export default function Watchlist() {
       const symbols = activeItems.map((i) => `${i.exchange}:${i.symbol}`);
       const r = await callFn("market-quotes", { symbols });
       const map: QuoteMap = {};
-      for (const q of r?.quotes ?? []) map[`${q.exchange}:${q.symbol}`] = { ltp: q.ltp, change_pct: q.change_pct };
+      for (const q of r?.quotes ?? []) map[quoteKey(q.exchange, q.symbol)] = q;
       setQuotes(map);
     } catch (e) {
       if (!opts.silent) push(toSafeError(e, "Quotes failed").message, "err");
@@ -175,7 +177,8 @@ export default function Watchlist() {
                 </thead>
                 <tbody>
                   {activeItems.map((i) => {
-                    const q = quotes[`${i.exchange}:${i.symbol}`];
+                    const q = quotes[quoteKey(i.exchange, i.symbol)];
+                    const dayChange = getTrustedDayChange(q);
                     return (
                       <tr key={i.id} style={{ borderBottom: "1px solid var(--edge)" }}>
                         <td style={{ padding: "6px 8px" }}>
@@ -185,6 +188,8 @@ export default function Watchlist() {
                         <td style={{ padding: "6px 8px" }}>{q ? q.ltp.toFixed(2) : "—"}</td>
                         <td style={{ padding: "6px 8px", color: (q?.change_pct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
                           {q?.change_pct == null ? "—" : `${q.change_pct >= 0 ? "+" : ""}${q.change_pct.toFixed(2)}%`}
+                          {dayChange == null ? null : <span style={{ marginLeft: 6, color: "var(--text-dim)" }}>({dayChange >= 0 ? "+" : ""}{dayChange.toFixed(2)})</span>}
+                          {q?.stale ? <span style={{ marginLeft: 6, color: "var(--warn)", fontSize: 10 }}>stale</span> : null}
                         </td>
                         <td style={{ padding: "6px 8px" }}>
                           <ScoreBadge score={scores[i.symbol]?.breakout_score} components={scores[i.symbol]?.score_components?.breakout} label="breakout components" />

@@ -107,7 +107,7 @@ Deno.serve(async (req) => {
         exchange: ex,
         ltp: q.price,
         previous_close: stale ? null : q.previous_close ?? null,
-        change_pct: q.change_pct ?? null,
+        change_pct: stale ? null : q.change_pct ?? null,
         day_change: stale ? null : q.change_abs ?? null,
         source: q.source,
         as_of: q.as_of ?? null,

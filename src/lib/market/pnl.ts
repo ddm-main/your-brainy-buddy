@@ -6,7 +6,7 @@ const finite = (v: unknown): number | null => {
 };
 
 export function quoteKey(exchange: string, symbol: string): string {
-  return `${exchange}:${symbol}`;
+  return `${exchange.trim().toUpperCase()}:${symbol.trim().toUpperCase()}`;
 }
 
 export function getQuoteLtp(quote: Quote | undefined, fallback: number): number {
