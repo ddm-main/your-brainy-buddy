@@ -2,27 +2,31 @@
 // NSE archives (CSV). Fallback: a static list of liquid large/mid caps so the
 // pipeline still works when NSE blocks datacenter IPs.
 
-const NIFTY500_CSV = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv";
+const NIFTY500_SOURCES = [
+  "https://niftyindices.com/IndexConstituent/ind_nifty500list.csv",
+  "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
+];
 
 export async function fetchNifty500(): Promise<string[]> {
-  try {
-    const r = await fetch(NIFTY500_CSV, {
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
-    });
-    if (!r.ok) return [];
-    const text = await r.text();
-    const lines = text.split(/\r?\n/).slice(1);
-    const out: string[] = [];
-    for (const line of lines) {
-      // CSV: Company Name,Industry,Symbol,Series,ISIN Code
-      const cols = line.split(",");
-      const symbol = cols[2]?.trim();
-      if (symbol && /^[A-Z0-9&-]+$/.test(symbol)) out.push(symbol);
-    }
-    return out;
-  } catch {
-    return [];
+  for (const url of NIFTY500_SOURCES) {
+    try {
+      const r = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+      });
+      if (!r.ok) continue;
+      const text = await r.text();
+      const lines = text.split(/\r?\n/).slice(1);
+      const out: string[] = [];
+      for (const line of lines) {
+        // CSV: Company Name,Industry,Symbol,Series,ISIN Code
+        const cols = line.split(",");
+        const symbol = cols[2]?.trim();
+        if (symbol && /^[A-Z0-9&-]+$/.test(symbol)) out.push(symbol);
+      }
+      if (out.length > 50) return out;
+    } catch { /* try next */ }
   }
+  return [];
 }
 
 // Static fallback — liquid NSE large/mid caps (Nifty 100 + prominent midcaps).

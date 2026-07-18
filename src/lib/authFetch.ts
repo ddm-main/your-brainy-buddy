@@ -2,7 +2,8 @@
 // Falls back to the publishable key (apikey) so the request still passes the
 // PostgREST gateway; edge fns then validate the JWT server-side.
 
-import { supabase, SAFE_SUPABASE_KEY } from "@/integrations/supabase/client";
+import { supabase } from "@/integrations/supabase/client";
+import { SAFE_SUPABASE_KEY } from "@/lib/supabaseSafe";
 
 async function bearer(): Promise<string | null> {
   const { data } = await supabase.auth.getSession();

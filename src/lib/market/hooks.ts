@@ -252,6 +252,38 @@ export function useFundamentals(symbol: string | undefined, exchange = "NSE") {
   });
 }
 
+export interface StockInsight {
+  verdict: "buy" | "hold" | "wait" | "avoid";
+  confidence: number;
+  entry: number | null;
+  stop_loss: number | null;
+  targets: number[];
+  holding_period_days: number | null;
+  rationale: string;
+  risks: string[];
+}
+export function useStockInsight(symbol: string | undefined, exchange = "NSE") {
+  return useQuery({
+    queryKey: ["market", "insight", symbol ?? "", exchange],
+    queryFn: () => callMarketFn<{ payload: StockInsight; cached: boolean; computed_at: string }>(
+      "market-stock-insight", { symbol, exchange },
+    ),
+    enabled: !!symbol,
+    staleTime: 6 * 3600_000,
+    retry: 1,
+  });
+}
+export function useRefreshStockInsight() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ symbol, exchange = "NSE" }: { symbol: string; exchange?: string }) =>
+      callMarketFn<{ payload: StockInsight; cached: boolean; computed_at: string }>(
+        "market-stock-insight", { symbol, exchange, force: true },
+      ),
+    onSuccess: (_r, v) => qc.invalidateQueries({ queryKey: ["market", "insight", v.symbol, v.exchange ?? "NSE"] }),
+  });
+}
+
 export function useOptionChain(symbol: string | undefined, expiry?: string) {
   return useQuery({
     queryKey: ["market", "optionchain", symbol ?? "", expiry ?? ""],

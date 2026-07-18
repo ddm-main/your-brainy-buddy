@@ -1,5 +1,5 @@
 // Single entry point for market edge-function calls.
-import { SAFE_SUPABASE_URL } from "@/integrations/supabase/client";
+import { SAFE_SUPABASE_URL } from "@/lib/supabaseSafe";
 import { authFetch } from "@/lib/authFetch";
 
 export async function callMarketFn<T = any>(name: string, body: Record<string, unknown> = {}): Promise<T> {

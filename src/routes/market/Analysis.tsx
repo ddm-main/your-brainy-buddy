@@ -9,9 +9,9 @@ import { CandleChart, type ChartType, type IndicatorFlags } from "@/components/m
 import { TradingViewChart, tvInterval } from "@/components/market/TradingViewChart";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { fmtNum, fmtInt, fmtPct } from "@/components/hud/DataTable";
-import { useCandles, useDepth, useQuotes, useSectorStrength, useStockScores } from "@/lib/market/hooks";
+import { useCandles, useDepth, useFundamentals, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores } from "@/lib/market/hooks";
 import { getTrustedDayChange } from "@/lib/market/pnl";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, RefreshCw } from "lucide-react";
 
 const TIMEFRAMES = ["1D", "1h", "15m", "5m"];
 const CHART_TYPES: Array<{ key: ChartType; label: string }> = [
@@ -55,6 +55,11 @@ export default function Analysis() {
   const quote = quotesData?.quotes?.[0];
   const { data: sectors = [] } = useSectorStrength();
   const { data: depth } = useDepth(sym);
+  const { data: fundData } = useFundamentals(sym);
+  const fund = fundData?.fundamentals as any | undefined;
+  const { data: insightData, isLoading: insightLoading, error: insightError } = useStockInsight(sym);
+  const refreshInsight = useRefreshStockInsight();
+  const insight = insightData?.payload;
   const sectorRow = useMemo(
     () => sectors.find((s) => s.sector === score?.sector),
     [sectors, score],
@@ -275,6 +280,78 @@ export default function Analysis() {
           </Row>
         </HudPanel>
         </>
+        )}
+
+        {/* AI Verdict — cached 6h per symbol */}
+        <HudPanel flow title="AI Verdict" index="A5"
+          actions={
+            <Btn size="sm" variant="ghost" disabled={!sym || refreshInsight.isPending}
+              onClick={() => sym && refreshInsight.mutate({ symbol: sym })}
+              aria-label="refresh AI verdict">
+              <RefreshCw size={11} />
+            </Btn>
+          }>
+          {insightLoading || refreshInsight.isPending ? (
+            <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)" }}>analyzing…</div>
+          ) : insightError ? (
+            <div className="hud-label" style={{ fontSize: 11, color: "var(--danger)" }}>
+              {(insightError as Error).message.includes("no coverage")
+                ? "no coverage — run pipeline"
+                : "AI unavailable — try refresh"}
+            </div>
+          ) : insight ? (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <Chip tone={insight.verdict === "buy" ? "ok" : insight.verdict === "avoid" ? "err" : insight.verdict === "wait" ? "warn" : "accent"}>
+                  {insight.verdict.toUpperCase()}
+                </Chip>
+                <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                  conf {Math.round(insight.confidence * 100)}%
+                </span>
+              </div>
+              {(insight.entry || insight.stop_loss || insight.targets.length > 0) && (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 11, marginBottom: 6 }}>
+                  {insight.entry != null && <Row label="Entry" mono>₹{fmtNum(insight.entry, 2)}</Row>}
+                  {insight.stop_loss != null && <Row label="Stop" mono>₹{fmtNum(insight.stop_loss, 2)}</Row>}
+                  {insight.targets.map((t, i) => (
+                    <Row key={i} label={`T${i + 1}`} mono>₹{fmtNum(t, 2)}</Row>
+                  ))}
+                  {insight.holding_period_days != null && (
+                    <Row label="Hold" mono>{insight.holding_period_days}d</Row>
+                  )}
+                </div>
+              )}
+              <div style={{ fontSize: 11, lineHeight: 1.5, color: "var(--text)", marginBottom: 4 }}>
+                {insight.rationale}
+              </div>
+              {insight.risks.length > 0 && (
+                <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 4 }}>
+                  <div className="hud-label" style={{ marginBottom: 2 }}>Risks</div>
+                  <ul style={{ margin: 0, paddingLeft: 14 }}>
+                    {insight.risks.map((r, i) => <li key={i}>{r}</li>)}
+                  </ul>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)" }}>press refresh</div>
+          )}
+        </HudPanel>
+
+        {/* Fundamentals */}
+        {fund && (
+          <HudPanel flow title="Fundamentals" index="A6">
+            <Row label="Market Cap" mono>{fund.marketCap ? `₹${fmtNum(fund.marketCap / 1e7, 0)} Cr` : "—"}</Row>
+            <Row label="P/E (TTM)" mono>{fmtNum(fund.trailingPE ?? fund.peRatio, 2)}</Row>
+            <Row label="P/B" mono>{fmtNum(fund.priceToBook, 2)}</Row>
+            <Row label="EPS (TTM)" mono>{fmtNum(fund.trailingEps ?? fund.eps, 2)}</Row>
+            <Row label="ROE" mono>{fund.returnOnEquity != null ? fmtPct(fund.returnOnEquity * 100) : "—"}</Row>
+            <Row label="Debt/Equity" mono>{fmtNum(fund.debtToEquity, 2)}</Row>
+            <Row label="Div Yield" mono>{fund.dividendYield != null ? fmtPct(fund.dividendYield * 100) : "—"}</Row>
+            <Row label="Beta" mono>{fmtNum(fund.beta, 2)}</Row>
+            {fund.sector && <Row label="Sector">{fund.sector}</Row>}
+            {fund.industry && <Row label="Industry">{fund.industry}</Row>}
+          </HudPanel>
         )}
       </div>
     </div>

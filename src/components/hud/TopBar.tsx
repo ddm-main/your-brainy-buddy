@@ -11,9 +11,9 @@ import { motion, AnimatePresence } from "framer-motion";
 
 const NAV = [
   { to: "/", label: "HUD" },
-  { to: "/tasks", label: "Tasks" },
   { to: "/market", label: "Market" },
   { to: "/finance", label: "Finance" },
+  { to: "/tasks", label: "Tasks" },
   { to: "/projects", label: "Projects" },
 ];
 

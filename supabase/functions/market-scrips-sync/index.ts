@@ -119,8 +119,9 @@ Deno.serve(async (req) => {
       svc.from("market_watchlist_items").select("symbol"),
       svc.from("market_positions").select("symbol"),
     ]);
+    const nifty500List = n500.length > 50 ? n500 : FALLBACK_UNIVERSE;
     const universe = dedupe([
-      ...(n500.length > 50 ? n500 : FALLBACK_UNIVERSE),
+      ...nifty500List,
       ...(holdingsRes.data ?? []).map((r: any) => r.symbol),
       ...(watchRes.data ?? []).map((r: any) => r.symbol),
       ...(posRes.data ?? []).map((r: any) => r.symbol),
@@ -140,6 +141,15 @@ Deno.serve(async (req) => {
         .in("symbol", universe.slice(i, i + 200))
         .eq("exchange", "NSE");
     }
+    // Flag is_nifty500 on the official (or fallback) list
+    await svc.from("market_stocks").update({ is_nifty500: false }).eq("is_nifty500", true);
+    for (let i = 0; i < nifty500List.length; i += 200) {
+      await svc.from("market_stocks")
+        .update({ is_nifty500: true })
+        .in("symbol", nifty500List.slice(i, i + 200))
+        .eq("exchange", "NSE");
+    }
+
 
     return jsonResponse(req, {
       ok: true,
