@@ -10,13 +10,13 @@ import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "@/lib/market/api";
-import { useCandles, useIndices, useMarketSettings, useSectorStrength, useStockScores } from "@/lib/market/hooks";
-import { CandleChart } from "@/components/market/CandleChart";
+import { useIndices, useIndexWatch, useIndexWatchMutations, useMarketSettings, useSectorStrength, useStockScores } from "@/lib/market/hooks";
+import { ALL_PRESETS, GLOBAL_PRESETS, INDIAN_PRESETS, type IndexPreset } from "@/lib/market/indices";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { RefreshCw, Sparkles, X } from "lucide-react";
-import type { IndexQuote, Quote, StockScore } from "@/lib/market/types";
+import { RefreshCw, Settings2, Sparkles, Trash2, X } from "lucide-react";
+import type { Quote, StockScore } from "@/lib/market/types";
 import { holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 
 export default function MarketDashboard() {
@@ -25,7 +25,7 @@ export default function MarketDashboard() {
   const qc = useQueryClient();
   const [insight, setInsight] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
-  const [selIdx, setSelIdx] = useState<IndexQuote | null>(null);
+  const [manageOpen, setManageOpen] = useState(false);
 
   useEffect(() => {
     const handler = () => qc.invalidateQueries({ queryKey: ["market"] });
@@ -171,6 +171,9 @@ export default function MarketDashboard() {
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <HudPanel flow title="Market Summary" index="MK.D1" live={indicesFetching ? "warn" : "ok"} actions={
         <div style={{ display: "flex", gap: 6 }}>
+          <Btn size="sm" onClick={() => setManageOpen(true)} title="Manage indices">
+            <Settings2 size={11} style={{ marginRight: 4 }} /> manage
+          </Btn>
           <Btn size="sm" onClick={primeData} disabled={busy !== null}>
             <Sparkles size={11} style={{ marginRight: 4 }} /> {busy === "prime" ? "priming…" : "prime data"}
           </Btn>
@@ -189,7 +192,7 @@ export default function MarketDashboard() {
           {(indicesData?.quotes ?? []).map((q) => (
             <button
               key={q.symbol}
-              onClick={() => setSelIdx(q)}
+              onClick={() => nav(`/market/index/${encodeURIComponent(q.symbol)}`)}
               title={`${q.name} — view details`}
               style={{
                 padding: 10, border: "1px solid var(--edge)", background: "transparent",
@@ -297,36 +300,33 @@ export default function MarketDashboard() {
         </HudPanel>
       </div>
 
-      {selIdx && <IndexDetailModal quote={selIdx} onClose={() => setSelIdx(null)} />}
+      {manageOpen && <ManageIndicesDialog onClose={() => setManageOpen(false)} />}
     </div>
   );
 }
 
-function IndexDetailModal({ quote, onClose }: { quote: IndexQuote; onClose: () => void }) {
-  const { data, isLoading } = useCandles(quote.symbol, "1D");
-  const candles = data?.candles ?? [];
+function ManageIndicesDialog({ onClose }: { onClose: () => void }) {
+  const { data: rows = [] } = useIndexWatch();
+  const { add, remove } = useIndexWatchMutations();
+  const [tab, setTab] = useState<"IN" | "GLOBAL" | "custom">("IN");
+  const [customSym, setCustomSym] = useState("");
+  const [customName, setCustomName] = useState("");
+  const existing = new Set(rows.map((r) => r.symbol));
 
-  const s = useMemo(() => {
-    if (candles.length === 0) return null;
-    const last = candles[candles.length - 1];
-    const prev = candles[candles.length - 2];
-    const window = candles.slice(-252); // ~1 trading year
-    const hi52 = Math.max(...window.map((c) => c.high));
-    const lo52 = Math.min(...window.map((c) => c.low));
-    const vols = candles.slice(-20).map((c) => c.volume).filter((v) => v > 0);
-    const avgVol = vols.length ? vols.reduce((a, b) => a + b, 0) / vols.length : 0;
-    const prevClose = prev?.close ?? last.open;
-    const dayAbs = last.close - prevClose;
-    return {
-      last, open: last.open, high: last.high, low: last.low, close: last.close,
-      prevClose, dayAbs, dayPct: prevClose ? (dayAbs / prevClose) * 100 : 0,
-      hi52, lo52, fromHi: hi52 ? ((last.close - hi52) / hi52) * 100 : 0,
-      fromLo: lo52 ? ((last.close - lo52) / lo52) * 100 : 0,
-      vol: last.volume, avgVol,
-    };
-  }, [candles]);
+  const addPreset = (p: IndexPreset) => add.mutate({
+    symbol: p.symbol, name: p.name, region: p.region,
+    nse_symbol: p.nse_symbol ?? null,
+    fno_enabled: !!p.fno_enabled,
+    constituents_slug: p.constituents_slug ?? null,
+  });
 
-  const chgPct = quote.change_pct ?? s?.dayPct ?? null;
+  const addCustom = () => {
+    const sym = customSym.trim();
+    const nm = customName.trim() || sym;
+    if (!sym) return;
+    add.mutate({ symbol: sym, name: nm, region: "GLOBAL", nse_symbol: null, fno_enabled: false, constituents_slug: null });
+    setCustomSym(""); setCustomName("");
+  };
 
   return (
     <div onClick={onClose} style={{
@@ -334,54 +334,72 @@ function IndexDetailModal({ quote, onClose }: { quote: IndexQuote; onClose: () =
       display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
     }}>
       <div onClick={(e) => e.stopPropagation()} style={{
-        width: "min(760px, 96vw)", maxHeight: "90vh", overflowY: "auto",
+        width: "min(720px, 96vw)", maxHeight: "90vh", overflowY: "auto",
         background: "var(--bg)", border: "1px solid var(--edge-strong)",
         padding: 16, display: "flex", flexDirection: "column", gap: 12,
       }}>
-        {/* header */}
-        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
-          <div>
-            <div className="hud-label" style={{ color: "var(--accent)", letterSpacing: "0.2em" }}>{quote.name}</div>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 4 }}>
-              <span style={{ fontFamily: "var(--font-display)", fontSize: 28 }}>
-                {Number(quote.price).toLocaleString(undefined, { maximumFractionDigits: 2 })}
-              </span>
-              <span style={{ fontSize: 14, color: (chgPct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
-                {chgPct == null ? "—" : `${chgPct >= 0 ? "+" : ""}${chgPct.toFixed(2)}%`}
-                {s && <span style={{ marginLeft: 6 }}>({s.dayAbs >= 0 ? "+" : ""}{fmtNum(s.dayAbs)})</span>}
-              </span>
-            </div>
-            <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>{quote.symbol} · daily · EOD</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div className="hud-label" style={{ color: "var(--accent)", letterSpacing: "0.2em" }}>Manage indices</div>
+          <button onClick={onClose} className="hud-btn focus-outline" data-variant="ghost" data-size="sm" title="Close"><X size={14} /></button>
+        </div>
+
+        <div>
+          <div className="hud-label" style={{ color: "var(--text-dim)", marginBottom: 6 }}>Current ({rows.length})</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 200, overflow: "auto", border: "1px solid var(--edge)" }}>
+            {rows.map((r) => (
+              <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", borderBottom: "1px solid var(--edge)", fontSize: 12 }}>
+                <span>
+                  <span style={{ color: "var(--accent)" }}>{r.name}</span>
+                  <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: 10 }}>{r.symbol} · {r.region}</span>
+                </span>
+                <button onClick={() => remove.mutate(r.id)} className="hud-btn focus-outline" data-variant="ghost" data-size="sm" title="Remove">
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+            {rows.length === 0 && <div style={{ padding: 10, color: "var(--text-dim)", fontSize: 12 }}>none yet</div>}
           </div>
-          <button onClick={onClose} className="hud-btn focus-outline" data-variant="ghost" data-size="sm" title="Close">
-            <X size={14} />
-          </button>
         </div>
 
-        {/* chart */}
-        <div style={{ height: 320, border: "1px solid var(--edge)" }}>
-          {isLoading ? (
-            <div className="hud-label" style={{ padding: 24, textAlign: "center" }}>loading chart…</div>
-          ) : candles.length === 0 ? (
-            <div className="hud-label" style={{ padding: 24, textAlign: "center" }}>no chart data for this index</div>
-          ) : (
-            <CandleChart candles={candles} fill chartType="candles" indicators={{ ema20: true, ema50: true, volume: true }} />
-          )}
+        <div style={{ display: "flex", gap: 4, borderBottom: "1px solid var(--edge)" }}>
+          {(["IN", "GLOBAL", "custom"] as const).map((t) => (
+            <button key={t} onClick={() => setTab(t)}
+              style={{
+                padding: "6px 10px", background: "transparent", border: 0,
+                borderBottom: `2px solid ${tab === t ? "var(--accent)" : "transparent"}`,
+                color: tab === t ? "var(--accent)" : "var(--text-dim)",
+                fontSize: 11, letterSpacing: "0.15em", textTransform: "uppercase", cursor: "pointer",
+              }}>{t === "IN" ? "Indian" : t === "GLOBAL" ? "Global" : "Custom"}</button>
+          ))}
         </div>
 
-        {/* stats */}
-        {s && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 8 }}>
-            <IdxStat label="Open" value={fmtNum(s.open)} />
-            <IdxStat label="Prev Close" value={fmtNum(s.prevClose)} />
-            <IdxStat label="Day High" value={fmtNum(s.high)} />
-            <IdxStat label="Day Low" value={fmtNum(s.low)} />
-            <IdxStat label="52W High" value={fmtNum(s.hi52)} />
-            <IdxStat label="52W Low" value={fmtNum(s.lo52)} />
-            <IdxStat label="From 52W High" value={`${s.fromHi >= 0 ? "+" : ""}${s.fromHi.toFixed(2)}%`} tone={s.fromHi >= -5 ? "ok" : undefined} />
-            <IdxStat label="From 52W Low" value={`${s.fromLo >= 0 ? "+" : ""}${s.fromLo.toFixed(2)}%`} tone="ok" />
-            {s.vol > 0 && <IdxStat label="Volume" value={fmtInt(s.vol)} />}
-            {s.avgVol > 0 && <IdxStat label="Avg Vol (20d)" value={fmtInt(s.avgVol)} />}
+        {tab !== "custom" && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 6 }}>
+            {(tab === "IN" ? INDIAN_PRESETS : GLOBAL_PRESETS).map((p) => {
+              const has = existing.has(p.symbol);
+              return (
+                <button key={p.symbol} disabled={has || add.isPending}
+                  onClick={() => addPreset(p)}
+                  style={{
+                    padding: 8, border: "1px solid var(--edge)", background: has ? "rgba(53,214,237,0.08)" : "transparent",
+                    textAlign: "left", cursor: has ? "default" : "pointer", opacity: has ? 0.7 : 1, borderRadius: 2,
+                  }}>
+                  <div style={{ color: has ? "var(--text-dim)" : "var(--accent)", fontSize: 12 }}>{p.name}</div>
+                  <div style={{ color: "var(--text-muted)", fontSize: 10 }}>{p.symbol}{has ? " · added" : ""}</div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {tab === "custom" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ fontSize: 11, color: "var(--text-dim)" }}>Add any Yahoo Finance symbol (e.g. ^GSPC, ^N225, NIFTY_MIDCAP_50.NS)</div>
+            <input value={customSym} onChange={(e) => setCustomSym(e.target.value)} placeholder="Yahoo symbol"
+              style={{ padding: 8, background: "transparent", border: "1px solid var(--edge)", color: "var(--text)", fontFamily: "var(--font-mono)" }} />
+            <input value={customName} onChange={(e) => setCustomName(e.target.value)} placeholder="Display name (optional)"
+              style={{ padding: 8, background: "transparent", border: "1px solid var(--edge)", color: "var(--text)" }} />
+            <Btn size="sm" onClick={addCustom} disabled={!customSym.trim() || add.isPending}>add</Btn>
           </div>
         )}
       </div>
@@ -389,15 +407,6 @@ function IndexDetailModal({ quote, onClose }: { quote: IndexQuote; onClose: () =
   );
 }
 
-function IdxStat({ label, value, tone }: { label: string; value: string; tone?: "ok" | "err" }) {
-  const color = tone === "ok" ? "var(--ok)" : tone === "err" ? "var(--danger)" : "var(--text)";
-  return (
-    <div style={{ padding: "8px 10px", border: "1px solid var(--edge)" }}>
-      <div className="hud-label" style={{ color: "var(--text-dim)" }}>{label}</div>
-      <div style={{ fontFamily: "var(--font-display)", fontSize: 16, color, fontVariantNumeric: "tabular-nums" }}>{value}</div>
-    </div>
-  );
-}
 
 function StatTile({ label, value, to, tone }: { label: string; value: string; to?: string; tone?: "ok" | "err" | "accent" }) {
   const color = tone === "ok" ? "var(--ok)" : tone === "err" ? "var(--danger)" : "var(--accent)";

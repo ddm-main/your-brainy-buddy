@@ -71,9 +71,18 @@ export default function App() {
 
 
   if (!ready) return <BootFallback />;
-  if (!session) {
-    const isReset = window.location.pathname === "/reset-password"
-      || window.location.hash.includes("type=recovery");
+
+  const path = window.location.pathname;
+  const isReset = path === "/reset-password" || window.location.hash.includes("type=recovery");
+  const isAuthPath = path === "/auth" || isReset;
+
+  // Authenticated users hitting /auth should go home; keep /reset-password accessible for recovery flow.
+  if (session && path === "/auth" && !isReset) {
+    return <Navigate to="/" replace />;
+  }
+
+  // Render minimal chrome on auth surfaces (signed out, or signed-in on /reset-password).
+  if (!session || isAuthPath) {
     return (
       <>
         <div className="grid-bg" />

@@ -16,6 +16,7 @@ const MarketSettings = lazy(() => import("@/routes/market/Settings"));
 const OptionChain = lazy(() => import("@/routes/market/OptionChain"));
 const Planner = lazy(() => import("@/routes/market/Planner"));
 const AIEngine = lazy(() => import("@/routes/market/AIEngine"));
+const IndexDetail = lazy(() => import("@/routes/market/IndexDetail"));
 
 
 type Sub = { to: string; label: string };
@@ -148,6 +149,7 @@ export default function Market() {
               <Route path="ai/:symbol" element={<AIEngine />} />
               <Route path="options" element={<OptionChain />} />
               <Route path="options/:symbol" element={<OptionChain />} />
+              <Route path="index/:symbol" element={<IndexDetail />} />
               <Route path="settings" element={<MarketSettings />} />
               <Route path="*" element={<Navigate to="/market" replace />} />
             </Routes>

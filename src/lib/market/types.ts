@@ -37,6 +37,36 @@ export interface IndexQuote {
   price: number;
   change_pct: number | null;
   change_abs: number | null;
+  region?: "IN" | "GLOBAL";
+  nse_symbol?: string | null;
+  fno_enabled?: boolean;
+  constituents_slug?: string | null;
+}
+
+export interface IndexWatchRow {
+  id: string;
+  user_id: string;
+  symbol: string;
+  name: string;
+  region: "IN" | "GLOBAL";
+  nse_symbol: string | null;
+  fno_enabled: boolean;
+  constituents_slug: string | null;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IndexConstituent {
+  symbol: string;
+  company: string;
+  sector: string | null;
+  close: number | null;
+  change_pct: number | null;
+  breakout_score: number | null;
+  prebreakout_score: number | null;
+  rel_volume: number | null;
+  rsi14: number | null;
 }
 
 export interface BreadthDaily {
@@ -98,6 +128,16 @@ export interface StockScore {
   rel_strength_nifty: number | null;
   breakout_score: number | null;
   prebreakout_score: number | null;
+  // extended technicals / fundamentals stamped by the pipeline (nullable when not yet synced)
+  delivery_pct?: number | null;
+  mfi14?: number | null;
+  bb_percent_b?: number | null;
+  supertrend_dir?: number | null;
+  vwap?: number | null;
+  pe_ttm?: number | null;
+  roe?: number | null;
+  revenue_growth?: number | null;
+  pattern_flags?: Record<string, boolean> | null;
   score_components: { breakout?: Record<string, number>; prebreakout?: Record<string, number> } | null;
   computed_at: string;
 }

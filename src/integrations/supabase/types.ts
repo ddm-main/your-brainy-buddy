@@ -1849,6 +1849,108 @@ export type Database = {
         }
         Relationships: []
       }
+      market_fundamentals_global: {
+        Row: {
+          book_value: number | null
+          company_name: string | null
+          current_ratio: number | null
+          debt_to_equity: number | null
+          dii_holding: number | null
+          dividend_yield: number | null
+          eps_growth_yoy: number | null
+          eps_ttm: number | null
+          exchange: string
+          face_value: number | null
+          fii_holding: number | null
+          high_52w: number | null
+          industry: string | null
+          low_52w: number | null
+          market_cap_cr: number | null
+          pb: number | null
+          pe_ttm: number | null
+          peg: number | null
+          price: number | null
+          profit_growth_yoy: number | null
+          profit_ttm_cr: number | null
+          promoter_holding: number | null
+          promoter_pledge: number | null
+          quick_ratio: number | null
+          revenue_growth_yoy: number | null
+          revenue_ttm_cr: number | null
+          roce: number | null
+          roe: number | null
+          sector: string | null
+          symbol: string
+          updated_at: string
+        }
+        Insert: {
+          book_value?: number | null
+          company_name?: string | null
+          current_ratio?: number | null
+          debt_to_equity?: number | null
+          dii_holding?: number | null
+          dividend_yield?: number | null
+          eps_growth_yoy?: number | null
+          eps_ttm?: number | null
+          exchange?: string
+          face_value?: number | null
+          fii_holding?: number | null
+          high_52w?: number | null
+          industry?: string | null
+          low_52w?: number | null
+          market_cap_cr?: number | null
+          pb?: number | null
+          pe_ttm?: number | null
+          peg?: number | null
+          price?: number | null
+          profit_growth_yoy?: number | null
+          profit_ttm_cr?: number | null
+          promoter_holding?: number | null
+          promoter_pledge?: number | null
+          quick_ratio?: number | null
+          revenue_growth_yoy?: number | null
+          revenue_ttm_cr?: number | null
+          roce?: number | null
+          roe?: number | null
+          sector?: string | null
+          symbol: string
+          updated_at?: string
+        }
+        Update: {
+          book_value?: number | null
+          company_name?: string | null
+          current_ratio?: number | null
+          debt_to_equity?: number | null
+          dii_holding?: number | null
+          dividend_yield?: number | null
+          eps_growth_yoy?: number | null
+          eps_ttm?: number | null
+          exchange?: string
+          face_value?: number | null
+          fii_holding?: number | null
+          high_52w?: number | null
+          industry?: string | null
+          low_52w?: number | null
+          market_cap_cr?: number | null
+          pb?: number | null
+          pe_ttm?: number | null
+          peg?: number | null
+          price?: number | null
+          profit_growth_yoy?: number | null
+          profit_ttm_cr?: number | null
+          promoter_holding?: number | null
+          promoter_pledge?: number | null
+          quick_ratio?: number | null
+          revenue_growth_yoy?: number | null
+          revenue_ttm_cr?: number | null
+          roce?: number | null
+          roe?: number | null
+          sector?: string | null
+          symbol?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       market_holdings: {
         Row: {
           avg_price: number
@@ -1921,6 +2023,48 @@ export type Database = {
           symbol?: string
           updated_at?: string
           weight?: number | null
+        }
+        Relationships: []
+      }
+      market_index_watch: {
+        Row: {
+          constituents_slug: string | null
+          created_at: string
+          fno_enabled: boolean
+          id: string
+          name: string
+          nse_symbol: string | null
+          region: string
+          sort_order: number
+          symbol: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          constituents_slug?: string | null
+          created_at?: string
+          fno_enabled?: boolean
+          id?: string
+          name: string
+          nse_symbol?: string | null
+          region: string
+          sort_order?: number
+          symbol: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          constituents_slug?: string | null
+          created_at?: string
+          fno_enabled?: boolean
+          id?: string
+          name?: string
+          nse_symbol?: string | null
+          region?: string
+          sort_order?: number
+          symbol?: string
+          updated_at?: string
+          user_id?: string
         }
         Relationships: []
       }
@@ -2513,6 +2657,7 @@ export type Database = {
           is_active: boolean
           is_nifty500: boolean
           isin: string | null
+          last_fundamentals_sync_at: string | null
           last_price_sync_at: string | null
           lot_size: number | null
           market_cap: number | null
@@ -2539,6 +2684,7 @@ export type Database = {
           is_active?: boolean
           is_nifty500?: boolean
           isin?: string | null
+          last_fundamentals_sync_at?: string | null
           last_price_sync_at?: string | null
           lot_size?: number | null
           market_cap?: number | null
@@ -2565,6 +2711,7 @@ export type Database = {
           is_active?: boolean
           is_nifty500?: boolean
           isin?: string | null
+          last_fundamentals_sync_at?: string | null
           last_price_sync_at?: string | null
           lot_size?: number | null
           market_cap?: number | null
@@ -3698,6 +3845,7 @@ export type Database = {
       }
       market_cron_call: { Args: { fn_name: string }; Returns: number }
       purge_old_jarvis_interactions: { Args: never; Returns: undefined }
+      seed_default_indices: { Args: { _uid: string }; Returns: undefined }
     }
     Enums: {
       email_category:

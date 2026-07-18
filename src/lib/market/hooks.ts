@@ -7,7 +7,9 @@ import type {
   BreadthDaily,
   CandlesResponse,
   Holding,
+  IndexConstituent,
   IndexQuote,
+  IndexWatchRow,
   Position,
   Quote,
   SavedScreener,
@@ -298,3 +300,64 @@ export function useOptionChain(symbol: string | undefined, expiry?: string) {
   });
 }
 
+
+// ---- Indices watchlist (user-configurable list on the dashboard) ----
+
+export function useIndexWatch() {
+  return useQuery({
+    queryKey: ["market", "indexwatch"],
+    queryFn: async (): Promise<IndexWatchRow[]> => {
+      const { data, error } = await supabase
+        .from("market_index_watch" as any).select("*").order("sort_order");
+      if (error) throw error;
+      return (data ?? []) as unknown as IndexWatchRow[];
+    },
+  });
+}
+
+export function useIndexWatchMutations() {
+  const qc = useQueryClient();
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["market", "indexwatch"] });
+    qc.invalidateQueries({ queryKey: ["market", "indices"] });
+  };
+  const add = useMutation({
+    mutationFn: async (row: Omit<IndexWatchRow, "id" | "user_id" | "sort_order" | "created_at" | "updated_at">) => {
+      const { data: session } = await supabase.auth.getSession();
+      const userId = session.session?.user.id;
+      if (!userId) throw new Error("Not signed in");
+      const { error } = await supabase.from("market_index_watch" as any).insert({ ...row, user_id: userId } as any);
+      if (error) throw error;
+    },
+    onSuccess: invalidate,
+  });
+  const remove = useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase.from("market_index_watch" as any).delete().eq("id", id);
+      if (error) throw error;
+    },
+    onSuccess: invalidate,
+  });
+  const reorder = useMutation({
+    mutationFn: async (rows: { id: string; sort_order: number }[]) => {
+      for (const r of rows) {
+        const { error } = await supabase.from("market_index_watch" as any)
+          .update({ sort_order: r.sort_order } as any).eq("id", r.id);
+        if (error) throw error;
+      }
+    },
+    onSuccess: invalidate,
+  });
+  return { add, remove, reorder };
+}
+
+export function useIndexConstituents(slug: string | null | undefined) {
+  return useQuery({
+    queryKey: ["market", "constituents", slug ?? ""],
+    queryFn: () => callMarketFn<{ members: IndexConstituent[]; count: number; reason?: string }>(
+      "market-index-constituents", { slug },
+    ),
+    enabled: !!slug,
+    staleTime: 10 * 60_000,
+  });
+}

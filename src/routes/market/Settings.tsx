@@ -330,6 +330,9 @@ export default function MarketSettings() {
             <RefreshCw size={11} style={{ marginRight: 4 }} /> {busy === "market-pipeline-aggregates" ? "finalizing…" : "Finalize aggregates"}
           </Btn>
           <Btn onClick={() => runPipeline("market-indices", "Index refresh")} disabled={busy !== null}>Refresh indices</Btn>
+          <Btn onClick={() => runPipeline("market-fundamentals-global-sync", "Fundamentals sync")} disabled={busy !== null} title="Populates the Screener's fundamentals (PE, PB, ROE, market cap, sector, industry) from Yahoo. Takes ~2 minutes for the full universe.">
+            <Database size={11} style={{ marginRight: 4 }} /> {busy === "market-fundamentals-global-sync" ? "syncing fundamentals… (~2 min)" : "Sync fundamentals (Yahoo)"}
+          </Btn>
         </div>
         {pipelineSummary && (
           <div style={{ marginTop: 10, fontSize: 11, color: "var(--accent-soft)", lineHeight: 1.5 }}>{pipelineSummary}</div>

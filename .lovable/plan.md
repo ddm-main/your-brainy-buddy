@@ -1,75 +1,51 @@
-# Market Section — Verified State & Execution Plan
+## Diagnosis (verified against the database)
 
-## Live DB state (just verified)
+- `market_stock_scores`: **508 rows** — technicals are fine.
+- `market_fundamentals_global`: **0 rows** — completely empty.
+- `market_stocks.market_cap`: **0/2699 populated**.
+- `market_stocks WHERE is_active AND in_universe`: **501 rows**.
 
-| Item | State |
-|---|---|
-| Step 0 schema (all 9 items) | ✅ applied |
-| Edge fns: `market-ai-recommend`, `market-alerts-eval`, `market-fii-dii-sync`, `market-fundamentals-sync`, `market-pipeline-eod`, `market-pipeline-aggregates`, `market-scrips-sync` | ✅ exist |
-| `market_stocks` total | 2,699 |
-| `is_nifty500` flagged | ⚠️ 211 / 500 |
-| `market_stock_scores` rows | 267 (needs full-universe) |
-| `market_fundamentals` | 0 (backfill never completed) |
-| `fii_dii_activity` | 0 |
-| `market_stock_ai` | 0 |
-| `market_alert_events` | 0 |
-| `market_breadth_daily` | 1 row |
-| `push_subscriptions` | 0 |
-| Routes `/market/breadth`, `/market/reports` | ❌ missing |
-| `public/sw.js` + web push | ❌ missing (no `public/` dir) |
-| Stock Analysis extra tabs (Financials/Peers/News/etc.) | ❌ missing |
-| Zerodha / Dhan providers | ❌ missing |
-| CommandPalette symbol search | ❌ missing |
-| VAPID secrets | ❌ not configured |
+So every fundamentals-based filter (Market Cap, PE, ROE, D/E, growth, sector, industry…) matches nothing, which is exactly what the screenshot shows ("FUNDAMENTALS 0/508 · 0%", "0 OF 508"). Technicals-only filters still work.
 
-**Bottom line:** Schema and cron scaffolding is done. What's missing is (a) data actually flowing, and (b) the frontend surfaces to consume it.
+Why the table is empty: `market-fundamentals-global-sync` tries to sync all 501 in-universe stocks in one invocation with ~250 ms sleep + up-to-8 s Yahoo timeout per stock. Supabase edge functions cap wall time well below the 12-minute budget the function assumes, so every manual "Sync fundamentals" click hits the ceiling before writing anything meaningful, and the table stays at zero.
 
-## Why one turn can't ship all of M1–M6 honestly
+## Fix plan
 
-M3 (Analysis tabs + indicators), M4 (sw.js + VAPID + alerts history), M5 (breadth + reports + backup/restore + palette), M6 (two provider adapters + tests) is ~3–4 sessions of real work. Cramming it produces broken stubs. I'll execute in tight, verifiable batches instead — each batch leaves the app working.
+### 1. Make `market-fundamentals-global-sync` chunked + resumable
 
-## Execution plan (in order, one batch per turn)
+- Add a nullable cursor column `last_fundamentals_sync_at timestamptz` on `market_stocks` (migration).
+- Rewrite the edge function to:
+  - Select up to `CHUNK = 40` stocks where `in_universe AND is_active AND (last_fundamentals_sync_at IS NULL OR last_fundamentals_sync_at < now() - interval '7 days')`, ordered nulls-first, oldest-first.
+  - Process them with `CONCURRENCY = 4` (Promise pool), no artificial sleep, 6 s Yahoo timeout.
+  - Always stamp `last_fundamentals_sync_at = now()` even on failure (so one bad symbol can't wedge the queue), matching the `market-pipeline-eod` pattern.
+  - Return `{ ok, processed, synced, failed, drained: processed < CHUNK }`.
+- Keep the existing backfill of `market_stocks.market_cap/sector/industry`.
 
-### Batch 1 — Data (M1 finish) — no UI changes
-- Fix `market-scrips-sync` to flag full Nifty 500 universe (currently 211/500).
-- Trigger pipeline in order: `market-scrips-sync` → `market-pipeline-eod` (full universe scoring) → `market-fundamentals-sync` → `market-fii-dii-sync` → `market-pipeline-aggregates` → `market-ai-recommend`.
-- Verify row counts land: fundamentals > 400, fii_dii > 0, ai_rows > 400, scores_today > 400, breadth appended.
-- Outcome: Dashboard/Screener/Analysis you already have suddenly light up.
+### 2. Auto-drain from the UI
 
-### Batch 2 — AI surfacing (M2 UI)
-- Add Buy/Hold/Wait/Avoid + confidence chips to Dashboard top-breakouts, Screener rows, Analysis header (reads `market_stock_ai`).
-- Dashboard regime chip (bull/neutral/bear) from `market_breadth_daily.market_score`.
+- In `Screener.tsx` `DataHealthStrip.trigger("market-fundamentals-global-sync", …)`, loop invocations until the response says `drained: true` or `MAX_CALLS = 20`, updating the toast with `processed / total`.
+- Invalidate the `["market", "screener-rows-v2", universe]` query on completion so rows re-fetch without a manual reload.
 
-### Batch 3 — Screener depth + indicators (M3 part A)
-- Extend `_shared/market/indicators.ts`: VWAP, Supertrend(10,3), OBV, MFI(14), BB %B, candlestick + pattern flags → written by `market-pipeline-eod` into new score columns.
-- Screener: register new columns in `FILTER_COLUMNS`; add fundamentals filters (P/E, PB, ROE, D/E, mcap).
+### 3. Guard fundamentals filters when coverage is zero
 
-### Batch 4 — Stock Analysis tabs (M3 part B)
-- Analysis tabs: Financials / Quarterly / Shareholding / Peers / News / Corporate Actions / Dividends / Earnings (Yahoo `quoteSummary` + NSE RSS, 24h cache).
-- Trade Planner block pre-filled from `market_stock_ai` (entry/SL/targets/holding period).
+In `Screener.tsx`, when the user activates a filter whose `coverageOf(rows, id).has === 0`:
+- Show an inline hint on the active filter chip: "No data yet — run Sync fundamentals".
+- Highlight the Sync fundamentals button (pulse border) so the fix is one click away.
 
-### Batch 5 — Alerts + Web Push (M4)
-- Generate + store `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` (asks user once).
-- Create `public/` dir + `public/sw.js`; add opt-in flow in Settings that writes to `push_subscriptions`.
-- Wire `market-alerts-eval` dispatch to web-push + email (existing sender).
-- Alerts page: add "History" tab (last 100 `market_alert_events`).
+No change to `filterMatches` semantics — a null value should still exclude a row; this is just user-visible guidance.
 
-### Batch 6 — Breadth + Reports + Settings + Palette (M5)
-- New route `/market/breadth`: sector heatmap, rotation matrix, new-highs/lows series, %-above-EMAs history, market-score sparkline, FII/DII 30-day chart.
-- New route `/market/reports`: report builder + CSV/Excel/PDF export (`xlsx` + `jspdf`).
-- Settings polish: theme, refresh cadence, default timeframe & risk %, notification prefs, JSON Backup + Restore (watchlists/alerts/strategies).
-- Extend `CommandPalette` with `market_stocks` symbol search → `/market/analysis/:symbol`.
+### 4. Verify
 
-### Batch 7 — Providers (M6)
-- Add Zerodha Kite and Dhan behind existing `MarketProvider` interface (quotes/OHLCV/holdings/positions/orders read).
-- Add `placeOrder` to interface; all providers throw `not-implemented`.
-- Deno unit tests for each new parser.
+- Trigger the sync from Settings once the migration + function are deployed; wait for `drained: true`.
+- Re-run: `SELECT COUNT(*) FROM market_fundamentals_global WHERE market_cap_cr IS NOT NULL;` — expect ≈ 480+.
+- Reload Screener → All Stocks → Market Cap 5,000–20,000 Cr → non-zero results, Fundamentals coverage ≥ 90 %.
 
-## Rules held constant
-- No changes to CRM / Finance / Deals code.
-- Every new public table already has grants + RLS from Step 0.
-- AI cost controlled via `score_hash` dedupe + batched Gemini flash.
-- Yahoo `quoteSummary` via retry + host fail-over in `yahooClient.ts`; 24h cache.
+## Files touched
 
-## What I need from you
-Approve this plan and I start **Batch 1** immediately. If you'd rather I merge two batches (e.g. 1+2 together, or 5+6), tell me and I'll adjust before starting.
+- `supabase/migrations/<ts>_market_stocks_fundamentals_cursor.sql` — add `last_fundamentals_sync_at` + index.
+- `supabase/functions/market-fundamentals-global-sync/index.ts` — chunked/resumable rewrite.
+- `src/routes/market/Screener.tsx` — auto-drain loop, zero-coverage hint on active filter chips.
+
+## Out of scope (call out only)
+
+- `market_index_members` only has 77 rows; NIFTY50/BANKNIFTY/FINNIFTY universes will be partial until `market-index-constituents` is re-run. Not needed for the reported "All Stocks + Market Cap" bug — flag it, don't fix it in this batch unless you say so.
