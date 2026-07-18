@@ -35,15 +35,37 @@ export async function yahooQuote(symbols: string[]): Promise<YahooQuoteRow[]> {
   return rows.filter((r): r is YahooQuoteRow => r !== null);
 
   async function fetchOne(symbol: string): Promise<YahooQuoteRow | null> {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=1d&interval=1d`;
+    // Use a 5-day window so we can derive prev close from the actual prior
+    // daily bar. Yahoo's meta.chartPreviousClose is occasionally stale
+    // (returns a value from days ago), which corrupts day-change math.
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=1d`;
     try {
       const r = await fetch(url, { headers: UA });
       if (!r.ok) return null;
       const j = await r.json();
-      const meta = j?.chart?.result?.[0]?.meta;
+      const res = j?.chart?.result?.[0];
+      const meta = res?.meta;
       const price = meta?.regularMarketPrice;
       if (price == null) return null;
-      const prev = meta?.chartPreviousClose ?? meta?.previousClose ?? null;
+
+      // Derive prev close from the last completed daily bar before today.
+      let prev: number | null = null;
+      const ts: number[] = res?.timestamp ?? [];
+      const closes: (number | null)[] = res?.indicators?.quote?.[0]?.close ?? [];
+      const todayUtc = new Date();
+      const todayKey = `${todayUtc.getUTCFullYear()}-${todayUtc.getUTCMonth()}-${todayUtc.getUTCDate()}`;
+      for (let i = ts.length - 1; i >= 0; i--) {
+        const c = closes[i];
+        if (c == null) continue;
+        const d = new Date(ts[i] * 1000);
+        const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
+        if (key === todayKey) continue; // skip current in-progress bar
+        prev = Number(c);
+        break;
+      }
+      if (prev == null) {
+        prev = meta?.chartPreviousClose ?? meta?.previousClose ?? null;
+      }
       const changeAbs = prev != null ? price - prev : null;
       return {
         symbol: meta.symbol ?? symbol,
