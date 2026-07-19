@@ -39,7 +39,9 @@ export interface ScreenerRow extends StockScore {
   last_error?: string | null;
   fundamentals_updated_at?: string | null;
   last_attempted_at?: string | null;
+  instrument_type?: string | null;
 }
+
 
 const universeIndexKey: Record<UniverseId, string | null> = {
   all:       null,
@@ -153,6 +155,7 @@ export function useScreenerData(universe: UniverseId) {
           last_error:        s.last_error ?? null,
           fundamentals_updated_at: s.fundamentals_updated_at ?? null,
           last_attempted_at: s.last_attempted_at ?? null,
+          instrument_type:   s.instrument_type ?? "EQ",
         };
       });
     },

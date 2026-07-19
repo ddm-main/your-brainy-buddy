@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { lazy, Suspense } from "react";
 import ErrorBoundary from "@/components/hud/ErrorBoundary";
+import { useMarketAutoSync } from "@/lib/market/useAutoSync";
 
 const Dashboard = lazy(() => import("@/routes/market/Dashboard"));
 const Holdings = lazy(() => import("@/routes/market/Holdings"));
@@ -105,6 +106,8 @@ export default function Market() {
   const loc = useLocation();
   const activeGroup = GROUPS.find((g) => g.match(loc.pathname)) ?? GROUPS[0];
   useEffect(() => { document.title = `Market · ${activeGroup.label}`; }, [activeGroup.key]);
+  useMarketAutoSync();
+
 
   return (
     <div style={{ padding: 12, height: "100%", display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>

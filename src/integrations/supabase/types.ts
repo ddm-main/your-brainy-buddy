@@ -3856,6 +3856,20 @@ export type Database = {
         }
         Relationships: []
       }
+      market_pipeline_status: {
+        Row: {
+          active_stocks: number | null
+          equities_covered: number | null
+          equities_total: number | null
+          equities_with_sector: number | null
+          fundamentals_covered: number | null
+          fundamentals_failed: number | null
+          fundamentals_last_updated_at: string | null
+          scores_last_count: number | null
+          scores_last_trade_date: string | null
+        }
+        Relationships: []
+      }
       market_screener_rows: {
         Row: {
           above_ema200: boolean | null
@@ -3894,6 +3908,7 @@ export type Database = {
           higher_lows: boolean | null
           in_universe: boolean | null
           industry: string | null
+          instrument_type: string | null
           is_active: boolean | null
           is_nifty500: boolean | null
           last_attempted_at: string | null

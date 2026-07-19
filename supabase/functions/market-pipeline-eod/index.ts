@@ -30,7 +30,6 @@ Deno.serve(async (req) => {
 
     const { data: stocks, error } = await svc.from("market_stocks")
       .select("symbol,exchange,yahoo_symbol,sector,last_price_sync_at")
-      .eq("in_universe", true)
       .eq("is_active", true)
       .or(`last_price_sync_at.is.null,last_price_sync_at.lt.${cutoff}`)
       .order("last_price_sync_at", { ascending: true, nullsFirst: true })

@@ -77,9 +77,28 @@ export function CandleChart({
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    // lightweight-charts silently renders nothing when times are out of order
+    // or duplicated. Sort ascending and dedupe by time before feeding series.
+    const _tKey = (t: string | number) => (typeof t === "number" ? t : Date.parse(t) / 1000);
+    const _sorted = [...candles].sort((a, b) => _tKey(a.time) - _tKey(b.time));
+    const _seen = new Set<string>();
+    const _candles = _sorted.filter((c) => {
+      const k = String(c.time);
+      if (_seen.has(k)) return false;
+      _seen.add(k);
+      return true;
+    });
+    // shadow the outer `candles` so all setData calls below use cleaned data
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const candlesRaw = candles;
+    candles = _candles as typeof candles;
 
     const chart = createChart(el, {
+      // We drive width/height ourselves via `chart.resize` + ResizeObserver;
+      // autoSize sometimes leaves the canvas at its default 300×150 when the
+      // chart is created inside a freshly-mounted flex container.
       height: fill ? el.clientHeight || height : height,
+      width: el.clientWidth || 600,
       layout: {
         background: { color: "transparent" },
         textColor: "#6a93a8",
@@ -207,9 +226,17 @@ export function CandleChart({
 
     chart.timeScale().fitContent();
 
-    const ro = new ResizeObserver(() => {
-      chart.applyOptions({ width: el.clientWidth, ...(fill ? { height: el.clientHeight } : {}) });
-    });
+    // `autoSize: true` handles most resize cases, but we still guard against
+    // the first-paint race where the container has zero size when the chart
+    // is created (the canvas would stay at its 300×150 default). Force one
+    // resize on the next frame and any time the container changes.
+    const doResize = () => {
+      const w = el.clientWidth;
+      const h = fill ? el.clientHeight : height;
+      if (w > 0 && h > 0) chart.resize(w, h);
+    };
+    requestAnimationFrame(doResize);
+    const ro = new ResizeObserver(doResize);
     ro.observe(el);
 
     return () => {

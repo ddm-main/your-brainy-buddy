@@ -8,30 +8,13 @@ import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/
 import { CandleChart, type ChartType, type IndicatorFlags } from "@/components/market/CandleChart";
 import { TradingViewChart, tvInterval } from "@/components/market/TradingViewChart";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
+import { ChartToolbar } from "@/components/market/ChartToolbar";
 import { fmtNum, fmtInt, fmtPct } from "@/components/hud/DataTable";
 import { useCandles, useDepth, useFundamentals, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores } from "@/lib/market/hooks";
 import { getTrustedDayChange } from "@/lib/market/pnl";
 import { FullscreenShell } from "@/components/market/FullscreenShell";
-import { ExternalLink, Maximize2, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 
-const TIMEFRAMES = ["1D", "1h", "15m", "5m"];
-const CHART_TYPES: Array<{ key: ChartType; label: string }> = [
-  { key: "candles", label: "Candles" },
-  { key: "bars", label: "Bars" },
-  { key: "line", label: "Line" },
-  { key: "area", label: "Area" },
-];
-const INDICATOR_DEFS: Array<{ key: keyof IndicatorFlags; label: string }> = [
-  { key: "ema20", label: "EMA20" },
-  { key: "ema50", label: "EMA50" },
-  { key: "ema200", label: "EMA200" },
-  { key: "sma20", label: "SMA20" },
-  { key: "bb", label: "BB" },
-  { key: "vwap", label: "VWAP" },
-  { key: "rsi", label: "RSI" },
-  { key: "macd", label: "MACD" },
-  { key: "volume", label: "VOL" },
-];
 const IND_STORE = "jarvis.analysis.indicators";
 const defaultFlags: IndicatorFlags = { ema20: true, ema50: true, volume: true };
 
@@ -74,8 +57,6 @@ export default function Analysis() {
     return lines;
   }, [score]);
 
-  const toggle = (k: keyof IndicatorFlags) => setFlags((p) => ({ ...p, [k]: !p[k] }));
-
   if (!sym) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -105,62 +86,29 @@ export default function Analysis() {
   const dayChange = getTrustedDayChange(quote);
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 12, height: "100%", minHeight: 0 }}>
+    <div className="mk-anl-grid">
       {/* Chart column — fills the viewport height */}
-      <div style={{ display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
+      <div className="mk-anl-chart" style={{ display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
         <HudPanel
-          title={`${sym} · ${tf}`}
+          title={sym}
           index="MK.ANL"
           live={isLoading ? "warn" : "ok"}
           style={{ flex: 1, minHeight: 0 }}
-          actions={
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-              {TIMEFRAMES.map((t) => (
-                <Btn key={t} size="sm" variant={tf === t ? "primary" : "ghost"} onClick={() => setTf(t)}>{t}</Btn>
-              ))}
-              {!tvMode && (
-                <>
-                  <span style={{ width: 1, background: "var(--edge)", margin: "0 2px" }} />
-                  {CHART_TYPES.map((c) => (
-                    <Btn key={c.key} size="sm" variant={chartType === c.key ? "primary" : "ghost"} onClick={() => setChartType(c.key)}>{c.label}</Btn>
-                  ))}
-                </>
-              )}
-              <span style={{ width: 1, background: "var(--edge)", margin: "0 2px" }} />
-              <Btn size="sm" variant={tvMode ? "primary" : "ghost"} onClick={() => setTvMode((v) => !v)}>TradingView</Btn>
-              <Btn size="sm" variant="ghost" onClick={() => setFs(true)} title="Fullscreen"><Maximize2 size={12} /></Btn>
-              {tvMode && (
-                <a
-                  href={`https://www.tradingview.com/chart/?symbol=NSE:${sym}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="hud-btn focus-outline"
-                  data-variant="ghost"
-                  data-size="sm"
-                  title="Open real-time NSE chart on tradingview.com (uses your TradingView login)"
-                  style={{ textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 4 }}
-                >
-                  Real-time <ExternalLink size={11} />
-                </a>
-              )}
-            </div>
-          }
         >
           <FullscreenShell fullscreen={fs} onExit={() => setFs(false)} title={`${sym} · ${tf}`}>
-            {!tvMode && (
-              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8, flex: "0 0 auto" }}>
-                {INDICATOR_DEFS.map((d) => (
-                  <button key={d.key} onClick={() => toggle(d.key)}
-                    style={{
-                      padding: "3px 8px", fontFamily: "var(--font-hud)", fontSize: 9,
-                      letterSpacing: "0.14em", cursor: "pointer", borderRadius: 2,
-                      border: `1px solid ${flags[d.key] ? "var(--edge-strong)" : "var(--edge)"}`,
-                      background: flags[d.key] ? "rgba(53,214,237,0.12)" : "transparent",
-                      color: flags[d.key] ? "var(--accent)" : "var(--text-dim)",
-                    }}>{d.label}</button>
-                ))}
-              </div>
-            )}
+            <ChartToolbar
+              symbol={sym}
+              tf={tf}
+              onTf={setTf}
+              chartType={chartType}
+              onChartType={setChartType}
+              flags={flags}
+              onFlags={(u) => setFlags(u)}
+              tvMode={tvMode}
+              onTvMode={setTvMode}
+              onFullscreen={() => setFs(true)}
+              onAlert={() => nav(`/market/alerts?symbol=${sym}`)}
+            />
             <div style={{ flex: 1, minHeight: 0 }}>
               {tvMode ? (
                 <TradingViewChart symbol={sym} interval={tvInterval(tf)} />
@@ -185,7 +133,7 @@ export default function Analysis() {
       </div>
 
       {/* Right rail — scrolls independently */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 0, overflowY: "auto", paddingRight: 2 }}>
+      <div className="mk-anl-rail">
         <HudPanel flow title="Quote" index="A1">
           <div style={{ fontFamily: "var(--font-display)", fontSize: 26, color: "var(--accent)" }}>
             {ltp != null ? `₹${fmtNum(ltp)}` : "—"}
@@ -204,23 +152,23 @@ export default function Analysis() {
         </HudPanel>
 
         {depth && (depth.bids.length > 0 || depth.asks.length > 0) && (
-          <HudPanel flow title="Market Depth" index="A1.5">
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
+          <HudPanel flow title="Market Depth" index="A2">
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
               <div>
                 <div className="hud-label" style={{ color: "var(--ok)", marginBottom: 4 }}>Bids</div>
                 {depth.bids.map((b, i) => (
-                  <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", borderBottom: "1px solid var(--edge)" }}>
+                  <div key={i} style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 6, padding: "2px 0", borderBottom: "1px solid var(--edge)" }}>
                     <span style={{ color: "var(--ok)" }}>{b.price.toFixed(2)}</span>
-                    <span style={{ color: "var(--text-dim)" }}>{b.qty.toLocaleString("en-IN")}</span>
+                    <span style={{ color: "var(--text-dim)", textAlign: "right" }}>{b.qty.toLocaleString("en-IN")}</span>
                   </div>
                 ))}
               </div>
               <div>
                 <div className="hud-label" style={{ color: "var(--danger)", marginBottom: 4 }}>Asks</div>
                 {depth.asks.map((a, i) => (
-                  <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", borderBottom: "1px solid var(--edge)" }}>
+                  <div key={i} style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 6, padding: "2px 0", borderBottom: "1px solid var(--edge)" }}>
                     <span style={{ color: "var(--danger)" }}>{a.price.toFixed(2)}</span>
-                    <span style={{ color: "var(--text-dim)" }}>{a.qty.toLocaleString("en-IN")}</span>
+                    <span style={{ color: "var(--text-dim)", textAlign: "right" }}>{a.qty.toLocaleString("en-IN")}</span>
                   </div>
                 ))}
               </div>
@@ -229,7 +177,7 @@ export default function Analysis() {
         )}
 
         {!score ? (
-          <HudPanel flow title="Coverage" index="A2">
+          <HudPanel flow title="Coverage" index="A3">
             <div className="hud-label" style={{ fontSize: 11, lineHeight: 1.6, color: "var(--text-dim)" }}>
               No screener data for <b style={{ color: "var(--accent)" }}>{sym}</b>. It isn't in the
               tracked universe yet — run the pipeline from <span style={{ color: "var(--accent)" }}>Settings → Sync universe</span>,
@@ -238,7 +186,7 @@ export default function Analysis() {
           </HudPanel>
         ) : (
         <>
-        <HudPanel flow title="Breakout Intelligence" index="A2">
+        <HudPanel flow title="Breakout Intelligence" index="A3">
           <Row label="Breakout">
             <ScoreBadge score={score?.breakout_score} components={score?.score_components?.breakout} label="breakout components" />
           </Row>
@@ -258,7 +206,7 @@ export default function Analysis() {
           <Row label="Support" mono>{fmtNum(score?.support_level)}</Row>
         </HudPanel>
 
-        <HudPanel flow title="Indicators (Daily)" index="A3">
+        <HudPanel flow title="Indicators (Daily)" index="A4">
           <Row label="RSI (14)" mono>{fmtNum(score?.rsi14, 1)}</Row>
           <Row label="MACD" mono>{fmtNum(score?.macd, 2)} / {fmtNum(score?.macd_signal, 2)}</Row>
           <Row label="ADX (14)" mono>{fmtNum(score?.adx14, 1)}</Row>
@@ -268,7 +216,7 @@ export default function Analysis() {
           <Row label="Volume" mono>{fmtInt(score?.volume)}</Row>
         </HudPanel>
 
-        <HudPanel flow title="Range & Strength" index="A4">
+        <HudPanel flow title="Range & Strength" index="A5">
           <Row label="52w High" mono>{fmtNum(score?.high_52w)}</Row>
           <Row label="52w Low" mono>{fmtNum(score?.low_52w)}</Row>
           <Row label="From 52w High" mono>
@@ -288,7 +236,7 @@ export default function Analysis() {
         )}
 
         {/* AI Verdict — cached 6h per symbol */}
-        <HudPanel flow title="AI Verdict" index="A5"
+        <HudPanel flow title="AI Verdict" index="A6"
           actions={
             <Btn size="sm" variant="ghost" disabled={!sym || refreshInsight.isPending}
               onClick={() => sym && refreshInsight.mutate({ symbol: sym })}
@@ -315,7 +263,7 @@ export default function Analysis() {
                 </span>
               </div>
               {(insight.entry || insight.stop_loss || insight.targets.length > 0) && (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 11, marginBottom: 6 }}>
+                <div style={{ display: "flex", flexDirection: "column", fontSize: 11, marginBottom: 6 }}>
                   {insight.entry != null && <Row label="Entry" mono>₹{fmtNum(insight.entry, 2)}</Row>}
                   {insight.stop_loss != null && <Row label="Stop" mono>₹{fmtNum(insight.stop_loss, 2)}</Row>}
                   {insight.targets.map((t, i) => (
@@ -345,7 +293,7 @@ export default function Analysis() {
 
         {/* Fundamentals */}
         {fund && (
-          <HudPanel flow title="Fundamentals" index="A6">
+          <HudPanel flow title="Fundamentals" index="A7">
             <Row label="Market Cap" mono>{fund.marketCap ? `₹${fmtNum(fund.marketCap / 1e7, 0)} Cr` : "—"}</Row>
             <Row label="P/E (TTM)" mono>{fmtNum(fund.trailingPE ?? fund.peRatio, 2)}</Row>
             <Row label="P/B" mono>{fmtNum(fund.priceToBook, 2)}</Row>

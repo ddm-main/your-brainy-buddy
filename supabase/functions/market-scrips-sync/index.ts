@@ -134,13 +134,10 @@ Deno.serve(async (req) => {
         { onConflict: "symbol,exchange", ignoreDuplicates: true },
       );
     }
-    await svc.from("market_stocks").update({ in_universe: false }).eq("in_universe", true);
-    for (let i = 0; i < universe.length; i += 200) {
-      await svc.from("market_stocks")
-        .update({ in_universe: true })
-        .in("symbol", universe.slice(i, i + 200))
-        .eq("exchange", "NSE");
-    }
+    // Flag every active NSE equity as in_universe — the screener view and
+    // sync pipelines now cover the full active set, not just Nifty 500 + user
+    // holdings. Nifty 500 membership stays on is_nifty500 below.
+    await svc.from("market_stocks").update({ in_universe: true }).eq("is_active", true).eq("exchange", "NSE");
     // Flag is_nifty500 on the official (or fallback) list
     await svc.from("market_stocks").update({ is_nifty500: false }).eq("is_nifty500", true);
     for (let i = 0; i < nifty500List.length; i += 200) {

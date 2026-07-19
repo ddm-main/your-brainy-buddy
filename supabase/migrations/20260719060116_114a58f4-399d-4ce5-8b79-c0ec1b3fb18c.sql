@@ -1,0 +1,1 @@
+ALTER VIEW public.market_fundamentals_sync_queue SET (security_invoker = on);

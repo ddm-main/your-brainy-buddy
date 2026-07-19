@@ -67,3 +67,30 @@ export async function yahooQuoteSummary(yahooSymbol: string, modules: string): P
   }
   return null;
 }
+
+/** Yahoo v1 finance search — used to auto-resolve renamed tickers. Returns the
+ *  best matching Indian equity `.NS` / `.BO` symbol or null. */
+export async function yahooSearchSymbol(query: string): Promise<string | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const s = await session(attempt === 1);
+    if (!s) continue;
+    for (const host of QS_HOSTS) {
+      try {
+        const url = `https://${host}/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=8&newsCount=0&region=IN&lang=en-IN`;
+        const r = await fetchWithTimeout(url, { headers: { "User-Agent": UA, Cookie: s.cookie } });
+        if (r.status === 401 || r.status === 403) { cached = null; break; }
+        if (!r.ok) continue;
+        const j = await r.json();
+        const quotes = (j?.quotes ?? []) as Array<{ symbol?: string; exchange?: string; quoteType?: string }>;
+        // Prefer .NS equities first, then .BO, then any.
+        const ns = quotes.find((q) => q.symbol?.endsWith(".NS") && (q.quoteType === "EQUITY" || !q.quoteType));
+        if (ns?.symbol) return ns.symbol;
+        const bo = quotes.find((q) => q.symbol?.endsWith(".BO"));
+        if (bo?.symbol) return bo.symbol;
+        const any = quotes[0]?.symbol;
+        if (any) return any;
+      } catch { /* try next host */ }
+    }
+  }
+  return null;
+}

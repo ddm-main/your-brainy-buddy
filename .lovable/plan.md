@@ -1,165 +1,107 @@
-## Verified diagnosis
-
-I checked the current code and live database state. The screener problem is real at the data layer, not just UI.
-
-- `market_stock_scores` has 508 rows with technicals populated.
-- `market_fundamentals_global` has 0 rows, so every fundamentals filter has no usable data.
-- `market_stocks` has 2,699 active NSE stocks, but only 501 are in the current pipeline universe and the Screener’s “All Stocks” is based on score rows, so it only shows ~508 scored symbols, not all stocks.
-- Cron jobs exist for market sync, but recent scheduled HTTP calls are returning 403, so automatic sync is broken.
-- There is no scheduled fundamentals sync job right now.
-- `market_index_members` is partial, and the current index constituent function returns data but does not persist it, so Nifty/BankNifty/FinNifty universe filters can be incomplete.
-- `market-fundamentals-global-sync` silently swallows upstream errors and still stamps `last_fundamentals_sync_at`, which hides why Yahoo/NSE failed and makes the queue look “done” even when no fundamentals were inserted.
-- Market navigation still exposes several immature/secondary sections (`AI Analysis Engine`, `Backtesting`, `Trade Planner`) as first-class tabs, which makes the section feel unfinished.
-
 ## Goal
+Fix the Analysis workbench end-to-end and rebuild its chart controls as a real TradingView-style dropdown toolbar. Verified against the live app while logged in — the issues below were reproduced with screenshots, not guessed.
 
-Make Market behave like a proper Tickertape/Screener-style workspace:
+## Bugs verified (with reproduction)
 
-- “All Stocks” actually includes all known active NSE stocks.
-- Fundamentals, technicals, sectors, index membership, filters, and presets are populated automatically.
-- The user should not need to manually sync anything.
-- Manual sync controls become diagnostics/admin fallback only.
-- Unreliable/unfinished sections are removed from primary navigation or merged into the right workflow.
+### Right rail — panels are stacking on top of each other (root cause)
+Screenshot `/market/analysis/RELIANCE` at 1332×892: `A1 QUOTE`, `A2 BREAKOUT`, `A3 INDICATORS`, `A4 RANGE`, `A5 AI VERDICT`, `A6 FUNDAMENTALS` all render on top of one another with visible text bleed-through.
 
-## Plan
+Root cause: `HudPanel` renders a `<section>` with `display:flex; flexDirection:column; minHeight:0` and no `flex` value. Inside a flex-column parent (the right rail: `display:flex; flexDirection:column; gap:12; overflowY:auto`), the default `flex:0 1 auto` combined with `min-height:0` lets every panel shrink below its content height. Result: panels collapse and their content overflows into the next panel's box (visible in every screenshot I captured, including the TradingView-mode view).
 
-### 1. Fix automatic scheduled sync first
+Fix: give the panel root `flex: 0 0 auto` (or drop `min-height:0` on `flow` panels). This is a single-line change in `src/components/hud/HudPanel.tsx` and it also unblocks the rail's `overflow-y:auto` scroll.
 
-- Repair the cron secret mismatch causing 403 responses.
-- Harden `requireCronSecret` and `market_cron_call` so scheduled market jobs authenticate consistently.
-- Add clear non-secret diagnostics when a cron call fails, without exposing secret values.
-- Add or restore scheduled jobs for:
-  - universe/scrip master sync
-  - index constituent persistence
-  - EOD technical pipeline
-  - sector/breadth aggregates
-  - global fundamentals sync
+### Chart toolbar overflows and wraps
+Selected-element text and screenshots show the header row wrapping into two lines at 1332px and into three lines at 1100px (`1D 1H 15M 5M / CANDLES BARS LINE AREA / TRADINGVIEW ⛶`), then the 9 indicator chips wrap into another two lines below. The panel title `MK.ANL · RELIANCE · 1D` also cramps into that row. The vertical `<span>` dividers between button groups render at height 0 because they have `width:1` but no `height`.
 
-### 2. Make fundamentals sync reliable and observable
+### Native chart body is blank
+In the 1D view for RELIANCE the OHLC legend renders (`O 1535.20 H 1551.50 …`) but no candles are drawn — the chart body area is empty. TradingView mode on the same symbol shows a full candle chart, so data + rendering pipeline work in the TV path but not the native `CandleChart` path. Likely causes to verify in the fix pass:
+- `CandleChart` receives `fill` and sizes off `container.clientHeight`, but the panel body is inside a `FullscreenShell` whose flex parent may report height 0 on first paint (no ResizeObserver-driven resize).
+- Or the `candles` array is arriving with string timestamps that `lightweight-charts` rejects silently.
 
-Refactor `market-fundamentals-global-sync` so failures are visible and recoverable:
+Diagnosis and fix belong in the same pass because a broken primary chart is the highest-priority bug.
 
-- Stop silently swallowing all Yahoo/NSE failures.
-- Track per-symbol source status: `ok`, `partial`, `failed`, `last_error`, `source`, `data_as_of`.
-- Only mark rows as successfully refreshed when at least useful metadata/fundamental fields are returned.
-- Keep failed symbols retryable with backoff instead of hiding them for 7 days.
-- Add fallback source order:
-  1. Yahoo quoteSummary for ratios and financial fields.
-  2. NSE public quote/meta endpoints for sector, industry, market cap, traded price metadata where Yahoo is missing.
-  3. Existing NSE index CSVs for index membership and sector/industry fallback.
-  4. Optional future paid/freemium providers only if you choose to add keys later.
+### Right-rail responsiveness
+At 1100px the rail is still pinned to a fixed 300px column, so the chart column shrinks to ~750px, indicator chips wrap to three rows, and the panels overlap even harder. Below ~1000px the layout is unusable.
 
-I will not scrape Tickertape/Screener as a backend dependency; the app can match their UX, but relying on their pages as a data source is brittle and likely against usage terms.
+### Section index labels
+`A1 A2 A3 A4 A5 A6` but `Market Depth` currently uses `A1.5` (out of sequence) — cosmetic.
 
-### 3. Make “All Stocks” truly all active stocks
+### AI Verdict inner layout
+The Entry/Stop/T1/T2/Hold block wraps a `1fr 1fr` grid around `Row` components that are themselves two-column, so numbers overflow the 300px rail and land under the rationale text.
 
-- Change the screener data model so `market_stocks` is the base dataset, not `market_stock_scores`.
-- Left-join technical scores and fundamentals onto all active NSE stocks.
-- Add a secure `market_screener_rows` read view or equivalent query layer so the frontend can load complete rows efficiently.
-- Result: stocks without technicals/fundamentals still appear, with missing fields shown as `—`; filters on missing fields exclude those rows only when the user activates that filter.
+### Market Depth alignment
+Qty column is not right-aligned and long numbers (`26,40,042`) collide with the price column in the ask half.
 
-### 4. Fix universes and index membership
+## Changes (scope: Analysis UI + one HudPanel line + one CSS block)
 
-- Persist official index constituents into `market_index_members` for at least:
-  - Nifty 50
-  - Nifty Next 50
-  - Nifty 100/200/500
-  - Bank Nifty
-  - Fin Nifty
-  - Midcap 100
-  - Smallcap 100
-- Update the screener universe logic to use the persisted membership reliably.
-- Keep “All Stocks” separate from “Nifty 500” so the counts are clear.
+### 1. Fix panel collapse (unblocks everything else)
+`src/components/hud/HudPanel.tsx` — add `flex: "0 0 auto"` to the section root style. This is the only change to `HudPanel` and it doesn't affect the fixed-height chart panel (which already sets `flex: 1` via its `style` prop).
 
-### 5. Fix filter correctness and screener UX
+### 2. Fix native chart rendering
+`src/components/market/CandleChart.tsx`:
+- Guarantee the chart resizes after mount by observing the container with `ResizeObserver` and calling `chart.applyOptions({ width, height })` on every entry. Also call `chart.timeScale().fitContent()` after the first series `setData`.
+- Coerce `time` values: if `typeof time === 'string'` and the string is `YYYY-MM-DD`, pass it through unchanged (lightweight-charts accepts BusinessDay strings); if it's an ISO datetime, convert to a UNIX second `UTCTimestamp`. Guard against `NaN`/`null`.
 
-- Rework filter coverage so each filter shows:
-  - available data count
-  - matched count
-  - missing data count
-  - last sync freshness
-- Disable or clearly mark fundamentals presets until fundamentals coverage is usable.
-- Add missing technical columns/filters that are already computed but not fully exposed:
-  - EMA 20/50/100/200
-  - MACD / signal / histogram
-  - ATR / ATR %
-  - support/resistance
-  - 52-week high/low
-  - relative strength
-- Add missing fundamentals display where available:
-  - market cap
-  - PE/PB/PEG
-  - EPS/book value
-  - ROE/ROCE
-  - debt/equity
-  - current/quick ratio
-  - revenue/profit growth
-  - promoter/institutional holding
-- Remove filters/columns that have no dependable source yet, or mark them as “coming later” outside the main screener.
+If after the fix the chart is still blank the diagnosis will surface (via a one-line dev warning we'll add for empty series) instead of failing silently.
 
-### 6. Replace manual sync UI with auto-sync health
+### 3. New TradingView-style toolbar
+Replace the wrapping `actions` row + indicator-chip strip with a single compact toolbar rendered inside the chart panel body (above the chart, not in the header). It has real dropdown menus:
 
-- Remove prominent “Sync fundamentals / EOD batch / Aggregates” buttons from Screener and Dashboard.
-- Replace with a compact “Data Health” strip showing:
-  - total active stocks
-  - technical coverage
-  - fundamentals coverage
-  - latest EOD date
-  - latest fundamentals refresh
-  - background sync status
-- Keep manual run buttons only inside Market Settings under an “Advanced / Repair data” area.
-
-### 7. Rearrange Market navigation
-
-Simplify the primary Market tabs to:
-
-```text
-Overview | Screener | Analysis | Portfolio | Watchlists & Alerts | Settings
+```
+[1D ▾]  [Candles ▾]  [ƒ Indicators ▾]  [🔔 Alert]  [⧉ Layout ▾]  [⋯ More ▾]        [TV | Native]  [⛶]
 ```
 
-- Merge AI verdicts into `Analysis` instead of a separate `AI Analysis Engine` tab.
-- Move `Trade Planner` into Analysis/Portfolio as a contextual tool, not a top-level section.
-- Hide `Backtesting` from primary navigation until the data layer is reliable; keep code if useful, but do not present it as production-ready.
-- Keep `Options` as a sub-tool under Analysis only when the selected symbol is F&O-enabled.
+- **Interval ▾** — 5m / 15m / 1h / 1D (existing `TIMEFRAMES`). Selected row shows check.
+- **Chart type ▾** — Candles / Bars / Line / Area (existing `CHART_TYPES`), disabled while `TV` mode is on.
+- **Indicators ▾** — grouped checkbox menu: *Overlays* (EMA20/50/200, SMA20, BB, VWAP) / *Oscillators* (RSI, MACD) / *Volume*. Persists to `IND_STORE` as today.
+- **Alert** — navigates to `/market/alerts?symbol=<sym>` (existing route).
+- **Layout ▾** — Single (active), 2-up / 2×2 (disabled, "coming soon"). Ships as visual parity with TradingView; no behavior change.
+- **More ▾** — Reset indicators, Open in TradingView (external), Fullscreen.
+- **TV | Native** — segmented switch (replaces standalone "TradingView" button).
+- **⛶** — fullscreen icon.
 
-### 8. Update source comparison behavior
+New files:
+- `src/components/hud/Menu.tsx` — tiny popover primitive: button + absolute-positioned panel, close on outside click / `Escape` / route change. No new dependencies.
+- `src/components/market/ChartToolbar.tsx` — owns the menu wiring; state stays in `Analysis.tsx`.
 
-- Use Yahoo primarily for charts/technicals because it is free and already integrated.
-- Add NSE fallback for Indian-market metadata and index membership.
-- Treat free/freemium APIs as optional future integrations:
-  - FMP/EODHD/Twelve Data can improve fundamentals but require API keys and have free-tier limits.
-  - Alpha Vantage is not reliable enough for broad NSE fundamentals.
-  - Unofficial NSE libraries are useful as implementation references, but direct controlled fetches are better for Edge Functions.
+`src/routes/market/Analysis.tsx`:
+- Remove the wrapping button row from panel `actions` (leave only the segmented TV/Native + fullscreen icon).
+- Remove the standalone indicator-chip strip; move indicators into the dropdown.
+- Move `MK.ANL · RELIANCE · 1D` header text to just `RELIANCE` (interval/type live in the toolbar).
 
-### 9. Verification
+### 4. Rail layout polish
+`src/routes/market/Analysis.tsx` + a small CSS block in `src/styles.css`:
+- Add `.mk-anl-grid` with `grid-template-columns: minmax(0,1fr) minmax(280px,340px)`; at `max-width: 1100px` collapse to a single column (rail below chart).
+- Increase rail `gap` to `16px`; add `padding-right: 4px` so the panels' outer glow shadows don't clip against the scrollbar.
+- `Market Depth` inner grid → `grid-template-columns: auto 1fr` with `text-align:right` on qty.
+- `AI Verdict` — drop the nested `1fr 1fr` grid; render Entry/Stop/T1/T2/Hold as stacked `Row`s.
+- Renumber index labels to `A1..A7` (Depth becomes A2, everything after shifts).
 
-After implementation:
+### 5. Small polish
+- Restore visible group dividers in the toolbar (`width:1; align-self:stretch; background:var(--edge)`).
+- All toolbar controls close on `Escape` (reuses `useEscapeClose`).
 
-- Confirm cron calls stop returning 403.
-- Confirm `market_fundamentals_global` populates non-zero rows.
-- Confirm `market_stocks` active count remains ~2,699 and Screener “All Stocks” reflects that base universe.
-- Confirm Nifty 50/Bank Nifty/Fin Nifty counts are populated from persisted index members.
-- Confirm fundamentals filters like Market Cap, PE, ROE, Debt/Equity return non-zero matches where data exists.
-- Confirm technical filters still work across scored symbols.
-- Verify Market navigation is simplified and no unfinished section is exposed as a main tab.
+## Files touched
 
-## Files/areas to change after approval
+- `src/components/hud/HudPanel.tsx` — one-line flex fix.
+- `src/components/hud/Menu.tsx` — new popover primitive.
+- `src/components/market/CandleChart.tsx` — ResizeObserver + time coercion + `fitContent()`.
+- `src/components/market/ChartToolbar.tsx` — new toolbar with dropdowns.
+- `src/routes/market/Analysis.tsx` — wire toolbar, drop old rows, renumber, responsive grid, fix Depth + AI Verdict panels.
+- `src/styles.css` — `.mk-anl-grid` responsive rules + tiny `.mk-menu` styles.
 
-- Supabase migration: sync state fields/view/index membership cron jobs.
-- `supabase/functions/_shared/market/cron.ts`
-- `supabase/functions/market-fundamentals-global-sync/index.ts`
-- new or updated NSE fallback helper under `supabase/functions/_shared/market/`
-- `supabase/functions/market-scrips-sync/index.ts`
-- `supabase/functions/market-index-constituents/index.ts` or new persistent sync function
-- `src/lib/market/screenerRun.ts`
-- `src/lib/market/screenerCatalog.ts`
-- `src/routes/market/Screener.tsx`
-- `src/routes/market/Settings.tsx`
-- `src/routes/Market.tsx`
-- `src/routes/market/Analysis.tsx`
+## Out of scope (flagged as follow-ups, not built in this pass)
 
-## Out of scope for this pass
+- Symbol search inside the toolbar (needs an autocomplete hook against `market_stocks`).
+- Real multi-chart split layouts (2-up, 2×2) — Layout menu ships as stub.
+- Drawing tools (trendlines, fibs, measure) on the native chart — requires lightweight-charts drawing primitives.
+- Server-persisted indicator/layout presets per symbol (today: localStorage global).
+- Auditing the wider Market section (Options, Positions, Watchlists) for the same `HudPanel` collapse — the fix to `HudPanel` will help globally, but a follow-up sweep is worth scheduling if any other page uses `flow` panels in a flex column.
 
-- Paid market-data providers unless you explicitly approve adding an API key.
-- Brokerage order placement changes.
-- Scraping Tickertape/Screener pages as a production data source.
+## Verification plan
+
+After the fix, re-run the same logged-in Playwright script at 1332×892, 1100×800, and 900×800, and confirm:
+- No panel overlap in the right rail; each panel renders its full content and the rail scrolls.
+- Native chart renders candles for RELIANCE, AIIL, and a small-cap symbol.
+- Toolbar fits on a single row down to 900px; dropdowns open, close on outside click and `Escape`, and persist indicator toggles across reload.
+- TV mode still works and no longer has the standalone TradingView button in the header.

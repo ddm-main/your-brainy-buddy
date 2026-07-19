@@ -1498,4 +1498,156 @@ textarea.hud-input:focus {
   animation: hud-boot 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+/* -------- Market · Analysis workbench -------- */
+.mk-anl-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  gap: 14px;
+  height: 100%;
+  min-height: 0;
+}
+@media (max-width: 1100px) {
+  .mk-anl-grid { grid-template-columns: minmax(0, 1fr); height: auto; }
+  .mk-anl-rail { max-height: none !important; overflow: visible !important; }
+  .mk-anl-chart { min-height: 520px; }
+}
+
+.mk-anl-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 6px 12px 2px;
+}
+.mk-anl-rail::-webkit-scrollbar { width: 6px; }
+.mk-anl-rail::-webkit-scrollbar-thumb { background: rgba(53,214,237,0.18); border-radius: 3px; }
+
+/* Chart toolbar (TradingView-style) */
+.mk-chart-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  margin-bottom: 8px;
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  background: rgba(4,16,22,0.55);
+  flex: 0 0 auto;
+  min-height: 34px;
+  flex-wrap: wrap;
+}
+.mk-toolbar-divider {
+  align-self: stretch;
+  width: 1px;
+  background: var(--edge);
+  margin: 2px 4px;
+}
+
+.mk-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-hud);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background 140ms, border-color 140ms, color 140ms;
+  white-space: nowrap;
+}
+.mk-menu-trigger:hover:not(:disabled) { background: rgba(53,214,237,0.08); color: var(--accent); }
+.mk-menu-trigger.is-open,
+.mk-menu-trigger.is-active { background: rgba(53,214,237,0.12); color: var(--accent); border-color: var(--edge-strong); }
+.mk-menu-trigger:disabled { opacity: 0.4; cursor: not-allowed; }
+.mk-menu-ico { display: inline-flex; align-items: center; color: var(--accent); opacity: 0.85; }
+.mk-menu-count {
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: rgba(53,214,237,0.2);
+  color: var(--accent);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+}
+
+/* Menu popover */
+.mk-menu-panel {
+  padding: 6px 4px;
+  background: rgba(6,20,28,0.96);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 12px 40px -10px rgba(0,0,0,0.7), 0 0 0 1px rgba(53,214,237,0.08);
+}
+.mk-menu-group + .mk-menu-group { margin-top: 2px; }
+.mk-menu-group-title {
+  padding: 6px 12px 4px;
+  font-family: var(--font-hud);
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.mk-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-family: var(--font-hud);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: none;
+  border-radius: 2px;
+}
+.mk-menu-item:hover:not(:disabled) { background: rgba(53,214,237,0.1); color: var(--accent); }
+.mk-menu-item:disabled { opacity: 0.35; cursor: not-allowed; }
+.mk-menu-item[data-selected="true"] { color: var(--accent); }
+.mk-menu-item-check {
+  display: inline-flex;
+  width: 14px;
+  justify-content: center;
+  color: var(--accent);
+}
+.mk-menu-box {
+  width: 12px; height: 12px;
+  border: 1px solid var(--edge-strong);
+  border-radius: 2px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--accent);
+}
+.mk-menu-box.is-on { background: rgba(53,214,237,0.18); border-color: var(--accent); }
+.mk-menu-hint { font-size: 9px; color: var(--text-muted); letter-spacing: 0.14em; }
+.mk-menu-divider { height: 1px; margin: 4px 8px; background: var(--edge); opacity: 0.6; }
+
+/* Segmented Native/TV switch */
+.mk-seg {
+  display: inline-flex;
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.mk-seg-btn {
+  padding: 4px 10px;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-family: var(--font-hud);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.mk-seg-btn + .mk-seg-btn { border-left: 1px solid var(--edge); }
+.mk-seg-btn.is-on { background: rgba(53,214,237,0.16); color: var(--accent); }
+
 

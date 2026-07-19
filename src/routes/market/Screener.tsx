@@ -2,7 +2,8 @@
 // Left rail: collapsible filter categories with search & data-coverage chips.
 // Right pane: query chips → results grid with coverage note, pagination & CSV.
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { createPortal } from "react-dom";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import type { ColumnDef } from "@tanstack/react-table";
 import { HudPanel } from "@/components/hud/HudPanel";
@@ -335,7 +336,7 @@ export default function Screener() {
             {isFetching ? "loading…" : `${filtered.length} of ${rows.length} stocks`}
           </div>
         </div>
-        <DataHealthStrip rows={rows} />
+        <DataHealthStrip rows={rows} universe={universe} />
       </HudPanel>
 
       {/* Two-pane workspace */}
@@ -506,20 +507,27 @@ function FilterRail({ rows, active, onAdd, sectorList, industryList }: {
 function PresetPicker({ onPick, rows }: { onPick: (id: string) => void; rows: ScreenerRow[] }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const pos = useAnchoredPos(triggerRef, open, "right", 480);
   useEffect(() => {
     if (!open) return;
-    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (triggerRef.current?.contains(t) || popRef.current?.contains(t)) return;
+      setOpen(false);
+    };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
   const groups = ["Fundamental", "Technical", "Hybrid"] as const;
   return (
     <div ref={ref} style={{ position: "relative" }}>
-      <Btn size="sm" onClick={() => setOpen((o) => !o)}>
+      <button ref={triggerRef} className="hud-btn" data-variant="ghost" data-size="sm" onClick={() => setOpen((o) => !o)}>
         <Sparkles size={11} style={{ marginRight: 4 }} />Presets
-      </Btn>
-      {open && (
-        <div style={{ ...popoverStyle, width: 320, maxHeight: 480, overflowY: "auto" }}>
+      </button>
+      {open && pos && createPortal(
+        <div ref={popRef} style={{ ...popoverStyle, ...pos, width: 320, maxHeight: 480, overflowY: "auto" }}>
           {groups.map((g) => (
             <div key={g}>
               <div style={{ padding: "4px 8px", fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.2em", textTransform: "uppercase", borderBottom: "1px solid var(--edge)" }}>{g}</div>
@@ -544,7 +552,8 @@ function PresetPicker({ onPick, rows }: { onPick: (id: string) => void; rows: Sc
               })}
             </div>
           ))}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -555,19 +564,27 @@ function SavedPicker({ saved, onLoad, onDelete }: {
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const pos = useAnchoredPos(triggerRef, open, "right", 360);
   useEffect(() => {
     if (!open) return;
-    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (triggerRef.current?.contains(t) || popRef.current?.contains(t)) return;
+      setOpen(false);
+    };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
   return (
     <div ref={ref} style={{ position: "relative" }}>
-      <Btn size="sm" onClick={() => setOpen((o) => !o)} disabled={saved.length === 0}>
+      <button ref={triggerRef} className="hud-btn" data-variant="ghost" data-size="sm"
+        onClick={() => setOpen((o) => !o)} disabled={saved.length === 0}>
         My Screens · {saved.length}
-      </Btn>
-      {open && saved.length > 0 && (
-        <div style={{ ...popoverStyle, width: 240, maxHeight: 360, overflowY: "auto" }}>
+      </button>
+      {open && saved.length > 0 && pos && createPortal(
+        <div ref={popRef} style={{ ...popoverStyle, ...pos, width: 240, maxHeight: 360, overflowY: "auto" }}>
           {saved.map((s) => (
             <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 6px", borderBottom: "1px solid var(--edge)" }}>
               <button onClick={() => { onLoad(s); setOpen(false); }}
@@ -581,7 +598,8 @@ function SavedPicker({ saved, onLoad, onDelete }: {
               </button>
             </div>
           ))}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -682,18 +700,28 @@ function FilterRow({ af, rows, sectorList, industryList, onUpdate, onRemove }: {
 function EnumMultiSelect({ options, values, onChange }: { options: string[]; values: string[]; onChange: (v: string[]) => void }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const pos = useAnchoredPos(triggerRef, open, "left", 320);
   useEffect(() => {
     if (!open) return;
-    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (triggerRef.current?.contains(t)) return;
+      if (popRef.current?.contains(t)) return;
+      setOpen(false);
+    };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
   const toggle = (v: string) => values.includes(v) ? onChange(values.filter((x) => x !== v)) : onChange([...values, v]);
   return (
     <div ref={ref} style={{ position: "relative" }}>
-      <Btn size="sm" onClick={() => setOpen((o) => !o)}>{values.length ? `${values.length} selected` : "select…"}</Btn>
-      {open && (
-        <div style={{ ...popoverStyle, maxHeight: 320, overflowY: "auto", width: 240, left: 0, right: "auto" }}>
+      <button ref={triggerRef} className="hud-btn" data-variant="ghost" data-size="sm" onClick={() => setOpen((o) => !o)}>
+        {values.length ? `${values.length} selected` : "select…"}
+      </button>
+      {open && pos && createPortal(
+        <div ref={popRef} style={{ ...popoverStyle, ...pos, maxHeight: 320, overflowY: "auto", width: 240 }}>
           {options.length === 0
             ? <span style={{ fontSize: 11, color: "var(--text-muted)", padding: 6 }}>no options yet</span>
             : options.map((o) => (
@@ -707,7 +735,8 @@ function EnumMultiSelect({ options, values, onChange }: { options: string[]; val
                 <span>{o}</span>
               </button>
             ))}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -719,18 +748,27 @@ function EnumMultiSelect({ options, values, onChange }: { options: string[]; val
 function ColumnPicker({ value, onChange }: { value: string[]; onChange: (cols: string[]) => void }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const pos = useAnchoredPos(triggerRef, open, "right", 400);
   useEffect(() => {
     if (!open) return;
-    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (triggerRef.current?.contains(t) || popRef.current?.contains(t)) return;
+      setOpen(false);
+    };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
   const toggle = (id: string) => value.includes(id) ? onChange(value.filter((x) => x !== id)) : onChange([...value, id]);
   return (
     <div ref={ref} style={{ position: "relative" }}>
-      <Btn size="sm" onClick={() => setOpen((o) => !o)}>Columns · {value.length}</Btn>
-      {open && (
-        <div style={{ ...popoverStyle, width: 240, maxHeight: 400, overflowY: "auto" }}>
+      <button ref={triggerRef} className="hud-btn" data-variant="ghost" data-size="sm" onClick={() => setOpen((o) => !o)}>
+        Columns · {value.length}
+      </button>
+      {open && pos && createPortal(
+        <div ref={popRef} style={{ ...popoverStyle, ...pos, width: 240, maxHeight: 400, overflowY: "auto" }}>
           {COLUMNS.map((c) => (
             <button key={c.id} onClick={() => toggle(c.id)}
               style={{ ...popoverItem, padding: "6px 8px", display: "flex", alignItems: "center", gap: 8 }}
@@ -747,14 +785,15 @@ function ColumnPicker({ value, onChange }: { value: string[]; onChange: (cols: s
             <Btn size="sm" onClick={() => onChange(COLUMNS.map((c) => c.id))}>all</Btn>
             <Btn size="sm" onClick={() => onChange([])}>none</Btn>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
 }
 
 const popoverStyle: React.CSSProperties = {
-  position: "absolute", right: 0, top: "calc(100% + 4px)", zIndex: 40,
+  position: "fixed", zIndex: 9999,
   minWidth: 220, background: "var(--bg-panel)", border: "1px solid var(--edge-strong)",
   padding: 6, display: "flex", flexDirection: "column", gap: 2,
   boxShadow: "0 12px 32px rgba(0,0,0,0.6)",
@@ -763,6 +802,40 @@ const popoverItem: React.CSSProperties = {
   background: "transparent", border: "none", textAlign: "left",
   padding: "6px 8px", cursor: "pointer", color: "var(--text)", width: "100%",
 };
+
+// Anchored popover position: computed from trigger rect, updates on scroll/resize.
+// Uses "align" to snap left/right edge of the popover to the trigger, and prefers
+// opening below unless there isn't enough room (then flips above). Combined with
+// `position: fixed` + createPortal, this makes popovers escape any scrolling
+// ancestor and render above everything else on the page.
+function useAnchoredPos(
+  triggerRef: React.RefObject<HTMLElement>,
+  open: boolean,
+  align: "left" | "right" = "right",
+  estHeight = 320,
+): { top: number; left?: number; right?: number } | null {
+  const [pos, setPos] = useState<{ top: number; left?: number; right?: number } | null>(null);
+  useEffect(() => {
+    if (!open || !triggerRef.current) return;
+    const compute = () => {
+      const el = triggerRef.current; if (!el) return;
+      const r = el.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - r.bottom;
+      const openUp = spaceBelow < estHeight && r.top > spaceBelow;
+      const top = openUp ? Math.max(8, r.top - estHeight - 4) : r.bottom + 4;
+      if (align === "left") setPos({ top, left: r.left });
+      else setPos({ top, right: window.innerWidth - r.right });
+    };
+    compute();
+    window.addEventListener("scroll", compute, true);
+    window.addEventListener("resize", compute);
+    return () => {
+      window.removeEventListener("scroll", compute, true);
+      window.removeEventListener("resize", compute);
+    };
+  }, [open, triggerRef, align, estHeight]);
+  return pos;
+}
 
 // ============================================================================
 // Column preset picker — one-click column-set swap (Screener.in style)
@@ -799,82 +872,120 @@ function ColumnPresetPicker({ onPick }: { onPick: (cols: string[]) => void }) {
 }
 
 // ============================================================================
-// Data Health strip — shows fundamentals coverage + one-click resync
+// Data Health strip — passive status. Sync happens on server crons + a silent
+// background hook (`useMarketAutoSync`). Users only see a "last synced X ago"
+// line; a discreet overflow menu keeps force-resync available for power users.
 // ============================================================================
-function DataHealthStrip({ rows }: { rows: ScreenerRow[] }) {
+function DataHealthStrip({ rows }: { rows: ScreenerRow[]; universe: UniverseId }) {
   const push = useUi((s) => s.push);
   const qc = useQueryClient();
   const [busy, setBusy] = useState<null | "fund" | "eod" | "agg">(null);
-  const stats = useMemo(() => {
-    const total = rows.length;
-    const withFundamentals = rows.filter((r) => r.pe_ttm != null || r.roe != null || r.market_cap != null).length;
-    const withTechnicals = rows.filter((r) => r.rsi14 != null || r.adx14 != null).length;
-    const withSector = rows.filter((r) => r.sector != null).length;
-    return { total, withFundamentals, withTechnicals, withSector };
-  }, [rows]);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuTriggerRef = useRef<HTMLButtonElement>(null);
+  const menuPopRef = useRef<HTMLDivElement>(null);
+  const menuPos = useAnchoredPos(menuTriggerRef, menuOpen, "right", 180);
 
-  const trigger = async (fn: "market-fundamentals-global-sync" | "market-pipeline-eod" | "market-pipeline-aggregates", label: string, key: "fund" | "eod" | "agg", quiet = false) => {
-    if (busy) return;
-    setBusy(key);
-    // Chunked pipelines (fund + eod) auto-drain across multiple invocations.
-    const isChunked = fn === "market-fundamentals-global-sync" || fn === "market-pipeline-eod";
-    if (!isChunked) {
-      if (!quiet) push(`${label} started`, "warn");
-      try {
-        const { error } = await supabase.functions.invoke(fn, { body: {} });
-        if (error) throw error;
-        if (!quiet) push(`${label} complete`, "ok");
-        await qc.invalidateQueries({ queryKey: ["market", "screener-rows-v2"] });
-      } catch (e) {
-        if (!quiet) push(`${label} failed: ${(e as Error).message}`, "err");
-      } finally {
-        setBusy(null);
-      }
-      return;
-    }
-
-    const MAX_CALLS = 30;
-    let totalProcessed = 0, totalSynced = 0, totalFailed = 0;
-    if (!quiet) push(`${label} started — chunked run, this may take a few minutes`, "warn");
-    try {
-      for (let i = 0; i < MAX_CALLS; i++) {
-        const { data, error } = await supabase.functions.invoke(fn, { body: {} });
-        if (error) throw error;
-        const d = (data ?? {}) as { drained?: boolean; processed?: number; synced?: number; failed?: number; remaining?: number };
-        totalProcessed += d.processed ?? 0;
-        totalSynced += d.synced ?? 0;
-        totalFailed += d.failed ?? 0;
-        if (d.drained) break;
-        if (!quiet && i % 3 === 2) {
-          push(`${label} … ${totalSynced} synced${d.remaining != null ? ` · ${d.remaining} remaining` : ""}`, "warn");
-        }
-      }
-      if (!quiet) push(`${label} complete — ${totalSynced} synced, ${totalFailed} failed`, "ok");
-      await qc.invalidateQueries({ queryKey: ["market", "screener-rows-v2"] });
-    } catch (e) {
-      if (!quiet) push(`${label} stopped: ${(e as Error).message} (synced ${totalSynced}/${totalProcessed})`, "err");
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const pct = (n: number) => stats.total ? Math.round((n / stats.total) * 100) : 0;
-  const fundPct = pct(stats.withFundamentals);
-  const techPct = pct(stats.withTechnicals);
-  const sectorPct = pct(stats.withSector);
-  const anyLow = fundPct < 50 || sectorPct < 50;
+  // Live pipeline status from the DB view — reflects reality regardless of
+  // whether the current user has ever triggered a sync from this browser.
+  const { data: pipeline } = useQuery({
+    queryKey: ["market", "pipeline-status"],
+    queryFn: async () => {
+      const { data, error } = await (supabase as any).from("market_pipeline_status").select("*").maybeSingle();
+      if (error) throw error;
+      return data as {
+        active_stocks: number;
+        fundamentals_covered: number;
+        fundamentals_failed: number;
+        fundamentals_last_updated_at: string | null;
+        scores_last_trade_date: string | null;
+        scores_last_count: number | null;
+      } | null;
+    },
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
 
   useEffect(() => {
-    if (rows.length === 0 || busy) return;
-    if (fundPct >= 80 && sectorPct >= 80) return;
-    const last = Number(localStorage.getItem(AUTO_SYNC_STORE_KEY) || 0);
-    if (Date.now() - last < 30 * 60_000) return;
-    localStorage.setItem(AUTO_SYNC_STORE_KEY, String(Date.now()));
-    void trigger("market-fundamentals-global-sync", "Fundamentals auto-sync", "fund", true);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows.length, fundPct, sectorPct]);
+    if (!menuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (menuTriggerRef.current?.contains(t) || menuPopRef.current?.contains(t)) return;
+      setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [menuOpen]);
+
+  // Coverage stats — scope by applicability.
+  //  Fundamentals: equity rows are the denominator; ETFs are structurally N/A.
+  //  Sector: equity rows are the denominator (ETFs have no sector).
+  //  Technicals: rows with a trade_date are the denominator (rows without an EOD score legitimately have no RSI).
+  const stats = useMemo(() => {
+    const equities = rows.filter((r) => (r.instrument_type ?? "EQ") === "EQ");
+    const withScore = rows.filter((r) => r.trade_date != null);
+    const total = equities.length;
+    const ok      = equities.filter((r) => r.sync_status === "ok").length;
+    const partial = equities.filter((r) => r.sync_status === "partial").length;
+    const failed  = equities.filter((r) => r.sync_status === "failed").length;
+    const withTech = withScore.filter((r) => r.rsi14 != null || r.adx14 != null).length;
+    const withSector = equities.filter((r) => r.sector != null).length;
+    return {
+      total,
+      ok, partial, failed,
+      withTech, techTotal: withScore.length,
+      withSector,
+      nonEquity: rows.length - equities.length,
+    };
+  }, [rows]);
+
+
+  const trigger = async (
+    fn: "market-fundamentals-global-sync" | "market-pipeline-eod" | "market-pipeline-aggregates",
+    label: string,
+    key: "fund" | "eod" | "agg",
+  ) => {
+    if (busy) return;
+    setBusy(key);
+    setMenuOpen(false);
+    const isChunked = fn === "market-fundamentals-global-sync" || fn === "market-pipeline-eod";
+    try {
+      if (!isChunked) {
+        const { error } = await supabase.functions.invoke(fn, { body: {} });
+        if (error) throw error;
+      } else {
+        // Drain up to 30 chunks, silently.
+        for (let i = 0; i < 30; i++) {
+          const { data, error } = await supabase.functions.invoke(fn, { body: {} });
+          if (error) throw error;
+          if ((data as any)?.drained) break;
+        }
+      }
+      push(`${label} complete`, "ok");
+      await qc.invalidateQueries({ queryKey: ["market"] });
+    } catch (e) {
+      push(`${label} failed: ${(e as Error).message}`, "err");
+    } finally { setBusy(null); }
+  };
+
+  const pctOf = (n: number, d: number) => d ? Math.round((n / d) * 100) : 0;
+  const healthyPct = pctOf(stats.ok + stats.partial, stats.total);
+  const sectorPct  = pctOf(stats.withSector, stats.total);
+  const techPct    = pctOf(stats.withTech, stats.techTotal);
+  const anyLow = healthyPct < 80 || sectorPct < 80 || techPct < 80;
 
   if (rows.length === 0) return null;
+
+  // Relative-time formatter.
+  const ago = (iso: string | null | undefined): string => {
+    if (!iso) return "never";
+    const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    return `${Math.floor(hrs / 24)}d ago`;
+  };
 
   return (
     <div style={{
@@ -882,24 +993,45 @@ function DataHealthStrip({ rows }: { rows: ScreenerRow[] }) {
       background: anyLow ? "rgba(255,180,0,0.05)" : "rgba(53,214,237,0.03)",
       display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap",
     }}>
-      <span style={{ fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.18em", textTransform: "uppercase", color: "var(--text-muted)" }}>Data Health · auto-sync</span>
-      <Chip tone={fundPct >= 80 ? "ok" : fundPct >= 40 ? "warn" : "err"}>Fundamentals {stats.withFundamentals}/{stats.total} · {fundPct}%</Chip>
-      <Chip tone={sectorPct >= 80 ? "ok" : sectorPct >= 40 ? "warn" : "err"}>Sector {stats.withSector}/{stats.total} · {sectorPct}%</Chip>
-      <Chip tone={techPct >= 80 ? "ok" : techPct >= 40 ? "warn" : "err"}>Technicals {stats.withTechnicals}/{stats.total} · {techPct}%</Chip>
-      <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
-        <Btn size="sm" onClick={() => trigger("market-fundamentals-global-sync", "Fundamentals sync", "fund")} disabled={busy !== null}
-          title="Populates PE, ROE, D/E, growth, sector, industry, market cap from Yahoo (~2 min).">
-          <Database size={11} style={{ marginRight: 4 }} />{busy === "fund" ? "syncing…" : "Sync fundamentals"}
-        </Btn>
-        <Btn size="sm" onClick={() => trigger("market-pipeline-eod", "EOD batch", "eod")} disabled={busy !== null}
-          title="Fetches EOD candles + technical indicators (~100 stocks per invocation).">
-          {busy === "eod" ? "running…" : "EOD batch"}
-        </Btn>
-        <Btn size="sm" onClick={() => trigger("market-pipeline-aggregates", "Aggregates", "agg")} disabled={busy !== null}
-          title="Finalizes breadth, sector strength, relative strength.">
-          {busy === "agg" ? "finalizing…" : "Aggregates"}
-        </Btn>
+      <span style={{ fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.18em", textTransform: "uppercase", color: "var(--text-muted)" }}>
+        Data Health · applicable rows only
+      </span>
+      <Chip tone={healthyPct >= 95 ? "ok" : healthyPct >= 80 ? "warn" : "err"}>
+        Fundamentals {stats.ok + stats.partial}/{stats.total} · {healthyPct}%
+      </Chip>
+      <Chip tone={sectorPct >= 95 ? "ok" : sectorPct >= 80 ? "warn" : "err"}>Sector {stats.withSector}/{stats.total} · {sectorPct}%</Chip>
+      <Chip tone={techPct >= 95 ? "ok" : techPct >= 80 ? "warn" : "err"}>Technicals {stats.withTech}/{stats.techTotal} · {techPct}%</Chip>
+      {stats.failed > 0 && <Chip tone="err">{stats.failed} upstream failures</Chip>}
+      {stats.nonEquity > 0 && (
+        <span style={{ fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.14em" }}>
+          excludes {stats.nonEquity} ETF/non-equity
+        </span>
+      )}
+      <span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.14em" }}>
+        Fundamentals synced {ago(pipeline?.fundamentals_last_updated_at)} · Scores {pipeline?.scores_last_trade_date ?? "—"}
+      </span>
+      <div ref={menuRef} style={{ marginLeft: "auto", position: "relative" }}>
+        <button ref={menuTriggerRef} className="hud-btn" data-variant="ghost" data-size="sm"
+          onClick={() => setMenuOpen((o) => !o)} disabled={busy !== null}
+          title="Force a resync — runs immediately instead of waiting for the next background pass.">
+          {busy ? "syncing…" : "⋯ Force resync"}
+        </button>
+        {menuOpen && menuPos && createPortal(
+          <div ref={menuPopRef} style={{ ...popoverStyle, ...menuPos }}>
+            <button style={popoverItem} onClick={() => trigger("market-fundamentals-global-sync", "Fundamentals", "fund")}>
+              <Database size={11} style={{ marginRight: 6 }} />Fundamentals (stale/failed only)
+            </button>
+            <button style={popoverItem} onClick={() => trigger("market-pipeline-eod", "EOD technicals", "eod")}>
+              Recompute technical indicators
+            </button>
+            <button style={popoverItem} onClick={() => trigger("market-pipeline-aggregates", "Aggregates", "agg")}>
+              Recompute breadth &amp; sector strength
+            </button>
+          </div>,
+          document.body,
+        )}
       </div>
     </div>
   );
 }
+

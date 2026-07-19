@@ -14,6 +14,27 @@ export type FilterCategory =
   | "momentum"
   | "signals";
 
+/** Applicability scope — determines which rows are counted for coverage and,
+ *  by extension, whether a null value is legitimate ("N/A") or missing.
+ *   - all       : every active row (structural columns)
+ *   - eq        : equity instruments only (ETFs excluded)
+ *   - eq_profit : equities with positive EPS (loss-makers have no meaningful PE/PEG)
+ *   - eq_owner  : equities where any ownership number was reported
+ *   - tech      : rows with a trade_date (i.e. an EOD score row exists)
+ */
+export type ApplicabilityScope = "all" | "eq" | "eq_profit" | "eq_owner" | "tech";
+
+export function rowIsApplicable(row: Record<string, any>, scope: ApplicabilityScope): boolean {
+  const type = row.instrument_type ?? "EQ";
+  switch (scope) {
+    case "all":       return true;
+    case "eq":        return type === "EQ";
+    case "eq_profit": return type === "EQ" && row.eps_ttm != null && Number(row.eps_ttm) > 0;
+    case "eq_owner":  return type === "EQ" && (row.promoter_holding != null || row.fii_holding != null || row.dii_holding != null);
+    case "tech":      return row.trade_date != null;
+  }
+}
+
 export interface FilterDef {
   id: string;
   label: string;
@@ -26,8 +47,12 @@ export interface FilterDef {
   hint?: string;
   /** enum values (for kind: 'enum') */
   options?: string[];
-  /** Marks filters whose data comes from the global fundamentals sync. */
+  /** Legacy flag — replaced by scope; kept for saved-screener back-compat. */
   fundamental?: boolean;
+  /** Applicability scope: rows failing this are neither counted in coverage nor filtered out. */
+  scope?: ApplicabilityScope;
+  /** For numeric filters where NULL semantically means zero (e.g. non-dividend payer). */
+  nullMeansZero?: boolean;
 }
 
 export const CATEGORIES: Array<{ id: FilterCategory; label: string; desc: string }> = [
@@ -53,59 +78,59 @@ export const CAP_TIERS: CapTier[] = [
 ];
 
 export const FILTERS: FilterDef[] = [
-  // Basics
-  { id: "market_cap",         label: "Market Cap",        category: "basics",     kind: "number", unit: "Cr", min: 0, max: 1_500_000, step: 500 },
-  { id: "sector",             label: "Sector",            category: "basics",     kind: "enum" },
-  { id: "industry",           label: "Industry",          category: "basics",     kind: "enum" },
-  { id: "close",              label: "Price",             category: "basics",     kind: "number", unit: "₹", min: 0, max: 100000, step: 1 },
-  { id: "volume",             label: "Volume",            category: "basics",     kind: "number", min: 0, max: 50_000_000, step: 100_000 },
-  { id: "pct_from_52w_high",  label: "% from 52w High",   category: "basics",     kind: "number", unit: "%", min: -100, max: 0, step: 1 },
+  // Basics — structural columns, apply to every active row.
+  { id: "market_cap",         label: "Market Cap",        category: "basics",     kind: "number", unit: "Cr", min: 0, max: 2_500_000, step: 500, scope: "all" },
+  { id: "sector",             label: "Sector",            category: "basics",     kind: "enum", scope: "eq" },
+  { id: "industry",           label: "Industry",          category: "basics",     kind: "enum", scope: "eq" },
+  { id: "close",              label: "Price",             category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "all" },
+  { id: "volume",             label: "Volume",            category: "basics",     kind: "number", min: 0, max: 200_000_000, step: 100_000, scope: "tech" },
+  { id: "pct_from_52w_high",  label: "% from 52w High",   category: "basics",     kind: "number", unit: "%", min: -100, max: 20, step: 1, scope: "tech" },
 
-  // Valuation
-  { id: "pe_ttm",             label: "PE (TTM)",          category: "valuation",  kind: "number", unit: "x", min: 0, max: 200, step: 1, fundamental: true },
-  { id: "pb",                 label: "P/B",               category: "valuation",  kind: "number", unit: "x", min: 0, max: 30, step: 0.1, fundamental: true },
-  { id: "peg",                label: "PEG",               category: "valuation",  kind: "number", unit: "x", min: 0, max: 10, step: 0.1, fundamental: true },
-  { id: "dividend_yield",     label: "Dividend Yield",    category: "valuation",  kind: "number", unit: "%", min: 0, max: 15, step: 0.1, fundamental: true },
-  { id: "eps_ttm",            label: "EPS (TTM)",         category: "valuation",  kind: "number", unit: "₹", min: -100, max: 2000, step: 1, fundamental: true },
-  { id: "book_value",         label: "Book Value",        category: "valuation",  kind: "number", unit: "₹", min: 0, max: 10000, step: 1, fundamental: true },
+  // Valuation — most require positive earnings to be meaningful.
+  { id: "pe_ttm",             label: "PE (TTM)",          category: "valuation",  kind: "number", unit: "x", min: 0, max: 300, step: 1, fundamental: true, scope: "eq_profit" },
+  { id: "pb",                 label: "P/B",               category: "valuation",  kind: "number", unit: "x", min: 0, max: 50, step: 0.1, fundamental: true, scope: "eq" },
+  { id: "peg",                label: "PEG",               category: "valuation",  kind: "number", unit: "x", min: 0, max: 10, step: 0.1, fundamental: true, scope: "eq_profit" },
+  { id: "dividend_yield",     label: "Dividend Yield",    category: "valuation",  kind: "number", unit: "%", min: 0, max: 15, step: 0.1, fundamental: true, scope: "eq", nullMeansZero: true },
+  { id: "eps_ttm",            label: "EPS (TTM)",         category: "valuation",  kind: "number", unit: "₹", min: -500, max: 5000, step: 1, fundamental: true, scope: "eq" },
+  { id: "book_value",         label: "Book Value",        category: "valuation",  kind: "number", unit: "₹", min: 0, max: 20000, step: 1, fundamental: true, scope: "eq" },
 
   // Profitability
-  { id: "roe",                label: "ROE",               category: "profitability", kind: "number", unit: "%", min: -50, max: 80, step: 1, fundamental: true },
+  { id: "roe",                label: "ROE",               category: "profitability", kind: "number", unit: "%", min: -50, max: 100, step: 1, fundamental: true, scope: "eq" },
 
   // Growth
-  { id: "revenue_growth_yoy", label: "Revenue Growth YoY", category: "growth",    kind: "number", unit: "%", min: -50, max: 200, step: 1, fundamental: true },
-  { id: "profit_growth_yoy",  label: "Profit Growth YoY",  category: "growth",    kind: "number", unit: "%", min: -100, max: 300, step: 1, fundamental: true },
-  { id: "eps_growth_yoy",     label: "EPS Growth YoY",     category: "growth",    kind: "number", unit: "%", min: -100, max: 300, step: 1, fundamental: true },
+  { id: "revenue_growth_yoy", label: "Revenue Growth YoY", category: "growth",    kind: "number", unit: "%", min: -50, max: 200, step: 1, fundamental: true, scope: "eq" },
+  { id: "profit_growth_yoy",  label: "Profit Growth YoY",  category: "growth",    kind: "number", unit: "%", min: -100, max: 300, step: 1, fundamental: true, scope: "eq" },
+  { id: "eps_growth_yoy",     label: "EPS Growth YoY",     category: "growth",    kind: "number", unit: "%", min: -100, max: 300, step: 1, fundamental: true, scope: "eq" },
 
   // Financial Health
-  { id: "debt_to_equity",     label: "Debt / Equity",     category: "health",     kind: "number", unit: "x", min: 0, max: 10, step: 0.1, fundamental: true },
-  { id: "current_ratio",      label: "Current Ratio",     category: "health",     kind: "number", unit: "x", min: 0, max: 10, step: 0.1, fundamental: true },
-  { id: "quick_ratio",        label: "Quick Ratio",       category: "health",     kind: "number", unit: "x", min: 0, max: 10, step: 0.1, fundamental: true },
+  { id: "debt_to_equity",     label: "Debt / Equity",     category: "health",     kind: "number", unit: "x", min: 0, max: 10, step: 0.1, fundamental: true, scope: "eq", nullMeansZero: true },
+  { id: "current_ratio",      label: "Current Ratio",     category: "health",     kind: "number", unit: "x", min: 0, max: 10, step: 0.1, fundamental: true, scope: "eq" },
+  { id: "quick_ratio",        label: "Quick Ratio",       category: "health",     kind: "number", unit: "x", min: 0, max: 10, step: 0.1, fundamental: true, scope: "eq" },
 
-  // Ownership
-  { id: "promoter_holding",   label: "Promoter Holding",  category: "ownership",  kind: "number", unit: "%", min: 0, max: 100, step: 1, fundamental: true },
-  { id: "dii_holding",        label: "Institutional Hold", category: "ownership", kind: "number", unit: "%", min: 0, max: 100, step: 1, fundamental: true },
+  // Ownership — only meaningful where any ownership number is reported.
+  { id: "promoter_holding",   label: "Promoter Holding",  category: "ownership",  kind: "number", unit: "%", min: 0, max: 100, step: 1, fundamental: true, scope: "eq_owner" },
+  { id: "dii_holding",        label: "Institutional Hold", category: "ownership", kind: "number", unit: "%", min: 0, max: 100, step: 1, fundamental: true, scope: "eq_owner" },
 
-  // Technicals
-  { id: "rsi14",              label: "RSI (14)",          category: "technicals", kind: "number", min: 0, max: 100, step: 1 },
-  { id: "adx14",              label: "ADX (14)",          category: "technicals", kind: "number", min: 0, max: 100, step: 1 },
-  { id: "macd_hist",          label: "MACD Hist",         category: "technicals", kind: "number", min: -50, max: 50, step: 0.1 },
-  { id: "bb_width",           label: "BB Width",          category: "technicals", kind: "number", min: 0, max: 1, step: 0.01 },
-  { id: "atr_pct",            label: "ATR %",             category: "technicals", kind: "number", unit: "%", min: 0, max: 20, step: 0.1 },
-  { id: "above_ema200",       label: "Above 200 EMA",     category: "technicals", kind: "boolean" },
+  // Technicals — depend on an EOD score row.
+  { id: "rsi14",              label: "RSI (14)",          category: "technicals", kind: "number", min: 0, max: 100, step: 1, scope: "tech" },
+  { id: "adx14",              label: "ADX (14)",          category: "technicals", kind: "number", min: 0, max: 100, step: 1, scope: "tech" },
+  { id: "macd_hist",          label: "MACD Hist",         category: "technicals", kind: "number", min: -50, max: 50, step: 0.1, scope: "tech" },
+  { id: "bb_width",           label: "BB Width",          category: "technicals", kind: "number", min: 0, max: 1, step: 0.01, scope: "tech" },
+  { id: "atr_pct",            label: "ATR %",             category: "technicals", kind: "number", unit: "%", min: 0, max: 20, step: 0.1, scope: "tech" },
+  { id: "above_ema200",       label: "Above 200 EMA",     category: "technicals", kind: "boolean", scope: "tech" },
 
   // Momentum & Volume
-  { id: "change_pct",         label: "Change %",          category: "momentum",   kind: "number", unit: "%", min: -20, max: 20, step: 0.1 },
-  { id: "rel_volume",         label: "Rel Volume",        category: "momentum",   kind: "number", unit: "x", min: 0, max: 20, step: 0.1 },
-  { id: "rel_strength_nifty", label: "RS vs NIFTY",       category: "momentum",   kind: "number", unit: "%", min: -50, max: 50, step: 1 },
-  { id: "sector_strength",    label: "Sector Strength",   category: "momentum",   kind: "number", min: 0, max: 1, step: 0.05 },
+  { id: "change_pct",         label: "Change %",          category: "momentum",   kind: "number", unit: "%", min: -20, max: 20, step: 0.1, scope: "tech" },
+  { id: "rel_volume",         label: "Rel Volume",        category: "momentum",   kind: "number", unit: "x", min: 0, max: 20, step: 0.1, scope: "tech" },
+  { id: "rel_strength_nifty", label: "RS vs NIFTY",       category: "momentum",   kind: "number", unit: "%", min: -50, max: 50, step: 1, scope: "tech" },
+  { id: "sector_strength",    label: "Sector Strength",   category: "momentum",   kind: "number", min: 0, max: 1, step: 0.05, scope: "tech" },
 
   // Signals
-  { id: "breakout_score",     label: "Breakout Score",    category: "signals",    kind: "number", min: 0, max: 100, step: 5 },
-  { id: "prebreakout_score",  label: "Pre-Breakout Score",category: "signals",    kind: "number", min: 0, max: 100, step: 5 },
-  { id: "bb_squeeze",         label: "BB Squeeze",        category: "signals",    kind: "boolean" },
-  { id: "higher_lows",        label: "Higher Lows",       category: "signals",    kind: "boolean" },
-  { id: "near_resistance",    label: "Near Resistance",   category: "signals",    kind: "boolean" },
+  { id: "breakout_score",     label: "Breakout Score",    category: "signals",    kind: "number", min: 0, max: 100, step: 5, scope: "tech" },
+  { id: "prebreakout_score",  label: "Pre-Breakout Score",category: "signals",    kind: "number", min: 0, max: 100, step: 5, scope: "tech" },
+  { id: "bb_squeeze",         label: "BB Squeeze",        category: "signals",    kind: "boolean", scope: "tech" },
+  { id: "higher_lows",        label: "Higher Lows",       category: "signals",    kind: "boolean", scope: "tech" },
+  { id: "near_resistance",    label: "Near Resistance",   category: "signals",    kind: "boolean", scope: "tech" },
 ];
 
 export const FILTER_BY_ID: Record<string, FilterDef> = Object.fromEntries(FILTERS.map((f) => [f.id, f]));
@@ -119,12 +144,19 @@ export interface ActiveFilter {
   values?: string[]; // for enum filters
 }
 
-/** Returns true if the row satisfies the active filter. Null values are treated as
- *  a miss (excluded) for active filters — but the UI shows coverage stats so the
- *  user understands why fewer rows appear. */
+/** Returns true if the row satisfies the active filter.
+ *  Rules:
+ *   - Rows outside the filter's applicability scope are always kept (they are "N/A").
+ *   - Numeric filter with no min/max set → matches everything.
+ *   - Numeric filter with a bound + `nullMeansZero` → NULL is treated as 0.
+ *   - Numeric filter with a bound and no `nullMeansZero` → NULL is excluded. */
 export function filterMatches(row: Record<string, any>, af: ActiveFilter): boolean {
   const def = FILTER_BY_ID[af.id];
   if (!def) return true;
+  // Applicability: rows outside the scope are excluded from filtering — they pass through
+  // untouched so that, e.g., an ETF is not dropped by a PE filter.
+  const scope: ApplicabilityScope = def.scope ?? (def.fundamental ? "eq" : "all");
+  if (!rowIsApplicable(row, scope)) return true;
   const v = row[af.id];
   if (def.kind === "boolean") {
     if (af.bool === undefined) return true;
@@ -134,25 +166,41 @@ export function filterMatches(row: Record<string, any>, af: ActiveFilter): boole
     if (!af.values || af.values.length === 0) return true;
     return typeof v === "string" && af.values.includes(v);
   }
-  if (v == null || Number.isNaN(v)) return false;
-  if (af.min !== undefined && af.min !== "" && Number(v) < Number(af.min)) return false;
-  if (af.max !== undefined && af.max !== "" && Number(v) > Number(af.max)) return false;
+  const minNum = af.min === undefined || af.min === "" || Number.isNaN(Number(af.min)) ? null : Number(af.min);
+  const maxNum = af.max === undefined || af.max === "" || Number.isNaN(Number(af.max)) ? null : Number(af.max);
+  if (minNum === null && maxNum === null) return true;
+  let n: number;
+  if (v == null || Number.isNaN(v)) {
+    if (def.nullMeansZero) n = 0;
+    else return false;
+  } else {
+    n = Number(v);
+  }
+  if (minNum !== null && n < minNum) return false;
+  if (maxNum !== null && n > maxNum) return false;
   return true;
 }
 
-/** How many rows have a usable value for the filter's underlying column. */
+/** Coverage over the applicable set: rows outside the filter's scope are excluded
+ *  from both numerator and denominator, so "% coverage" is meaningful. */
 export function coverageOf(rows: Array<Record<string, any>>, filterId: string): { has: number; total: number } {
   const def = FILTER_BY_ID[filterId];
   if (!def) return { has: 0, total: rows.length };
+  const scope: ApplicabilityScope = def.scope ?? (def.fundamental ? "eq" : "all");
+  const scoped = rows.filter((r) => rowIsApplicable(r, scope));
   let has = 0;
-  for (const r of rows) {
+  for (const r of scoped) {
     const v = r[filterId];
     if (def.kind === "boolean") { if (v !== null && v !== undefined) has++; }
     else if (def.kind === "enum") { if (typeof v === "string" && v.length > 0) has++; }
-    else { if (v != null && !Number.isNaN(v)) has++; }
+    else {
+      if (v != null && !Number.isNaN(v)) has++;
+      else if (def.nullMeansZero) has++; // NULL is a meaningful zero
+    }
   }
-  return { has, total: rows.length };
+  return { has, total: scoped.length };
 }
+
 
 // ----- Universes -----
 export type UniverseId = "all" | "nifty500" | "nifty50" | "banknifty" | "finnifty";

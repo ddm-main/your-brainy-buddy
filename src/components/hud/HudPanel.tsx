@@ -53,7 +53,11 @@ export function HudPanel({
       style={{
         display: "flex",
         flexDirection: "column",
-        minHeight: 0,
+        // Default to content-sized so the panel never shrinks below its
+        // content inside a flex column parent (the Analysis right rail).
+        // Panels that fill a grid cell (e.g. the chart) override this by
+        // passing `flex: 1` and `minHeight: 0` via the `style` prop.
+        flex: "0 0 auto",
         ...(flow ? { overflow: "visible" } : null),
         ...(style || {}),
       }}

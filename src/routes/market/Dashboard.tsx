@@ -149,14 +149,9 @@ export default function MarketDashboard() {
     { header: "Chg %", accessorKey: "change_pct", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue()} /> },
     { header: "RVol", accessorKey: "rel_volume", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue(), 1) },
     { header: "RSI", accessorKey: "rsi14", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue(), 0) },
-    { header: "Vol", accessorKey: "volume", meta: { align: "right" }, cell: ({ getValue }) => fmtInt(getValue()) },
     {
       header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },
       cell: ({ row }) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" />,
-    },
-    {
-      header: "Pre-BO", accessorKey: "prebreakout_score", meta: { align: "right" },
-      cell: ({ row }) => <ScoreBadge score={row.original.prebreakout_score} components={row.original.score_components?.prebreakout} label="pre-breakout components" />,
     },
     {
       header: "Entry ≈", id: "entry", meta: { align: "right" },
@@ -165,74 +160,106 @@ export default function MarketDashboard() {
     },
   ], []);
 
-  const pipelineEmpty = topBreakouts.length === 0;
+  const filteredBreakouts = useMemo(
+    () => topBreakouts.filter((s) => (s.breakout_score ?? 0) >= 60).slice(0, 12),
+    [topBreakouts],
+  );
+
+  const ETF_RE = /(BEES|IETF|LIQUID|ETF|GOLD|SILVER)/i;
+  const filteredPreBreakouts = useMemo(
+    () => preBreakouts.filter((s) => {
+      if ((s.prebreakout_score ?? 0) < 60) return false;
+      if (ETF_RE.test(s.symbol)) return false;
+      if (!s.sector) return false;
+      const flags = [s.bb_squeeze, s.higher_lows, s.near_resistance].filter(Boolean).length;
+      return flags >= 1;
+    }).slice(0, 12),
+    [preBreakouts],
+  );
+
+  const filteredSectors = useMemo(
+    () => sectors.filter((s) => s.sector && s.sector.toLowerCase() !== "unknown").slice(0, 8),
+    [sectors],
+  );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <HudPanel flow title="Market Summary" index="MK.D1" live={indicesFetching ? "warn" : "ok"} actions={
-        <div style={{ display: "flex", gap: 6 }}>
-          <Btn size="sm" onClick={() => setManageOpen(true)} title="Manage indices">
-            <Settings2 size={11} style={{ marginRight: 4 }} /> manage
-          </Btn>
-          <Btn size="sm" onClick={primeData} disabled={busy !== null}>
-            <Sparkles size={11} style={{ marginRight: 4 }} /> {busy === "prime" ? "priming…" : "prime data"}
-          </Btn>
-          <Btn size="sm" onClick={() => refetchIndices()} disabled={indicesFetching}>
-            <RefreshCw size={11} style={{ marginRight: 4 }} /> {indicesFetching ? "refreshing…" : "refresh"}
-          </Btn>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <HudPanel flow title="Market Summary" live={indicesFetching ? "warn" : "ok"} actions={
+        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          {!connected && (
+            <Link to="/market/settings" title="Using Yahoo Finance — connect Kotak Neo for live NSE" style={{ fontSize: 10, color: "var(--text-dim)", textDecoration: "none", padding: "2px 6px", border: "1px dashed var(--edge)", marginRight: 4 }}>
+              yahoo · connect kotak
+            </Link>
+          )}
+          <Btn size="sm" onClick={() => setManageOpen(true)} title="Manage indices"><Settings2 size={12} /></Btn>
+          <Btn size="sm" onClick={primeData} disabled={busy !== null} title={busy === "prime" ? "priming…" : "prime data pipeline"}><Sparkles size={12} /></Btn>
+          <Btn size="sm" onClick={() => refetchIndices()} disabled={indicesFetching} title="refresh"><RefreshCw size={12} /></Btn>
         </div>
       }>
-        {!connected && (
-          <div style={{ marginBottom: 12, padding: 10, border: "1px dashed var(--edge)", fontSize: 12, color: "var(--text-dim)" }}>
-            Using Yahoo Finance.{" "}
-            <Link to="/market/settings" style={{ color: "var(--accent)" }}>Connect Kotak Neo</Link> for live NSE quotes and portfolio sync.
-          </div>
-        )}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: 8 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 6 }}>
           {(indicesData?.quotes ?? []).map((q) => (
             <button
               key={q.symbol}
               onClick={() => nav(`/market/index/${encodeURIComponent(q.symbol)}`)}
               title={`${q.name} — view details`}
               style={{
-                padding: 10, border: "1px solid var(--edge)", background: "transparent",
+                padding: "6px 8px", border: "1px solid var(--edge)", background: "transparent",
                 textAlign: "left", cursor: "pointer", borderRadius: 2,
-                transition: "border-color 120ms, background 120ms",
               }}
               onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--edge-strong)"; e.currentTarget.style.background = "rgba(53,214,237,0.05)"; }}
               onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--edge)"; e.currentTarget.style.background = "transparent"; }}
             >
-              <div className="hud-label" style={{ color: "var(--text-dim)" }}>{q.name}</div>
-              <div style={{ fontFamily: "var(--font-display)", fontSize: 18, color: "var(--text)" }}>
-                {Number(q.price).toLocaleString(undefined, { maximumFractionDigits: 2 })}
-              </div>
-              <div style={{ fontSize: 11, color: (q.change_pct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
-                {q.change_pct == null ? "—" : `${q.change_pct >= 0 ? "+" : ""}${q.change_pct.toFixed(2)}%`}
+              <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 9 }}>{q.name}</div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6 }}>
+                <span style={{ fontFamily: "var(--font-display)", fontSize: 15, color: "var(--text)" }}>
+                  {Number(q.price).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                </span>
+                <span style={{ fontSize: 10, color: (q.change_pct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
+                  {q.change_pct == null ? "—" : `${q.change_pct >= 0 ? "+" : ""}${q.change_pct.toFixed(2)}%`}
+                </span>
               </div>
             </button>
           ))}
         </div>
       </HudPanel>
 
-      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 12, alignItems: "start" }}>
-        <HudPanel flow title="Top Breakout Stocks" index="MK.D2">
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(260px, 1fr)", gap: 10, alignItems: "start" }}>
+        <HudPanel flow title="Top Breakouts">
           <DataTable
             columns={breakoutColumns}
-            data={topBreakouts}
+            data={filteredBreakouts}
             onRowClick={(r) => nav(`/market/analysis/${r.symbol}`)}
             initialSort={[{ id: "breakout_score", desc: true }]}
-            emptyLabel="no scores yet"
+            emptyLabel="no breakouts ≥60"
             emptyHint="run the data pipeline from Settings, or wait for the evening cron"
           />
         </HudPanel>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <HudPanel flow title="Sector Strength" index="MK.D3">
-            {sectors.length === 0 ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <HudPanel flow title="Portfolio">
+            {pf ? (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                <StatTile label="Value" value={`₹${Math.round(pf.current).toLocaleString("en-IN")}`} to="/market/holdings" />
+                <StatTile label="Total P&L" value={`${pf.pnl >= 0 ? "+" : ""}₹${Math.round(pf.pnl).toLocaleString("en-IN")}`} tone={pf.pnl >= 0 ? "ok" : "err"} />
+                {pf.day != null && (
+                  <StatTile label="Today" value={`${pf.day >= 0 ? "+" : ""}₹${Math.round(pf.day).toLocaleString("en-IN")}`} tone={pf.day >= 0 ? "ok" : "err"} />
+                )}
+                <StatTile label={`${counts?.holdings ?? 0} held · ${counts?.watchlist ?? 0} watched`} value="" to="/market/holdings" />
+              </div>
+            ) : (
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--text-dim)" }}>
+                <Link to="/market/holdings" style={{ color: "var(--accent)", textDecoration: "none" }}>+ add holdings</Link>
+                <Link to="/market/watchlist" style={{ color: "var(--accent)", textDecoration: "none" }}>+ watchlist</Link>
+              </div>
+            )}
+          </HudPanel>
+
+          <HudPanel flow title="Sector Strength">
+            {filteredSectors.length === 0 ? (
               <div className="hud-label" style={{ color: "var(--text-dim)" }}>pipeline pending</div>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 260, overflow: "auto" }}>
-                {sectors.slice(0, 12).map((s) => (
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                {filteredSectors.map((s) => (
                   <div key={s.sector} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "3px 0", borderBottom: "1px solid var(--edge)" }}>
                     <span style={{ color: (s.strength_rank ?? 99) <= 3 ? "var(--ok)" : "var(--text-dim)" }}>
                       #{s.strength_rank} {s.sector}
@@ -245,41 +272,24 @@ export default function MarketDashboard() {
               </div>
             )}
           </HudPanel>
-
-          <HudPanel flow title="Portfolio Pulse" index="MK.D4">
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-              <StatTile label="Holdings" value={String(counts?.holdings ?? 0)} to="/market/holdings" />
-              <StatTile label="Watchlist" value={String(counts?.watchlist ?? 0)} to="/market/watchlist" />
-              {pf && (
-                <>
-                  <StatTile label="Current value" value={`₹${Math.round(pf.current).toLocaleString("en-IN")}`} to="/market/holdings" />
-                  <StatTile label="Today's P&L" value={pf.day == null ? "—" : `${pf.day >= 0 ? "+" : ""}₹${Math.round(pf.day).toLocaleString("en-IN")}`} tone={pf.day == null ? "accent" : pf.day >= 0 ? "ok" : "err"} />
-                  <StatTile label="Total P&L" value={`${pf.pnl >= 0 ? "+" : ""}₹${Math.round(pf.pnl).toLocaleString("en-IN")}`} tone={pf.pnl >= 0 ? "ok" : "err"} />
-                </>
-              )}
-              <StatTile label="Ready to buy" value={pipelineEmpty ? "—" : String(watchPulse.ready)} tone="ok" />
-              <StatTile label="Near breakout" value={pipelineEmpty ? "—" : String(watchPulse.near)} tone="accent" />
-              <StatTile label="Weak stocks" value={pipelineEmpty ? "—" : String(watchPulse.weak)} tone="err" />
-            </div>
-          </HudPanel>
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, alignItems: "start" }}>
-        <HudPanel flow title="Pre-Breakout Watch" index="MK.D5">
-          {preBreakouts.filter((s) => (s.prebreakout_score ?? 0) > 0).length === 0 ? (
-            <div className="hud-label" style={{ color: "var(--text-dim)" }}>no coiled setups yet — pipeline pending</div>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(260px, 1fr)", gap: 10, alignItems: "start" }}>
+        <HudPanel flow title="Pre-Breakout Watch">
+          {filteredPreBreakouts.length === 0 ? (
+            <div className="hud-label" style={{ color: "var(--text-dim)" }}>no coiled setups yet</div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              {preBreakouts.filter((s) => (s.prebreakout_score ?? 0) > 0).map((s) => (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 4 }}>
+              {filteredPreBreakouts.map((s) => (
                 <div key={s.id} onClick={() => nav(`/market/analysis/${s.symbol}`)}
-                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0", borderBottom: "1px solid var(--edge)", cursor: "pointer", fontSize: 12 }}>
+                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 6px", border: "1px solid var(--edge)", cursor: "pointer", fontSize: 12 }}>
                   <span>
                     <span style={{ color: "var(--accent)" }}>{s.symbol}</span>
-                    <span style={{ display: "inline-flex", gap: 4, marginLeft: 8 }}>
-                      {s.bb_squeeze && <Chip tone="accent">squeeze</Chip>}
+                    <span style={{ display: "inline-flex", gap: 3, marginLeft: 6 }}>
+                      {s.bb_squeeze && <Chip tone="accent">sq</Chip>}
                       {s.higher_lows && <Chip tone="ok">HL</Chip>}
-                      {s.near_resistance && <Chip tone="warn">@res</Chip>}
+                      {s.near_resistance && <Chip tone="warn">@r</Chip>}
                     </span>
                   </span>
                   <ScoreBadge score={s.prebreakout_score} components={s.score_components?.prebreakout} label="pre-breakout components" />
@@ -289,14 +299,14 @@ export default function MarketDashboard() {
           )}
         </HudPanel>
 
-        <HudPanel flow title="AI Daily Insight" index="MK.D6" actions={
+        <HudPanel flow title="AI Insight" actions={
           <Btn size="sm" onClick={loadInsight} disabled={busy !== null}>
-            <Sparkles size={11} style={{ marginRight: 4 }} /> {busy === "insight" ? "generating…" : "generate"}
+            <Sparkles size={11} style={{ marginRight: 4 }} /> {busy === "insight" ? "…" : "generate"}
           </Btn>
         }>
           {insight
-            ? <div style={{ fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{insight}</div>
-            : <div className="hud-label" style={{ color: "var(--text-dim)" }}>Tap generate — JARVIS reads today's breadth, your holdings and watchlist, and briefs you.</div>}
+            ? <div style={{ fontSize: 12, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{insight}</div>
+            : <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 10 }}>tap generate for today's brief</div>}
         </HudPanel>
       </div>
 
