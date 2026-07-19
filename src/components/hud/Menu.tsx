@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { useLocation } from "react-router-dom";
 import { ChevronDown, Check } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -30,15 +31,41 @@ export function Menu({
   title?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const location = useLocation();
 
   useEffect(() => setOpen(false), [location.pathname]);
 
+  // Position the portalled panel just under the trigger. Recomputed on open
+  // and on scroll/resize so it tracks the toolbar even when it scrolls.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const b = btnRef.current?.getBoundingClientRect();
+      if (!b) return;
+      const left = align === "end" ? b.right - width : b.left;
+      setPos({
+        top: b.bottom + 4,
+        left: Math.max(8, Math.min(left, window.innerWidth - width - 8)),
+      });
+    };
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [open, align, width]);
+
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (!wrapRef.current?.contains(t) && !panelRef.current?.contains(t)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
     window.addEventListener("mousedown", onDown);
@@ -54,6 +81,7 @@ export function Menu({
   return (
     <div ref={wrapRef} style={{ position: "relative", display: "inline-flex" }}>
       <button
+        ref={btnRef}
         type="button"
         disabled={disabled}
         title={title}
@@ -64,20 +92,22 @@ export function Menu({
         <span>{label}</span>
         {showCaret && <ChevronDown size={11} style={{ opacity: 0.7 }} />}
       </button>
-      {open && (
+      {open && pos && createPortal(
         <div
+          ref={panelRef}
           className="mk-menu-panel hud-panel"
           style={{
-            position: "absolute",
-            top: "calc(100% + 4px)",
-            [align === "end" ? "right" : "left"]: 0,
+            position: "fixed",
+            top: pos.top,
+            left: pos.left,
             width,
-            zIndex: 40,
+            zIndex: 10000,
           } as CSSProperties}
           onClick={(e) => e.stopPropagation()}
         >
           {typeof children === "function" ? children(close) : children}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

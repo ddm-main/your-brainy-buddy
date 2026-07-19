@@ -1,13 +1,16 @@
 // Index detail page — Chart / Technicals / F&O / Constituents.
 // Reached from Market Dashboard by clicking an index card.
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Activity } from "lucide-react";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
 import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import type { ColumnDef } from "@tanstack/react-table";
-import { CandleChart, type IndicatorFlags, type ChartType } from "@/components/market/CandleChart";
+import { CandleChart, type ChartType } from "@/components/market/CandleChart";
+import { Menu, MenuGroup, MenuItem } from "@/components/hud/Menu";
+import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
+import { DEFAULT_STUDIES, makeStudy, OVERLAY_DEFS, OSCILLATOR_DEFS, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
 import { TradingViewChart, tvInterval } from "@/components/market/TradingViewChart";
 import { FullscreenShell } from "@/components/market/FullscreenShell";
 import { Maximize2 } from "lucide-react";
@@ -41,7 +44,13 @@ export default function IndexDetail() {
   const [chartType, setChartType] = useState<ChartType>("candles");
   const [useTv, setUseTv] = useState(false);
   const [fs, setFs] = useState(false);
-  const [ind, setInd] = useState<IndicatorFlags>({ ema20: true, ema50: true, volume: true });
+  const [studies, setStudies] = useState<Study[]>(DEFAULT_STUDIES);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const addStudy = useCallback((t: IndicatorType) => setStudies((s) => [...s, makeStudy(t)]), []);
+  const toggleStudy = useCallback((id: string) => setStudies((s) => s.map((x) => (x.id === id ? { ...x, visible: !x.visible } : x))), []);
+  const removeStudy = useCallback((id: string) => setStudies((s) => s.filter((x) => x.id !== id)), []);
+  const updateStudy = useCallback((u: Study) => setStudies((s) => s.map((x) => (x.id === u.id ? u : x))), []);
+  const editing = studies.find((s) => s.id === editingId) ?? null;
 
   const { data: candlesData, isLoading: candlesLoading } = useCandles(symbol, tf);
   const candles: CandleDto[] = candlesData?.candles ?? [];
@@ -114,11 +123,26 @@ export default function IndexDetail() {
           <FullscreenShell fullscreen={fs} onExit={() => setFs(false)} title={`${name} · Chart`}>
             {!showTv && (
               <div style={{ display: "flex", gap: 4, marginBottom: 6, flexWrap: "wrap", flex: "0 0 auto" }}>
-                {(["ema20", "ema50", "ema200", "sma20", "bb", "vwap", "rsi", "macd", "volume"] as (keyof IndicatorFlags)[]).map((k) => (
-                  <Btn key={k} size="sm" onClick={() => setInd((i) => ({ ...i, [k]: !i[k] }))} style={{ opacity: ind[k] ? 1 : 0.55 }}>
-                    {k}
-                  </Btn>
-                ))}
+                <Menu label={<span>Indicators{studies.length > 0 && <span className="mk-menu-count">{studies.length}</span>}</span>} icon={<Activity size={12} />} width={260}>
+                  {[...OVERLAY_DEFS, ...OSCILLATOR_DEFS].length > 0 && (
+                    <>
+                      <MenuGroup title="Overlays">
+                        {OVERLAY_DEFS.map((d) => (
+                          <MenuItem key={d.type} onClick={() => addStudy(d.type)}>
+                            <span className="mk-ind-swatch" style={{ background: d.lines[0].defaultColor, marginRight: 8 }} />{d.label}
+                          </MenuItem>
+                        ))}
+                      </MenuGroup>
+                      <MenuGroup title="Oscillators">
+                        {OSCILLATOR_DEFS.map((d) => (
+                          <MenuItem key={d.type} onClick={() => addStudy(d.type)}>
+                            <span className="mk-ind-swatch" style={{ background: d.lines[0].defaultColor, marginRight: 8 }} />{d.label}
+                          </MenuItem>
+                        ))}
+                      </MenuGroup>
+                    </>
+                  )}
+                </Menu>
               </div>
             )}
             <div style={{ height: fs ? "auto" : 480, flex: fs ? 1 : undefined, minHeight: 0, border: "1px solid var(--edge)" }}>
@@ -129,10 +153,18 @@ export default function IndexDetail() {
               ) : candles.length === 0 ? (
                 <EmptyState hint="try a different timeframe or check the symbol">no chart data</EmptyState>
               ) : (
-                <CandleChart candles={candles} fill chartType={chartType} indicators={ind} />
+                <CandleChart
+                  candles={candles} fill chartType={chartType}
+                  studies={studies}
+                  intraday={tf !== "1D"}
+                  onToggleStudy={toggleStudy}
+                  onEditStudy={setEditingId}
+                  onRemoveStudy={removeStudy}
+                />
               )}
             </div>
           </FullscreenShell>
+          <IndicatorSettingsModal study={editing} onChange={updateStudy} onRemove={removeStudy} onClose={() => setEditingId(null)} />
         </HudPanel>
       )}
 

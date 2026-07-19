@@ -40,7 +40,7 @@ export function FullscreenShell({
 
   return createPortal(
     <div style={{
-      position: "fixed", inset: 0, zIndex: 9999, background: "var(--bg)",
+      position: "fixed", inset: 0, zIndex: 9999, background: "var(--bg-void)",
       display: "flex", flexDirection: "column", padding: 12, gap: 8,
     }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flex: "0 0 auto" }}>

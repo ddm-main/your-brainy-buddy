@@ -14,7 +14,7 @@ const Analysis = lazy(() => import("@/routes/market/Analysis"));
 const Alerts = lazy(() => import("@/routes/market/Alerts"));
 const Backtesting = lazy(() => import("@/routes/market/Backtesting"));
 const MarketSettings = lazy(() => import("@/routes/market/Settings"));
-const OptionChain = lazy(() => import("@/routes/market/OptionChain"));
+const StockTable = lazy(() => import("@/routes/market/StockTable"));
 const Planner = lazy(() => import("@/routes/market/Planner"));
 const AIEngine = lazy(() => import("@/routes/market/AIEngine"));
 const IndexDetail = lazy(() => import("@/routes/market/IndexDetail"));
@@ -33,10 +33,10 @@ const GROUPS: Group[] = [
   { key: "screener", label: "Screener", to: "/market/screener",
     match: (p) => /^\/market\/screener/.test(p), subs: [] },
   { key: "analysis", label: "Analysis", to: "/market/analysis",
-    match: (p) => /^\/market\/(analysis|options)/.test(p),
+    match: (p) => /^\/market\/(analysis|stocks)/.test(p),
     subs: [
       { to: "/market/analysis", label: "Analysis" },
-      { to: "/market/options", label: "Options" },
+      { to: "/market/stocks", label: "Stocks" },
     ] },
   { key: "portfolio", label: "Portfolio", to: "/market/holdings",
     match: (p) => /^\/market\/(holdings|positions)/.test(p),
@@ -50,7 +50,7 @@ const GROUPS: Group[] = [
       { to: "/market/watchlist", label: "Watchlists" },
       { to: "/market/alerts", label: "Alerts" },
     ] },
-  { key: "settings", label: "Settings", to: "/market/settings",
+  { key: "settings", label: "Config", to: "/market/settings",
     match: (p) => /^\/market\/settings/.test(p), subs: [] },
 ];
 
@@ -144,8 +144,7 @@ export default function Market() {
               <Route path="planner" element={<Planner />} />
               <Route path="ai" element={<AIEngine />} />
               <Route path="ai/:symbol" element={<AIEngine />} />
-              <Route path="options" element={<OptionChain />} />
-              <Route path="options/:symbol" element={<OptionChain />} />
+              <Route path="stocks" element={<StockTable />} />
               <Route path="index/:symbol" element={<IndexDetail />} />
               <Route path="settings" element={<MarketSettings />} />
               <Route path="*" element={<Navigate to="/market" replace />} />

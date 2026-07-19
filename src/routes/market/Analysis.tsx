@@ -5,10 +5,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
-import { CandleChart, type ChartType, type IndicatorFlags } from "@/components/market/CandleChart";
+import { CandleChart, type ChartType } from "@/components/market/CandleChart";
 import { TradingViewChart, tvInterval } from "@/components/market/TradingViewChart";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { ChartToolbar, DEFAULT_SETTINGS, type ChartSettings } from "@/components/market/ChartToolbar";
+import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
+import { DEFAULT_STUDIES, makeStudy, normalizeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
 import { fmtNum, fmtInt, fmtPct } from "@/components/hud/DataTable";
 import { useCandles, useDepth, useFundamentals, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores } from "@/lib/market/hooks";
 import { getTrustedDayChange } from "@/lib/market/pnl";
@@ -16,14 +18,14 @@ import { FullscreenShell } from "@/components/market/FullscreenShell";
 import { useNotifications } from "@/store/notificationStore";
 import { RefreshCw } from "lucide-react";
 
-const STATE_STORE = "jarvis.analysis.state.v2";
-const defaultFlags: IndicatorFlags = { ema20: true, ema50: true, volume: true };
+const STATE_STORE = "jarvis.analysis.state.v4";
+const INTRADAY_TFS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h"];
 
 type Persisted = {
   tf: string;
   chartType: ChartType;
   tvMode: boolean;
-  flags: IndicatorFlags;
+  studies: Study[];
   settings: ChartSettings;
   range: string;
 };
@@ -32,10 +34,17 @@ const defaultState: Persisted = {
   tf: "1D",
   chartType: "candles",
   tvMode: false,
-  flags: defaultFlags,
+  studies: DEFAULT_STUDIES,
   settings: DEFAULT_SETTINGS,
   range: "6M",
 };
+
+// Drop studies whose type no longer exists and backfill missing params/colours.
+function loadStudies(saved: unknown): Study[] {
+  if (!Array.isArray(saved)) return DEFAULT_STUDIES;
+  const out = saved.map((s) => normalizeStudy(s as Study)).filter((s): s is Study => s != null);
+  return out;
+}
 
 function loadState(): Persisted {
   try {
@@ -43,7 +52,7 @@ function loadState(): Persisted {
     return {
       ...defaultState,
       ...raw,
-      flags: { ...defaultFlags, ...(raw.flags ?? {}) },
+      studies: loadStudies(raw.studies),
       settings: { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) },
     };
   } catch { return defaultState; }
@@ -58,16 +67,24 @@ export default function Analysis() {
   const [chartType, setChartType] = useState<ChartType>(initial.chartType);
   const [tvMode, setTvMode] = useState(initial.tvMode);
   const [fs, setFs] = useState(false);
-  const [flags, setFlags] = useState<IndicatorFlags>(initial.flags);
+  const [studies, setStudies] = useState<Study[]>(initial.studies);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [settings, setSettings] = useState<ChartSettings>(initial.settings);
   const [search, setSearch] = useState("");
   const chartWrapRef = useRef<HTMLDivElement>(null);
   const notify = useNotifications((s) => s.add);
 
+  const addStudy = useCallback((type: IndicatorType) => setStudies((s) => [...s, makeStudy(type)]), []);
+  const toggleStudy = useCallback((id: string) => setStudies((s) => s.map((x) => (x.id === id ? { ...x, visible: !x.visible } : x))), []);
+  const removeStudy = useCallback((id: string) => setStudies((s) => s.filter((x) => x.id !== id)), []);
+  const updateStudy = useCallback((u: Study) => setStudies((s) => s.map((x) => (x.id === u.id ? u : x))), []);
+  const resetStudies = useCallback(() => setStudies(DEFAULT_STUDIES), []);
+  const editing = studies.find((s) => s.id === editingId) ?? null;
+
   useEffect(() => {
-    const payload: Persisted = { tf, chartType, tvMode, flags, settings, range };
+    const payload: Persisted = { tf, chartType, tvMode, studies, settings, range };
     localStorage.setItem(STATE_STORE, JSON.stringify(payload));
-  }, [tf, chartType, tvMode, flags, settings, range]);
+  }, [tf, chartType, tvMode, studies, settings, range]);
 
   // F toggles fullscreen when not typing in an input
   useEffect(() => {
@@ -191,8 +208,9 @@ export default function Analysis() {
               onRange={setRange}
               chartType={chartType}
               onChartType={setChartType}
-              flags={flags}
-              onFlags={(u) => setFlags(u)}
+              onAddStudy={addStudy}
+              onResetStudies={resetStudies}
+              studyCount={studies.length}
               settings={settings}
               onSettings={(u) => setSettings(u)}
               tvMode={tvMode}
@@ -217,12 +235,17 @@ export default function Analysis() {
                   priceLines={tf === "1D" ? priceLines : undefined}
                   fill
                   chartType={chartType}
-                  indicators={flags}
+                  studies={studies}
+                  intraday={INTRADAY_TFS.includes(tf)}
+                  onToggleStudy={toggleStudy}
+                  onEditStudy={setEditingId}
+                  onRemoveStudy={removeStudy}
                 />
 
               )}
             </div>
           </FullscreenShell>
+          <IndicatorSettingsModal study={editing} onChange={updateStudy} onRemove={removeStudy} onClose={() => setEditingId(null)} />
         </HudPanel>
       </div>
 

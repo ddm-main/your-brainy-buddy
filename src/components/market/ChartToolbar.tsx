@@ -1,6 +1,11 @@
-import { CandlestickChart, LineChart, BarChart3, AreaChart, Activity, Bell, LayoutGrid, MoreHorizontal, Maximize2, ExternalLink, Settings, Camera, CalendarRange, Save } from "lucide-react";
+import { useState } from "react";
+import { CandlestickChart, LineChart, BarChart3, AreaChart, Activity, Bell, LayoutGrid, MoreHorizontal, Maximize2, ExternalLink, Settings, Camera, CalendarRange, Save, Search } from "lucide-react";
 import { Menu, MenuItem, MenuGroup, MenuDivider } from "@/components/hud/Menu";
-import type { ChartType, IndicatorFlags } from "@/components/market/CandleChart";
+import type { ChartType } from "@/components/market/CandleChart";
+import {
+  OVERLAY_DEFS, OSCILLATOR_DEFS,
+  type IndicatorType, type IndicatorDef,
+} from "@/lib/market/indicatorRegistry";
 
 const TIMEFRAMES = [
   { key: "1m", label: "1m" },
@@ -35,21 +40,6 @@ const CHART_TYPES: Array<{ key: ChartType; label: string; icon: React.ReactNode 
   { key: "area", label: "Area", icon: <AreaChart size={12} /> },
 ];
 
-const OVERLAYS: Array<{ key: keyof IndicatorFlags; label: string }> = [
-  { key: "ema20", label: "EMA 20" },
-  { key: "ema50", label: "EMA 50" },
-  { key: "ema200", label: "EMA 200" },
-  { key: "sma20", label: "SMA 20" },
-  { key: "bb", label: "Bollinger Bands" },
-  { key: "vwap", label: "VWAP" },
-];
-const OSCILLATORS: Array<{ key: keyof IndicatorFlags; label: string }> = [
-  { key: "rsi", label: "RSI (14)" },
-  { key: "macd", label: "MACD (12,26,9)" },
-];
-
-const DEFAULT_FLAGS: IndicatorFlags = { ema20: true, ema50: true, volume: true };
-
 export interface ChartSettings {
   grid: boolean;
   logScale: boolean;
@@ -72,8 +62,9 @@ export interface ChartToolbarProps {
   onRange?: (v: string) => void;
   chartType: ChartType;
   onChartType: (v: ChartType) => void;
-  flags: IndicatorFlags;
-  onFlags: (updater: (prev: IndicatorFlags) => IndicatorFlags) => void;
+  onAddStudy: (type: IndicatorType) => void;
+  onResetStudies?: () => void;
+  studyCount?: number;
   settings?: ChartSettings;
   onSettings?: (updater: (prev: ChartSettings) => ChartSettings) => void;
   tvMode: boolean;
@@ -85,11 +76,11 @@ export interface ChartToolbarProps {
 }
 
 export function ChartToolbar({
-  symbol, tf, onTf, range, onRange, chartType, onChartType, flags, onFlags,
+  symbol, tf, onTf, range, onRange, chartType, onChartType, onAddStudy, onResetStudies, studyCount = 0,
   settings, onSettings, tvMode, onTvMode, onFullscreen, onAlert, onScreenshot, onSaveLayout,
 }: ChartToolbarProps) {
   const activeType = CHART_TYPES.find((c) => c.key === chartType) ?? CHART_TYPES[0];
-  const activeCount = Object.values(flags).filter(Boolean).length;
+  const activeCount = studyCount;
   const s = settings ?? DEFAULT_SETTINGS;
   const activeRange = RANGES.find((r) => r.key === range);
 
@@ -149,39 +140,11 @@ export function ChartToolbar({
       <Menu
         label={<span>Indicators{activeCount > 0 && <span className="mk-menu-count">{activeCount}</span>}</span>}
         icon={<Activity size={12} />}
-        width={230}
+        width={260}
         disabled={tvMode}
         title={tvMode ? "Indicators live in TradingView UI while TV mode is on" : undefined}
       >
-        <MenuGroup title="Overlays">
-          {OVERLAYS.map((o) => (
-            <MenuItem
-              key={o.key}
-              checkbox
-              selected={!!flags[o.key]}
-              onClick={() => onFlags((p) => ({ ...p, [o.key]: !p[o.key] }))}
-            >{o.label}</MenuItem>
-          ))}
-        </MenuGroup>
-        <MenuDivider />
-        <MenuGroup title="Oscillators">
-          {OSCILLATORS.map((o) => (
-            <MenuItem
-              key={o.key}
-              checkbox
-              selected={!!flags[o.key]}
-              onClick={() => onFlags((p) => ({ ...p, [o.key]: !p[o.key] }))}
-            >{o.label}</MenuItem>
-          ))}
-        </MenuGroup>
-        <MenuDivider />
-        <MenuGroup title="Volume">
-          <MenuItem
-            checkbox
-            selected={flags.volume !== false}
-            onClick={() => onFlags((p) => ({ ...p, volume: !p.volume }))}
-          >Volume</MenuItem>
-        </MenuGroup>
+        <IndicatorPicker onAddStudy={onAddStudy} />
       </Menu>
 
       <Divider />
@@ -234,9 +197,11 @@ export function ChartToolbar({
         {(close) => (
           <>
             <MenuGroup title="Actions">
-              <MenuItem onClick={() => { onFlags(() => DEFAULT_FLAGS); close(); }}>
-                Reset indicators
-              </MenuItem>
+              {onResetStudies && (
+                <MenuItem onClick={() => { onResetStudies(); close(); }}>
+                  Reset indicators
+                </MenuItem>
+              )}
               {onScreenshot && (
                 <MenuItem onClick={() => { onScreenshot(); close(); }}>
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
@@ -296,6 +261,46 @@ export function ChartToolbar({
       >
         <Maximize2 size={12} />
       </button>
+    </div>
+  );
+}
+
+// Searchable, scrollable indicator type picker. Clicking a type adds an
+// instance (study) to the chart; the menu stays open so several can be added.
+function IndicatorPicker({ onAddStudy }: { onAddStudy: (type: IndicatorType) => void }) {
+  const [q, setQ] = useState("");
+  const query = q.trim().toLowerCase();
+  const match = (d: IndicatorDef) => !query || d.label.toLowerCase().includes(query) || d.type.toLowerCase().includes(query);
+  const overlays = OVERLAY_DEFS.filter(match);
+  const oscillators = OSCILLATOR_DEFS.filter(match);
+
+  const Item = (d: IndicatorDef) => (
+    <button key={d.type} type="button" className="mk-menu-item" onClick={() => onAddStudy(d.type)}>
+      <span className="mk-ind-swatch" style={{ background: d.lines[0].defaultColor }} />
+      <span style={{ flex: 1, textAlign: "left" }}>{d.label}</span>
+    </button>
+  );
+
+  return (
+    <div className="mk-ind-picker">
+      <div className="mk-ind-search">
+        <Search size={12} style={{ opacity: 0.6, flex: "0 0 auto" }} />
+        <input
+          autoFocus
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onMouseDown={(e) => e.stopPropagation()}
+          placeholder="Search indicators…"
+          aria-label="Search indicators"
+        />
+      </div>
+      <div className="mk-ind-list">
+        {overlays.length > 0 && <MenuGroup title="Overlays">{overlays.map(Item)}</MenuGroup>}
+        {oscillators.length > 0 && <MenuGroup title="Oscillators">{oscillators.map(Item)}</MenuGroup>}
+        {overlays.length === 0 && oscillators.length === 0 && (
+          <div style={{ padding: "10px 12px", fontSize: 11, color: "var(--text-muted)" }}>No match</div>
+        )}
+      </div>
     </div>
   );
 }
