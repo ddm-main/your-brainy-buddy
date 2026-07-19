@@ -35,7 +35,7 @@ async function fetchOne(symbol: string): Promise<QSResult | null> {
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
-  const gate = requireCronSecret(req); if (gate) return gate;
+  const gate = await requireCronSecret(req); if (gate) return gate;
   try {
     const svc = svcClient();
     const PAGE = 500;

@@ -42,7 +42,7 @@ Deno.serve(async (req) => {
   try {
     const svc = svcClient();
     if (req.headers.get("x-cron-secret") != null) {
-      const guard = requireCronSecret(req);
+      const guard = await requireCronSecret(req);
       if (guard) return guard;
     } else {
       const auth = await requireUserId(req);

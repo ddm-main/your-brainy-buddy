@@ -1,6 +1,7 @@
-// market-index-constituents — fetches an Indian index's member list from
-// niftyindices.com and joins the latest computed scores.
+// market-index-constituents — fetches Indian index member lists from
+// niftyindices.com, persists them to market_index_members, and joins latest scores.
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
+import { requireCronSecret } from "../_shared/market/cron.ts";
 
 const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" };
 
@@ -22,6 +23,25 @@ const SLUG_TO_FILE: Record<string, string> = {
   niftyrealty: "ind_niftyrealtylist.csv",
   niftyenergy: "ind_niftyenergylist.csv",
   niftyfinservice: "ind_niftyfinancelist.csv",
+};
+
+const SLUG_TO_KEY: Record<string, string> = {
+  nifty50: "NIFTY50",
+  niftynext50: "NIFTYNEXT50",
+  nifty100: "NIFTY100",
+  nifty200: "NIFTY200",
+  nifty500: "NIFTY500",
+  niftymidcap100: "NIFTYMIDCAP100",
+  niftysmallcap100: "NIFTYSMALLCAP100",
+  niftybank: "BANKNIFTY",
+  niftyfinservice: "FINNIFTY",
+  niftyit: "NIFTYIT",
+  niftyauto: "NIFTYAUTO",
+  niftypharma: "NIFTYPHARMA",
+  niftyfmcg: "NIFTYFMCG",
+  niftymetal: "NIFTYMETAL",
+  niftyrealty: "NIFTYREALTY",
+  niftyenergy: "NIFTYENERGY",
 };
 
 // CSV parser respecting double-quoted fields.
@@ -82,29 +102,79 @@ async function fetchCsvMembers(file: string): Promise<Member[]> {
 const CACHE = new Map<string, { at: number; members: Member[] }>();
 const TTL = 5 * 60_000;
 
+async function loadMembers(slug: string): Promise<{ members: Member[]; reason?: string }> {
+  const file = SLUG_TO_FILE[slug];
+  if (!file) return { members: [], reason: "unsupported slug" };
+  const cached = CACHE.get(slug);
+  if (cached && Date.now() - cached.at < TTL) return { members: cached.members };
+  const members = await fetchCsvMembers(file);
+  if (members.length > 0) CACHE.set(slug, { at: Date.now(), members });
+  return members.length > 0 ? { members } : { members: [], reason: "empty upstream" };
+}
+
+async function persistMembers(svc: ReturnType<typeof svcClient>, slug: string, members: Member[]) {
+  const indexKey = SLUG_TO_KEY[slug];
+  if (!indexKey || members.length === 0) return 0;
+  const rows = members.map((m, i) => ({
+    index_key: indexKey,
+    symbol: m.symbol,
+    exchange: "NSE",
+    rank: i + 1,
+    updated_at: new Date().toISOString(),
+  }));
+  await svc.from("market_index_members").delete().eq("index_key", indexKey);
+  for (let i = 0; i < rows.length; i += 500) {
+    const { error } = await svc.from("market_index_members").upsert(rows.slice(i, i + 500), { onConflict: "index_key,symbol" });
+    if (error) throw error;
+  }
+  for (let i = 0; i < members.length; i += 500) {
+    const batch = members.slice(i, i + 500).map((m) => ({
+      symbol: m.symbol,
+      exchange: "NSE",
+      company_name: m.company || m.symbol,
+      industry: m.industry,
+      yahoo_symbol: `${m.symbol}.NS`,
+      is_active: true,
+      in_universe: true,
+      ...(indexKey === "NIFTY500" ? { is_nifty500: true } : {}),
+    }));
+    await svc.from("market_stocks").upsert(batch, { onConflict: "symbol,exchange" });
+  }
+  return rows.length;
+}
+
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
   try {
-    const auth = await requireUserId(req);
-    if ("error" in auth) return new Response("unauthorized", { status: 401, headers: corsFor(req) });
-
-    const { slug } = await req.json().catch(() => ({}));
-    const key = String(slug ?? "").toLowerCase();
-    const file = SLUG_TO_FILE[key];
-    if (!file) return jsonResponse(req, { members: [], reason: "unsupported slug" });
-
-    const cached = CACHE.get(key);
-    let members: Member[];
-    if (cached && Date.now() - cached.at < TTL) {
-      members = cached.members;
+    const isCron = req.headers.get("x-cron-secret") != null;
+    if (isCron) {
+      const guard = await requireCronSecret(req);
+      if (guard) return guard;
     } else {
-      members = await fetchCsvMembers(file);
-      if (members.length > 0) CACHE.set(key, { at: Date.now(), members });
+      const auth = await requireUserId(req);
+      if ("error" in auth) return new Response("unauthorized", { status: 401, headers: corsFor(req) });
     }
-    if (members.length === 0) return jsonResponse(req, { members: [], reason: "empty upstream" });
+
+    const { slug, all } = await req.json().catch(() => ({}));
+    const svc = svcClient();
+
+    if (all === true || slug === "all" || (isCron && !slug)) {
+      const results: Record<string, number> = {};
+      for (const key of ["nifty50", "niftynext50", "nifty100", "nifty200", "nifty500", "niftymidcap100", "niftysmallcap100", "niftybank", "niftyfinservice"]) {
+        const { members } = await loadMembers(key);
+        results[SLUG_TO_KEY[key]] = await persistMembers(svc, key, members);
+      }
+      return jsonResponse(req, { ok: true, persisted: results });
+    }
+
+    const key = String(slug ?? "").toLowerCase();
+    if (!SLUG_TO_FILE[key]) return jsonResponse(req, { members: [], reason: "unsupported slug" });
+
+    const { members, reason } = await loadMembers(key);
+    if (members.length === 0) return jsonResponse(req, { members: [], reason });
+    const persisted = await persistMembers(svc, key, members);
 
     const symbols = members.map((m) => m.symbol);
-    const svc = svcClient();
     // Latest score per symbol
     const { data: scores } = await svc
       .from("market_stock_scores")
@@ -128,7 +198,7 @@ Deno.serve(async (req) => {
         rsi14: s?.rsi14 ?? null,
       };
     });
-    return jsonResponse(req, { members: out, count: out.length, slug: key });
+    return jsonResponse(req, { members: out, count: out.length, persisted, slug: key, index_key: SLUG_TO_KEY[key] });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }
