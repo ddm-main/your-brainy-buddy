@@ -1501,12 +1501,12 @@ textarea.hud-input:focus {
 /* -------- Market · Analysis workbench -------- */
 .mk-anl-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
   gap: 14px;
   height: 100%;
   min-height: 0;
 }
-@media (max-width: 1100px) {
+@media (max-width: 1180px) {
   .mk-anl-grid { grid-template-columns: minmax(0, 1fr); height: auto; }
   .mk-anl-rail { max-height: none !important; overflow: visible !important; }
   .mk-anl-chart { min-height: 520px; }
@@ -1515,7 +1515,7 @@ textarea.hud-input:focus {
 .mk-anl-rail {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   min-height: 0;
   overflow-y: auto;
   padding: 2px 6px 12px 2px;
@@ -1523,7 +1523,15 @@ textarea.hud-input:focus {
 .mk-anl-rail::-webkit-scrollbar { width: 6px; }
 .mk-anl-rail::-webkit-scrollbar-thumb { background: rgba(53,214,237,0.18); border-radius: 3px; }
 
-/* Chart toolbar (TradingView-style) */
+/* Flow panels: hide the animated shimmer overlay that occasionally paints
+   outside on re-renders and causes visible "overlap" between stacked panels. */
+.hud-panel[data-flow="true"]::after { display: none; }
+.hud-panel[data-flow="true"] header { min-width: 0; }
+.hud-panel[data-flow="true"] header .h-title {
+  min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Chart toolbar (TradingView-style) — single row, horizontal scroll on narrow */
 .mk-chart-toolbar {
   display: flex;
   align-items: center;
@@ -1535,14 +1543,25 @@ textarea.hud-input:focus {
   background: rgba(4,16,22,0.55);
   flex: 0 0 auto;
   min-height: 34px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
+.mk-chart-toolbar::-webkit-scrollbar { height: 4px; }
+.mk-chart-toolbar::-webkit-scrollbar-thumb { background: rgba(53,214,237,0.2); border-radius: 2px; }
+.mk-chart-toolbar > * { flex: 0 0 auto; }
 .mk-toolbar-divider {
   align-self: stretch;
   width: 1px;
   background: var(--edge);
   margin: 2px 4px;
 }
+
+/* Hide app chrome behind the fullscreen chart overlay */
+body.is-fs-chart .hud-topbar,
+body.is-fs-chart .ambient-layer,
+body.is-fs-chart .hud-voicebar { display: none !important; }
+
 
 .mk-menu-trigger {
   display: inline-flex;

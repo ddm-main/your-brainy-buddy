@@ -1,107 +1,66 @@
-## Goal
-Fix the Analysis workbench end-to-end and rebuild its chart controls as a real TradingView-style dropdown toolbar. Verified against the live app while logged in — the issues below were reproduced with screenshots, not guessed.
+## Audit results — Stock Analysis workbench
 
-## Bugs verified (with reproduction)
+I inspected `src/routes/market/Analysis.tsx`, `ChartToolbar.tsx`, `FullscreenShell.tsx`, `HudPanel.tsx`, and the `.mk-anl-*` / `.hud-panel` CSS. Here is what is already shipped from the earlier plan, what's still broken, and what I'll fix in this turn.
 
-### Right rail — panels are stacking on top of each other (root cause)
-Screenshot `/market/analysis/RELIANCE` at 1332×892: `A1 QUOTE`, `A2 BREAKOUT`, `A3 INDICATORS`, `A4 RANGE`, `A5 AI VERDICT`, `A6 FUNDAMENTALS` all render on top of one another with visible text bleed-through.
+### Already shipped
+- TradingView-style toolbar shell with dropdown menus (Interval, Chart type, Indicators, Layout, More) via `Menu`.
+- Native ↔ TV segmented toggle, Alert button, "Open in tradingview.com" link.
+- Indicator flags persisted to `localStorage`.
+- Right rail is a flex-column with `gap: 14px`, panels use `flow` (content-sized).
+- `FullscreenShell` portals to `document.body` with `zIndex: 300` and Esc-to-exit.
 
-Root cause: `HudPanel` renders a `<section>` with `display:flex; flexDirection:column; minHeight:0` and no `flex` value. Inside a flex-column parent (the right rail: `display:flex; flexDirection:column; gap:12; overflowY:auto`), the default `flex:0 1 auto` combined with `min-height:0` lets every panel shrink below its content height. Result: panels collapse and their content overflows into the next panel's box (visible in every screenshot I captured, including the TradingView-mode view).
+### Bugs I confirmed
+1. **Right rail panels overlap (image 8 & 10).** `HudPanel` renders decorative `::before`/`::after` layers and 4 absolute `.hud-corner` spans with `overflow: hidden` on the outer section — but when `flow` is on, we set `overflow: visible` on both wrapper and body, so on Chromium the shimmer layer occasionally paints outside and, more importantly, the body's inner flex column collapses because `flex: 0 0 auto` combined with an unbounded `min-height:0` lets Rows render before the header measures, producing visible overlap on first paint and on updates (AI Verdict re-render triggers it every 6h refresh).
+2. **Rail width too narrow** — `minmax(280px, 340px)` at typical viewport gives ~300px; the header text ("BREAKOUT INTELLIGENCE", "INDICATORS (DAILY)") wraps behind adjacent index labels.
+3. **Fullscreen bleeds through** — `zIndex: 300` sits under the app TopBar/AmbientLayer (they use z-index 400+). The user sees the top bar and ambient scanlines drawn on top of the fullscreen chart.
+4. **Fullscreen body doesn't clip** — `document.body.style.overflow="hidden"` only; the root app container keeps its own scroll and the ambient canvas keeps painting.
+5. **Toolbar wraps to two rows** on narrow widths and the segmented Native/TV control jumps to a new line, hiding the fullscreen icon.
+6. **Chart type dropdown disabled in TV mode** but the disabled state has no visible cue on the trigger button beyond `opacity`.
+7. **Interval set is thin** — only 5m/15m/1h/1D. TradingView parity needs 1m/3m/5m/15m/30m/1h/2h/4h/1D/1W/1M and quick range buttons (1D/5D/1M/3M/6M/YTD/1Y/5Y/All).
+8. **No left drawing rail** (cursor/trend/hline/text/measure) — currently only inside TV embed.
+9. **`onTvMode` toggle races** — flipping to TV then back to Native re-mounts `CandleChart` without preserving the previous crosshair/zoom.
+10. **Alert button** navigates away instead of opening a lightweight modal, breaking the "TradingView-like" feel.
 
-Fix: give the panel root `flex: 0 0 auto` (or drop `min-height:0` on `flow` panels). This is a single-line change in `src/components/hud/HudPanel.tsx` and it also unblocks the rail's `overflow-y:auto` scroll.
+### Plan — what I will build
 
-### Chart toolbar overflows and wraps
-Selected-element text and screenshots show the header row wrapping into two lines at 1332px and into three lines at 1100px (`1D 1H 15M 5M / CANDLES BARS LINE AREA / TRADINGVIEW ⛶`), then the 9 indicator chips wrap into another two lines below. The panel title `MK.ANL · RELIANCE · 1D` also cramps into that row. The vertical `<span>` dividers between button groups render at height 0 because they have `width:1` but no `height`.
+**A. Right rail overlap fix**
+- Widen rail to `minmax(320px, 380px)` and bump gap to 12px.
+- On `HudPanel` in `flow` mode: switch outer `overflow` to `hidden` (keeps shimmer contained) but keep body `overflow: visible`; set body `min-height: auto` so content measures before layout.
+- Remove `::after` shimmer on flow panels (add `.hud-panel[data-flow="true"]::after { display:none }`) — it's the layer bleeding on re-renders.
+- Header gets `flex-wrap: nowrap` with `min-width:0` and `text-overflow: ellipsis` on the title so index chip never sits over the label.
 
-### Native chart body is blank
-In the 1D view for RELIANCE the OHLC legend renders (`O 1535.20 H 1551.50 …`) but no candles are drawn — the chart body area is empty. TradingView mode on the same symbol shows a full candle chart, so data + rendering pipeline work in the TV path but not the native `CandleChart` path. Likely causes to verify in the fix pass:
-- `CandleChart` receives `fill` and sizes off `container.clientHeight`, but the panel body is inside a `FullscreenShell` whose flex parent may report height 0 on first paint (no ResizeObserver-driven resize).
-- Or the `candles` array is arriving with string timestamps that `lightweight-charts` rejects silently.
+**B. Fullscreen overlay fix**
+- Raise `FullscreenShell` z-index to `9999`.
+- Add `document.documentElement.style.overflow="hidden"` alongside body, and toggle a `body.is-fs-chart` class that hides `.hud-topbar`, `.ambient-layer`, and the router shell via CSS while active.
+- Give the overlay its own solid background (`var(--bg)`) plus a `backdrop-filter: blur(2px)` fallback so nothing bleeds through if a portal fails.
+- Make the exit button larger (44px tap) and add an "F" shortcut in addition to Esc.
 
-Diagnosis and fix belong in the same pass because a broken primary chart is the highest-priority bug.
+**C. TradingView-parity toolbar**
+- Expand intervals to 1m/3m/5m/15m/30m/1h/2h/4h/1D/1W/1M with a "Seconds" submenu placeholder.
+- Add **Range** dropdown (1D/5D/1M/3M/6M/YTD/1Y/5Y/All) that maps to candle window (separate from interval).
+- Add **Compare** dropdown (NIFTY/BANKNIFTY/sector index + custom) — overlays a normalized line on `CandleChart`.
+- Add **Settings** dropdown (theme: dark/darker, grid on/off, log scale, price line, session breaks).
+- Add **Save layout** action (persists tf + chartType + flags + compare list under `jarvis.analysis.layouts` and lists them under Layout menu).
+- Add **Screenshot** action (uses `html-to-image` on the chart container, downloads PNG).
+- Make Alert open a `HudModal` with price + condition (above/below) and call the existing alerts hook; no route change.
+- Prevent wrap: set toolbar to `flex-wrap: nowrap; overflow-x: auto` on narrow, hiding scrollbar.
+- Disabled state gets a visible strike style, not just opacity.
 
-### Right-rail responsiveness
-At 1100px the rail is still pinned to a fixed 300px column, so the chart column shrinks to ~750px, indicator chips wrap to three rows, and the panels overlap even harder. Below ~1000px the layout is unusable.
+**D. Left drawing rail (native chart only)**
+- New `ChartDrawingRail` component (vertical 36px strip) with: cursor, crosshair, trend line, horizontal line, vertical line, rectangle, text, measure, magnet, lock, clear-all.
+- State stored per-symbol in `localStorage` (`jarvis.analysis.draw.<SYM>`).
+- Wire into `CandleChart` via an overlay `<canvas>` sibling; drawings render on top and rescale with the price/time axes it already exposes.
 
-### Section index labels
-`A1 A2 A3 A4 A5 A6` but `Market Depth` currently uses `A1.5` (out of sequence) — cosmetic.
+**E. Persistence & UX polish**
+- Persist `tf`, `chartType`, `tvMode`, `compare[]`, and the layout preset name in a single `jarvis.analysis.state` object.
+- Preserve zoom when toggling Native↔TV by lifting `visibleRange` state into `Analysis.tsx`.
+- Add symbol search box in top of toolbar (small autocomplete against `market_scrips`).
+- Debounce indicator toggles so `CandleChart` doesn't recompute on each click.
 
-### AI Verdict inner layout
-The Entry/Stop/T1/T2/Hold block wraps a `1fr 1fr` grid around `Row` components that are themselves two-column, so numbers overflow the 300px rail and land under the rationale text.
+### Technical notes
+- Files touched: `src/routes/market/Analysis.tsx`, `src/components/market/ChartToolbar.tsx`, `src/components/market/FullscreenShell.tsx`, `src/components/market/CandleChart.tsx`, `src/components/hud/HudPanel.tsx`, `src/styles.css`. New: `src/components/market/ChartDrawingRail.tsx`, `src/components/market/AlertQuickModal.tsx`, `src/lib/market/chartLayout.ts`.
+- No DB migrations, no edge-function changes.
+- No new package needed except `html-to-image` (~7 kB) for screenshot; skip if you'd rather use native `canvas.toDataURL`.
+- I'll verify by launching Playwright against `/market/analysis/FEDERALBNK` at 1574×997 and screenshotting: normal, dropdowns open, fullscreen, narrow (900px).
 
-### Market Depth alignment
-Qty column is not right-aligned and long numbers (`26,40,042`) collide with the price column in the ask half.
-
-## Changes (scope: Analysis UI + one HudPanel line + one CSS block)
-
-### 1. Fix panel collapse (unblocks everything else)
-`src/components/hud/HudPanel.tsx` — add `flex: "0 0 auto"` to the section root style. This is the only change to `HudPanel` and it doesn't affect the fixed-height chart panel (which already sets `flex: 1` via its `style` prop).
-
-### 2. Fix native chart rendering
-`src/components/market/CandleChart.tsx`:
-- Guarantee the chart resizes after mount by observing the container with `ResizeObserver` and calling `chart.applyOptions({ width, height })` on every entry. Also call `chart.timeScale().fitContent()` after the first series `setData`.
-- Coerce `time` values: if `typeof time === 'string'` and the string is `YYYY-MM-DD`, pass it through unchanged (lightweight-charts accepts BusinessDay strings); if it's an ISO datetime, convert to a UNIX second `UTCTimestamp`. Guard against `NaN`/`null`.
-
-If after the fix the chart is still blank the diagnosis will surface (via a one-line dev warning we'll add for empty series) instead of failing silently.
-
-### 3. New TradingView-style toolbar
-Replace the wrapping `actions` row + indicator-chip strip with a single compact toolbar rendered inside the chart panel body (above the chart, not in the header). It has real dropdown menus:
-
-```
-[1D ▾]  [Candles ▾]  [ƒ Indicators ▾]  [🔔 Alert]  [⧉ Layout ▾]  [⋯ More ▾]        [TV | Native]  [⛶]
-```
-
-- **Interval ▾** — 5m / 15m / 1h / 1D (existing `TIMEFRAMES`). Selected row shows check.
-- **Chart type ▾** — Candles / Bars / Line / Area (existing `CHART_TYPES`), disabled while `TV` mode is on.
-- **Indicators ▾** — grouped checkbox menu: *Overlays* (EMA20/50/200, SMA20, BB, VWAP) / *Oscillators* (RSI, MACD) / *Volume*. Persists to `IND_STORE` as today.
-- **Alert** — navigates to `/market/alerts?symbol=<sym>` (existing route).
-- **Layout ▾** — Single (active), 2-up / 2×2 (disabled, "coming soon"). Ships as visual parity with TradingView; no behavior change.
-- **More ▾** — Reset indicators, Open in TradingView (external), Fullscreen.
-- **TV | Native** — segmented switch (replaces standalone "TradingView" button).
-- **⛶** — fullscreen icon.
-
-New files:
-- `src/components/hud/Menu.tsx` — tiny popover primitive: button + absolute-positioned panel, close on outside click / `Escape` / route change. No new dependencies.
-- `src/components/market/ChartToolbar.tsx` — owns the menu wiring; state stays in `Analysis.tsx`.
-
-`src/routes/market/Analysis.tsx`:
-- Remove the wrapping button row from panel `actions` (leave only the segmented TV/Native + fullscreen icon).
-- Remove the standalone indicator-chip strip; move indicators into the dropdown.
-- Move `MK.ANL · RELIANCE · 1D` header text to just `RELIANCE` (interval/type live in the toolbar).
-
-### 4. Rail layout polish
-`src/routes/market/Analysis.tsx` + a small CSS block in `src/styles.css`:
-- Add `.mk-anl-grid` with `grid-template-columns: minmax(0,1fr) minmax(280px,340px)`; at `max-width: 1100px` collapse to a single column (rail below chart).
-- Increase rail `gap` to `16px`; add `padding-right: 4px` so the panels' outer glow shadows don't clip against the scrollbar.
-- `Market Depth` inner grid → `grid-template-columns: auto 1fr` with `text-align:right` on qty.
-- `AI Verdict` — drop the nested `1fr 1fr` grid; render Entry/Stop/T1/T2/Hold as stacked `Row`s.
-- Renumber index labels to `A1..A7` (Depth becomes A2, everything after shifts).
-
-### 5. Small polish
-- Restore visible group dividers in the toolbar (`width:1; align-self:stretch; background:var(--edge)`).
-- All toolbar controls close on `Escape` (reuses `useEscapeClose`).
-
-## Files touched
-
-- `src/components/hud/HudPanel.tsx` — one-line flex fix.
-- `src/components/hud/Menu.tsx` — new popover primitive.
-- `src/components/market/CandleChart.tsx` — ResizeObserver + time coercion + `fitContent()`.
-- `src/components/market/ChartToolbar.tsx` — new toolbar with dropdowns.
-- `src/routes/market/Analysis.tsx` — wire toolbar, drop old rows, renumber, responsive grid, fix Depth + AI Verdict panels.
-- `src/styles.css` — `.mk-anl-grid` responsive rules + tiny `.mk-menu` styles.
-
-## Out of scope (flagged as follow-ups, not built in this pass)
-
-- Symbol search inside the toolbar (needs an autocomplete hook against `market_stocks`).
-- Real multi-chart split layouts (2-up, 2×2) — Layout menu ships as stub.
-- Drawing tools (trendlines, fibs, measure) on the native chart — requires lightweight-charts drawing primitives.
-- Server-persisted indicator/layout presets per symbol (today: localStorage global).
-- Auditing the wider Market section (Options, Positions, Watchlists) for the same `HudPanel` collapse — the fix to `HudPanel` will help globally, but a follow-up sweep is worth scheduling if any other page uses `flow` panels in a flex column.
-
-## Verification plan
-
-After the fix, re-run the same logged-in Playwright script at 1332×892, 1100×800, and 900×800, and confirm:
-- No panel overlap in the right rail; each panel renders its full content and the rail scrolls.
-- Native chart renders candles for RELIANCE, AIIL, and a small-cap symbol.
-- Toolbar fits on a single row down to 900px; dropdowns open, close on outside click and `Escape`, and persist indicator toggles across reload.
-- TV mode still works and no longer has the standalone TradingView button in the header.
+Approve and I'll ship all of A–E in one pass.

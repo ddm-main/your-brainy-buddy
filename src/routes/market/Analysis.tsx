@@ -1,39 +1,126 @@
 // Stock Analysis — TradingView-style chart workbench + indicator readouts.
 // Chart fills the viewport height; indicators are computed client-side in
 // CandleChart, so toggles work even before the EOD pipeline has run.
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { CandleChart, type ChartType, type IndicatorFlags } from "@/components/market/CandleChart";
 import { TradingViewChart, tvInterval } from "@/components/market/TradingViewChart";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
-import { ChartToolbar } from "@/components/market/ChartToolbar";
+import { ChartToolbar, DEFAULT_SETTINGS, type ChartSettings } from "@/components/market/ChartToolbar";
 import { fmtNum, fmtInt, fmtPct } from "@/components/hud/DataTable";
 import { useCandles, useDepth, useFundamentals, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores } from "@/lib/market/hooks";
 import { getTrustedDayChange } from "@/lib/market/pnl";
 import { FullscreenShell } from "@/components/market/FullscreenShell";
+import { useNotifications } from "@/store/notificationStore";
 import { RefreshCw } from "lucide-react";
 
-const IND_STORE = "jarvis.analysis.indicators";
+const STATE_STORE = "jarvis.analysis.state.v2";
 const defaultFlags: IndicatorFlags = { ema20: true, ema50: true, volume: true };
+
+type Persisted = {
+  tf: string;
+  chartType: ChartType;
+  tvMode: boolean;
+  flags: IndicatorFlags;
+  settings: ChartSettings;
+  range: string;
+};
+
+const defaultState: Persisted = {
+  tf: "1D",
+  chartType: "candles",
+  tvMode: false,
+  flags: defaultFlags,
+  settings: DEFAULT_SETTINGS,
+  range: "6M",
+};
+
+function loadState(): Persisted {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STATE_STORE) ?? "{}");
+    return {
+      ...defaultState,
+      ...raw,
+      flags: { ...defaultFlags, ...(raw.flags ?? {}) },
+      settings: { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) },
+    };
+  } catch { return defaultState; }
+}
 
 export default function Analysis() {
   const { symbol } = useParams();
   const nav = useNavigate();
-  const [tf, setTf] = useState("1D");
-  const [chartType, setChartType] = useState<ChartType>("candles");
-  const [tvMode, setTvMode] = useState(false);
+  const initial = useMemo(loadState, []);
+  const [tf, setTf] = useState(initial.tf);
+  const [range, setRange] = useState(initial.range);
+  const [chartType, setChartType] = useState<ChartType>(initial.chartType);
+  const [tvMode, setTvMode] = useState(initial.tvMode);
   const [fs, setFs] = useState(false);
-  const [flags, setFlags] = useState<IndicatorFlags>(() => {
-    try { return { ...defaultFlags, ...JSON.parse(localStorage.getItem(IND_STORE) ?? "{}") }; }
-    catch { return defaultFlags; }
-  });
+  const [flags, setFlags] = useState<IndicatorFlags>(initial.flags);
+  const [settings, setSettings] = useState<ChartSettings>(initial.settings);
   const [search, setSearch] = useState("");
-  useEffect(() => { localStorage.setItem(IND_STORE, JSON.stringify(flags)); }, [flags]);
+  const chartWrapRef = useRef<HTMLDivElement>(null);
+  const notify = useNotifications((s) => s.add);
+
+  useEffect(() => {
+    const payload: Persisted = { tf, chartType, tvMode, flags, settings, range };
+    localStorage.setItem(STATE_STORE, JSON.stringify(payload));
+  }, [tf, chartType, tvMode, flags, settings, range]);
+
+  // F toggles fullscreen when not typing in an input
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "f" && e.key !== "F") return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+      if (fs) return;
+      setFs(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [fs]);
 
   const sym = symbol?.toUpperCase();
+
+  const handleScreenshot = useCallback(() => {
+    const wrap = chartWrapRef.current;
+    if (!wrap) return;
+    const canvases = wrap.querySelectorAll("canvas");
+    if (canvases.length === 0) { notify("Chart not ready for screenshot"); return; }
+    const rects = Array.from(canvases).map((c) => c.getBoundingClientRect());
+    const wrapRect = wrap.getBoundingClientRect();
+    const out = document.createElement("canvas");
+    out.width = Math.ceil(wrapRect.width * devicePixelRatio);
+    out.height = Math.ceil(wrapRect.height * devicePixelRatio);
+    const ctx = out.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = getComputedStyle(document.body).getPropertyValue("--bg").trim() || "#050b12";
+    ctx.fillRect(0, 0, out.width, out.height);
+    canvases.forEach((c, i) => {
+      const r = rects[i];
+      const x = (r.left - wrapRect.left) * devicePixelRatio;
+      const y = (r.top - wrapRect.top) * devicePixelRatio;
+      try { ctx.drawImage(c, x, y, r.width * devicePixelRatio, r.height * devicePixelRatio); } catch {}
+    });
+    out.toBlob((blob) => {
+      if (!blob) { notify("Screenshot failed"); return; }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${sym ?? "chart"}-${tf}-${new Date().toISOString().slice(0, 10)}.png`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      notify("Chart screenshot saved");
+    }, "image/png");
+  }, [tf, sym, notify]);
+
+  const handleSaveLayout = useCallback(() => {
+    notify("Chart layout saved");
+  }, [notify]);
   const { data: candleData, isLoading, error } = useCandles(sym, tf);
+
   const { data: scores = [] } = useStockScores({ symbol: sym, limit: 1 });
   const score = scores[0];
   const { data: quotesData } = useQuotes(sym ? [`NSE:${sym}`] : []);
@@ -100,16 +187,22 @@ export default function Analysis() {
               symbol={sym}
               tf={tf}
               onTf={setTf}
+              range={range}
+              onRange={setRange}
               chartType={chartType}
               onChartType={setChartType}
               flags={flags}
               onFlags={(u) => setFlags(u)}
+              settings={settings}
+              onSettings={(u) => setSettings(u)}
               tvMode={tvMode}
               onTvMode={setTvMode}
               onFullscreen={() => setFs(true)}
               onAlert={() => nav(`/market/alerts?symbol=${sym}`)}
+              onScreenshot={handleScreenshot}
+              onSaveLayout={handleSaveLayout}
             />
-            <div style={{ flex: 1, minHeight: 0 }}>
+            <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0 }}>
               {tvMode ? (
                 <TradingViewChart symbol={sym} interval={tvInterval(tf)} />
               ) : error ? (
@@ -126,6 +219,7 @@ export default function Analysis() {
                   chartType={chartType}
                   indicators={flags}
                 />
+
               )}
             </div>
           </FullscreenShell>

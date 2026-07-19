@@ -50,19 +50,19 @@ export function HudPanel({
   return (
     <section
       className={cn("hud-panel mounted", className)}
+      data-flow={flow ? "true" : undefined}
       style={{
         display: "flex",
         flexDirection: "column",
-        // Default to content-sized so the panel never shrinks below its
-        // content inside a flex column parent (the Analysis right rail).
-        // Panels that fill a grid cell (e.g. the chart) override this by
-        // passing `flex: 1` and `minHeight: 0` via the `style` prop.
         flex: "0 0 auto",
-        ...(flow ? { overflow: "visible" } : null),
+        // Keep decorative ::before/::after shimmer clipped even in flow mode;
+        // content that needs to escape uses the body which stays visible.
+        overflow: "hidden",
         ...(style || {}),
       }}
       {...restNoStyle}
     >
+
       <span className="hud-corner tl" />
       <span className="hud-corner tr" />
       <span className="hud-corner bl" />
@@ -95,7 +95,7 @@ export function HudPanel({
         className={cn("relative", bodyClass)}
         style={{
           flex: flow ? "0 0 auto" : "1 1 0",
-          minHeight: 0,
+          minHeight: flow ? undefined : 0,
           padding: 12,
           display: "flex",
           flexDirection: "column",
@@ -104,6 +104,7 @@ export function HudPanel({
       >
         {children}
       </div>
+
     </section>
   );
 }
