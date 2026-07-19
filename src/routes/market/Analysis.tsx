@@ -11,7 +11,8 @@ import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { fmtNum, fmtInt, fmtPct } from "@/components/hud/DataTable";
 import { useCandles, useDepth, useFundamentals, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores } from "@/lib/market/hooks";
 import { getTrustedDayChange } from "@/lib/market/pnl";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { FullscreenShell } from "@/components/market/FullscreenShell";
+import { ExternalLink, Maximize2, RefreshCw } from "lucide-react";
 
 const TIMEFRAMES = ["1D", "1h", "15m", "5m"];
 const CHART_TYPES: Array<{ key: ChartType; label: string }> = [
@@ -40,6 +41,7 @@ export default function Analysis() {
   const [tf, setTf] = useState("1D");
   const [chartType, setChartType] = useState<ChartType>("candles");
   const [tvMode, setTvMode] = useState(false);
+  const [fs, setFs] = useState(false);
   const [flags, setFlags] = useState<IndicatorFlags>(() => {
     try { return { ...defaultFlags, ...JSON.parse(localStorage.getItem(IND_STORE) ?? "{}") }; }
     catch { return defaultFlags; }
@@ -126,6 +128,7 @@ export default function Analysis() {
               )}
               <span style={{ width: 1, background: "var(--edge)", margin: "0 2px" }} />
               <Btn size="sm" variant={tvMode ? "primary" : "ghost"} onClick={() => setTvMode((v) => !v)}>TradingView</Btn>
+              <Btn size="sm" variant="ghost" onClick={() => setFs(true)} title="Fullscreen"><Maximize2 size={12} /></Btn>
               {tvMode && (
                 <a
                   href={`https://www.tradingview.com/chart/?symbol=NSE:${sym}`}
@@ -143,39 +146,41 @@ export default function Analysis() {
             </div>
           }
         >
-          {!tvMode && (
-            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8, flex: "0 0 auto" }}>
-              {INDICATOR_DEFS.map((d) => (
-                <button key={d.key} onClick={() => toggle(d.key)}
-                  style={{
-                    padding: "3px 8px", fontFamily: "var(--font-hud)", fontSize: 9,
-                    letterSpacing: "0.14em", cursor: "pointer", borderRadius: 2,
-                    border: `1px solid ${flags[d.key] ? "var(--edge-strong)" : "var(--edge)"}`,
-                    background: flags[d.key] ? "rgba(53,214,237,0.12)" : "transparent",
-                    color: flags[d.key] ? "var(--accent)" : "var(--text-dim)",
-                  }}>{d.label}</button>
-              ))}
-            </div>
-          )}
-          <div style={{ flex: 1, minHeight: 0 }}>
-            {tvMode ? (
-              <TradingViewChart symbol={sym} interval={tvInterval(tf)} />
-            ) : error ? (
-              <EmptyState hint={String((error as Error).message ?? "")}>chart unavailable</EmptyState>
-            ) : isLoading || !candleData ? (
-              <div className="hud-label" style={{ padding: 24, textAlign: "center" }}>loading candles…</div>
-            ) : candleData.candles.length === 0 ? (
-              <EmptyState hint="unknown symbol, or data pipeline hasn't covered it yet">no candle data</EmptyState>
-            ) : (
-              <CandleChart
-                candles={candleData.candles}
-                priceLines={tf === "1D" ? priceLines : undefined}
-                fill
-                chartType={chartType}
-                indicators={flags}
-              />
+          <FullscreenShell fullscreen={fs} onExit={() => setFs(false)} title={`${sym} · ${tf}`}>
+            {!tvMode && (
+              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8, flex: "0 0 auto" }}>
+                {INDICATOR_DEFS.map((d) => (
+                  <button key={d.key} onClick={() => toggle(d.key)}
+                    style={{
+                      padding: "3px 8px", fontFamily: "var(--font-hud)", fontSize: 9,
+                      letterSpacing: "0.14em", cursor: "pointer", borderRadius: 2,
+                      border: `1px solid ${flags[d.key] ? "var(--edge-strong)" : "var(--edge)"}`,
+                      background: flags[d.key] ? "rgba(53,214,237,0.12)" : "transparent",
+                      color: flags[d.key] ? "var(--accent)" : "var(--text-dim)",
+                    }}>{d.label}</button>
+                ))}
+              </div>
             )}
-          </div>
+            <div style={{ flex: 1, minHeight: 0 }}>
+              {tvMode ? (
+                <TradingViewChart symbol={sym} interval={tvInterval(tf)} />
+              ) : error ? (
+                <EmptyState hint={String((error as Error).message ?? "")}>chart unavailable</EmptyState>
+              ) : isLoading || !candleData ? (
+                <div className="hud-label" style={{ padding: 24, textAlign: "center" }}>loading candles…</div>
+              ) : candleData.candles.length === 0 ? (
+                <EmptyState hint="unknown symbol, or data pipeline hasn't covered it yet">no candle data</EmptyState>
+              ) : (
+                <CandleChart
+                  candles={candleData.candles}
+                  priceLines={tf === "1D" ? priceLines : undefined}
+                  fill
+                  chartType={chartType}
+                  indicators={flags}
+                />
+              )}
+            </div>
+          </FullscreenShell>
         </HudPanel>
       </div>
 

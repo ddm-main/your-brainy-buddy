@@ -13,7 +13,6 @@ import { useContent } from "@/store/contentStore";
 import { useUi } from "@/store/uiStore";
 import { useNotifications } from "@/store/notificationStore";
 import { startReminderPoller } from "@/lib/reminders";
-import { runMorningBriefing } from "@/lib/briefing";
 import { useSession } from "@/lib/useSession";
 
 
@@ -49,11 +48,6 @@ export default function App() {
     if ("Notification" in window && Notification.permission === "default") {
       Notification.requestPermission().catch((e) => { if (import.meta.env.DEV) console.warn("[JARVIS] notification prompt:", e); });
     }
-    // Fire morning briefing once per day, after a small delay.
-    const t = window.setTimeout(() => {
-      runMorningBriefing().catch((e) => { if (import.meta.env.DEV) console.warn("[JARVIS] morning briefing:", e); });
-    }, 4000);
-
     // Global hotkey: ⌘/Ctrl+J → open conversation overlay.
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey)) return;
@@ -66,7 +60,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
 
-    return () => { stop(); window.clearTimeout(t); window.removeEventListener("keydown", onKey); };
+    return () => { stop(); window.removeEventListener("keydown", onKey); };
   }, [session]);
 
 

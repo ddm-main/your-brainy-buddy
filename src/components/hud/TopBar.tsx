@@ -1,10 +1,9 @@
 import { NavLink, Link, useLocation } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
-import { Bell, Command, LogOut, SlidersHorizontal, Wifi, Zap } from "lucide-react";
+import { Bell, SlidersHorizontal, Wifi } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 
 import { useEffect, useRef, useState } from "react";
-import { useUi } from "@/store/uiStore";
 import { useAiStatus } from "@/store/aiStatusStore";
 import { useNotifications } from "@/store/notificationStore";
 import { motion, AnimatePresence } from "framer-motion";
@@ -20,7 +19,6 @@ const NAV = [
 export default function TopBar() {
   const loc = useLocation();
   const navigate = useNavigate();
-  const togglePalette = useUi((s) => s.togglePalette);
   const [now, setNow] = useState(new Date());
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -145,28 +143,15 @@ export default function TopBar() {
       </nav>
 
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <button
-          onClick={togglePalette}
-          className="focus-outline"
-          style={{
-            display: "flex", alignItems: "center", gap: 6,
-            padding: "5px 10px", border: "1px solid var(--edge)",
-            borderRadius: 2, fontSize: 10, fontFamily: "var(--font-hud)",
-            letterSpacing: "0.16em", textTransform: "uppercase",
-            color: "var(--text-dim)",
-          }}
-          title="Command palette"
-          aria-label="Command palette"
-        >
-          <Command size={12} /> command
-        </button>
-
-        <StatusChip
-          label="sys"
-          ok={linkOk && aiOk}
-          icon={<Wifi size={11} />}
-          title={`Link ${linkOk ? "OK" : "DOWN"} · AI ${aiOk ? "OK" : "DOWN"}`}
-        />
+        {/* System-health chip only surfaces when something is actually down. */}
+        {!(linkOk && aiOk) && (
+          <StatusChip
+            label="sys"
+            ok={false}
+            icon={<Wifi size={11} />}
+            title={`Link ${linkOk ? "OK" : "DOWN"} · AI ${aiOk ? "OK" : "DOWN"}`}
+          />
+        )}
 
         <div style={{ fontFamily: "var(--font-display)", fontSize: 13, color: "var(--accent-soft)", letterSpacing: "0.1em" }}>
           <span style={{ color: "var(--text-dim)", fontSize: 10, marginRight: 8 }}>{date}</span>
@@ -216,14 +201,6 @@ export default function TopBar() {
           style={iconBtn}
         >
           <SlidersHorizontal size={13} />
-        </button>
-        <button
-          className="focus-outline"
-          title="Sign out"
-          onClick={() => supabase.auth.signOut()}
-          style={iconBtn}
-        >
-          <LogOut size={14} />
         </button>
       </div>
     </header>

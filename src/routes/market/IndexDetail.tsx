@@ -9,6 +9,8 @@ import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import type { ColumnDef } from "@tanstack/react-table";
 import { CandleChart, type IndicatorFlags, type ChartType } from "@/components/market/CandleChart";
 import { TradingViewChart, tvInterval } from "@/components/market/TradingViewChart";
+import { FullscreenShell } from "@/components/market/FullscreenShell";
+import { Maximize2 } from "lucide-react";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { useCandles, useIndexConstituents, useIndexWatch, useIndices, useOptionChain } from "@/lib/market/hooks";
 import { findPreset, tvSymbolFor } from "@/lib/market/indices";
@@ -38,6 +40,7 @@ export default function IndexDetail() {
   const [tf, setTf] = useState<(typeof TIMEFRAMES)[number]>("1D");
   const [chartType, setChartType] = useState<ChartType>("candles");
   const [useTv, setUseTv] = useState(false);
+  const [fs, setFs] = useState(false);
   const [ind, setInd] = useState<IndicatorFlags>({ ema20: true, ema50: true, volume: true });
 
   const { data: candlesData, isLoading: candlesLoading } = useCandles(symbol, tf);
@@ -48,6 +51,11 @@ export default function IndexDetail() {
 
   const tvS = tvSymbolFor(symbol, region);
   const [tvExch, tvSym] = tvS.includes(":") ? tvS.split(":") : ["NSE", tvS];
+  // TradingView's free widget doesn't carry NSE — those symbols render a wrong
+  // fallback (Apple). Only offer TradingView when the mapped exchange is one the
+  // widget actually serves (BSE / global exchanges).
+  const tvSupported = tvExch.toUpperCase() !== "NSE";
+  const showTv = useTv && tvSupported;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -99,29 +107,32 @@ export default function IndexDetail() {
               <Btn key={t} size="sm" onClick={() => setChartType(t)} style={{ opacity: chartType === t ? 1 : 0.6 }}>{t}</Btn>
             ))}
             <span style={{ width: 8 }} />
-            <Btn size="sm" onClick={() => setUseTv((v) => !v)}>{useTv ? "hud chart" : "tradingview"}</Btn>
+            {tvSupported && <Btn size="sm" onClick={() => setUseTv((v) => !v)}>{useTv ? "hud chart" : "tradingview"}</Btn>}
+            <Btn size="sm" onClick={() => setFs(true)} title="Fullscreen"><Maximize2 size={12} /></Btn>
           </div>
         }>
-          {!useTv && (
-            <div style={{ display: "flex", gap: 4, marginBottom: 6, flexWrap: "wrap" }}>
-              {(["ema20", "ema50", "ema200", "sma20", "bb", "vwap", "rsi", "macd", "volume"] as (keyof IndicatorFlags)[]).map((k) => (
-                <Btn key={k} size="sm" onClick={() => setInd((i) => ({ ...i, [k]: !i[k] }))} style={{ opacity: ind[k] ? 1 : 0.55 }}>
-                  {k}
-                </Btn>
-              ))}
-            </div>
-          )}
-          <div style={{ height: 480, border: "1px solid var(--edge)" }}>
-            {useTv ? (
-              <TradingViewChart symbol={tvSym} exchange={tvExch} interval={tvInterval(tf)} />
-            ) : candlesLoading ? (
-              <div className="hud-label" style={{ padding: 24, textAlign: "center" }}>loading chart…</div>
-            ) : candles.length === 0 ? (
-              <EmptyState hint="try a different timeframe or check the symbol">no chart data</EmptyState>
-            ) : (
-              <CandleChart candles={candles} fill chartType={chartType} indicators={ind} />
+          <FullscreenShell fullscreen={fs} onExit={() => setFs(false)} title={`${name} · Chart`}>
+            {!showTv && (
+              <div style={{ display: "flex", gap: 4, marginBottom: 6, flexWrap: "wrap", flex: "0 0 auto" }}>
+                {(["ema20", "ema50", "ema200", "sma20", "bb", "vwap", "rsi", "macd", "volume"] as (keyof IndicatorFlags)[]).map((k) => (
+                  <Btn key={k} size="sm" onClick={() => setInd((i) => ({ ...i, [k]: !i[k] }))} style={{ opacity: ind[k] ? 1 : 0.55 }}>
+                    {k}
+                  </Btn>
+                ))}
+              </div>
             )}
-          </div>
+            <div style={{ height: fs ? "auto" : 480, flex: fs ? 1 : undefined, minHeight: 0, border: "1px solid var(--edge)" }}>
+              {showTv ? (
+                <TradingViewChart symbol={tvSym} exchange={tvExch} interval={tvInterval(tf)} />
+              ) : candlesLoading ? (
+                <div className="hud-label" style={{ padding: 24, textAlign: "center" }}>loading chart…</div>
+              ) : candles.length === 0 ? (
+                <EmptyState hint="try a different timeframe or check the symbol">no chart data</EmptyState>
+              ) : (
+                <CandleChart candles={candles} fill chartType={chartType} indicators={ind} />
+              )}
+            </div>
+          </FullscreenShell>
         </HudPanel>
       )}
 

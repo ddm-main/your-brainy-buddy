@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
 import { supabase } from "@/integrations/supabase/client";
-import { Mail, Landmark, FolderKanban, type LucideIcon } from "lucide-react";
+import { Mail, Landmark, FolderKanban, LogOut, type LucideIcon } from "lucide-react";
 
 type Card = {
   to: string;
@@ -74,6 +74,24 @@ export default function ConfigHome() {
             </NavLink>
           );
         })}
+      </div>
+
+      <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--edge)" }}>
+        <button
+          onClick={() => supabase.auth.signOut()}
+          className="focus-outline"
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 8,
+            padding: "9px 14px", border: "1px solid var(--edge)",
+            background: "transparent", color: "var(--danger)", cursor: "pointer",
+            borderRadius: 2, fontFamily: "var(--font-hud)", fontSize: 11,
+            letterSpacing: "0.16em", textTransform: "uppercase",
+          }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.borderColor = "var(--danger)"; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.borderColor = "var(--edge)"; }}
+        >
+          <LogOut size={13} /> Sign out
+        </button>
       </div>
     </HudPanel>
   );
