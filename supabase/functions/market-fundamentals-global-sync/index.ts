@@ -99,13 +99,9 @@ Deno.serve(async (req) => {
 
   try {
     const svc = svcClient();
-    // Pick the next chunk of never-synced, stale, or retryable failed symbols.
-    const { data: stocks, error } = await svc.from("market_fundamentals_sync_queue")
-      .select("symbol,exchange,company_name,yahoo_symbol,queue_priority,last_attempted_at")
-      .order("queue_priority", { ascending: true })
-      .order("last_attempted_at", { ascending: true, nullsFirst: true })
-      .order("last_fundamentals_sync_at", { ascending: true, nullsFirst: true })
-      .limit(CHUNK);
+    // Atomically claim the next chunk so overlapping cron/manual runs never
+    // process the same 40 symbols. The RPC stamps the cursor immediately.
+    const { data: stocks, error } = await svc.rpc("claim_market_fundamentals_sync", { _limit: CHUNK });
     if (error) return errorResponse(req, error.message, 500);
 
     if (!stocks || stocks.length === 0) {
@@ -186,14 +182,10 @@ Deno.serve(async (req) => {
           }, { onConflict: "symbol,exchange" });
           if (marketCapCr != null || row.sector || row.industry) {
             await svc.from("market_stocks").update({
-              last_fundamentals_sync_at: now,
               ...(marketCapCr != null ? { market_cap: marketCapCr } : {}),
               ...(row.sector ? { sector: row.sector } : {}),
               ...(row.industry ? { industry: row.industry } : {}),
             }).eq("symbol", s.symbol).eq("exchange", s.exchange);
-          } else {
-            await svc.from("market_stocks").update({ last_fundamentals_sync_at: now })
-              .eq("symbol", s.symbol).eq("exchange", s.exchange);
           }
           if (status === "ok") synced++; else partial++;
         } catch (err) {
@@ -226,7 +218,7 @@ Deno.serve(async (req) => {
       partial,
       failed,
       remaining: remaining ?? 0,
-      drained: stocks.length < CHUNK,
+      drained: (remaining ?? 0) === 0,
     });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
