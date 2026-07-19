@@ -27,7 +27,7 @@ const RecoSchema = z.object({
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
-  const gate = requireCronSecret(req); if (gate) return gate;
+  const gate = await requireCronSecret(req); if (gate) return gate;
   const key = Deno.env.get("LOVABLE_API_KEY");
   if (!key) return errorResponse(req, "LOVABLE_API_KEY missing", 500);
 

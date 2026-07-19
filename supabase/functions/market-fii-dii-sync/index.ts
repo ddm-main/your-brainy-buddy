@@ -8,7 +8,7 @@ const NSE_HOSTS = ["www.nseindia.com"];
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
-  const gate = requireCronSecret(req); if (gate) return gate;
+  const gate = await requireCronSecret(req); if (gate) return gate;
   try {
     // NSE FII/DII cash-market provisional. Requires a browser-like UA.
     const url = "https://www.nseindia.com/api/fiidiiTradeReact";

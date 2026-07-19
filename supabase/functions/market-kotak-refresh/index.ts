@@ -14,7 +14,7 @@ Deno.serve(async (req) => {
     let userFilter: string | null = null;
 
     if (isCron) {
-      const guard = requireCronSecret(req);
+      const guard = await requireCronSecret(req);
       if (guard) return guard;
     } else {
       const auth = await requireUserId(req);

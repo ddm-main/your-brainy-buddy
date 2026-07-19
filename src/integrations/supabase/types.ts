@@ -1854,6 +1854,7 @@ export type Database = {
           book_value: number | null
           company_name: string | null
           current_ratio: number | null
+          data_as_of: string | null
           debt_to_equity: number | null
           dii_holding: number | null
           dividend_yield: number | null
@@ -1864,6 +1865,8 @@ export type Database = {
           fii_holding: number | null
           high_52w: number | null
           industry: string | null
+          last_attempted_at: string | null
+          last_error: string | null
           low_52w: number | null
           market_cap_cr: number | null
           pb: number | null
@@ -1881,12 +1884,15 @@ export type Database = {
           roe: number | null
           sector: string | null
           symbol: string
+          sync_source: string | null
+          sync_status: string | null
           updated_at: string
         }
         Insert: {
           book_value?: number | null
           company_name?: string | null
           current_ratio?: number | null
+          data_as_of?: string | null
           debt_to_equity?: number | null
           dii_holding?: number | null
           dividend_yield?: number | null
@@ -1897,6 +1903,8 @@ export type Database = {
           fii_holding?: number | null
           high_52w?: number | null
           industry?: string | null
+          last_attempted_at?: string | null
+          last_error?: string | null
           low_52w?: number | null
           market_cap_cr?: number | null
           pb?: number | null
@@ -1914,12 +1922,15 @@ export type Database = {
           roe?: number | null
           sector?: string | null
           symbol: string
+          sync_source?: string | null
+          sync_status?: string | null
           updated_at?: string
         }
         Update: {
           book_value?: number | null
           company_name?: string | null
           current_ratio?: number | null
+          data_as_of?: string | null
           debt_to_equity?: number | null
           dii_holding?: number | null
           dividend_yield?: number | null
@@ -1930,6 +1941,8 @@ export type Database = {
           fii_holding?: number | null
           high_52w?: number | null
           industry?: string | null
+          last_attempted_at?: string | null
+          last_error?: string | null
           low_52w?: number | null
           market_cap_cr?: number | null
           pb?: number | null
@@ -1947,6 +1960,8 @@ export type Database = {
           roe?: number | null
           sector?: string | null
           symbol?: string
+          sync_source?: string | null
+          sync_status?: string | null
           updated_at?: string
         }
         Relationships: []
@@ -3828,7 +3843,102 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      market_fundamentals_sync_queue: {
+        Row: {
+          company_name: string | null
+          exchange: string | null
+          last_attempted_at: string | null
+          last_fundamentals_sync_at: string | null
+          queue_priority: number | null
+          symbol: string | null
+          sync_status: string | null
+          yahoo_symbol: string | null
+        }
+        Relationships: []
+      }
+      market_screener_rows: {
+        Row: {
+          above_ema200: boolean | null
+          adx14: number | null
+          atr_pct: number | null
+          atr14: number | null
+          bb_lower: number | null
+          bb_squeeze: boolean | null
+          bb_upper: number | null
+          bb_width: number | null
+          book_value: number | null
+          breakout_score: number | null
+          change_pct: number | null
+          close: number | null
+          company_name: string | null
+          computed_at: string | null
+          current_ratio: number | null
+          data_as_of: string | null
+          debt_to_equity: number | null
+          dii_holding: number | null
+          dividend_yield: number | null
+          ema100: number | null
+          ema20: number | null
+          ema200: number | null
+          ema50: number | null
+          eps_growth_yoy: number | null
+          eps_ttm: number | null
+          exchange: string | null
+          face_value: number | null
+          fii_holding: number | null
+          fundamental_high_52w: number | null
+          fundamental_low_52w: number | null
+          fundamental_price: number | null
+          fundamentals_updated_at: string | null
+          high_52w: number | null
+          higher_lows: boolean | null
+          in_universe: boolean | null
+          industry: string | null
+          is_active: boolean | null
+          is_nifty500: boolean | null
+          last_attempted_at: string | null
+          last_error: string | null
+          last_fundamentals_sync_at: string | null
+          last_price_sync_at: string | null
+          low_52w: number | null
+          macd: number | null
+          macd_hist: number | null
+          macd_signal: number | null
+          market_cap: number | null
+          near_resistance: boolean | null
+          pb: number | null
+          pct_from_52w_high: number | null
+          pe_ttm: number | null
+          peg: number | null
+          prebreakout_score: number | null
+          profit_growth_yoy: number | null
+          profit_ttm_cr: number | null
+          promoter_holding: number | null
+          promoter_pledge: number | null
+          quick_ratio: number | null
+          rel_strength_nifty: number | null
+          rel_volume: number | null
+          resistance_level: number | null
+          revenue_growth_yoy: number | null
+          revenue_ttm_cr: number | null
+          roce: number | null
+          roe: number | null
+          rsi14: number | null
+          score_components: Json | null
+          score_id: string | null
+          sector: string | null
+          sector_strength: number | null
+          support_level: number | null
+          symbol: string | null
+          sync_source: string | null
+          sync_status: string | null
+          trade_date: string | null
+          vol_avg20: number | null
+          volume: number | null
+          yahoo_symbol: string | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
       increment_jarvis_usage: {
@@ -3846,6 +3956,7 @@ export type Database = {
       market_cron_call: { Args: { fn_name: string }; Returns: number }
       purge_old_jarvis_interactions: { Args: never; Returns: undefined }
       seed_default_indices: { Args: { _uid: string }; Returns: undefined }
+      verify_market_cron_secret: { Args: { _secret: string }; Returns: boolean }
     }
     Enums: {
       email_category:

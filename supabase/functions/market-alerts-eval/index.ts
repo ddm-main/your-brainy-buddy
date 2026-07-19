@@ -15,7 +15,7 @@ function marketOpenNow(): boolean {
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
-  const gate = requireCronSecret(req); if (gate) return gate;
+  const gate = await requireCronSecret(req); if (gate) return gate;
   try {
     if (!marketOpenNow()) return jsonResponse(req, { ok: true, note: "market_closed" });
     const svc = svcClient();

@@ -67,6 +67,7 @@ const DEFAULT_COLS = COLUMNS.filter((c) => c.default).map((c) => c.id);
 const COLS_STORE_KEY = "screener.visibleCols.v2";
 const OPEN_STORE_KEY = "screener.openCats.v2";
 const PAGE_SIZE_KEY  = "screener.pageSize.v2";
+const AUTO_SYNC_STORE_KEY = "screener.autoFundamentalsSyncAt.v1";
 
 function fmtBound(def: FilterDef, v: number | "" | undefined): string {
   if (v === undefined || v === "") return "*";
@@ -108,7 +109,7 @@ export default function Screener() {
   const push = useUi((s) => s.push);
   const nav = useNavigate();
 
-  const [universe, setUniverse] = useState<UniverseId>("nifty500");
+  const [universe, setUniverse] = useState<UniverseId>("all");
   const [active, setActive] = useState<ActiveFilter[]>([]);
   const [visibleCols, setVisibleCols] = useState<string[]>(() => {
     try { const raw = localStorage.getItem(COLS_STORE_KEY); if (raw) { const p = JSON.parse(raw); if (Array.isArray(p)) return p; } } catch { /* */ }
@@ -156,7 +157,7 @@ export default function Screener() {
       const payload = JSON.stringify({ universe, active });
       const b64 = btoa(unescape(encodeURIComponent(payload)));
       const url = new URL(window.location.href);
-      if (active.length === 0 && universe === "nifty500") url.searchParams.delete("f");
+      if (active.length === 0 && universe === "all") url.searchParams.delete("f");
       else url.searchParams.set("f", b64);
       window.history.replaceState(null, "", url.toString());
     } catch { /* */ }
@@ -382,8 +383,8 @@ export default function Screener() {
                   data={paged}
                   onRowClick={(r) => nav(`/market/analysis/${r.symbol}`)}
                   initialSort={[{ id: "breakout_score", desc: true }]}
-                  emptyLabel={rows.length === 0 && !isFetching ? "pipeline hasn't run yet" : "no matches"}
-                  emptyHint={rows.length === 0 && !isFetching ? "run the EOD pipeline in Market → Settings" : "loosen the filters or change the universe"}
+                  emptyLabel={rows.length === 0 && !isFetching ? "market pipeline is warming up" : "no matches"}
+                  emptyHint={rows.length === 0 && !isFetching ? "automatic sync is enabled; refresh shortly" : "loosen the filters or change the universe"}
                 />
                 {/* Coverage note */}
                 {active.length > 0 && rows.length > 0 && (
@@ -812,19 +813,20 @@ function DataHealthStrip({ rows }: { rows: ScreenerRow[] }) {
     return { total, withFundamentals, withTechnicals, withSector };
   }, [rows]);
 
-  const trigger = async (fn: "market-fundamentals-global-sync" | "market-pipeline-eod" | "market-pipeline-aggregates", label: string, key: "fund" | "eod" | "agg") => {
+  const trigger = async (fn: "market-fundamentals-global-sync" | "market-pipeline-eod" | "market-pipeline-aggregates", label: string, key: "fund" | "eod" | "agg", quiet = false) => {
+    if (busy) return;
     setBusy(key);
     // Chunked pipelines (fund + eod) auto-drain across multiple invocations.
     const isChunked = fn === "market-fundamentals-global-sync" || fn === "market-pipeline-eod";
     if (!isChunked) {
-      push(`${label} started`, "warn");
+      if (!quiet) push(`${label} started`, "warn");
       try {
         const { error } = await supabase.functions.invoke(fn, { body: {} });
         if (error) throw error;
-        push(`${label} complete`, "ok");
+        if (!quiet) push(`${label} complete`, "ok");
         await qc.invalidateQueries({ queryKey: ["market", "screener-rows-v2"] });
       } catch (e) {
-        push(`${label} failed: ${(e as Error).message}`, "err");
+        if (!quiet) push(`${label} failed: ${(e as Error).message}`, "err");
       } finally {
         setBusy(null);
       }
@@ -833,7 +835,7 @@ function DataHealthStrip({ rows }: { rows: ScreenerRow[] }) {
 
     const MAX_CALLS = 30;
     let totalProcessed = 0, totalSynced = 0, totalFailed = 0;
-    push(`${label} started — chunked run, this may take a few minutes`, "warn");
+    if (!quiet) push(`${label} started — chunked run, this may take a few minutes`, "warn");
     try {
       for (let i = 0; i < MAX_CALLS; i++) {
         const { data, error } = await supabase.functions.invoke(fn, { body: {} });
@@ -843,25 +845,36 @@ function DataHealthStrip({ rows }: { rows: ScreenerRow[] }) {
         totalSynced += d.synced ?? 0;
         totalFailed += d.failed ?? 0;
         if (d.drained) break;
-        if (i % 3 === 2) {
+        if (!quiet && i % 3 === 2) {
           push(`${label} … ${totalSynced} synced${d.remaining != null ? ` · ${d.remaining} remaining` : ""}`, "warn");
         }
       }
-      push(`${label} complete — ${totalSynced} synced, ${totalFailed} failed`, "ok");
+      if (!quiet) push(`${label} complete — ${totalSynced} synced, ${totalFailed} failed`, "ok");
       await qc.invalidateQueries({ queryKey: ["market", "screener-rows-v2"] });
     } catch (e) {
-      push(`${label} stopped: ${(e as Error).message} (synced ${totalSynced}/${totalProcessed})`, "err");
+      if (!quiet) push(`${label} stopped: ${(e as Error).message} (synced ${totalSynced}/${totalProcessed})`, "err");
     } finally {
       setBusy(null);
     }
   };
 
-  if (rows.length === 0) return null;
   const pct = (n: number) => stats.total ? Math.round((n / stats.total) * 100) : 0;
   const fundPct = pct(stats.withFundamentals);
   const techPct = pct(stats.withTechnicals);
   const sectorPct = pct(stats.withSector);
   const anyLow = fundPct < 50 || sectorPct < 50;
+
+  useEffect(() => {
+    if (rows.length === 0 || busy) return;
+    if (fundPct >= 80 && sectorPct >= 80) return;
+    const last = Number(localStorage.getItem(AUTO_SYNC_STORE_KEY) || 0);
+    if (Date.now() - last < 30 * 60_000) return;
+    localStorage.setItem(AUTO_SYNC_STORE_KEY, String(Date.now()));
+    void trigger("market-fundamentals-global-sync", "Fundamentals auto-sync", "fund", true);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows.length, fundPct, sectorPct]);
+
+  if (rows.length === 0) return null;
 
   return (
     <div style={{
@@ -869,7 +882,7 @@ function DataHealthStrip({ rows }: { rows: ScreenerRow[] }) {
       background: anyLow ? "rgba(255,180,0,0.05)" : "rgba(53,214,237,0.03)",
       display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap",
     }}>
-      <span style={{ fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.18em", textTransform: "uppercase", color: "var(--text-muted)" }}>Data Health</span>
+      <span style={{ fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.18em", textTransform: "uppercase", color: "var(--text-muted)" }}>Data Health · auto-sync</span>
       <Chip tone={fundPct >= 80 ? "ok" : fundPct >= 40 ? "warn" : "err"}>Fundamentals {stats.withFundamentals}/{stats.total} · {fundPct}%</Chip>
       <Chip tone={sectorPct >= 80 ? "ok" : sectorPct >= 40 ? "warn" : "err"}>Sector {stats.withSector}/{stats.total} · {sectorPct}%</Chip>
       <Chip tone={techPct >= 80 ? "ok" : techPct >= 40 ? "warn" : "err"}>Technicals {stats.withTechnicals}/{stats.total} · {techPct}%</Chip>
