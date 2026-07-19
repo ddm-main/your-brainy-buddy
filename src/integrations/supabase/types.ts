@@ -3941,6 +3941,18 @@ export type Database = {
       }
     }
     Functions: {
+      claim_market_fundamentals_sync: {
+        Args: { _limit?: number }
+        Returns: {
+          company_name: string
+          exchange: string
+          last_attempted_at: string
+          last_fundamentals_sync_at: string
+          queue_priority: number
+          symbol: string
+          yahoo_symbol: string
+        }[]
+      }
       increment_jarvis_usage: {
         Args: {
           _endpoint?: string
