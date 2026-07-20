@@ -32,7 +32,7 @@ export function HudPanel({
   children,
   className,
   bodyClass,
-  flow = false,
+  flow: _flow,
   ...rest
 }: HudPanelProps) {
   const [pinging, setPinging] = useState(false);
