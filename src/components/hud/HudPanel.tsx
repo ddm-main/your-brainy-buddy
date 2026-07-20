@@ -14,11 +14,11 @@ interface HudPanelProps extends HTMLAttributes<HTMLElement> {
   children: ReactNode;
   bodyClass?: string;
   /**
-   * Content-height mode. The default panel body is `flex:1 1 0` with
-   * `overflow:hidden` so it fills a fixed-height grid cell and scrolls
-   * internally. In a plain content-flow page (no definite height) that
-   * starves the body to zero and clips everything. Set `flow` for those
-   * pages so the panel grows to its content instead of collapsing.
+   * Legacy prop — accepted for backwards compatibility. The panel body
+   * now sizes with `flex:1 1 auto; min-height:0`, so it grows with its
+   * content in a content-flow column AND fills a fixed-height cell when
+   * an ancestor gives the section explicit height (e.g. `.home-cell > *`
+   * → `flex:1`). No caller needs to pass this any more.
    */
   flow?: boolean;
 }
@@ -32,7 +32,7 @@ export function HudPanel({
   children,
   className,
   bodyClass,
-  flow = false,
+  flow: _flow,
   ...rest
 }: HudPanelProps) {
   const [pinging, setPinging] = useState(false);
@@ -50,13 +50,12 @@ export function HudPanel({
   return (
     <section
       className={cn("hud-panel mounted", className)}
-      data-flow={flow ? "true" : undefined}
       style={{
         display: "flex",
         flexDirection: "column",
         flex: "0 0 auto",
-        // Keep decorative ::before/::after shimmer clipped even in flow mode;
-        // content that needs to escape uses the body which stays visible.
+        // Keep decorative ::before/::after shimmer clipped; content that
+        // needs to escape uses the body, which stays visible.
         overflow: "hidden",
         ...(style || {}),
       }}
@@ -94,12 +93,16 @@ export function HudPanel({
       <div
         className={cn("relative", bodyClass)}
         style={{
-          flex: flow ? "0 0 auto" : "1 1 0",
-          minHeight: flow ? undefined : 0,
+          // `1 1 auto` makes the body grow with its content in a normal
+          // content-flow column AND fill a fixed-height parent section
+          // (e.g. Home's `.home-cell > *` flex:1 override) — so we no
+          // longer need per-callsite `flow`/fill toggles.
+          flex: "1 1 auto",
+          minHeight: 0,
           padding: 12,
           display: "flex",
           flexDirection: "column",
-          overflow: flow ? "visible" : "hidden",
+          overflow: "visible",
         }}
       >
         {children}

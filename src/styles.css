@@ -1760,3 +1760,11 @@ body.is-fs-chart .hud-voicebar { display: none !important; }
 .mk-seg-btn.is-on { background: rgba(53,214,237,0.16); color: var(--accent); }
 
 
+
+/* Tasks quick-add form wraps below the panel breakpoint. */
+@media (max-width: 900px) {
+  .quick-add-form {
+    grid-template-columns: 1fr 1fr !important;
+  }
+  .quick-add-form > *:first-child { grid-column: 1 / -1; }
+}
