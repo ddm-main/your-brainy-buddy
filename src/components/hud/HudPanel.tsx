@@ -14,11 +14,11 @@ interface HudPanelProps extends HTMLAttributes<HTMLElement> {
   children: ReactNode;
   bodyClass?: string;
   /**
-   * Content-height mode. The default panel body is `flex:1 1 0` with
-   * `overflow:hidden` so it fills a fixed-height grid cell and scrolls
-   * internally. In a plain content-flow page (no definite height) that
-   * starves the body to zero and clips everything. Set `flow` for those
-   * pages so the panel grows to its content instead of collapsing.
+   * Legacy prop — accepted for backwards compatibility. The panel body
+   * now sizes with `flex:1 1 auto; min-height:0`, so it grows with its
+   * content in a content-flow column AND fills a fixed-height cell when
+   * an ancestor gives the section explicit height (e.g. `.home-cell > *`
+   * → `flex:1`). No caller needs to pass this any more.
    */
   flow?: boolean;
 }
