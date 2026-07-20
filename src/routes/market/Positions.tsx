@@ -13,6 +13,7 @@ import { toSafeError } from "@/lib/errors";
 import { Download, Plus, Trash2, X } from "lucide-react";
 import type { Position, Quote } from "@/lib/market/types";
 import { positionPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
+import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
 
 const emptyForm = { symbol: "", exchange: "NSE", side: "long", quantity: "", entry_price: "", stop_loss: "", target: "", journal_notes: "" };
 
@@ -29,11 +30,17 @@ export default function Positions() {
   const closed = useMemo(() => positions.filter((p) => p.closed_at), [positions]);
   const keys = useMemo(() => [...new Set(open.map((p) => `${p.exchange}:${p.symbol}`))], [open]);
   const { data: quotesData } = useQuotes(keys);
+  const liveTicks = useLiveTickStore((s) => s.ticks);
   const quoteMap = useMemo(() => {
     const m = new Map<string, Quote>();
     for (const q of quotesData?.quotes ?? []) m.set(quoteKey(q.exchange, q.symbol), q);
+    for (const [key, tick] of Object.entries(liveTicks)) {
+      if (!isFreshTick(tick)) continue;
+      const base = m.get(key);
+      m.set(key, base ? { ...base, ltp: tick.ltp, change_pct: tick.change_pct } : ({ ltp: tick.ltp, change_pct: tick.change_pct } as Quote));
+    }
     return m;
-  }, [quotesData]);
+  }, [quotesData, liveTicks]);
 
   const connected = settings.some((s) => s.active_provider === "kotak_neo" && s.connection_status === "connected");
 

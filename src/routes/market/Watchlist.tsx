@@ -4,39 +4,27 @@ import { Link } from "react-router-dom";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { supabase } from "@/integrations/supabase/client";
-import { SAFE_SUPABASE_URL } from "@/lib/supabaseSafe";
-import { authFetch } from "@/lib/authFetch";
 import { useUi } from "@/store/uiStore";
-import { toSafeError } from "@/lib/errors";
 import { Plus, RefreshCw, Trash2 } from "lucide-react";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { getTrustedDayChange, quoteKey } from "@/lib/market/pnl";
-import type { Quote } from "@/lib/market/types";
+import { useQuotes } from "@/lib/market/hooks";
+import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
 
 type Watchlist = { id: string; name: string; color: string | null };
 type Item = { id: string; watchlist_id: string; symbol: string; exchange: string; priority: number | null; notes: string | null; tags: string[] | null };
-type QuoteMap = Record<string, Quote>;
 type ScoreMap = Record<string, { breakout_score: number | null; prebreakout_score: number | null; score_components: any }>;
 
 export default function Watchlist() {
   const push = useUi((s) => s.push);
   const [lists, setLists] = useState<Watchlist[]>([]);
   const [items, setItems] = useState<Item[]>([]);
-  const [quotes, setQuotes] = useState<QuoteMap>({});
   const [scores, setScores] = useState<ScoreMap>({});
   const [active, setActive] = useState<string | null>(null);
   const [newList, setNewList] = useState("");
   const [newSym, setNewSym] = useState("");
   const [newEx, setNewEx] = useState("NSE");
   const [busy, setBusy] = useState<string | null>(null);
-
-  const callFn = async (name: string, body: Record<string, unknown> = {}) => {
-    const url = `${SAFE_SUPABASE_URL}/functions/v1/${name}`;
-    const r = await authFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j?.error ?? r.statusText);
-    return j;
-  };
 
   const load = async () => {
     const [{ data: wl, error: e1 }, { data: it, error: e2 }] = await Promise.all([
@@ -64,29 +52,17 @@ export default function Watchlist() {
 
   const activeItems = useMemo(() => items.filter((i) => i.watchlist_id === active), [items, active]);
 
-  const refreshQuotes = async (opts: { silent?: boolean } = {}) => {
-    if (activeItems.length === 0) return;
-    if (!opts.silent) setBusy("quotes");
-    try {
-      const symbols = activeItems.map((i) => `${i.exchange}:${i.symbol}`);
-      const r = await callFn("market-quotes", { symbols });
-      const map: QuoteMap = {};
-      for (const q of r?.quotes ?? []) map[quoteKey(q.exchange, q.symbol)] = q;
-      setQuotes(map);
-    } catch (e) {
-      if (!opts.silent) push(toSafeError(e, "Quotes failed").message, "err");
-    } finally { if (!opts.silent) setBusy(null); }
-  };
-  useEffect(() => { if (activeItems.length) refreshQuotes(); /* eslint-disable-next-line */ }, [active, activeItems.length]);
-  // Live-ish quotes: poll every 30s while the tab is visible.
-  useEffect(() => {
-    if (activeItems.length === 0) return;
-    const id = window.setInterval(() => {
-      if (!document.hidden) refreshQuotes({ silent: true });
-    }, 30_000);
-    return () => window.clearInterval(id);
-    // eslint-disable-next-line
-  }, [activeItems]);
+  // Live quotes for the active list only (bounded, user-curated) — 1s refresh
+  // during market hours via the shared hook, same cadence as Holdings/Analysis.
+  const quoteKeys = useMemo(() => activeItems.map((i) => `${i.exchange}:${i.symbol}`), [activeItems]);
+  const { data: quotesData, isFetching: quotesFetching, refetch: refetchQuotes } = useQuotes(quoteKeys);
+  const restQuotes = useMemo(() => {
+    const map: Record<string, import("@/lib/market/types").Quote> = {};
+    for (const q of quotesData?.quotes ?? []) map[quoteKey(q.exchange, q.symbol)] = q;
+    return map;
+  }, [quotesData]);
+  const liveTicks = useLiveTickStore((s) => s.ticks);
+  const quotes = useMemo(() => mergeLiveQuotes(restQuotes, liveTicks), [restQuotes, liveTicks]);
 
   const createList = async () => {
     if (!newList.trim()) return;
@@ -162,8 +138,8 @@ export default function Watchlist() {
                 </select>
               </div>
               <Btn onClick={addItem}><Plus size={11} style={{ marginRight: 4 }} /> add</Btn>
-              <Btn onClick={() => refreshQuotes()} disabled={busy !== null}>
-                <RefreshCw size={11} style={{ marginRight: 4 }} /> refresh
+              <Btn onClick={() => refetchQuotes()} disabled={busy !== null}>
+                <RefreshCw size={11} style={{ marginRight: 4 }} /> {quotesFetching ? "refreshing…" : "refresh"}
               </Btn>
             </div>
 

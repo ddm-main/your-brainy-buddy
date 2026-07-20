@@ -10,7 +10,7 @@ import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "@/lib/market/api";
-import { useIndices, useIndexWatch, useIndexWatchMutations, useMarketSettings, useSectorStrength, useStockScores } from "@/lib/market/hooks";
+import { useIndices, useIndexWatch, useIndexWatchMutations, useMarketSettings, useQuotes, useSectorStrength, useStockScores } from "@/lib/market/hooks";
 import { ALL_PRESETS, GLOBAL_PRESETS, INDIAN_PRESETS, type IndexPreset } from "@/lib/market/indices";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
@@ -18,6 +18,7 @@ import { toSafeError } from "@/lib/errors";
 import { RefreshCw, Settings2, Sparkles, Trash2, X } from "lucide-react";
 import type { Quote, StockScore } from "@/lib/market/types";
 import { holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
+import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
 
 export default function MarketDashboard() {
   const push = useUi((s) => s.push);
@@ -39,6 +40,34 @@ export default function MarketDashboard() {
   const { data: settings = [] } = useMarketSettings();
   const { data: topBreakouts = [] } = useStockScores({ orderBy: "breakout_score", limit: 15 });
   const { data: preBreakouts = [] } = useStockScores({ orderBy: "prebreakout_score", limit: 10 });
+
+  // The scores above are EOD (recomputed once a day by the evening pipeline —
+  // RSI/EMA/breakout scoring is inherently a daily-bar concept, same as any
+  // trading platform). But the displayed price/change% shouldn't sit frozen at
+  // yesterday's close all session — overlay live quotes on top of them.
+  const scoreKeys = useMemo(
+    () => Array.from(new Set([...topBreakouts, ...preBreakouts].map((s) => quoteKey(s.exchange, s.symbol)))),
+    [topBreakouts, preBreakouts],
+  );
+  const { data: scoreQuotes } = useQuotes(scoreKeys);
+  const pushTicks = useLiveTickStore((s) => s.ticks);
+  const liveByKey = useMemo(() => {
+    const m = new Map((scoreQuotes?.quotes ?? []).map((q) => [quoteKey(q.exchange, q.symbol), q]));
+    for (const [key, tick] of Object.entries(pushTicks)) {
+      if (!isFreshTick(tick)) continue;
+      const base = m.get(key);
+      m.set(key, base ? { ...base, ltp: tick.ltp, change_pct: tick.change_pct } : ({ ltp: tick.ltp, change_pct: tick.change_pct } as any));
+    }
+    return m;
+  }, [scoreQuotes, pushTicks]);
+  const liveFor = (s: StockScore) => liveByKey.get(quoteKey(s.exchange, s.symbol));
+  const anyPush = useMemo(() => scoreKeys.some((k) => isFreshTick(pushTicks[k])), [scoreKeys, pushTicks]);
+  const liveQuoteState = useMemo<"push" | "live" | "stale" | "none">(() => {
+    if (anyPush) return "push";
+    const quotes = scoreQuotes?.quotes ?? [];
+    if (quotes.length === 0) return "none";
+    return quotes.some((q) => q.stale) ? "stale" : "live";
+  }, [scoreQuotes, anyPush]);
 
   const { data: counts } = useQuery({
     queryKey: ["market", "dash-counts"],
@@ -145,8 +174,16 @@ export default function MarketDashboard() {
         </span>
       ),
     },
-    { header: "Price", accessorKey: "close", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue()) },
-    { header: "Chg %", accessorKey: "change_pct", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue()} /> },
+    {
+      header: "Price", id: "livePrice", meta: { align: "right" },
+      accessorFn: (s) => liveFor(s)?.ltp ?? s.close,
+      cell: ({ getValue }) => fmtNum(getValue()),
+    },
+    {
+      header: "Chg %", id: "liveChangePct", meta: { align: "right" },
+      accessorFn: (s) => liveFor(s)?.change_pct ?? s.change_pct,
+      cell: ({ getValue }) => <PctCell value={getValue()} />,
+    },
     { header: "RVol", accessorKey: "rel_volume", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue(), 1) },
     { header: "RSI", accessorKey: "rsi14", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue(), 0) },
     {
@@ -158,7 +195,8 @@ export default function MarketDashboard() {
       accessorFn: (r) => r.resistance_level ?? r.close,
       cell: ({ getValue }) => fmtNum(getValue()),
     },
-  ], []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  ], [liveByKey]);
 
   const filteredBreakouts = useMemo(
     () => topBreakouts.filter((s) => (s.breakout_score ?? 0) >= 60).slice(0, 12),
@@ -224,7 +262,21 @@ export default function MarketDashboard() {
       </HudPanel>
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(260px, 1fr)", gap: 10, alignItems: "start" }}>
-        <HudPanel flow title="Top Breakouts">
+        <HudPanel
+          flow
+          title="Top Breakouts"
+          actions={
+            <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.1em", textTransform: "uppercase" }}>
+              {liveQuoteState === "push" && <Chip tone="ok">push · relay live</Chip>}
+              {liveQuoteState === "live" && <Chip tone="ok">price live</Chip>}
+              {liveQuoteState === "stale" && <Chip tone="warn">quotes degraded — cached close</Chip>}
+              {liveQuoteState === "none" && "price · yesterday's close"}
+            </span>
+          }
+        >
+          <div style={{ fontSize: 10, color: "var(--text-muted)", marginBottom: 6 }}>
+            Score/RSI/RVol are end-of-day (recomputed once daily, same as standard technical scoring) — price & chg% update live.
+          </div>
           <DataTable
             columns={breakoutColumns}
             data={filteredBreakouts}

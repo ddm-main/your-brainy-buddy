@@ -112,6 +112,7 @@ export function CandleChart({
   chartType = "candles",
   studies,
   intraday = false,
+  livePrice = null,
   onToggleStudy,
   onEditStudy,
   onRemoveStudy,
@@ -123,6 +124,10 @@ export function CandleChart({
   chartType?: ChartType;
   studies: Study[];
   intraday?: boolean;
+  /** Live LTP for the symbol on screen — moves/extends the rightmost bar in
+   * real time via `series.update()` (no full chart rebuild) between the
+   * periodic historical refetches that eventually supersede it. */
+  livePrice?: number | null;
   onToggleStudy?: (id: string) => void;
   onEditStudy?: (id: string) => void;
   onRemoveStudy?: (id: string) => void;
@@ -134,6 +139,10 @@ export function CandleChart({
   // preserve zoom/scroll across rebuilds; reset only when the candle set changes
   const rangeRef = useRef<{ from: number; to: number } | null>(null);
   const candlesKeyRef = useRef<string>("");
+  // live-tick plumbing: refs so the 1s price update never tears down the chart
+  const priceSeriesRef = useRef<ISeriesApi<any> | null>(null);
+  const liveBarRef = useRef<{ seriesTime: any; rawTime: string | number; open: number; high: number; low: number; close: number; volume: number } | null>(null);
+  const [liveBar, setLiveBar] = useState<CandleDto | null>(null);
 
   const computed = useMemo(
     () => studies.map((s) => ({ study: s, data: computeStudy(candles, s) })),
@@ -206,6 +215,12 @@ export function CandleChart({
       });
       priceSeries.setData(data.map((c) => ({ time: toTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })));
     }
+    priceSeriesRef.current = priceSeries;
+    const lastRaw = data[data.length - 1];
+    liveBarRef.current = lastRaw
+      ? { seriesTime: toTime(lastRaw.time), rawTime: lastRaw.time, open: lastRaw.open, high: lastRaw.high, low: lastRaw.low, close: lastRaw.close, volume: lastRaw.volume }
+      : null;
+    setLiveBar(null);
 
     const overlayLine = (values: Num[], color: string, width = 1, style?: LineStyle, lastVal = false, offset = 0) => {
       const line = chart.addSeries(LineSeries, {
@@ -336,8 +351,26 @@ export function CandleChart({
       ro.disconnect();
       chart.remove();
       chartRef.current = null;
+      priceSeriesRef.current = null;
     };
   }, [candles, computed, priceLines, height, fill, chartType, intraday]);
+
+  // ---- live tick: move/extend the rightmost bar without rebuilding the chart ----
+  useEffect(() => {
+    const series = priceSeriesRef.current;
+    const base = liveBarRef.current;
+    if (!series || !base || livePrice == null || !Number.isFinite(livePrice)) return;
+    const close = livePrice;
+    const updated = { ...base, high: Math.max(base.high, close), low: Math.min(base.low, close), close };
+    liveBarRef.current = updated;
+    if (chartType === "line" || chartType === "area") {
+      series.update({ time: updated.seriesTime, value: close });
+    } else {
+      series.update({ time: updated.seriesTime, open: updated.open, high: updated.high, low: updated.low, close: updated.close });
+    }
+    setLiveBar({ time: updated.rawTime, open: updated.open, high: updated.high, low: updated.low, close: updated.close, volume: updated.volume });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [livePrice]);
 
   // ---- legend rows (value at crosshair, else last bar) ----
   const legendRows: LegendRow[] = useMemo(() => {
@@ -355,7 +388,7 @@ export function CandleChart({
     });
   }, [computed, hoverIdx, candles.length]);
 
-  const last = candles[candles.length - 1];
+  const last = liveBar ?? candles[candles.length - 1];
   const l = legend ?? last;
   const chg = l && candles.length > 1 ? ((l.close - l.open) / l.open) * 100 : null;
 

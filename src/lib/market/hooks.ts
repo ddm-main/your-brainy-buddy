@@ -42,7 +42,7 @@ export function useIndices() {
     queryKey: ["market", "indices"],
     queryFn: () =>
       callMarketFn<{ quotes: IndexQuote[]; breadth: BreadthDaily | null }>("market-indices"),
-    refetchInterval: marketOpen() ? 15_000 : 120_000,
+    refetchInterval: marketOpen() ? 2_000 : 120_000,
   });
 }
 
@@ -51,7 +51,8 @@ export function useQuotes(keys: string[]) {
     queryKey: ["market", "quotes", [...keys].sort().join(",")],
     queryFn: () => callMarketFn<{ quotes: Quote[]; source: string }>("market-quotes", { symbols: keys }),
     enabled: keys.length > 0,
-    refetchInterval: marketOpen() ? 15_000 : false,
+    // On-screen symbols only (caller scopes `keys`) — near-second refresh.
+    refetchInterval: marketOpen() ? 1_000 : false,
   });
 }
 
@@ -195,7 +196,7 @@ export function useDepth(symbol: string | undefined) {
     queryKey: ["market", "depth", symbol ?? ""],
     queryFn: () => callMarketFn<DepthResponse>("market-depth", { symbol }),
     enabled: !!symbol,
-    refetchInterval: 15_000,
+    refetchInterval: marketOpen() ? 1_000 : false,
     retry: false,
   });
 }

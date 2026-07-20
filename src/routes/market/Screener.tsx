@@ -11,7 +11,9 @@ import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/
 import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { HistogramSlider } from "@/components/market/HistogramSlider";
-import { useSavedScreeners, useScreenerMutations } from "@/lib/market/hooks";
+import { useQuotes, useSavedScreeners, useScreenerMutations } from "@/lib/market/hooks";
+import { quoteKey } from "@/lib/market/pnl";
+import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
 import { useScreenerData, useScreenerSectors, useScreenerIndustries, type ScreenerRow } from "@/lib/market/screenerRun";
 import { useUi } from "@/store/uiStore";
 import { supabase } from "@/integrations/supabase/client";
@@ -229,6 +231,29 @@ export default function Screener() {
     a.click(); URL.revokeObjectURL(url);
   };
 
+  // Paginate visible rows client-side.
+  const pageStart = page * pageSize;
+  const paged = useMemo(() => filtered.slice(pageStart, pageStart + pageSize), [filtered, pageStart, pageSize]);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+
+  // Live quotes for only the rows actually rendered on this page (bounded to
+  // `pageSize`, never the full universe) — 1s refresh during market hours.
+  const quoteKeys = useMemo(
+    () => paged.map((r) => `${r.exchange ?? "NSE"}:${r.symbol}`),
+    [paged],
+  );
+  const { data: liveQuotesData } = useQuotes(quoteKeys);
+  const pushTicks = useLiveTickStore((s) => s.ticks);
+  const liveQuoteByKey = useMemo(() => {
+    const m = new Map<string, { ltp: number; change_pct: number | null }>();
+    for (const q of liveQuotesData?.quotes ?? []) m.set(quoteKey(q.exchange, q.symbol), q);
+    for (const [key, tick] of Object.entries(pushTicks)) {
+      if (!isFreshTick(tick)) continue;
+      m.set(key, { ltp: tick.ltp, change_pct: tick.change_pct });
+    }
+    return m;
+  }, [liveQuotesData, pushTicks]);
+
   const columns = useMemo<ColumnDef<ScreenerRow, any>[]>(() => {
     const all: Record<string, ColumnDef<ScreenerRow, any>> = {
       symbol: {
@@ -245,8 +270,16 @@ export default function Screener() {
       sector:  { header: "Sector",  accessorKey: "sector",  cell: ({ getValue }) => <span style={{ fontSize: 11 }}>{getValue() as string ?? "—"}</span> },
       industry:{ header: "Industry",accessorKey: "industry",cell: ({ getValue }) => <span style={{ fontSize: 11 }}>{getValue() as string ?? "—"}</span> },
       market_cap: { header: "Mcap (Cr)", accessorKey: "market_cap", meta: { align: "right" }, cell: ({ getValue }) => fmtInt(getValue() as number | null) },
-      close: { header: "Price", accessorKey: "close", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null) },
-      change_pct: { header: "Chg %", accessorKey: "change_pct", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
+      close: {
+        header: "Price", id: "livePrice", meta: { align: "right" },
+        accessorFn: (r) => liveQuoteByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol))?.ltp ?? r.close,
+        cell: ({ getValue }) => fmtNum(getValue() as number | null),
+      },
+      change_pct: {
+        header: "Chg %", id: "liveChangePct", meta: { align: "right" },
+        accessorFn: (r) => liveQuoteByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol))?.change_pct ?? r.change_pct,
+        cell: ({ getValue }) => <PctCell value={getValue() as number | null} />,
+      },
       volume: { header: "Vol", accessorKey: "volume", meta: { align: "right" }, cell: ({ getValue }) => fmtInt(getValue() as number | null) },
       rel_volume: { header: "RVol", accessorKey: "rel_volume", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
       pe_ttm: { header: "PE", accessorKey: "pe_ttm", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
@@ -293,12 +326,8 @@ export default function Screener() {
       },
     };
     return visibleCols.map((id) => all[id]).filter(Boolean);
-  }, [visibleCols]);
-
-  // Paginate visible rows client-side.
-  const pageStart = page * pageSize;
-  const paged = useMemo(() => filtered.slice(pageStart, pageStart + pageSize), [filtered, pageStart, pageSize]);
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleCols, liveQuoteByKey]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>

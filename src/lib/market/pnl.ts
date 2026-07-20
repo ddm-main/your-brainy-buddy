@@ -34,7 +34,25 @@ export function holdingPnl(input: { quantity: number; avgPrice: number; quote?: 
   const totalPnlPct = invested ? (totalPnl / invested) * 100 : 0;
   const dayChange = getTrustedDayChange(input.quote);
   const todayPnl = dayChange == null ? null : dayChange * quantity;
-  return { ltp, invested, current, totalPnl, totalPnlPct, todayPnl };
+  // % against yesterday's closing value (current minus today's move), not
+  // against invested — matches how Kite/Groww pair ₹ with % for "today".
+  const prevValue = todayPnl == null ? null : current - todayPnl;
+  const todayPnlPct = todayPnl == null || !prevValue ? null : (todayPnl / prevValue) * 100;
+  return { ltp, invested, current, totalPnl, totalPnlPct, todayPnl, todayPnlPct };
+}
+
+// Approximate annualized return since buy date — a single-cash-flow stand-in
+// for a real XIRR. The current holdings model has no lot-level buy history
+// (one avg_price/quantity per symbol), so a true money-weighted return isn't
+// possible without a schema change; always label this as "approx." in the UI.
+export function approxAnnualizedReturnPct(totalPnlPct: number, buyDate: string | null | undefined): number | null {
+  if (!buyDate) return null;
+  const days = (Date.now() - new Date(buyDate).getTime()) / 86_400_000;
+  if (!Number.isFinite(days) || days < 1) return null;
+  const growth = 1 + totalPnlPct / 100;
+  if (growth <= 0) return null; // a >100% loss has no meaningful annualized rate
+  const years = days / 365.25;
+  return (Math.pow(growth, 1 / years) - 1) * 100;
 }
 
 export function positionPnl(input: { quantity: number; entryPrice: number; side: "long" | "short"; quote?: Quote }) {

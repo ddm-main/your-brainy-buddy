@@ -4,6 +4,7 @@ import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "reac
 import { lazy, Suspense } from "react";
 import ErrorBoundary from "@/components/hud/ErrorBoundary";
 import { useMarketAutoSync } from "@/lib/market/useAutoSync";
+import { useRealtimeTicks } from "@/lib/market/useRealtimeTicks";
 
 const Dashboard = lazy(() => import("@/routes/market/Dashboard"));
 const Holdings = lazy(() => import("@/routes/market/Holdings"));
@@ -31,12 +32,10 @@ const GROUPS: Group[] = [
   { key: "overview", label: "Overview", to: "/market",
     match: (p) => p === "/market" || p === "/market/" || /^\/market\/index\//.test(p), subs: [] },
   { key: "screener", label: "Screener", to: "/market/screener",
-    match: (p) => /^\/market\/screener/.test(p), subs: [] },
-  { key: "analysis", label: "Analysis", to: "/market/analysis",
-    match: (p) => /^\/market\/(analysis|stocks)/.test(p),
+    match: (p) => /^\/market\/(screener|stocks)/.test(p),
     subs: [
-      { to: "/market/analysis", label: "Analysis" },
-      { to: "/market/stocks", label: "Stocks" },
+      { to: "/market/screener", label: "Screener" },
+      { to: "/market/stocks", label: "All Stocks" },
     ] },
   { key: "portfolio", label: "Portfolio", to: "/market/holdings",
     match: (p) => /^\/market\/(holdings|positions)/.test(p),
@@ -107,6 +106,7 @@ export default function Market() {
   const activeGroup = GROUPS.find((g) => g.match(loc.pathname)) ?? GROUPS[0];
   useEffect(() => { document.title = `Market · ${activeGroup.label}`; }, [activeGroup.key]);
   useMarketAutoSync();
+  useRealtimeTicks();
 
 
   return (
@@ -137,7 +137,7 @@ export default function Market() {
               <Route path="positions" element={<Positions />} />
               <Route path="watchlist" element={<Watchlist />} />
               <Route path="screener" element={<Screener />} />
-              <Route path="analysis" element={<Analysis />} />
+              <Route path="analysis" element={<Navigate to="/market/screener" replace />} />
               <Route path="analysis/:symbol" element={<Analysis />} />
               <Route path="alerts" element={<Alerts />} />
               <Route path="backtesting" element={<Backtesting />} />

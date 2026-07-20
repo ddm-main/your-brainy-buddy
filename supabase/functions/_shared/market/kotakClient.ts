@@ -56,8 +56,20 @@ export class KotakError extends Error {
   }
 }
 
-async function kotakFetch(url: string, init: RequestInit): Promise<any> {
+// rate_limit column on market_api_settings documents the user's Kotak tier
+// but nothing enforces it client-side — Kotak's APIM gateway is the actual
+// throttle. On 429, back off and retry rather than surfacing an error (the
+// only place in this backend besides yahooClient.ts that needs this).
+async function kotakFetch(url: string, init: RequestInit, attempt = 1): Promise<any> {
   const r = await fetch(url, init);
+  if (r.status === 429 && attempt <= 3) {
+    const retryAfterSec = Number(r.headers.get("retry-after"));
+    const delayMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+      ? retryAfterSec * 1000
+      : 400 * attempt;
+    await new Promise((res) => setTimeout(res, delayMs));
+    return kotakFetch(url, init, attempt + 1);
+  }
   const text = await r.text();
   let json: any = null;
   try {

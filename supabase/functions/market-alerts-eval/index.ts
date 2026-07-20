@@ -1,9 +1,11 @@
 // market-alerts-eval — 1-min cron during IST market hours. Evaluates every
-// active alert against the latest quote / indicator cache and writes
-// market_alert_events. Delivery to browser push / email is done by separate
-// workers reading unfired events; this fn only detects and records.
+// active alert against a live quote (via each user's own active provider —
+// Kotak if connected, Yahoo otherwise) plus the latest indicator cache, and
+// writes market_alert_events. Delivery to browser push / email is done by
+// separate workers reading unfired events; this fn only detects and records.
 import { corsFor, preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
+import { getActiveProvider } from "../_shared/market/provider.ts";
 
 function marketOpenNow(): boolean {
   const d = new Date();
@@ -24,10 +26,32 @@ Deno.serve(async (req) => {
       .eq("is_active", true).is("triggered_at", null).limit(1000);
     if (!alerts?.length) return jsonResponse(req, { ok: true, fired: 0 });
 
-    // Batch-load quotes + latest indicators.
+    // Live prices come from each user's own active provider (Kotak if
+    // connected, Yahoo fallback otherwise) — NOT market_quotes, which is only
+    // ever populated by the unrelated personal-finance/mutual-fund sync and
+    // never contains NSE equity prices for arbitrary alert symbols.
+    const byUser = new Map<string, typeof alerts>();
+    for (const a of alerts) {
+      const list = byUser.get(a.user_id) ?? [];
+      list.push(a);
+      byUser.set(a.user_id, list);
+    }
+    const quoteMap = new Map<string, number>(); // "SYMBOL:EXCHANGE" -> price
+    for (const [userId, userAlerts] of byUser) {
+      const keys = [...new Set(userAlerts.map((a) => `${a.exchange}:${a.symbol}`))];
+      try {
+        const { provider } = await getActiveProvider(svc, userId);
+        const rows = await provider.getQuotes(keys);
+        for (const r of rows) {
+          const [exchange, symbol] = r.key.split(":");
+          quoteMap.set(`${symbol}:${exchange}`, r.price);
+        }
+      } catch {
+        // one user's provider failing shouldn't block everyone else's alerts
+      }
+    }
+
     const symbols = [...new Set(alerts.map((a) => a.symbol))];
-    const { data: quotes } = await svc.from("market_quotes").select("symbol,price").in("symbol", symbols);
-    const quoteMap = new Map((quotes ?? []).map((q) => [q.symbol, Number(q.price)]));
     const { data: scores } = await svc.from("market_stock_scores")
       .select("symbol,exchange,close,rsi14,ema20,ema50,ema200,breakout_score")
       .in("symbol", symbols);
@@ -36,8 +60,8 @@ Deno.serve(async (req) => {
     const events: unknown[] = [];
     const firedIds: string[] = [];
     for (const a of alerts) {
-      const px = quoteMap.get(a.symbol);
       const sc = scoreMap.get(`${a.symbol}:${a.exchange}`);
+      const px = quoteMap.get(`${a.symbol}:${a.exchange}`) ?? (sc?.close ? Number(sc.close) : undefined);
       let fires = false, val: number | null = null;
       switch (a.alert_type) {
         case "price_above": fires = px != null && px > (a.threshold ?? 0); val = px ?? null; break;

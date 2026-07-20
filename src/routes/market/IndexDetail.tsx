@@ -1,27 +1,26 @@
 // Index detail page — Chart / Technicals / F&O / Constituents.
 // Reached from Market Dashboard by clicking an index card.
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Activity } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
 import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import type { ColumnDef } from "@tanstack/react-table";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
-import { Menu, MenuGroup, MenuItem } from "@/components/hud/Menu";
+import { ChartToolbar, DEFAULT_SETTINGS, type ChartSettings } from "@/components/market/ChartToolbar";
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
-import { DEFAULT_STUDIES, makeStudy, OVERLAY_DEFS, OSCILLATOR_DEFS, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
+import { DEFAULT_STUDIES, makeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
 import { TradingViewChart, tvInterval } from "@/components/market/TradingViewChart";
 import { FullscreenShell } from "@/components/market/FullscreenShell";
-import { Maximize2 } from "lucide-react";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { useCandles, useIndexConstituents, useIndexWatch, useIndices, useOptionChain } from "@/lib/market/hooks";
 import { findPreset, tvSymbolFor } from "@/lib/market/indices";
 import { bollinger, ema, macd, rsi, sma } from "@/lib/market/chartIndicators";
 import type { CandleDto, IndexConstituent } from "@/lib/market/types";
+import { useNotifications } from "@/store/notificationStore";
 
 type Tab = "chart" | "technicals" | "fno" | "constituents";
-const TIMEFRAMES = ["5m", "15m", "1h", "1D"] as const;
 
 export default function IndexDetail() {
   const { symbol: rawSym } = useParams();
@@ -40,13 +39,18 @@ export default function IndexDetail() {
   const cSlug = quote?.constituents_slug ?? watchRow?.constituents_slug ?? preset?.constituents_slug ?? null;
 
   const [tab, setTab] = useState<Tab>("chart");
-  const [tf, setTf] = useState<(typeof TIMEFRAMES)[number]>("1D");
+  const [tf, setTf] = useState("1D");
+  const [range, setRange] = useState("6M");
   const [chartType, setChartType] = useState<ChartType>("candles");
-  const [useTv, setUseTv] = useState(false);
+  const [tvMode, setTvMode] = useState(false);
   const [fs, setFs] = useState(false);
   const [studies, setStudies] = useState<Study[]>(DEFAULT_STUDIES);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [settings, setSettings] = useState<ChartSettings>(DEFAULT_SETTINGS);
+  const chartWrapRef = useRef<HTMLDivElement>(null);
+  const notify = useNotifications((s) => s.add);
   const addStudy = useCallback((t: IndicatorType) => setStudies((s) => [...s, makeStudy(t)]), []);
+  const resetStudies = useCallback(() => setStudies(DEFAULT_STUDIES), []);
   const toggleStudy = useCallback((id: string) => setStudies((s) => s.map((x) => (x.id === id ? { ...x, visible: !x.visible } : x))), []);
   const removeStudy = useCallback((id: string) => setStudies((s) => s.filter((x) => x.id !== id)), []);
   const updateStudy = useCallback((u: Study) => setStudies((s) => s.map((x) => (x.id === u.id ? u : x))), []);
@@ -64,7 +68,43 @@ export default function IndexDetail() {
   // fallback (Apple). Only offer TradingView when the mapped exchange is one the
   // widget actually serves (BSE / global exchanges).
   const tvSupported = tvExch.toUpperCase() !== "NSE";
-  const showTv = useTv && tvSupported;
+  const showTv = tvMode && tvSupported;
+
+  const handleScreenshot = useCallback(() => {
+    const wrap = chartWrapRef.current;
+    if (!wrap) return;
+    const canvases = wrap.querySelectorAll("canvas");
+    if (canvases.length === 0) { notify("Chart not ready for screenshot"); return; }
+    const rects = Array.from(canvases).map((c) => c.getBoundingClientRect());
+    const wrapRect = wrap.getBoundingClientRect();
+    const out = document.createElement("canvas");
+    out.width = Math.ceil(wrapRect.width * devicePixelRatio);
+    out.height = Math.ceil(wrapRect.height * devicePixelRatio);
+    const ctx = out.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = getComputedStyle(document.body).getPropertyValue("--bg").trim() || "#050b12";
+    ctx.fillRect(0, 0, out.width, out.height);
+    canvases.forEach((c, i) => {
+      const r = rects[i];
+      const x = (r.left - wrapRect.left) * devicePixelRatio;
+      const y = (r.top - wrapRect.top) * devicePixelRatio;
+      try { ctx.drawImage(c, x, y, r.width * devicePixelRatio, r.height * devicePixelRatio); } catch { /* noop */ }
+    });
+    out.toBlob((blob) => {
+      if (!blob) { notify("Screenshot failed"); return; }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${symbol ?? "chart"}-${tf}-${new Date().toISOString().slice(0, 10)}.png`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      notify("Chart screenshot saved");
+    }, "image/png");
+  }, [tf, symbol, notify]);
+
+  const handleSaveLayout = useCallback(() => {
+    notify("Chart layout saved");
+  }, [notify]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -106,46 +146,29 @@ export default function IndexDetail() {
       </HudPanel>
 
       {tab === "chart" && (
-        <HudPanel flow title="Chart" index="MK.IDX.C" actions={
-          <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap" }}>
-            {TIMEFRAMES.map((t) => (
-              <Btn key={t} size="sm" onClick={() => setTf(t)} style={{ opacity: tf === t ? 1 : 0.6 }}>{t}</Btn>
-            ))}
-            <span style={{ width: 8 }} />
-            {(["candles", "line", "area"] as ChartType[]).map((t) => (
-              <Btn key={t} size="sm" onClick={() => setChartType(t)} style={{ opacity: chartType === t ? 1 : 0.6 }}>{t}</Btn>
-            ))}
-            <span style={{ width: 8 }} />
-            {tvSupported && <Btn size="sm" onClick={() => setUseTv((v) => !v)}>{useTv ? "hud chart" : "tradingview"}</Btn>}
-            <Btn size="sm" onClick={() => setFs(true)} title="Fullscreen"><Maximize2 size={12} /></Btn>
-          </div>
-        }>
-          <FullscreenShell fullscreen={fs} onExit={() => setFs(false)} title={`${name} · Chart`}>
-            {!showTv && (
-              <div style={{ display: "flex", gap: 4, marginBottom: 6, flexWrap: "wrap", flex: "0 0 auto" }}>
-                <Menu label={<span>Indicators{studies.length > 0 && <span className="mk-menu-count">{studies.length}</span>}</span>} icon={<Activity size={12} />} width={260}>
-                  {[...OVERLAY_DEFS, ...OSCILLATOR_DEFS].length > 0 && (
-                    <>
-                      <MenuGroup title="Overlays">
-                        {OVERLAY_DEFS.map((d) => (
-                          <MenuItem key={d.type} onClick={() => addStudy(d.type)}>
-                            <span className="mk-ind-swatch" style={{ background: d.lines[0].defaultColor, marginRight: 8 }} />{d.label}
-                          </MenuItem>
-                        ))}
-                      </MenuGroup>
-                      <MenuGroup title="Oscillators">
-                        {OSCILLATOR_DEFS.map((d) => (
-                          <MenuItem key={d.type} onClick={() => addStudy(d.type)}>
-                            <span className="mk-ind-swatch" style={{ background: d.lines[0].defaultColor, marginRight: 8 }} />{d.label}
-                          </MenuItem>
-                        ))}
-                      </MenuGroup>
-                    </>
-                  )}
-                </Menu>
-              </div>
-            )}
-            <div style={{ height: fs ? "auto" : 480, flex: fs ? 1 : undefined, minHeight: 0, border: "1px solid var(--edge)" }}>
+        <HudPanel flow title="Chart" index="MK.IDX.C" style={{ flex: 1, minHeight: 0 }}>
+          <FullscreenShell fullscreen={fs} onExit={() => setFs(false)} title={`${name} · ${tf}`}>
+            <ChartToolbar
+              symbol={symbol}
+              tf={tf}
+              onTf={setTf}
+              range={range}
+              onRange={setRange}
+              chartType={chartType}
+              onChartType={setChartType}
+              onAddStudy={addStudy}
+              onResetStudies={resetStudies}
+              studyCount={studies.length}
+              settings={settings}
+              onSettings={(u) => setSettings(u)}
+              tvMode={tvMode}
+              onTvMode={(v) => tvSupported && setTvMode(v)}
+              onFullscreen={() => setFs(true)}
+              onAlert={() => nav(`/market/alerts?symbol=${symbol}`)}
+              onScreenshot={handleScreenshot}
+              onSaveLayout={handleSaveLayout}
+            />
+            <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0 }}>
               {showTv ? (
                 <TradingViewChart symbol={tvSym} exchange={tvExch} interval={tvInterval(tf)} />
               ) : candlesLoading ? (
@@ -157,6 +180,7 @@ export default function IndexDetail() {
                   candles={candles} fill chartType={chartType}
                   studies={studies}
                   intraday={tf !== "1D"}
+                  livePrice={quote?.price ?? null}
                   onToggleStudy={toggleStudy}
                   onEditStudy={setEditingId}
                   onRemoveStudy={removeStudy}

@@ -34,8 +34,20 @@ function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
   return out;
 }
 
+// Runtime-agnostic env read: this file is also imported directly (cross-folder,
+// no bundling) by the local Node relay (Apps/relay/kotak-ws-relay.mjs), which
+// has no `Deno` global — only `process.env`. Read via `globalThis` (rather
+// than the bare `Deno`/`process` identifiers) so neither runtime's checker
+// needs the other's ambient types declared.
+function readEnv(name: string): string | undefined {
+  const g = globalThis as Record<string, any>;
+  if (g.Deno?.env?.get) return g.Deno.env.get(name);
+  if (g.process?.env) return g.process.env[name];
+  return undefined;
+}
+
 async function keyFromSecret(): Promise<CryptoKey> {
-  const secret = Deno.env.get("STATEMENT_ENC_SECRET");
+  const secret = readEnv("STATEMENT_ENC_SECRET");
   if (!secret) throw new Error("STATEMENT_ENC_SECRET not configured");
   // Derive a 32-byte AES-256 key from the configured secret via SHA-256.
   const raw = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));

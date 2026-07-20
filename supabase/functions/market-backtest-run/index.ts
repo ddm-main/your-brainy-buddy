@@ -6,7 +6,7 @@ import { ema, rsi, type Candle } from "../_shared/market/indicators.ts";
 type Strategy = {
   id: string;
   user_id: string;
-  strategy: { rule?: string; symbol?: string; exchange?: string };
+  strategy: { rule?: string; symbol?: string; exchange?: string; stop_loss_pct?: number; target_pct?: number };
 };
 
 type Trade = {
@@ -50,7 +50,7 @@ function stdev(xs: number[]) {
   return Math.sqrt(mean(xs.map((x) => (x - m) ** 2)));
 }
 
-function runRule(candles: Candle[], rule: string) {
+function runRule(candles: Candle[], rule: string, stopLossPct: number, targetPct: number) {
   const closes = candles.map((c) => c.close);
   const e20 = ema(closes, 20);
   const e50 = ema(closes, 50);
@@ -81,8 +81,8 @@ function runRule(candles: Candle[], rule: string) {
     } else {
       const ret = pct(closes[i], entry);
       const shouldExit =
-        ret <= -8 ||
-        ret >= 18 ||
+        ret <= -Math.abs(stopLossPct) ||
+        ret >= Math.abs(targetPct) ||
         (rule === "ema_cross_20_50" && crossBelow(e20, e50, i)) ||
         (rule === "rsi_reversion" && rs[i] != null && rs[i]! > 70) ||
         (rule === "breakout_20d" && closes[i] < (e20[i] ?? closes[i] * 0.92));
@@ -118,6 +118,12 @@ Deno.serve(async (req) => {
     const exchange = String(s.strategy?.exchange ?? "NSE").toUpperCase();
     const rule = String(s.strategy?.rule ?? "ema_cross_20_50");
     if (!symbol) return errorResponse(req, "Strategy has no symbol", 400);
+    // Defaults preserve the historical -8%/+18% band for strategies saved
+    // before these fields existed; new strategies set their own via the UI.
+    const stopLossPct = Number(s.strategy?.stop_loss_pct);
+    const targetPct = Number(s.strategy?.target_pct);
+    const effectiveStopLoss = Number.isFinite(stopLossPct) && stopLossPct > 0 ? stopLossPct : 8;
+    const effectiveTarget = Number.isFinite(targetPct) && targetPct > 0 ? targetPct : 18;
 
     const range = years >= 10 ? "10y" : years >= 3 ? "5y" : "1y";
     const allCandles = await yahooChartRetry(toYahooSymbol(symbol, exchange), range, "1d", 3);
@@ -125,7 +131,7 @@ Deno.serve(async (req) => {
     const candles = allCandles.filter((c) => c.time >= cutoff);
     if (candles.length < 80) return errorResponse(req, "Not enough candle history for backtest", 400);
 
-    const { equityCurve, trades } = runRule(candles, rule);
+    const { equityCurve, trades } = runRule(candles, rule, effectiveStopLoss, effectiveTarget);
     const returns = trades.map((t) => t.return_pct);
     const wins = returns.filter((r) => r > 0);
     const losses = returns.filter((r) => r <= 0);

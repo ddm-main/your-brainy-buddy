@@ -241,6 +241,17 @@ export default function MarketSettings() {
         </div>
       </HudPanel>
 
+      {!editing && kotakConfigured && ["expired", "error"].includes(kotakStatus) && (
+        <HudPanel flow title="Kotak Session Expired" index="MK.S2">
+          <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
+            Kotak sessions reset daily near midnight IST. Reconnect using your saved credentials — nothing to re-enter.
+          </div>
+          <Btn onClick={startLogin} disabled={busy !== null} variant="primary">
+            {busy === "login" ? "reconnecting…" : "Re-login"}
+          </Btn>
+        </HudPanel>
+      )}
+
       {editing && (
         <HudPanel flow title="Kotak Neo — Credentials" index="MK.S2">
           <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12 }}>

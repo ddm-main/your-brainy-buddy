@@ -191,10 +191,18 @@ function NewStrategyModal({ onClose, onCreated }: { onClose: () => void; onCreat
   const [name, setName] = useState("");
   const [symbol, setSymbol] = useState("");
   const [rule, setRule] = useState("ema_cross_20_50");
+  const [stopLossPct, setStopLossPct] = useState("8");
+  const [targetPct, setTargetPct] = useState("18");
   const [busy, setBusy] = useState(false);
 
   const save = async () => {
     if (!name.trim() || !symbol.trim()) { push("Name and symbol required", "err"); return; }
+    const sl = Number(stopLossPct);
+    const tgt = Number(targetPct);
+    if (!Number.isFinite(sl) || sl <= 0 || !Number.isFinite(tgt) || tgt <= 0) {
+      push("Stop loss and target must be positive percentages", "err");
+      return;
+    }
     setBusy(true);
     try {
       const { data: u } = await supabase.auth.getUser();
@@ -202,8 +210,8 @@ function NewStrategyModal({ onClose, onCreated }: { onClose: () => void; onCreat
       const { error } = await supabase.from("market_saved_strategies").insert({
         user_id: u.user.id,
         name: name.trim(),
-        description: `${RULES.find((r) => r.v === rule)?.l} on ${symbol.toUpperCase()}`,
-        strategy: { rule, symbol: symbol.trim().toUpperCase(), exchange: "NSE" },
+        description: `${RULES.find((r) => r.v === rule)?.l} on ${symbol.toUpperCase()} · SL ${sl}% / T ${tgt}%`,
+        strategy: { rule, symbol: symbol.trim().toUpperCase(), exchange: "NSE", stop_loss_pct: sl, target_pct: tgt },
       });
       if (error) throw error;
       push("Strategy saved", "ok");
@@ -235,6 +243,16 @@ function NewStrategyModal({ onClose, onCreated }: { onClose: () => void; onCreat
           <select value={rule} onChange={(e) => setRule(e.target.value)} style={inputStyle}>
             {RULES.map((r) => <option key={r.v} value={r.v}>{r.l}</option>)}
           </select>
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <div style={labelStyle}>Stop loss %</div>
+            <input value={stopLossPct} onChange={(e) => setStopLossPct(e.target.value)} type="number" min="0.1" step="0.5" style={inputStyle}/>
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={labelStyle}>Target %</div>
+            <input value={targetPct} onChange={(e) => setTargetPct(e.target.value)} type="number" min="0.1" step="0.5" style={inputStyle}/>
+          </div>
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 6 }}>
           <Btn onClick={onClose}>cancel</Btn>

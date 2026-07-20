@@ -9,6 +9,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { Bell, Plus, Trash2 } from "lucide-react";
+import { formatAlertEvent, type AlertEvent } from "@/lib/market/alertsPoller";
 
 type Alert = {
   id: string;
@@ -24,13 +25,15 @@ type Alert = {
   created_at: string;
 };
 
+// Values must match market-alerts-eval's switch exactly — a mismatch here
+// means an alert can be created and never fire, silently, forever.
 const TYPES = [
   { v: "price_above", l: "Price above" },
   { v: "price_below", l: "Price below" },
-  { v: "pct_move", l: "% move (intraday)" },
+  { v: "percent_change", l: "% move (intraday)" },
   { v: "rsi_above", l: "RSI above" },
   { v: "rsi_below", l: "RSI below" },
-  { v: "ema_cross", l: "EMA cross (20/50)" },
+  { v: "ema_cross_up", l: "EMA cross (20/50)" },
   { v: "breakout", l: "Breakout confirmed" },
 ];
 const CHANNELS: Alert["channel"][] = ["browser", "email", "telegram", "whatsapp"];
@@ -130,6 +133,8 @@ export default function Alerts() {
         )}
       </HudPanel>
 
+      <RecentTriggers />
+
       {creating && <NewAlertModal onClose={() => setCreating(false)} onCreated={() => {
         qc.invalidateQueries({ queryKey: ["market", "alerts"] });
         setCreating(false);
@@ -146,7 +151,7 @@ function NewAlertModal({ onClose, onCreated }: { onClose: () => void; onCreated:
   const [channel, setChannel] = useState<Alert["channel"]>("browser");
   const [busy, setBusy] = useState(false);
 
-  const needsThreshold = !["ema_cross", "breakout"].includes(alertType);
+  const needsThreshold = !["ema_cross_up", "breakout"].includes(alertType);
 
   const save = async () => {
     if (!symbol.trim()) { push("Symbol required", "err"); return; }
@@ -210,5 +215,46 @@ function NewAlertModal({ onClose, onCreated }: { onClose: () => void; onCreated:
         </div>
       </div>
     </div>
+  );
+}
+
+function RecentTriggers() {
+  const { data: events = [], isLoading } = useQuery({
+    queryKey: ["market", "alert-events"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("market_alert_events")
+        .select("id,symbol,exchange,trigger_value,triggered_at,meta")
+        .order("triggered_at", { ascending: false })
+        .limit(20);
+      if (error) throw error;
+      return (data ?? []) as AlertEvent[];
+    },
+  });
+
+  return (
+    <HudPanel flow title="Recent Triggers" index="MK.ALR2">
+      {isLoading ? (
+        <div className="hud-label" style={{ padding: 16 }}>loading…</div>
+      ) : events.length === 0 ? (
+        <EmptyState hint="Fired alerts land here — checked every minute during market hours.">
+          nothing has fired yet
+        </EmptyState>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          {events.map((e) => (
+            <div key={e.id} style={{
+              display: "flex", justifyContent: "space-between", padding: "6px 4px",
+              borderBottom: "1px solid var(--edge)", fontSize: 12,
+            }}>
+              <span>{formatAlertEvent(e)}</span>
+              <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                {new Date(e.triggered_at).toLocaleString()}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </HudPanel>
   );
 }

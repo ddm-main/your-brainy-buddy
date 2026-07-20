@@ -10,14 +10,15 @@ import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { Plus, RefreshCw, Trash2, Download } from "lucide-react";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
-import { holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
-import type { Quote } from "@/lib/market/types";
+import { approxAnnualizedReturnPct, holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
+import { useQuotes } from "@/lib/market/hooks";
+import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { PortfolioAllocation } from "@/components/market/PortfolioAllocation";
 
 type Holding = {
   id: string; symbol: string; exchange: string; quantity: number; avg_price: number;
   buy_date: string | null; investment_type: string | null; notes: string | null; source: string;
 };
-type QuoteMap = Record<string, Quote>;
 type ScoreMap = Record<string, { breakout_score: number | null; prebreakout_score: number | null; score_components: any }>;
 
 const empty = { symbol: "", exchange: "NSE", quantity: "", avg_price: "", buy_date: "", investment_type: "long_term", notes: "" };
@@ -25,8 +26,8 @@ const empty = { symbol: "", exchange: "NSE", quantity: "", avg_price: "", buy_da
 export default function Holdings() {
   const push = useUi((s) => s.push);
   const [rows, setRows] = useState<Holding[]>([]);
-  const [quotes, setQuotes] = useState<QuoteMap>({});
   const [scores, setScores] = useState<ScoreMap>({});
+  const [sectors, setSectors] = useState<Record<string, string | null>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [form, setForm] = useState({ ...empty });
   const [showForm, setShowForm] = useState(false);
@@ -50,43 +51,33 @@ export default function Holdings() {
     setConnected((st?.[0] as any)?.active_provider ?? null);
     const symbols = [...new Set((data ?? []).map((h: any) => h.symbol))];
     if (symbols.length > 0) {
-      const { data: sc } = await supabase.from("market_stock_scores")
-        .select("symbol,breakout_score,prebreakout_score,score_components")
-        .in("symbol", symbols);
+      const [{ data: sc }, { data: st2 }] = await Promise.all([
+        supabase.from("market_stock_scores")
+          .select("symbol,breakout_score,prebreakout_score,score_components")
+          .in("symbol", symbols),
+        supabase.from("market_stocks").select("symbol,sector").in("symbol", symbols),
+      ]);
       const map: ScoreMap = {};
       for (const s of (sc ?? []) as any[]) map[s.symbol] = s;
       setScores(map);
+      const secMap: Record<string, string | null> = {};
+      for (const s of (st2 ?? []) as any[]) secMap[s.symbol] = s.sector ?? null;
+      setSectors(secMap);
     }
   };
 
-  const refreshQuotes = async (holdings: Holding[], opts: { silent?: boolean } = {}) => {
-    if (holdings.length === 0) return;
-    if (!opts.silent) setBusy("quotes");
-    try {
-      const symbols = Array.from(new Set(holdings.map((h) => `${h.exchange}:${h.symbol}`)));
-      const r = await callFn("market-quotes", { symbols });
-      const map: QuoteMap = {};
-      for (const q of r?.quotes ?? []) {
-        map[quoteKey(q.exchange, q.symbol)] = q;
-      }
-      setQuotes(map);
-    } catch (e) {
-      // background polls fail silently — a toast every 30s would be noise
-      if (!opts.silent) push(toSafeError(e, "Quotes failed").message, "err");
-    } finally { if (!opts.silent) setBusy(null); }
-  };
-
   useEffect(() => { load(); }, []);
-  useEffect(() => { if (rows.length) refreshQuotes(rows); /* eslint-disable-next-line */ }, [rows.length]);
-  // Live-ish quotes: poll every 30s while the tab is visible.
-  useEffect(() => {
-    if (rows.length === 0) return;
-    const id = window.setInterval(() => {
-      if (!document.hidden) refreshQuotes(rows, { silent: true });
-    }, 30_000);
-    return () => window.clearInterval(id);
-    // eslint-disable-next-line
-  }, [rows]);
+
+  // Live quotes: same shared 1s market-hours hook every other page uses.
+  const quoteKeys = useMemo(() => rows.map((h) => `${h.exchange}:${h.symbol}`), [rows]);
+  const { data: quotesData, isFetching: quotesFetching, refetch: refetchQuotes } = useQuotes(quoteKeys);
+  const restQuotes = useMemo(() => {
+    const map: Record<string, import("@/lib/market/types").Quote> = {};
+    for (const q of quotesData?.quotes ?? []) map[quoteKey(q.exchange, q.symbol)] = q;
+    return map;
+  }, [quotesData]);
+  const liveTicks = useLiveTickStore((s) => s.ticks);
+  const quotes = useMemo(() => mergeLiveQuotes(restQuotes, liveTicks), [restQuotes, liveTicks]);
 
   const add = async () => {
     if (!form.symbol.trim() || !form.quantity || !form.avg_price) { push("Symbol, quantity, avg price required", "warn"); return; }
@@ -140,15 +131,25 @@ export default function Holdings() {
       dayPnls.push(calc.todayPnl);
     }
     const dayPnl = sumNullable(dayPnls);
-    return { invested, current, pnl: current - invested, pnlPct: invested ? ((current - invested) / invested) * 100 : 0, dayPnl };
+    const prevValue = dayPnl == null ? null : current - dayPnl;
+    const dayPnlPct = dayPnl == null || !prevValue ? null : (dayPnl / prevValue) * 100;
+    return { invested, current, pnl: current - invested, pnlPct: invested ? ((current - invested) / invested) * 100 : 0, dayPnl, dayPnlPct };
   }, [rows, quotes]);
+
+  const allocationInput = useMemo(
+    () => rows.map((h) => ({
+      symbol: h.symbol,
+      currentValue: holdingPnl({ quantity: h.quantity, avgPrice: h.avg_price, quote: quotes[quoteKey(h.exchange, h.symbol)] }).current,
+    })),
+    [rows, quotes],
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <HudPanel flow title="Portfolio Summary" index="MK.H1" actions={
         <div style={{ display: "flex", gap: 6 }}>
-          <Btn size="sm" onClick={() => refreshQuotes(rows)} disabled={busy !== null}>
-            <RefreshCw size={11} style={{ marginRight: 4 }} /> refresh quotes
+          <Btn size="sm" onClick={() => refetchQuotes()} disabled={busy !== null}>
+            <RefreshCw size={11} style={{ marginRight: 4 }} /> {quotesFetching ? "refreshing…" : "refresh quotes"}
           </Btn>
           {connected === "kotak_neo" && (
             <Btn size="sm" onClick={sync} disabled={busy !== null}>
@@ -162,10 +163,20 @@ export default function Holdings() {
           <Stat label="Current Value" value={inr(totals.current)} />
           <Stat label="Total P&L" value={inr(totals.pnl)} tone={totals.pnl >= 0 ? "ok" : "err"} />
           <Stat label="Return %" value={`${totals.pnlPct.toFixed(2)}%`} tone={totals.pnlPct >= 0 ? "ok" : "err"} />
-          <Stat label="Today's P&L" value={totals.dayPnl == null ? "—" : inr(totals.dayPnl)} tone={totals.dayPnl == null ? undefined : totals.dayPnl >= 0 ? "ok" : "err"} />
+          <Stat
+            label="Today's P&L"
+            value={totals.dayPnl == null ? "—" : `${inr(totals.dayPnl)}${totals.dayPnlPct != null ? ` (${totals.dayPnlPct >= 0 ? "+" : ""}${totals.dayPnlPct.toFixed(2)}%)` : ""}`}
+            tone={totals.dayPnl == null ? undefined : totals.dayPnl >= 0 ? "ok" : "err"}
+          />
           <Stat label="Holdings" value={rows.length.toString()} />
         </div>
       </HudPanel>
+
+      {rows.length > 0 && (
+        <HudPanel flow title="Sector Allocation" index="MK.H1B">
+          <PortfolioAllocation holdings={allocationInput} sectorBySymbol={sectors} />
+        </HudPanel>
+      )}
 
       <HudPanel flow title="Holdings" index="MK.H2" actions={
         <Btn size="sm" onClick={() => setShowForm((v) => !v)}>
@@ -199,7 +210,7 @@ export default function Holdings() {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead>
               <tr style={{ textAlign: "left", color: "var(--text-dim)" }}>
-                {["Symbol", "Qty", "Avg Buy", "LTP", "Invested", "Current", "P&L", "P&L %", "Today", "Breakout", "Source", ""].map((h) => (
+                {["Symbol", "Qty", "Avg Buy", "LTP", "Invested", "Current", "P&L", "P&L %", "Today", "Today %", "Ann. Return*", "Breakout", "Source", ""].map((h) => (
                   <th key={h} style={{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", fontWeight: 400, textTransform: "uppercase", letterSpacing: "0.1em", fontSize: 10 }}>{h}</th>
                 ))}
               </tr>
@@ -222,6 +233,13 @@ export default function Holdings() {
                     <td style={{ ...td, color: calc.totalPnl >= 0 ? "var(--ok)" : "var(--danger)" }}>{inr(calc.totalPnl)}</td>
                     <td style={{ ...td, color: calc.totalPnlPct >= 0 ? "var(--ok)" : "var(--danger)" }}>{calc.totalPnlPct.toFixed(2)}%</td>
                     <td style={{ ...td, color: (calc.todayPnl ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }} title={q?.stale ? "Quote is stale; today's P&L unavailable" : undefined}>{calc.todayPnl == null ? "—" : inr(calc.todayPnl)}</td>
+                    <td style={{ ...td, color: (calc.todayPnlPct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>{calc.todayPnlPct == null ? "—" : `${calc.todayPnlPct.toFixed(2)}%`}</td>
+                    <td style={td} title="Approximate — assumes a single lump-sum buy on Buy Date, not a true XIRR">
+                      {(() => {
+                        const ann = approxAnnualizedReturnPct(calc.totalPnlPct, h.buy_date);
+                        return ann == null ? "—" : `${ann >= 0 ? "+" : ""}${ann.toFixed(1)}%`;
+                      })()}
+                    </td>
                     <td style={td}>
                       <ScoreBadge score={scores[h.symbol]?.breakout_score} components={scores[h.symbol]?.score_components?.breakout} label="breakout components" />
                     </td>
@@ -235,11 +253,16 @@ export default function Holdings() {
                 );
               })}
               {rows.length === 0 && (
-                <tr><td colSpan={12} style={{ padding: 20, textAlign: "center", color: "var(--text-dim)" }}>No holdings yet.</td></tr>
+                <tr><td colSpan={14} style={{ padding: 20, textAlign: "center", color: "var(--text-dim)" }}>No holdings yet.</td></tr>
               )}
             </tbody>
           </table>
         </div>
+        {rows.length > 0 && (
+          <div style={{ marginTop: 8, fontSize: 10, color: "var(--text-muted)" }}>
+            * Approximate annualized return since Buy Date — a single lump-sum estimate, not a true XIRR (would need per-lot buy history).
+          </div>
+        )}
       </HudPanel>
     </div>
   );

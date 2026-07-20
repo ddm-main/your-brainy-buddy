@@ -69,6 +69,44 @@ function parseKey(key: string): { exchange: string; symbol: string } {
   return { exchange, symbol };
 }
 
+// ---------- Short-TTL in-memory caches (per warm Deno isolate) ----------
+// `getQuotes` used to re-read the full market_api_settings row and
+// re-resolve the market_stocks token map from Postgres on every single call,
+// serially, before ever reaching Kotak — real latency on the hot 1s-poll
+// path. Neither value is correctness-critical to cache for a few seconds:
+// connection status / instrument tokens don't change tick to tick.
+
+interface SettingsRow extends KotakSettings { active_provider: string }
+const settingsCache = new Map<string, { rows: SettingsRow[]; expiresAt: number }>();
+const SETTINGS_TTL_MS = 10_000;
+
+async function getSettingsRows(svc: SupabaseClient, userId: string): Promise<SettingsRow[]> {
+  const cached = settingsCache.get(userId);
+  if (cached && cached.expiresAt > Date.now()) return cached.rows;
+  const { data } = await svc
+    .from("market_api_settings")
+    .select(KOTAK_SETTINGS_COLS + ",active_provider")
+    .eq("user_id", userId);
+  const rows = (data ?? []) as SettingsRow[];
+  settingsCache.set(userId, { rows, expiresAt: Date.now() + SETTINGS_TTL_MS });
+  return rows;
+}
+
+let tokenMapCache: { map: Map<string, string>; expiresAt: number } | null = null;
+const TOKEN_MAP_TTL_MS = 60_000;
+
+// NSE symbol -> instrument token, cached whole (market_stocks is a shared
+// reference table that only changes via the weekly scrip sync).
+async function getTokenMap(svc: SupabaseClient): Promise<Map<string, string>> {
+  if (tokenMapCache && tokenMapCache.expiresAt > Date.now()) return tokenMapCache.map;
+  const { data } = await svc
+    .from("market_stocks").select("symbol,token")
+    .eq("exchange", "NSE").not("token", "is", null);
+  const map = new Map<string, string>((data ?? []).map((r: any) => [r.symbol, r.token]));
+  tokenMapCache = { map, expiresAt: Date.now() + TOKEN_MAP_TTL_MS };
+  return map;
+}
+
 // ---------- Yahoo provider ----------
 
 function yahooProvider(): MarketProvider {
@@ -149,16 +187,9 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
   return {
     name: "kotak_neo",
     async getQuotes(keys) {
-      // Resolve instrument tokens from market_stocks; unresolved keys fall back to Yahoo.
+      // Resolve instrument tokens from the cached market_stocks map; unresolved keys fall back to Yahoo.
       const parsed = keys.map((k) => ({ key: k, ...parseKey(k) }));
-      const nse = parsed.filter((p) => p.exchange === "NSE");
-      const { data: stocks } = await svc
-        .from("market_stocks")
-        .select("symbol,token")
-        .in("symbol", nse.map((p) => p.symbol))
-        .eq("exchange", "NSE")
-        .not("token", "is", null);
-      const tokenBySymbol = new Map((stocks ?? []).map((r: any) => [r.symbol, r.token]));
+      const tokenBySymbol = await getTokenMap(svc);
       const withToken = parsed.filter((p) => tokenBySymbol.has(p.symbol) && p.exchange === "NSE");
       const without = parsed.filter((p) => !tokenBySymbol.has(p.symbol) || p.exchange !== "NSE");
 
@@ -166,7 +197,9 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       if (withToken.length > 0) {
         try {
           const neoSymbols = withToken.map((p) => `nse_cm|${tokenBySymbol.get(p.symbol)}`);
-          const rows = await kotakQuotes(s, neoSymbols, "all");
+          // Wrapped in withKotakSession so a mid-day expired token auto-relogs-in
+          // and retries once, instead of silently falling the whole batch to Yahoo.
+          const rows = await withKotakSession(svc, s, encryptValue, (ss) => kotakQuotes(ss, neoSymbols, "all"));
           const byToken = new Map<string, any>();
           for (const r of rows) {
             const tok = String(r?.symbol ?? r?.tk ?? r?.instrumentToken ?? "").replace(/^nse_cm\|/, "");
@@ -299,11 +332,7 @@ export async function getActiveProvider(
   svc: SupabaseClient,
   userId: string,
 ): Promise<ActiveProvider> {
-  const { data } = await svc
-    .from("market_api_settings")
-    .select(KOTAK_SETTINGS_COLS + ",active_provider")
-    .eq("user_id", userId);
-  const rows = (data ?? []) as (KotakSettings & { active_provider: string })[];
+  const rows = await getSettingsRows(svc, userId);
   const kotak = rows.find((r) => r.active_provider === "kotak_neo" && r.connection_status === "connected");
   if (kotak) return { provider: kotakProvider(svc, kotak), settings: kotak };
   const kotakAny = rows.find((r) => r.active_provider === "kotak_neo" && r.totp_secret_enc);

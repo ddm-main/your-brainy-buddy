@@ -13,6 +13,7 @@ import { useContent } from "@/store/contentStore";
 import { useUi } from "@/store/uiStore";
 import { useNotifications } from "@/store/notificationStore";
 import { startReminderPoller } from "@/lib/reminders";
+import { startMarketAlertsPoller, formatAlertEvent } from "@/lib/market/alertsPoller";
 import { useSession } from "@/lib/useSession";
 
 
@@ -48,6 +49,14 @@ export default function App() {
     if ("Notification" in window && Notification.permission === "default") {
       Notification.requestPermission().catch((e) => { if (import.meta.env.DEV) console.warn("[JARVIS] notification prompt:", e); });
     }
+
+    const stopAlerts = startMarketAlertsPoller((e) => {
+      const text = formatAlertEvent(e);
+      useNotifications.getState().add(text);
+      if ("Notification" in window && Notification.permission === "granted") {
+        try { new Notification("Market alert", { body: text }); } catch { /* noop */ }
+      }
+    });
     // Global hotkey: ⌘/Ctrl+J → open conversation overlay.
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey)) return;
@@ -60,7 +69,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
 
-    return () => { stop(); window.removeEventListener("keydown", onKey); };
+    return () => { stop(); stopAlerts(); window.removeEventListener("keydown", onKey); };
   }, [session]);
 
 
