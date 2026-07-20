@@ -10,6 +10,7 @@ import {
   kotakDepth,
   kotakHoldings,
   kotakLimits,
+  kotakPlaceOrder,
   kotakPositions,
   kotakQuotes,
   withKotakSession,
@@ -51,6 +52,17 @@ export interface PositionRow {
   entry_price: number;
 }
 
+export interface PlaceOrderInput {
+  symbol: string;
+  exchange: string;
+  side: "BUY" | "SELL";
+  quantity: number;
+  orderType: "MARKET" | "LIMIT";
+  product: "MIS" | "CNC";
+  price?: number;
+}
+export interface PlaceOrderResult { orderId: string; status: string }
+
 export interface MarketProvider {
   name: string;
   getQuotes(keys: string[]): Promise<QuoteRow[]>;
@@ -58,6 +70,7 @@ export interface MarketProvider {
   getDepth(symbol: string, exchange: string): Promise<DepthLadder>;
   getHoldings(): Promise<HoldingRow[]>;
   getPositions(): Promise<PositionRow[]>;
+  placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResult>;
   testAuth(): Promise<{ ok: boolean; detail?: string }>;
 }
 
@@ -95,46 +108,73 @@ async function getSettingsRows(svc: SupabaseClient, userId: string): Promise<Set
 let tokenMapCache: { map: Map<string, string>; expiresAt: number } | null = null;
 const TOKEN_MAP_TTL_MS = 60_000;
 
-// NSE symbol -> instrument token, cached whole (market_stocks is a shared
-// reference table that only changes via the weekly scrip sync).
+// "EXCHANGE:SYMBOL" -> instrument token, cached whole (market_stocks is a
+// shared reference table that only changes via the weekly scrip sync).
+// Keyed by exchange since the same symbol can carry different tokens on NSE
+// vs BSE.
 async function getTokenMap(svc: SupabaseClient): Promise<Map<string, string>> {
   if (tokenMapCache && tokenMapCache.expiresAt > Date.now()) return tokenMapCache.map;
   const { data } = await svc
-    .from("market_stocks").select("symbol,token")
-    .eq("exchange", "NSE").not("token", "is", null);
-  const map = new Map<string, string>((data ?? []).map((r: any) => [r.symbol, r.token]));
+    .from("market_stocks").select("symbol,exchange,token")
+    .in("exchange", ["NSE", "BSE"]).not("token", "is", null);
+  const map = new Map<string, string>((data ?? []).map((r: any) => [`${r.exchange}:${r.symbol}`, r.token]));
   tokenMapCache = { map, expiresAt: Date.now() + TOKEN_MAP_TTL_MS };
   return map;
 }
 
+// ---------- Provider health logging ----------
+// Lightweight — one row per getQuotes call for whichever provider actually
+// served it, not every internal call. Never let a logging failure affect
+// the actual data path: fire-and-forget, errors swallowed.
+function logProviderHealth(
+  svc: SupabaseClient,
+  provider: string,
+  endpoint: string,
+  ok: boolean,
+  latencyMs: number,
+  error?: string,
+): void {
+  svc.from("market_provider_health").insert({
+    provider, endpoint, ok, latency_ms: Math.round(latencyMs),
+    error: error ? error.slice(0, 500) : null,
+  }).then(() => {}, () => {});
+}
+
 // ---------- Yahoo provider ----------
 
-function yahooProvider(): MarketProvider {
+function yahooProvider(svc: SupabaseClient): MarketProvider {
   return {
     name: "yahoo",
     async getQuotes(keys) {
-      const ySyms = keys.map((k) => {
-        const { exchange, symbol } = parseKey(k);
-        return toYahooSymbol(symbol, exchange);
-      });
-      const rows = await yahooQuote(ySyms);
-      const byY = new Map(rows.map((r) => [r.symbol, r]));
-      return keys.flatMap((k) => {
-        const { exchange, symbol } = parseKey(k);
-        const r = byY.get(toYahooSymbol(symbol, exchange));
-        if (!r) return [];
-        return [{
-          key: k,
-          price: r.price,
-          previous_close: r.prev_close ?? null,
-          change_abs: r.change_abs,
-          change_pct: r.change_pct,
-          volume: r.volume ?? null,
-          source: "yahoo" as const,
-          as_of: r.as_of ?? null,
-          previous_close_as_of: r.prev_close_as_of ?? null,
-        }];
-      });
+      const t0 = Date.now();
+      try {
+        const ySyms = keys.map((k) => {
+          const { exchange, symbol } = parseKey(k);
+          return toYahooSymbol(symbol, exchange);
+        });
+        const rows = await yahooQuote(ySyms);
+        logProviderHealth(svc, "yahoo", "getQuotes", true, Date.now() - t0);
+        const byY = new Map(rows.map((r) => [r.symbol, r]));
+        return keys.flatMap((k) => {
+          const { exchange, symbol } = parseKey(k);
+          const r = byY.get(toYahooSymbol(symbol, exchange));
+          if (!r) return [];
+          return [{
+            key: k,
+            price: r.price,
+            previous_close: r.prev_close ?? null,
+            change_abs: r.change_abs,
+            change_pct: r.change_pct,
+            volume: r.volume ?? null,
+            source: "yahoo" as const,
+            as_of: r.as_of ?? null,
+            previous_close_as_of: r.prev_close_as_of ?? null,
+          }];
+        });
+      } catch (e) {
+        logProviderHealth(svc, "yahoo", "getQuotes", false, Date.now() - t0, e instanceof Error ? e.message : String(e));
+        throw e;
+      }
     },
     getOHLCV(symbol, exchange, range, interval) {
       return yahooChartRetry(toYahooSymbol(symbol, exchange), range, interval);
@@ -147,6 +187,9 @@ function yahooProvider(): MarketProvider {
     },
     getPositions() {
       return Promise.reject(new Error("Positions sync requires a broker provider (Kotak Neo)."));
+    },
+    placeOrder() {
+      return Promise.reject(new Error("Order placement requires a broker provider (Kotak Neo)."));
     },
     async testAuth() {
       const rows = await yahooQuote(["^NSEI"]);
@@ -183,30 +226,35 @@ const parseKotakDate = (obj: any): string | null => {
 };
 
 export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProvider {
-  const yahoo = yahooProvider();
+  const yahoo = yahooProvider(svc);
   return {
     name: "kotak_neo",
     async getQuotes(keys) {
       // Resolve instrument tokens from the cached market_stocks map; unresolved keys fall back to Yahoo.
       const parsed = keys.map((k) => ({ key: k, ...parseKey(k) }));
       const tokenBySymbol = await getTokenMap(svc);
-      const withToken = parsed.filter((p) => tokenBySymbol.has(p.symbol) && p.exchange === "NSE");
-      const without = parsed.filter((p) => !tokenBySymbol.has(p.symbol) || p.exchange !== "NSE");
+      const withToken = parsed.filter((p) => tokenBySymbol.has(`${p.exchange}:${p.symbol}`));
+      const without = parsed.filter((p) => !tokenBySymbol.has(`${p.exchange}:${p.symbol}`));
 
       const out: QuoteRow[] = [];
       if (withToken.length > 0) {
+        const t0 = Date.now();
         try {
-          const neoSymbols = withToken.map((p) => `nse_cm|${tokenBySymbol.get(p.symbol)}`);
+          const segFor = (exchange: string) => (exchange === "BSE" ? "bse_cm" : "nse_cm");
+          const neoSymbols = withToken.map((p) => `${segFor(p.exchange)}|${tokenBySymbol.get(`${p.exchange}:${p.symbol}`)}`);
           // Wrapped in withKotakSession so a mid-day expired token auto-relogs-in
           // and retries once, instead of silently falling the whole batch to Yahoo.
           const rows = await withKotakSession(svc, s, encryptValue, (ss) => kotakQuotes(ss, neoSymbols, "all"));
+          logProviderHealth(svc, "kotak_neo", "getQuotes", true, Date.now() - t0);
+          // Keyed by "segment|token" — bare token numbers aren't unique across
+          // NSE/BSE's separate instrument-token namespaces.
           const byToken = new Map<string, any>();
           for (const r of rows) {
-            const tok = String(r?.symbol ?? r?.tk ?? r?.instrumentToken ?? "").replace(/^nse_cm\|/, "");
-            if (tok) byToken.set(tok, r);
+            const segTok = String(r?.symbol ?? r?.tk ?? r?.instrumentToken ?? "").match(/^(nse|bse)_cm\|(.+)$/);
+            if (segTok) byToken.set(`${segTok[1]}_cm|${segTok[2]}`, r);
           }
           for (const p of withToken) {
-            const r = byToken.get(String(tokenBySymbol.get(p.symbol)));
+            const r = byToken.get(`${segFor(p.exchange)}|${tokenBySymbol.get(`${p.exchange}:${p.symbol}`)}`);
             if (!r) continue;
             const price = firstNum(r, ["last_traded_price", "ltp", "lastPrice", "last_price", "lp"]);
             const prevClose = firstNum(r, [
@@ -233,8 +281,10 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
               previous_close_as_of: null,
             });
           }
-        } catch {
+        } catch (err) {
           // whole Kotak quote batch failed — let Yahoo cover everything
+          console.error("kotak quote batch failed, falling back to yahoo", err);
+          logProviderHealth(svc, "kotak_neo", "getQuotes", false, Date.now() - t0, err instanceof Error ? err.message : String(err));
           return yahoo.getQuotes(keys);
         }
       }
@@ -312,6 +362,25 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
         })
         .filter((p: PositionRow) => p.symbol && p.quantity > 0);
     },
+    async placeOrder(input) {
+      const seg = input.exchange === "BSE" ? "bse_cm" : "nse_cm";
+      const { data: stock } = await svc
+        .from("market_stocks").select("token")
+        .eq("symbol", input.symbol).eq("exchange", input.exchange)
+        .not("token", "is", null).maybeSingle();
+      const token = stock?.token as string | undefined;
+      const result = await withKotakSession(svc, s, encryptValue, (ss) => kotakPlaceOrder(ss, {
+        exchangeSegment: seg,
+        tradingSymbol: `${input.symbol}-EQ`,
+        instrumentToken: token,
+        transactionType: input.side,
+        orderType: input.orderType,
+        product: input.product,
+        quantity: input.quantity,
+        price: input.price,
+      }));
+      return { orderId: result.orderId, status: result.status };
+    },
     async testAuth() {
       const j = await withKotakSession(svc, s, encryptValue, (ss) => kotakLimits(ss));
       const ok = !!j && !j.errMsg;
@@ -337,7 +406,7 @@ export async function getActiveProvider(
   if (kotak) return { provider: kotakProvider(svc, kotak), settings: kotak };
   const kotakAny = rows.find((r) => r.active_provider === "kotak_neo" && r.totp_secret_enc);
   if (kotakAny) return { provider: kotakProvider(svc, kotakAny), settings: kotakAny };
-  return { provider: yahooProvider(), settings: null };
+  return { provider: yahooProvider(svc), settings: null };
 }
 
 // Service-level provider for cron jobs (no user context): first connected kotak row, else yahoo.
@@ -351,7 +420,7 @@ export async function getServiceProvider(svc: SupabaseClient): Promise<ActivePro
   const rows = (data ?? []) as KotakSettings[];
   const usable = rows.find((r) => r.connection_status === "connected") ?? rows.find((r) => r.totp_secret_enc);
   if (usable) return { provider: kotakProvider(svc, usable), settings: usable };
-  return { provider: yahooProvider(), settings: null };
+  return { provider: yahooProvider(svc), settings: null };
 }
 
 export { yahooProvider };

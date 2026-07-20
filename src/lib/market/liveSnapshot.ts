@@ -7,6 +7,7 @@
 // universe.
 import { computeSnapshot, type Candle, type IndicatorSnapshot } from "../../../supabase/functions/_shared/market/indicators";
 import { breakoutScore, preBreakoutScore, type MarketContext, type ScoreResult } from "../../../supabase/functions/_shared/market/scoring";
+import { marketOpen } from "./hooks";
 import type { BreadthDaily, CandleDto, Quote, StockScore } from "./types";
 
 function toUnix(time: string | number): number {
@@ -28,7 +29,10 @@ export function withLivePrice(dailyCandles: CandleDto[], quote: Quote | undefine
   const last = base[base.length - 1];
   const lastDateStr = last ? new Date(last.time * 1000).toISOString().slice(0, 10) : null;
 
-  if (last && lastDateStr === today) {
+  // Once the session's over, stop repricing today's bar off the live tick —
+  // let the EOD-sourced close (backed by the pipeline's settled print) stand
+  // instead of freezing on whichever LTP arrived last before the market shut.
+  if (last && lastDateStr === today && marketOpen()) {
     base[base.length - 1] = {
       ...last,
       close: quote.ltp,

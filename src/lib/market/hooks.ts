@@ -19,11 +19,20 @@ import type {
 } from "./types";
 
 // NSE market hours (IST 09:15–15:30) ≈ UTC 03:45–10:00 — poll faster during them.
-function marketOpen(): boolean {
+export function marketOpen(): boolean {
   const now = new Date();
   const utcMin = now.getUTCHours() * 60 + now.getUTCMinutes();
   const day = now.getUTCDay();
   return day >= 1 && day <= 5 && utcMin >= 225 && utcMin <= 600;
+}
+
+// Brief window right after close where we keep slow-polling to catch the
+// settled EOD tick, instead of freezing on whatever LTP won the race at 15:30.
+function justClosedWindow(): boolean {
+  const now = new Date();
+  const utcMin = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const day = now.getUTCDay();
+  return day >= 1 && day <= 5 && utcMin > 600 && utcMin <= 615;
 }
 
 export function useMarketSettings() {
@@ -52,7 +61,9 @@ export function useQuotes(keys: string[]) {
     queryFn: () => callMarketFn<{ quotes: Quote[]; source: string }>("market-quotes", { symbols: keys }),
     enabled: keys.length > 0,
     // On-screen symbols only (caller scopes `keys`) — near-second refresh.
-    refetchInterval: marketOpen() ? 1_000 : false,
+    // Keep short-polling for a few minutes after close to land the settled
+    // EOD tick, rather than freezing on whichever LTP raced in at 15:30.
+    refetchInterval: marketOpen() ? 1_000 : justClosedWindow() ? 15_000 : false,
   });
 }
 
@@ -179,10 +190,10 @@ export function useSectorStrength() {
   });
 }
 
-export function useCandles(symbol: string | undefined, timeframe: string) {
+export function useCandles(symbol: string | undefined, timeframe: string, exchange = "NSE") {
   return useQuery({
-    queryKey: ["market", "candles", symbol ?? "", timeframe],
-    queryFn: () => callMarketFn<CandlesResponse>("market-candles", { symbol, timeframe }),
+    queryKey: ["market", "candles", symbol ?? "", timeframe, exchange],
+    queryFn: () => callMarketFn<CandlesResponse>("market-candles", { symbol, timeframe, exchange }),
     enabled: !!symbol,
     staleTime: 5 * 60_000,
   });
@@ -191,10 +202,10 @@ export function useCandles(symbol: string | undefined, timeframe: string) {
 export interface DepthRow { price: number; qty: number; orders: number }
 export interface DepthResponse { bids: DepthRow[]; asks: DepthRow[]; ltp: number | null; source: string }
 
-export function useDepth(symbol: string | undefined) {
+export function useDepth(symbol: string | undefined, exchange = "NSE") {
   return useQuery({
-    queryKey: ["market", "depth", symbol ?? ""],
-    queryFn: () => callMarketFn<DepthResponse>("market-depth", { symbol }),
+    queryKey: ["market", "depth", symbol ?? "", exchange],
+    queryFn: () => callMarketFn<DepthResponse>("market-depth", { symbol, exchange }),
     enabled: !!symbol,
     refetchInterval: marketOpen() ? 1_000 : false,
     retry: false,
@@ -360,5 +371,81 @@ export function useIndexConstituents(slug: string | null | undefined) {
     ),
     enabled: !!slug,
     staleTime: 10 * 60_000,
+  });
+}
+
+export interface NewsRow { id: string; headline: string; url: string | null; source: string | null; published_at: string | null }
+export interface CorporateActionRow {
+  id: string; action_type: string; ex_date: string | null; record_date: string | null;
+  details: { subject?: string } | null;
+}
+
+export function useMarketNews(symbol: string | undefined, exchange = "NSE") {
+  return useQuery({
+    queryKey: ["market", "news", symbol ?? "", exchange],
+    queryFn: async (): Promise<NewsRow[]> => {
+      const { data, error } = await supabase.from("market_news" as any)
+        .select("id,headline,url,source,published_at")
+        .eq("symbol", symbol).eq("exchange", exchange)
+        .order("published_at", { ascending: false }).limit(10);
+      if (error) throw error;
+      return (data ?? []) as unknown as NewsRow[];
+    },
+    enabled: !!symbol,
+  });
+}
+
+export function useCorporateActions(symbol: string | undefined, exchange = "NSE") {
+  return useQuery({
+    queryKey: ["market", "corporate-actions", symbol ?? "", exchange],
+    queryFn: async (): Promise<CorporateActionRow[]> => {
+      const { data, error } = await supabase.from("market_corporate_actions" as any)
+        .select("id,action_type,ex_date,record_date,details")
+        .eq("symbol", symbol).eq("exchange", exchange)
+        .order("ex_date", { ascending: false }).limit(10);
+      if (error) throw error;
+      return (data ?? []) as unknown as CorporateActionRow[];
+    },
+    enabled: !!symbol,
+  });
+}
+
+export interface PortfolioSnapshotRow {
+  snapshot_date: string;
+  total_value: number | null;
+  total_invested: number | null;
+  total_pnl: number | null;
+  unresolved_count: number;
+}
+
+export function usePortfolioSnapshots(days = 180) {
+  return useQuery({
+    queryKey: ["market", "portfolio-snapshots", days],
+    queryFn: async (): Promise<PortfolioSnapshotRow[]> => {
+      const since = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+      const { data, error } = await supabase.from("market_portfolio_snapshots" as any)
+        .select("snapshot_date,total_value,total_invested,total_pnl,unresolved_count")
+        .gte("snapshot_date", since)
+        .order("snapshot_date", { ascending: true });
+      if (error) throw error;
+      return (data ?? []) as unknown as PortfolioSnapshotRow[];
+    },
+  });
+}
+
+export function useSyncNewsAndActions() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ symbol, exchange }: { symbol: string; exchange: string }) => {
+      const body = { symbols: [{ symbol, exchange }] };
+      await Promise.all([
+        callMarketFn("market-news-sync", body),
+        exchange === "NSE" ? callMarketFn("market-corporate-actions-sync", body) : Promise.resolve(),
+      ]);
+    },
+    onSuccess: (_d, { symbol, exchange }) => {
+      qc.invalidateQueries({ queryKey: ["market", "news", symbol, exchange] });
+      qc.invalidateQueries({ queryKey: ["market", "corporate-actions", symbol, exchange] });
+    },
   });
 }

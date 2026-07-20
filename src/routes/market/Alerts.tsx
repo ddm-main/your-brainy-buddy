@@ -62,8 +62,12 @@ export default function Alerts() {
 
   const toggle = async (a: Alert) => {
     try {
+      // market-alerts-eval only scans triggered_at IS NULL — an alert that
+      // already fired once stays permanently dead unless resuming re-arms it
+      // by clearing the stamp.
+      const resuming = !a.is_active;
       const { error } = await supabase.from("market_alerts")
-        .update({ is_active: !a.is_active }).eq("id", a.id);
+        .update({ is_active: !a.is_active, ...(resuming ? { triggered_at: null } : {}) }).eq("id", a.id);
       if (error) throw error;
       qc.invalidateQueries({ queryKey: ["market", "alerts"] });
     } catch (e) { push(toSafeError(e, "toggle failed").message, "err"); }

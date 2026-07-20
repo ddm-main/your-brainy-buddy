@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import type { ColumnDef } from "@tanstack/react-table";
 import { HudPanel } from "@/components/hud/HudPanel";
-import { Btn, Chip } from "@/components/hud/HudControls";
+import { Btn, Chip, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { supabase } from "@/integrations/supabase/client";
@@ -20,6 +20,23 @@ import type { Quote, StockScore } from "@/lib/market/types";
 import { holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
 
+const BREAKOUT_FILTERS_STORE = "jarvis.dashboard.breakoutFilters.v1";
+interface BreakoutFilters {
+  minBreakout: number | "";
+  minRsi: number | "";
+  minRvol: number | "";
+  minChg: number | "";
+  sector: string;
+  limit: number;
+}
+const defaultBreakoutFilters: BreakoutFilters = { minBreakout: 60, minRsi: "", minRvol: "", minChg: "", sector: "", limit: 12 };
+function loadBreakoutFilters(): BreakoutFilters {
+  try {
+    const raw = JSON.parse(localStorage.getItem(BREAKOUT_FILTERS_STORE) ?? "{}");
+    return { ...defaultBreakoutFilters, ...raw };
+  } catch { return defaultBreakoutFilters; }
+}
+
 export default function MarketDashboard() {
   const push = useUi((s) => s.push);
   const nav = useNavigate();
@@ -27,6 +44,10 @@ export default function MarketDashboard() {
   const [insight, setInsight] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [manageOpen, setManageOpen] = useState(false);
+  const [bFilters, setBFilters] = useState<BreakoutFilters>(loadBreakoutFilters);
+  useEffect(() => {
+    localStorage.setItem(BREAKOUT_FILTERS_STORE, JSON.stringify(bFilters));
+  }, [bFilters]);
 
   useEffect(() => {
     const handler = () => qc.invalidateQueries({ queryKey: ["market"] });
@@ -38,7 +59,9 @@ export default function MarketDashboard() {
   const { data: indicesData, refetch: refetchIndices, isFetching: indicesFetching } = useIndices();
   const { data: sectors = [] } = useSectorStrength();
   const { data: settings = [] } = useMarketSettings();
-  const { data: topBreakouts = [] } = useStockScores({ orderBy: "breakout_score", limit: 15 });
+  // Fetched pool is wider than what's shown (12) so the filter bar below has
+  // something to narrow beyond the top-15-by-score slice.
+  const { data: topBreakouts = [] } = useStockScores({ orderBy: "breakout_score", limit: 60 });
   const { data: preBreakouts = [] } = useStockScores({ orderBy: "prebreakout_score", limit: 10 });
 
   // The scores above are EOD (recomputed once a day by the evening pipeline —
@@ -100,16 +123,21 @@ export default function MarketDashboard() {
     const rows = counts?.holdingRows ?? [];
     if (rows.length === 0) return null;
     const byKey = new Map((pfQuotes?.quotes ?? []).map((q) => [quoteKey(q.exchange, q.symbol), q]));
-    let invested = 0, current = 0;
+    // Rows with no resolvable live price are excluded from current/pnl
+    // (unknown, not zero) — see holdingPnl's contract in lib/market/pnl.ts.
+    let invested = 0, current = 0, knownInvested = 0, unresolved = 0;
     const dayPnls: Array<number | null> = [];
     for (const h of rows) {
       const calc = holdingPnl({ quantity: h.quantity, avgPrice: h.avg_price, quote: byKey.get(quoteKey(h.exchange, h.symbol)) });
       invested += calc.invested;
+      if (calc.current == null) { unresolved++; continue; }
+      knownInvested += calc.invested;
       current += calc.current;
       dayPnls.push(calc.todayPnl);
     }
     const day = sumNullable(dayPnls);
-    return { invested, current, pnl: current - invested, day };
+    const allUnresolved = unresolved === rows.length;
+    return { invested, current: allUnresolved ? null : current, pnl: allUnresolved ? null : current - knownInvested, day };
   }, [counts, pfQuotes]);
 
   // Watchlist pulse — intersect with already-fetched top/pre breakout scores;
@@ -198,10 +226,21 @@ export default function MarketDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   ], [liveByKey]);
 
-  const filteredBreakouts = useMemo(
-    () => topBreakouts.filter((s) => (s.breakout_score ?? 0) >= 60).slice(0, 12),
+  const breakoutSectors = useMemo(
+    () => Array.from(new Set(topBreakouts.map((s) => s.sector).filter((s): s is string => !!s))).sort(),
     [topBreakouts],
   );
+  const filteredBreakouts = useMemo(() => {
+    const { minBreakout, minRsi, minRvol, minChg, sector, limit } = bFilters;
+    return topBreakouts
+      .filter((s) => (s.breakout_score ?? 0) >= (minBreakout === "" ? 0 : minBreakout))
+      .filter((s) => minRsi === "" || (s.rsi14 ?? -Infinity) >= minRsi)
+      .filter((s) => minRvol === "" || (s.rel_volume ?? -Infinity) >= minRvol)
+      .filter((s) => minChg === "" || ((liveFor(s)?.change_pct ?? s.change_pct) ?? -Infinity) >= minChg)
+      .filter((s) => !sector || s.sector === sector)
+      .slice(0, limit || 12);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topBreakouts, bFilters, liveByKey]);
 
   const ETF_RE = /(BEES|IETF|LIQUID|ETF|GOLD|SILVER)/i;
   const filteredPreBreakouts = useMemo(
@@ -277,12 +316,13 @@ export default function MarketDashboard() {
           <div style={{ fontSize: 10, color: "var(--text-muted)", marginBottom: 6 }}>
             Score/RSI/RVol are end-of-day (recomputed once daily, same as standard technical scoring) — price & chg% update live.
           </div>
+          <BreakoutFilterBar filters={bFilters} onChange={setBFilters} sectors={breakoutSectors} />
           <DataTable
             columns={breakoutColumns}
             data={filteredBreakouts}
             onRowClick={(r) => nav(`/market/analysis/${r.symbol}`)}
             initialSort={[{ id: "breakout_score", desc: true }]}
-            emptyLabel="no breakouts ≥60"
+            emptyLabel={`no breakouts match — ${filteredBreakouts.length === 0 && topBreakouts.length > 0 ? "try loosening the filters" : "≥60 score"}`}
             emptyHint="run the data pipeline from Settings, or wait for the evening cron"
           />
         </HudPanel>
@@ -291,8 +331,8 @@ export default function MarketDashboard() {
           <HudPanel flow title="Portfolio">
             {pf ? (
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-                <StatTile label="Value" value={`₹${Math.round(pf.current).toLocaleString("en-IN")}`} to="/market/holdings" />
-                <StatTile label="Total P&L" value={`${pf.pnl >= 0 ? "+" : ""}₹${Math.round(pf.pnl).toLocaleString("en-IN")}`} tone={pf.pnl >= 0 ? "ok" : "err"} />
+                <StatTile label="Value" value={pf.current == null ? "—" : `₹${Math.round(pf.current).toLocaleString("en-IN")}`} to="/market/holdings" />
+                <StatTile label="Total P&L" value={pf.pnl == null ? "—" : `${pf.pnl >= 0 ? "+" : ""}₹${Math.round(pf.pnl).toLocaleString("en-IN")}`} tone={pf.pnl == null ? undefined : pf.pnl >= 0 ? "ok" : "err"} />
                 {pf.day != null && (
                   <StatTile label="Today" value={`${pf.day >= 0 ? "+" : ""}₹${Math.round(pf.day).toLocaleString("en-IN")}`} tone={pf.day >= 0 ? "ok" : "err"} />
                 )}
@@ -469,6 +509,59 @@ function ManageIndicesDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+
+function BreakoutFilterBar({ filters, onChange, sectors }: {
+  filters: BreakoutFilters;
+  onChange: (f: BreakoutFilters) => void;
+  sectors: string[];
+}) {
+  const set = <K extends keyof BreakoutFilters>(key: K, value: BreakoutFilters[K]) => onChange({ ...filters, [key]: value });
+  const numInput = (label: string, key: "minBreakout" | "minRsi" | "minRvol" | "minChg", width = 64) => (
+    <div>
+      <div style={labelStyle}>{label}</div>
+      <input
+        type="number"
+        value={filters[key]}
+        onChange={(e) => set(key, e.target.value === "" ? "" : Number(e.target.value))}
+        style={{ ...inputStyle, padding: "4px 6px", fontSize: 11, width }}
+      />
+    </div>
+  );
+  const isDefault = JSON.stringify(filters) === JSON.stringify(defaultBreakoutFilters);
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end", padding: "8px 0", marginBottom: 4, borderBottom: "1px solid var(--edge)" }}>
+      {numInput("Min Breakout", "minBreakout")}
+      {numInput("Min RSI", "minRsi")}
+      {numInput("Min RVol", "minRvol")}
+      {numInput("Min Chg %", "minChg")}
+      <div>
+        <div style={labelStyle}>Sector</div>
+        <select
+          value={filters.sector}
+          onChange={(e) => set("sector", e.target.value)}
+          style={{ ...inputStyle, padding: "4px 6px", fontSize: 11, width: 140 }}
+        >
+          <option value="">All</option>
+          {sectors.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </div>
+      <div>
+        <div style={labelStyle}>Rows</div>
+        <input
+          type="number"
+          value={filters.limit}
+          onChange={(e) => set("limit", e.target.value === "" ? 12 : Number(e.target.value))}
+          style={{ ...inputStyle, padding: "4px 6px", fontSize: 11, width: 56 }}
+        />
+      </div>
+      {!isDefault && (
+        <Btn size="sm" variant="ghost" onClick={() => onChange(defaultBreakoutFilters)} title="Reset filters">
+          reset
+        </Btn>
+      )}
+    </div>
+  );
+}
 
 function StatTile({ label, value, to, tone }: { label: string; value: string; to?: string; tone?: "ok" | "err" | "accent" }) {
   const color = tone === "ok" ? "var(--ok)" : tone === "err" ? "var(--danger)" : "var(--accent)";

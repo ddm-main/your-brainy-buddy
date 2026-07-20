@@ -4,7 +4,7 @@
 // writes market_alert_events. Delivery to browser push / email is done by
 // separate workers reading unfired events; this fn only detects and records.
 import { corsFor, preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
-import { requireCronSecret } from "../_shared/market/cron.ts";
+import { requireCronSecret, istTradeDate, isTradingHoliday } from "../_shared/market/cron.ts";
 import { getActiveProvider } from "../_shared/market/provider.ts";
 
 function marketOpenNow(): boolean {
@@ -21,6 +21,7 @@ Deno.serve(async (req) => {
   try {
     if (!marketOpenNow()) return jsonResponse(req, { ok: true, note: "market_closed" });
     const svc = svcClient();
+    if (await isTradingHoliday(svc, istTradeDate())) return jsonResponse(req, { ok: true, note: "market_closed_holiday" });
     const { data: alerts } = await svc.from("market_alerts")
       .select("id,user_id,symbol,exchange,alert_type,threshold,config,channel,triggered_at")
       .eq("is_active", true).is("triggered_at", null).limit(1000);

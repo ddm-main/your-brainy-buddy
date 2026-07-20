@@ -11,7 +11,7 @@ import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/
 import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { HistogramSlider } from "@/components/market/HistogramSlider";
-import { useQuotes, useSavedScreeners, useScreenerMutations } from "@/lib/market/hooks";
+import { useQuotes, useSavedScreeners, useScreenerMutations, marketOpen } from "@/lib/market/hooks";
 import { quoteKey } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
 import { useScreenerData, useScreenerSectors, useScreenerIndustries, type ScreenerRow } from "@/lib/market/screenerRun";
@@ -28,6 +28,7 @@ import {
   CAP_TIERS,
   filterMatches,
   coverageOf,
+  excludedByMissingData,
   type ActiveFilter,
   type FilterCategory,
   type FilterDef,
@@ -71,6 +72,13 @@ const COLS_STORE_KEY = "screener.visibleCols.v2";
 const OPEN_STORE_KEY = "screener.openCats.v2";
 const PAGE_SIZE_KEY  = "screener.pageSize.v2";
 const AUTO_SYNC_STORE_KEY = "screener.autoFundamentalsSyncAt.v1";
+// Change%/Price filters run against a live-quote overlay (matching what the
+// results table displays) when the market's open and the candidate set after
+// every other filter is small enough to batch-quote without hammering the
+// broker API — beyond this, fall back to the last EOD close/change% rather
+// than fetching thousands of live quotes on every filter tweak.
+const LIVE_FILTER_CANDIDATE_CAP = 300;
+const LIVE_SENSITIVE_FILTER_IDS = new Set(["change_pct", "close"]);
 
 function fmtBound(def: FilterDef, v: number | "" | undefined): string {
   if (v === undefined || v === "") return "*";
@@ -132,11 +140,51 @@ export default function Screener() {
   const { data: saved = [] } = useSavedScreeners();
   const { save, remove } = useScreenerMutations();
 
-  const filtered = useMemo(() => {
+  // Change %/Price come from the once-daily EOD pipeline (market_stock_scores),
+  // while the results table's Chg%/Price columns overlay a live quote for
+  // display — filtering on the stale value while showing the live one meant a
+  // user's range could silently disagree with what they saw on screen. Defer
+  // those two filters to a second pass, applied against the same live overlay
+  // the columns already use, once the candidate set is narrowed by everything
+  // else and small enough to batch-quote.
+  const liveSensitiveActive = useMemo(() => active.filter((af) => LIVE_SENSITIVE_FILTER_IDS.has(af.id)), [active]);
+  const marketIsOpen = marketOpen();
+  const deferLiveFilters = marketIsOpen && liveSensitiveActive.length > 0;
+
+  const preLiveFiltered = useMemo(() => {
     let out: ScreenerRow[] = rows;
-    for (const af of active) out = out.filter((r) => filterMatches(r as any, af));
+    for (const af of active) {
+      if (deferLiveFilters && LIVE_SENSITIVE_FILTER_IDS.has(af.id)) continue;
+      out = out.filter((r) => filterMatches(r as any, af));
+    }
     return out;
-  }, [rows, active]);
+  }, [rows, active, deferLiveFilters]);
+
+  const liveFilterTooManyCandidates = deferLiveFilters && preLiveFiltered.length > LIVE_FILTER_CANDIDATE_CAP;
+  const liveFilterKeys = useMemo(
+    () => (deferLiveFilters && !liveFilterTooManyCandidates ? preLiveFiltered.map((r) => `${r.exchange ?? "NSE"}:${r.symbol}`) : []),
+    [deferLiveFilters, liveFilterTooManyCandidates, preLiveFiltered],
+  );
+  const { data: liveFilterQuotesData } = useQuotes(liveFilterKeys);
+  const liveFilterQuoteByKey = useMemo(() => {
+    const m = new Map<string, { ltp: number; change_pct: number | null }>();
+    for (const q of liveFilterQuotesData?.quotes ?? []) m.set(quoteKey(q.exchange, q.symbol), q);
+    return m;
+  }, [liveFilterQuotesData]);
+
+  const filtered = useMemo(() => {
+    if (!deferLiveFilters || liveFilterTooManyCandidates) return preLiveFiltered;
+    return preLiveFiltered.filter((r) => {
+      const live = liveFilterQuoteByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
+      for (const af of liveSensitiveActive) {
+        const overlaid = af.id === "change_pct"
+          ? { ...r, change_pct: live?.change_pct ?? r.change_pct }
+          : { ...r, close: live?.ltp ?? r.close };
+        if (!filterMatches(overlaid as any, af)) return false;
+      }
+      return true;
+    });
+  }, [preLiveFiltered, deferLiveFilters, liveFilterTooManyCandidates, liveFilterQuoteByKey, liveSensitiveActive]);
 
   useEffect(() => { setPage(0); }, [active, universe, pageSize]);
 
@@ -148,7 +196,8 @@ export default function Screener() {
     try {
       const p = new URLSearchParams(window.location.search).get("f");
       if (!p) return;
-      const raw = decodeURIComponent(escape(atob(decodeURIComponent(p))));
+      const bytes = Uint8Array.from(atob(decodeURIComponent(p)), (c) => c.charCodeAt(0));
+      const raw = new TextDecoder().decode(bytes);
       const parsed = JSON.parse(raw);
       if (parsed?.universe) setUniverse(parsed.universe as UniverseId);
       if (Array.isArray(parsed?.active)) setActive(parsed.active);
@@ -158,7 +207,7 @@ export default function Screener() {
     if (!didHydrateFromUrlRef.current) return;
     try {
       const payload = JSON.stringify({ universe, active });
-      const b64 = btoa(unescape(encodeURIComponent(payload)));
+      const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(payload)));
       const url = new URL(window.location.href);
       if (active.length === 0 && universe === "all") url.searchParams.delete("f");
       else url.searchParams.set("f", b64);
@@ -236,23 +285,27 @@ export default function Screener() {
   const paged = useMemo(() => filtered.slice(pageStart, pageStart + pageSize), [filtered, pageStart, pageSize]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
 
-  // Live quotes for only the rows actually rendered on this page (bounded to
+  // Live quotes for the rows actually rendered on this page (bounded to
   // `pageSize`, never the full universe) — 1s refresh during market hours.
+  // When the live-filter pass above already fetched a superset (candidates
+  // pre-pagination), reuse that instead of firing a second overlapping batch.
   const quoteKeys = useMemo(
     () => paged.map((r) => `${r.exchange ?? "NSE"}:${r.symbol}`),
     [paged],
   );
-  const { data: liveQuotesData } = useQuotes(quoteKeys);
+  const skipPageQuoteFetch = deferLiveFilters && !liveFilterTooManyCandidates;
+  const { data: liveQuotesData } = useQuotes(skipPageQuoteFetch ? [] : quoteKeys);
   const pushTicks = useLiveTickStore((s) => s.ticks);
   const liveQuoteByKey = useMemo(() => {
     const m = new Map<string, { ltp: number; change_pct: number | null }>();
+    for (const [k, q] of liveFilterQuoteByKey) m.set(k, q);
     for (const q of liveQuotesData?.quotes ?? []) m.set(quoteKey(q.exchange, q.symbol), q);
     for (const [key, tick] of Object.entries(pushTicks)) {
       if (!isFreshTick(tick)) continue;
       m.set(key, { ltp: tick.ltp, change_pct: tick.change_pct });
     }
     return m;
-  }, [liveQuotesData, pushTicks]);
+  }, [liveFilterQuoteByKey, liveQuotesData, pushTicks]);
 
   const columns = useMemo<ColumnDef<ScreenerRow, any>[]>(() => {
     const all: Record<string, ColumnDef<ScreenerRow, any>> = {
@@ -361,8 +414,16 @@ export default function Screener() {
               ))}
             </div>
           </div>
-          <div style={{ marginLeft: "auto", fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.16em", textTransform: "uppercase" }}>
-            {isFetching ? "loading…" : `${filtered.length} of ${rows.length} stocks`}
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+            <span
+              style={{ fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-dim)", letterSpacing: "0.14em", textTransform: "uppercase", border: "1px solid var(--edge)", borderRadius: 2, padding: "2px 6px" }}
+              title="Screener universe/scoring pipeline currently covers NSE-listed stocks only — BSE-only listings aren't tracked here."
+            >
+              NSE universe
+            </span>
+            <div style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.16em", textTransform: "uppercase" }}>
+              {isFetching ? "loading…" : `${filtered.length} of ${rows.length} stocks`}
+            </div>
           </div>
         </div>
         <DataHealthStrip rows={rows} universe={universe} />
@@ -427,6 +488,23 @@ export default function Screener() {
                       const def = FILTER_BY_ID[af.id];
                       return <Chip key={af.id} tone={tone}>{def?.label ?? af.id}: {c.has}/{c.total}</Chip>;
                     })}
+                    {(() => {
+                      const excluded = excludedByMissingData(rows as any[], active);
+                      return excluded > 0 ? (
+                        <Chip tone="warn" key="excluded">{excluded} excluded — no synced data yet (not out of range)</Chip>
+                      ) : null;
+                    })()}
+                  </div>
+                )}
+                {liveSensitiveActive.length > 0 && (
+                  <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                    {!marketIsOpen ? (
+                      <Chip tone="neutral">Change%/Price filtering last EOD close — market closed</Chip>
+                    ) : liveFilterTooManyCandidates ? (
+                      <Chip tone="warn">{preLiveFiltered.length} candidates — too many for live filtering (cap {LIVE_FILTER_CANDIDATE_CAP}), using last EOD close. Narrow with another filter first.</Chip>
+                    ) : (
+                      <Chip tone="ok">Change%/Price filtering live</Chip>
+                    )}
                   </div>
                 )}
                 {/* Pagination */}
@@ -1003,6 +1081,20 @@ function DataHealthStrip({ rows }: { rows: ScreenerRow[]; universe: UniverseId }
   const techPct    = pctOf(stats.withTech, stats.techTotal);
   const anyLow = healthyPct < 80 || sectorPct < 80 || techPct < 80;
 
+  // Calendar days between the EOD pipeline's last trade_date and today (IST).
+  // >3 comfortably survives a normal weekend gap (Fri close still "fresh" on
+  // Monday) while still catching a genuinely stuck/broken pipeline.
+  const scoresLastTradeDate = pipeline?.scores_last_trade_date;
+  const scoresStaleDays = useMemo((): number | null => {
+    if (!scoresLastTradeDate) return null;
+    const d = new Date(`${scoresLastTradeDate}T00:00:00Z`);
+    if (Number.isNaN(d.getTime())) return null;
+    const nowIst = new Date(Date.now() + 5.5 * 3600_000);
+    const todayIst = Date.UTC(nowIst.getUTCFullYear(), nowIst.getUTCMonth(), nowIst.getUTCDate());
+    return Math.round((todayIst - d.getTime()) / 86_400_000);
+  }, [scoresLastTradeDate]);
+  const scoresStale = scoresStaleDays != null && scoresStaleDays > 3;
+
   if (rows.length === 0) return null;
 
   // Relative-time formatter.
@@ -1017,7 +1109,22 @@ function DataHealthStrip({ rows }: { rows: ScreenerRow[]; universe: UniverseId }
   };
 
   return (
-    <div style={{
+    <>
+      {scoresStale && (
+        <div style={{
+          marginTop: 8, padding: "8px 10px", border: "1px solid var(--danger)",
+          background: "rgba(255,95,109,0.08)", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap",
+        }}>
+          <span style={{ fontSize: 12, color: "var(--danger)" }}>
+            ⚠ EOD technical data last updated {pipeline?.scores_last_trade_date} ({scoresStaleDays}d ago) — Change %, RSI,
+            and related filters may not reflect current prices.
+          </span>
+          <Btn size="sm" variant="danger" onClick={() => trigger("market-pipeline-eod", "EOD technicals", "eod")} disabled={busy !== null}>
+            {busy === "eod" ? "syncing…" : "resync now"}
+          </Btn>
+        </div>
+      )}
+      <div style={{
       marginTop: 8, padding: "6px 10px", border: `1px solid ${anyLow ? "var(--warn, #ffb400)" : "var(--edge)"}`,
       background: anyLow ? "rgba(255,180,0,0.05)" : "rgba(53,214,237,0.03)",
       display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap",
@@ -1060,7 +1167,8 @@ function DataHealthStrip({ rows }: { rows: ScreenerRow[]; universe: UniverseId }
           document.body,
         )}
       </div>
-    </div>
+      </div>
+    </>
   );
 }
 

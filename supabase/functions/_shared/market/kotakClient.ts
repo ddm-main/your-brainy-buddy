@@ -307,6 +307,91 @@ export async function kotakDepth(
   };
 }
 
+// ---------------------------------------------------------------------
+// Order placement (AutoTrade). Endpoint/field names below are assembled
+// from Kotak's public docs (kotak-neo-api-v2's Place_Order.md + the Trade
+// API guide at kotakneo.com — both confirm POST {baseUrl}/quick/order/
+// rule/ms/place with these field names) and this file's existing "quick/
+// user/*" sibling endpoints, since Kotak does not publish a single
+// authoritative OpenAPI spec. Place Order is corroborated by two
+// independent sources; Modify/Cancel paths below follow the same "rule/ms/
+// <verb>" family by inference and are NOT independently confirmed —
+// kotakFetch() throws loudly on any non-2xx response rather than silently
+// misfiring, but verify both with a tiny manual test before relying on
+// them from an armed rule.
+// ---------------------------------------------------------------------
+export interface PlaceOrderInput {
+  exchangeSegment: string; // "nse_cm" | "bse_cm"
+  tradingSymbol: string; // e.g. "RELIANCE-EQ"
+  instrumentToken?: string;
+  transactionType: "BUY" | "SELL";
+  orderType: "MARKET" | "LIMIT";
+  product: "MIS" | "CNC";
+  quantity: number;
+  price?: number; // required for LIMIT
+}
+export interface KotakOrderResult { orderId: string; status: string; raw: any }
+
+function orderBody(input: PlaceOrderInput) {
+  return {
+    exchange_segment: input.exchangeSegment,
+    product: input.product,
+    order_type: input.orderType === "MARKET" ? "MKT" : "L",
+    price: input.orderType === "LIMIT" ? String(input.price ?? 0) : "0",
+    quantity: String(input.quantity),
+    validity: "DAY",
+    trading_symbol: input.tradingSymbol,
+    transaction_type: input.transactionType === "BUY" ? "B" : "S",
+    amo: "NO",
+    disclosed_quantity: "0",
+    market_protection: "0",
+    pf: "N",
+    trigger_price: "0",
+    ...(input.instrumentToken ? { scrip_token: input.instrumentToken } : {}),
+  };
+}
+
+export async function kotakPlaceOrder(s: KotakSettings, input: PlaceOrderInput): Promise<KotakOrderResult> {
+  const h = await sessionHeaders(s);
+  const j = await kotakFetch(`${apiBase(s)}/quick/order/rule/ms/place`, {
+    method: "POST",
+    headers: { ...h, "Content-Type": "application/json" },
+    body: JSON.stringify(orderBody(input)),
+  });
+  const orderId = String(j?.nOrdNo ?? j?.data?.nOrdNo ?? j?.orderId ?? "");
+  const status = String(j?.stat ?? j?.stCode ?? "");
+  if (!orderId) throw new KotakError("Kotak place order: no order id in response", 502, JSON.stringify(j).slice(0, 500));
+  return { orderId, status, raw: j };
+}
+
+export async function kotakCancelOrder(s: KotakSettings, orderId: string): Promise<KotakOrderResult> {
+  const h = await sessionHeaders(s);
+  const j = await kotakFetch(`${apiBase(s)}/quick/order/rule/ms/cancel`, {
+    method: "POST",
+    headers: { ...h, "Content-Type": "application/json" },
+    body: JSON.stringify({ order_id: orderId }),
+  });
+  return { orderId, status: String(j?.stat ?? j?.stCode ?? ""), raw: j };
+}
+
+export async function kotakModifyOrder(
+  s: KotakSettings,
+  orderId: string,
+  changes: Partial<Pick<PlaceOrderInput, "quantity" | "price" | "orderType">>,
+): Promise<KotakOrderResult> {
+  const h = await sessionHeaders(s);
+  const body: Record<string, string> = { order_id: orderId };
+  if (changes.quantity != null) body.quantity = String(changes.quantity);
+  if (changes.price != null) body.price = String(changes.price);
+  if (changes.orderType) body.order_type = changes.orderType === "MARKET" ? "MKT" : "L";
+  const j = await kotakFetch(`${apiBase(s)}/quick/order/rule/ms/modify`, {
+    method: "POST",
+    headers: { ...h, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { orderId, status: String(j?.stat ?? j?.stCode ?? ""), raw: j };
+}
+
 // Orders + trades (today).
 export async function kotakOrders(s: KotakSettings): Promise<any[]> {
   const h = await sessionHeaders(s);

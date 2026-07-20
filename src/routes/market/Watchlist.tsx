@@ -159,7 +159,7 @@ export default function Watchlist() {
                     return (
                       <tr key={i.id} style={{ borderBottom: "1px solid var(--edge)" }}>
                         <td style={{ padding: "6px 8px" }}>
-                          <Link to={`/market/analysis/${i.symbol}`} style={{ color: "var(--accent)", textDecoration: "none" }}>{i.symbol}</Link>
+                          <Link to={`/market/analysis/${i.symbol}?exchange=${i.exchange}`} style={{ color: "var(--accent)", textDecoration: "none" }}>{i.symbol}</Link>
                           <span style={{ color: "var(--text-dim)", marginLeft: 4, fontSize: 10 }}>{i.exchange}</span>
                         </td>
                         <td style={{ padding: "6px 8px" }}>{q ? q.ltp.toFixed(2) : "—"}</td>

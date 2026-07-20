@@ -4,6 +4,8 @@
 
 const NSE_HOME = "https://www.nseindia.com/";
 const NSE_QUOTE = "https://www.nseindia.com/api/quote-equity";
+const NSE_CORP_ACTIONS = "https://www.nseindia.com/api/corporates-corporateActions";
+const NSE_HOLIDAYS = "https://www.nseindia.com/api/holiday-master";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36";
 
 interface NseSession { cookie: string; at: number }
@@ -112,4 +114,102 @@ export async function nseEquityMeta(symbol: string): Promise<NseEquityMeta | nul
     }
   }
   return null;
+}
+
+export interface NseCorporateAction {
+  actionType: "dividend" | "split" | "bonus" | "results" | "board_meeting" | "other";
+  exDate: string | null;
+  recordDate: string | null;
+  subject: string;
+}
+
+// NSE's `purpose`/`subject` field is free text ("Dividend - Rs 5 Per Share",
+// "Bonus 1:1", "Face Value Split (Sub-Division)", "Board Meeting", "Financial
+// Results") — keyword-classify into our fixed action_type set rather than
+// storing NSE's own inconsistent taxonomy.
+function classifyAction(subject: string): NseCorporateAction["actionType"] {
+  const s = subject.toLowerCase();
+  if (s.includes("dividend")) return "dividend";
+  if (s.includes("bonus")) return "bonus";
+  if (s.includes("split") || s.includes("sub-division") || s.includes("subdivision")) return "split";
+  if (s.includes("board meeting")) return "board_meeting";
+  if (s.includes("financial result") || s.includes("results")) return "results";
+  return "other";
+}
+
+function toIsoDate(nseDate: string | null | undefined): string | null {
+  // NSE dates are typically "DD-MMM-YYYY" (e.g. "15-Aug-2026").
+  if (!nseDate) return null;
+  const d = new Date(nseDate);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+}
+
+export async function nseCorporateActions(symbol: string): Promise<NseCorporateAction[]> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const s = await session(attempt === 1);
+    if (!s) continue;
+    const url = `${NSE_CORP_ACTIONS}?index=equities&symbol=${encodeURIComponent(symbol.toUpperCase())}`;
+    try {
+      const r = await fetchWithTimeout(url, {
+        headers: {
+          "User-Agent": UA,
+          Accept: "application/json,text/plain,*/*",
+          "Accept-Language": "en-US,en;q=0.9",
+          Referer: NSE_HOME,
+          Cookie: s.cookie,
+        },
+      });
+      if (r.status === 401 || r.status === 403) { cached = null; continue; }
+      if (!r.ok) continue;
+      const body = await r.json();
+      const rows: any[] = Array.isArray(body) ? body : Array.isArray(body?.data) ? body.data : [];
+      return rows.map((row) => {
+        const subject = str(row?.subject, row?.purpose, row?.comp) ?? "";
+        return {
+          actionType: classifyAction(subject),
+          exDate: toIsoDate(str(row?.exDate, row?.exdate)),
+          recordDate: toIsoDate(str(row?.recDate, row?.recorddate)),
+          subject,
+        };
+      }).filter((a) => a.subject);
+    } catch {
+      // retry with a fresh NSE cookie once
+    }
+  }
+  return [];
+}
+
+export interface NseHoliday { date: string; description: string }
+
+export async function nseHolidays(): Promise<NseHoliday[]> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const s = await session(attempt === 1);
+    if (!s) continue;
+    const url = `${NSE_HOLIDAYS}?type=trading`;
+    try {
+      const r = await fetchWithTimeout(url, {
+        headers: {
+          "User-Agent": UA,
+          Accept: "application/json,text/plain,*/*",
+          "Accept-Language": "en-US,en;q=0.9",
+          Referer: NSE_HOME,
+          Cookie: s.cookie,
+        },
+      });
+      if (r.status === 401 || r.status === 403) { cached = null; continue; }
+      if (!r.ok) continue;
+      const body = await r.json();
+      // Response shape groups by segment, e.g. { CM: [{tradingDate, description}, ...], ... }
+      const rows: any[] = Array.isArray(body?.CM) ? body.CM : Array.isArray(body?.FO) ? body.FO : [];
+      return rows
+        .map((row) => ({
+          date: toIsoDate(str(row?.tradingDate, row?.date)),
+          description: str(row?.description, row?.holidayDate) ?? "Trading holiday",
+        }))
+        .filter((h): h is NseHoliday => h.date != null);
+    } catch {
+      // retry with a fresh NSE cookie once
+    }
+  }
+  return [];
 }

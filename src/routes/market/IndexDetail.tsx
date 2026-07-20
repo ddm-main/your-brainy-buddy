@@ -56,7 +56,7 @@ export default function IndexDetail() {
   const updateStudy = useCallback((u: Study) => setStudies((s) => s.map((x) => (x.id === u.id ? u : x))), []);
   const editing = studies.find((s) => s.id === editingId) ?? null;
 
-  const { data: candlesData, isLoading: candlesLoading } = useCandles(symbol, tf);
+  const { data: candlesData, isLoading: candlesLoading } = useCandles(symbol, tf, "NSE");
   const candles: CandleDto[] = candlesData?.candles ?? [];
 
   const chgPct = quote?.change_pct ?? null;
@@ -162,7 +162,10 @@ export default function IndexDetail() {
               settings={settings}
               onSettings={(u) => setSettings(u)}
               tvMode={tvMode}
-              onTvMode={(v) => tvSupported && setTvMode(v)}
+              onTvMode={(v) => {
+                if (v && !tvSupported) { notify("TradingView widget unavailable for NSE indices — showing native chart"); return; }
+                setTvMode(v);
+              }}
               onFullscreen={() => setFs(true)}
               onAlert={() => nav(`/market/alerts?symbol=${symbol}`)}
               onScreenshot={handleScreenshot}

@@ -3,6 +3,10 @@
   --bg-deep: #0a1929;
   --bg-panel: rgba(14, 30, 52, 0.55);
   --bg-panel-solid: #0d1f36;
+  /* Solid opaque backdrop for modals/dialogs — several use `var(--bg)`
+     directly and need a fully opaque fill so page content behind them
+     doesn't bleed/overlap through. */
+  --bg: var(--bg-void);
   --edge: rgba(127, 233, 255, 0.18);
   --edge-strong: rgba(127, 233, 255, 0.4);
   --edge-hot: #35d6ed;
@@ -308,8 +312,8 @@ select:autofill {
   min-height: 0;
   overflow: auto;
 }
-.home-cell { display: flex; min-height: 0; }
-.home-cell > * { flex: 1; min-height: 0; }
+.home-cell { display: flex; min-height: 0; min-width: 0; }
+.home-cell > * { flex: 1; min-height: 0; min-width: 0; }
 .home-col-left { grid-column: 1; }
 .home-col-right { grid-column: 3; }
 .home-row-1 { grid-row: 1; }
@@ -320,6 +324,7 @@ select:autofill {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
   gap: 10px;
 }
 .home-core {
@@ -379,6 +384,7 @@ select:autofill {
 .home-core-dock {
   position: relative;
   flex-shrink: 0;
+  min-width: 0;
   border: 1px solid var(--edge);
   background: var(--panel-tint-strong);
   backdrop-filter: blur(20px);
@@ -392,8 +398,8 @@ select:autofill {
   opacity: 0.6;
 }
 
-.voice-dock { display: flex; flex-direction: column; gap: 8px; }
-.voice-dock-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.voice-dock { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.voice-dock-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .voice-dock-row-secondary { gap: 6px; }
 .voice-mic {
   width: 36px; height: 36px; border-radius: 50%;
@@ -1477,11 +1483,6 @@ textarea.hud-input:focus {
   border-left-color: var(--jarvis-amber);
   background: linear-gradient(90deg, rgba(255,138,26,0.08), transparent 80%);
 }
-
-/* Split grid layouts */
-.split-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; height: 100%; min-height: 0; }
-.split-3 { display: grid; grid-template-columns: 220px 1fr 1.4fr; gap: 12px; height: 100%; min-height: 0; }
-.split-detail { display: grid; grid-template-columns: 1fr 380px; gap: 12px; height: 100%; min-height: 0; }
 
 /* Small caret indicator ">" for active rows */
 .hud-caret {

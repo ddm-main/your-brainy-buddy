@@ -122,24 +122,32 @@ export default function Holdings() {
   };
 
   const totals = useMemo(() => {
-    let invested = 0, current = 0;
+    // A holding with no resolvable live price is excluded from current/P&L
+    // (unknown, not zero) — its invested capital is excluded too so the two
+    // stay comparable, rather than quietly understating P&L against the full
+    // invested amount.
+    let invested = 0, current = 0, knownInvested = 0, unresolved = 0;
     const dayPnls: Array<number | null> = [];
     for (const h of rows) {
       const calc = holdingPnl({ quantity: h.quantity, avgPrice: h.avg_price, quote: quotes[quoteKey(h.exchange, h.symbol)] });
       invested += calc.invested;
+      if (calc.current == null) { unresolved++; continue; }
+      knownInvested += calc.invested;
       current += calc.current;
       dayPnls.push(calc.todayPnl);
     }
     const dayPnl = sumNullable(dayPnls);
     const prevValue = dayPnl == null ? null : current - dayPnl;
     const dayPnlPct = dayPnl == null || !prevValue ? null : (dayPnl / prevValue) * 100;
-    return { invested, current, pnl: current - invested, pnlPct: invested ? ((current - invested) / invested) * 100 : 0, dayPnl, dayPnlPct };
+    const pnl = unresolved === rows.length ? null : current - knownInvested;
+    const pnlPct = pnl == null ? null : knownInvested ? (pnl / knownInvested) * 100 : 0;
+    return { invested, current: unresolved === rows.length ? null : current, pnl, pnlPct, dayPnl, dayPnlPct, unresolved };
   }, [rows, quotes]);
 
   const allocationInput = useMemo(
     () => rows.map((h) => ({
       symbol: h.symbol,
-      currentValue: holdingPnl({ quantity: h.quantity, avgPrice: h.avg_price, quote: quotes[quoteKey(h.exchange, h.symbol)] }).current,
+      currentValue: holdingPnl({ quantity: h.quantity, avgPrice: h.avg_price, quote: quotes[quoteKey(h.exchange, h.symbol)] }).current ?? 0,
     })),
     [rows, quotes],
   );
@@ -160,9 +168,9 @@ export default function Holdings() {
       }>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 8 }}>
           <Stat label="Invested" value={inr(totals.invested)} />
-          <Stat label="Current Value" value={inr(totals.current)} />
-          <Stat label="Total P&L" value={inr(totals.pnl)} tone={totals.pnl >= 0 ? "ok" : "err"} />
-          <Stat label="Return %" value={`${totals.pnlPct.toFixed(2)}%`} tone={totals.pnlPct >= 0 ? "ok" : "err"} />
+          <Stat label="Current Value" value={totals.current == null ? "—" : inr(totals.current)} />
+          <Stat label="Total P&L" value={totals.pnl == null ? "—" : inr(totals.pnl)} tone={totals.pnl == null ? undefined : totals.pnl >= 0 ? "ok" : "err"} />
+          <Stat label="Return %" value={totals.pnlPct == null ? "—" : `${totals.pnlPct.toFixed(2)}%`} tone={totals.pnlPct == null ? undefined : totals.pnlPct >= 0 ? "ok" : "err"} />
           <Stat
             label="Today's P&L"
             value={totals.dayPnl == null ? "—" : `${inr(totals.dayPnl)}${totals.dayPnlPct != null ? ` (${totals.dayPnlPct >= 0 ? "+" : ""}${totals.dayPnlPct.toFixed(2)}%)` : ""}`}
@@ -222,21 +230,21 @@ export default function Holdings() {
                 return (
                   <tr key={h.id} style={{ borderBottom: "1px solid var(--edge)" }}>
                     <td style={td}>
-                      <Link to={`/market/analysis/${h.symbol}`} style={{ color: "var(--accent)", textDecoration: "none" }}>{h.symbol}</Link>
+                      <Link to={`/market/analysis/${h.symbol}?exchange=${h.exchange}`} style={{ color: "var(--accent)", textDecoration: "none" }}>{h.symbol}</Link>
                       <span style={{ color: "var(--text-dim)", marginLeft: 4, fontSize: 10 }}>{h.exchange}</span>
                     </td>
                     <td style={td}>{h.quantity}</td>
                     <td style={td}>{Number(h.avg_price).toFixed(2)}</td>
-                    <td style={td}>{q?.ltp ? calc.ltp.toFixed(2) : "—"}</td>
+                    <td style={td}>{calc.ltp != null ? calc.ltp.toFixed(2) : "—"}</td>
                     <td style={td}>{inr(calc.invested)}</td>
-                    <td style={td}>{inr(calc.current)}</td>
-                    <td style={{ ...td, color: calc.totalPnl >= 0 ? "var(--ok)" : "var(--danger)" }}>{inr(calc.totalPnl)}</td>
-                    <td style={{ ...td, color: calc.totalPnlPct >= 0 ? "var(--ok)" : "var(--danger)" }}>{calc.totalPnlPct.toFixed(2)}%</td>
+                    <td style={td}>{calc.current == null ? "—" : inr(calc.current)}</td>
+                    <td style={{ ...td, color: calc.totalPnl == null ? "var(--text-dim)" : calc.totalPnl >= 0 ? "var(--ok)" : "var(--danger)" }}>{calc.totalPnl == null ? "—" : inr(calc.totalPnl)}</td>
+                    <td style={{ ...td, color: calc.totalPnlPct == null ? "var(--text-dim)" : calc.totalPnlPct >= 0 ? "var(--ok)" : "var(--danger)" }}>{calc.totalPnlPct == null ? "—" : `${calc.totalPnlPct.toFixed(2)}%`}</td>
                     <td style={{ ...td, color: (calc.todayPnl ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }} title={q?.stale ? "Quote is stale; today's P&L unavailable" : undefined}>{calc.todayPnl == null ? "—" : inr(calc.todayPnl)}</td>
                     <td style={{ ...td, color: (calc.todayPnlPct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>{calc.todayPnlPct == null ? "—" : `${calc.todayPnlPct.toFixed(2)}%`}</td>
                     <td style={td} title="Approximate — assumes a single lump-sum buy on Buy Date, not a true XIRR">
                       {(() => {
-                        const ann = approxAnnualizedReturnPct(calc.totalPnlPct, h.buy_date);
+                        const ann = calc.totalPnlPct == null ? null : approxAnnualizedReturnPct(calc.totalPnlPct, h.buy_date);
                         return ann == null ? "—" : `${ann >= 0 ? "+" : ""}${ann.toFixed(1)}%`;
                       })()}
                     </td>

@@ -9,11 +9,6 @@ export function quoteKey(exchange: string, symbol: string): string {
   return `${exchange.trim().toUpperCase()}:${symbol.trim().toUpperCase()}`;
 }
 
-export function getQuoteLtp(quote: Quote | undefined, fallback: number): number {
-  const ltp = finite(quote?.ltp);
-  return ltp != null && ltp > 0 ? ltp : fallback;
-}
-
 export function getTrustedDayChange(quote: Quote | undefined): number | null {
   if (!quote || quote.stale) return null;
   const ltp = finite(quote.ltp);
@@ -24,11 +19,19 @@ export function getTrustedDayChange(quote: Quote | undefined): number | null {
   return finite(quote.day_change);
 }
 
+// `quote` missing/invalid means "we don't know the current price" — NOT "the
+// price equals avgPrice." Returning 0 P&L in that case would silently render
+// as a flat/break-even position instead of "data unavailable" (matches how
+// positionPnl() already treats an unresolvable quote).
 export function holdingPnl(input: { quantity: number; avgPrice: number; quote?: Quote }) {
   const quantity = finite(input.quantity) ?? 0;
   const avgPrice = finite(input.avgPrice) ?? 0;
-  const ltp = getQuoteLtp(input.quote, avgPrice);
   const invested = avgPrice * quantity;
+  const quoteLtp = finite(input.quote?.ltp);
+  if (quoteLtp == null || quoteLtp <= 0) {
+    return { ltp: null, invested, current: null, totalPnl: null, totalPnlPct: null, todayPnl: null, todayPnlPct: null };
+  }
+  const ltp = quoteLtp;
   const current = ltp * quantity;
   const totalPnl = current - invested;
   const totalPnlPct = invested ? (totalPnl / invested) * 100 : 0;

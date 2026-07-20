@@ -52,8 +52,10 @@ export default function Positions() {
       return;
     }
     const { data: session } = await supabase.auth.getSession();
+    const userId = session.session?.user.id;
+    if (!userId) { push("Sign in required", "err"); return; }
     const { error } = await supabase.from("market_positions").insert({
-      user_id: session.session?.user.id,
+      user_id: userId,
       symbol: form.symbol.trim().toUpperCase(),
       exchange: form.exchange,
       side: form.side,
@@ -118,7 +120,7 @@ export default function Positions() {
       accessorKey: "symbol",
       cell: ({ row }) => (
         <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-          <Link to={`/market/analysis/${row.original.symbol}`} style={{ color: "var(--accent)", textDecoration: "none" }}>
+          <Link to={`/market/analysis/${row.original.symbol}?exchange=${row.original.exchange}`} style={{ color: "var(--accent)", textDecoration: "none" }}>
             {row.original.symbol}
           </Link>
           <Chip tone={row.original.side === "long" ? "ok" : "warn"}>{row.original.side}</Chip>

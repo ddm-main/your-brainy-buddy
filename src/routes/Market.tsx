@@ -19,6 +19,7 @@ const StockTable = lazy(() => import("@/routes/market/StockTable"));
 const Planner = lazy(() => import("@/routes/market/Planner"));
 const AIEngine = lazy(() => import("@/routes/market/AIEngine"));
 const IndexDetail = lazy(() => import("@/routes/market/IndexDetail"));
+const AutoTrade = lazy(() => import("@/routes/market/AutoTrade"));
 
 
 type Sub = { to: string; label: string };
@@ -49,6 +50,8 @@ const GROUPS: Group[] = [
       { to: "/market/watchlist", label: "Watchlists" },
       { to: "/market/alerts", label: "Alerts" },
     ] },
+  { key: "autotrade", label: "AutoTrade", to: "/market/autotrade",
+    match: (p) => /^\/market\/autotrade/.test(p), subs: [] },
   { key: "settings", label: "Config", to: "/market/settings",
     match: (p) => /^\/market\/settings/.test(p), subs: [] },
 ];
@@ -146,6 +149,7 @@ export default function Market() {
               <Route path="ai/:symbol" element={<AIEngine />} />
               <Route path="stocks" element={<StockTable />} />
               <Route path="index/:symbol" element={<IndexDetail />} />
+              <Route path="autotrade" element={<AutoTrade />} />
               <Route path="settings" element={<MarketSettings />} />
               <Route path="*" element={<Navigate to="/market" replace />} />
             </Routes>

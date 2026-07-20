@@ -131,6 +131,46 @@ export async function yahooChart(
   return out;
 }
 
+export interface YahooNewsItem {
+  headline: string;
+  url: string | null;
+  source: string | null;
+  published_at: string | null;
+}
+
+// Yahoo's public RSS headline feed — no crumb/cookie auth required, unlike
+// the v7/finance/quote JSON endpoints (see the comment on yahooQuote above
+// and yahooCrumb.ts's own notes on how fragile that flow is). Simple
+// regex extraction rather than pulling in an XML/DOM dependency for what's
+// a small, predictable feed shape.
+export async function yahooNews(yahooSymbol: string): Promise<YahooNewsItem[]> {
+  const url = `https://feeds.finance.yahoo.com/rss/2.0/headline?s=${encodeURIComponent(yahooSymbol)}&region=IN&lang=en-IN`;
+  const r = await fetch(url, { headers: UA });
+  if (!r.ok) return [];
+  const xml = await r.text();
+  const items: YahooNewsItem[] = [];
+  const itemRe = /<item>([\s\S]*?)<\/item>/g;
+  const tag = (block: string, name: string): string | null => {
+    const m = block.match(new RegExp(`<${name}>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?<\\/${name}>`));
+    return m ? m[1].trim() : null;
+  };
+  let m: RegExpExecArray | null;
+  while ((m = itemRe.exec(xml)) !== null) {
+    const block = m[1];
+    const headline = tag(block, "title");
+    if (!headline) continue;
+    const pubDateRaw = tag(block, "pubDate");
+    const publishedAt = pubDateRaw ? new Date(pubDateRaw) : null;
+    items.push({
+      headline,
+      url: tag(block, "link"),
+      source: tag(block, "source") ?? "Yahoo Finance",
+      published_at: publishedAt && !Number.isNaN(publishedAt.getTime()) ? publishedAt.toISOString() : null,
+    });
+  }
+  return items;
+}
+
 // Small retry helper for 429s
 export async function yahooChartRetry(
   yahooSymbol: string,

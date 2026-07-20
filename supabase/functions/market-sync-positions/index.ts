@@ -18,11 +18,14 @@ Deno.serve(async (req) => {
     }
     const positions = await provider.getPositions();
 
-    // Replace open synced rows (journal_notes tag marks broker-synced entries)
+    // Replace open synced rows. Matched on is_broker_synced (a dedicated flag)
+    // rather than journal_notes text equality — a manually-journaled position
+    // whose note happened to be the literal string "kotak_sync" used to be at
+    // risk of silent deletion on the next sync.
     await svc.from("market_positions")
       .delete()
       .eq("user_id", auth.userId)
-      .eq("journal_notes", SYNC_MARK)
+      .eq("is_broker_synced", true)
       .is("closed_at", null);
 
     let inserted = 0;
@@ -35,6 +38,7 @@ Deno.serve(async (req) => {
         quantity: p.quantity,
         entry_price: p.entry_price,
         journal_notes: SYNC_MARK,
+        is_broker_synced: true,
       });
       if (!error) inserted++;
     }

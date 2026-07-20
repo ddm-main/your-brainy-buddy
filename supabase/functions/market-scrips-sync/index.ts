@@ -1,7 +1,8 @@
 // market-scrips-sync — populate market_stocks from the Kotak scrip master
-// (nse_cm CSV, ~20 MB, stream-parsed) and flag the pipeline universe
-// (NIFTY 500 ∪ user holdings/watchlist/positions symbols).
+// (nse_cm + bse_cm CSVs, ~20 MB each, stream-parsed) and flag the pipeline
+// universe (NIFTY 500 ∪ user holdings/watchlist/positions symbols).
 // Invoked by weekly cron or manually (cron secret or authenticated user).
+import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
 import { KOTAK_SETTINGS_COLS, type KotakSettings, kotakScripFilePaths } from "../_shared/market/kotakClient.ts";
@@ -37,6 +38,65 @@ async function* lines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string
   if (buf) yield buf;
 }
 
+// Stream-parse one Kotak scrip-master CSV (nse_cm or bse_cm) and upsert every
+// EQ/BE row for the given exchange. Shared by both exchange branches below —
+// same column layout, only the exchange tag and Yahoo suffix differ.
+async function syncScripFile(
+  svc: SupabaseClient,
+  url: string,
+  exchange: "NSE" | "BSE",
+  yahooSuffix: string,
+): Promise<{ parsed: number; upserted: number }> {
+  const r = await fetch(url);
+  if (!r.ok || !r.body) throw new Error(`${exchange} scrip master fetch failed: HTTP ${r.status}`);
+
+  let header: string[] | null = null;
+  let col: Record<string, number> = {};
+  let batch: ScripRow[] = [];
+  let parsed = 0;
+  let upserted = 0;
+
+  const flush = async () => {
+    if (batch.length === 0) return;
+    const { error } = await svc.from("market_stocks").upsert(batch, { onConflict: "symbol,exchange" });
+    if (!error) upserted += batch.length;
+    batch = [];
+  };
+
+  for await (const line of lines(r.body)) {
+    if (!line.trim()) continue;
+    const cells = line.split(",");
+    if (!header) {
+      header = cells.map((c) => c.trim());
+      col = Object.fromEntries(header.map((h, i) => [h, i]));
+      continue;
+    }
+    parsed++;
+    const series = cells[col["pSeries"] ?? col["pGroup"]]?.trim() ?? "";
+    if (series !== "EQ" && series !== "BE") continue;
+    const trd = cells[col["pTrdSymbol"]]?.trim() ?? "";
+    const symbol = trd.replace(/-(EQ|BE)$/, "");
+    const token = cells[col["pSymbol"]]?.trim();
+    if (!symbol || !token) continue;
+    batch.push({
+      symbol,
+      exchange,
+      token,
+      company_name: cells[col["pSymbolName"]]?.trim() || cells[col["pDesc"]]?.trim() || null,
+      series,
+      isin: cells[col["pISIN"]]?.trim() || null,
+      lot_size: parseInt(cells[col["lLotSize"]] ?? "") || null,
+      tick_size: parseFloat(cells[col["dTickSize"]] ?? "") || null,
+      instrument_type: cells[col["pInstType"]]?.trim() || null,
+      yahoo_symbol: `${symbol}${yahooSuffix}`,
+      is_active: true,
+    });
+    if (batch.length >= 500) await flush();
+  }
+  await flush();
+  return { parsed, upserted };
+}
+
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
   try {
@@ -59,57 +119,34 @@ Deno.serve(async (req) => {
 
     let parsed = 0;
     let upserted = 0;
+    let bseParsed = 0;
+    let bseUpserted = 0;
+    let bseError: string | null = null;
 
     if (settings) {
       const paths = await kotakScripFilePaths(settings);
       const nseCm = paths.find((p) => /nse_cm/i.test(p) && p.endsWith(".csv"));
       if (!nseCm) return errorResponse(req, "nse_cm scrip file not found in Kotak file paths", 502);
+      const nse = await syncScripFile(svc, nseCm, "NSE", ".NS");
+      parsed = nse.parsed;
+      upserted = nse.upserted;
 
-      const r = await fetch(nseCm);
-      if (!r.ok || !r.body) return errorResponse(req, `scrip master fetch failed: HTTP ${r.status}`, 502);
-
-      let header: string[] | null = null;
-      let col: Record<string, number> = {};
-      let batch: ScripRow[] = [];
-
-      const flush = async () => {
-        if (batch.length === 0) return;
-        const { error } = await svc.from("market_stocks").upsert(batch, { onConflict: "symbol,exchange" });
-        if (!error) upserted += batch.length;
-        batch = [];
-      };
-
-      for await (const line of lines(r.body)) {
-        if (!line.trim()) continue;
-        const cells = line.split(",");
-        if (!header) {
-          header = cells.map((c) => c.trim());
-          col = Object.fromEntries(header.map((h, i) => [h, i]));
-          continue;
+      // BSE-only listings (never cross-listed on NSE) were previously never
+      // ingested at all — the universe was structurally NSE-only. Best-effort:
+      // a missing bse_cm path or a fetch failure doesn't fail the whole sync,
+      // since NSE coverage is the primary, already-working path.
+      try {
+        const bseCm = paths.find((p) => /bse_cm/i.test(p) && p.endsWith(".csv"));
+        if (bseCm) {
+          const bse = await syncScripFile(svc, bseCm, "BSE", ".BO");
+          bseParsed = bse.parsed;
+          bseUpserted = bse.upserted;
+        } else {
+          bseError = "bse_cm scrip file not found in Kotak file paths";
         }
-        parsed++;
-        const series = cells[col["pSeries"] ?? col["pGroup"]]?.trim() ?? "";
-        if (series !== "EQ" && series !== "BE") continue;
-        const trd = cells[col["pTrdSymbol"]]?.trim() ?? "";
-        const symbol = trd.replace(/-(EQ|BE)$/, "");
-        const token = cells[col["pSymbol"]]?.trim();
-        if (!symbol || !token) continue;
-        batch.push({
-          symbol,
-          exchange: "NSE",
-          token,
-          company_name: cells[col["pSymbolName"]]?.trim() || cells[col["pDesc"]]?.trim() || null,
-          series,
-          isin: cells[col["pISIN"]]?.trim() || null,
-          lot_size: parseInt(cells[col["lLotSize"]] ?? "") || null,
-          tick_size: parseFloat(cells[col["dTickSize"]] ?? "") || null,
-          instrument_type: cells[col["pInstType"]]?.trim() || null,
-          yahoo_symbol: `${symbol}.NS`,
-          is_active: true,
-        });
-        if (batch.length >= 500) await flush();
+      } catch (e) {
+        bseError = e instanceof Error ? e.message : String(e);
       }
-      await flush();
     }
 
     // Universe flags: NIFTY 500 (or fallback list) ∪ user symbols
@@ -152,6 +189,9 @@ Deno.serve(async (req) => {
       ok: true,
       scrips_parsed: parsed,
       scrips_upserted: upserted,
+      bse_scrips_parsed: bseParsed,
+      bse_scrips_upserted: bseUpserted,
+      bse_error: bseError,
       universe_size: universe.length,
       nifty500_source: n500.length > 50 ? "nse_archives" : "fallback_static",
       kotak_master_used: !!settings,

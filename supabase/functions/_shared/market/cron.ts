@@ -45,3 +45,18 @@ export function istTradeDate(d = new Date()): string {
   const ist = new Date(d.getTime() + 5.5 * 3600_000);
   return ist.toISOString().slice(0, 10);
 }
+
+// Checked only where a wrong "market's open" call has real consequences —
+// alerts firing on stale data, or AutoTrade placing an order — on an
+// exchange holiday. Client-side polling-cadence checks (marketOpen() in
+// src/lib/market/hooks.ts) stay calendar-only: worst case there is a few
+// wasted polls on a holiday, not a wrong trade or a wrong alert.
+export async function isTradingHoliday(
+  svc: { from: (t: string) => any },
+  dateStr: string,
+  exchange = "NSE",
+): Promise<boolean> {
+  const { data } = await svc.from("market_holidays")
+    .select("id").eq("holiday_date", dateStr).eq("exchange", exchange).maybeSingle();
+  return !!data;
+}

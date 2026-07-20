@@ -2,7 +2,7 @@
 // Chart fills the viewport height; indicators are computed client-side in
 // CandleChart, so toggles work even before the EOD pipeline has run.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Navigate, useNavigate, useParams } from "react-router-dom";
+import { Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
@@ -12,7 +12,7 @@ import { ChartToolbar, DEFAULT_SETTINGS, type ChartSettings } from "@/components
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
 import { DEFAULT_STUDIES, makeStudy, normalizeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
 import { fmtNum, fmtInt, fmtPct } from "@/components/hud/DataTable";
-import { useBreadth, useCandles, useDepth, useFundamentals, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores } from "@/lib/market/hooks";
+import { useBreadth, useCandles, useCorporateActions, useDepth, useFundamentals, useMarketNews, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores, useSyncNewsAndActions } from "@/lib/market/hooks";
 import { computeLiveScore } from "@/lib/market/liveSnapshot";
 import { usePreferLiveTick } from "@/lib/market/useRealtimeTicks";
 import { getTrustedDayChange } from "@/lib/market/pnl";
@@ -63,6 +63,15 @@ function loadState(): Persisted {
 export default function Analysis() {
   const { symbol } = useParams();
   const nav = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const exchange = (searchParams.get("exchange") ?? "NSE").toUpperCase() === "BSE" ? "BSE" : "NSE";
+  const setExchange = (ex: "NSE" | "BSE") => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (ex === "NSE") next.delete("exchange"); else next.set("exchange", ex);
+      return next;
+    }, { replace: true });
+  };
   const initial = useMemo(loadState, []);
   const [tf, setTf] = useState(initial.tf);
   const [range, setRange] = useState(initial.range);
@@ -137,30 +146,33 @@ export default function Analysis() {
   const handleSaveLayout = useCallback(() => {
     notify("Chart layout saved");
   }, [notify]);
-  const { data: candleData, isLoading, error } = useCandles(sym, tf);
+  const { data: candleData, isLoading, error } = useCandles(sym, tf, exchange);
 
   const { data: scores = [] } = useStockScores({ symbol: sym, limit: 1 });
   const score = scores[0];
-  const { data: quotesData } = useQuotes(sym ? [`NSE:${sym}`] : []);
+  const { data: quotesData } = useQuotes(sym ? [`${exchange}:${sym}`] : []);
   const restQuote = quotesData?.quotes?.[0];
-  const preferred = usePreferLiveTick(sym ? `NSE:${sym}` : null, restQuote ? { ltp: restQuote.ltp, change_pct: restQuote.change_pct } : null);
+  const preferred = usePreferLiveTick(sym ? `${exchange}:${sym}` : null, restQuote ? { ltp: restQuote.ltp, change_pct: restQuote.change_pct } : null);
   // `quote` keeps its REST shape (source/stale/day_change) for the rest of the
   // page; only ltp/change_pct are overridden when a fresher push tick exists.
   const quote = restQuote && preferred ? { ...restQuote, ltp: preferred.ltp, change_pct: preferred.change_pct } : restQuote;
   const { data: breadth } = useBreadth();
   // Daily candles independent of the chart's selected timeframe (`tf` may be
   // intraday) — this is what the live technical recompute always uses.
-  const { data: dailyCandleData } = useCandles(sym, "1D");
+  const { data: dailyCandleData } = useCandles(sym, "1D", exchange);
   const liveScore = useMemo(
     () => computeLiveScore(dailyCandleData?.candles, quote, score, breadth),
     [dailyCandleData, quote, score, breadth],
   );
   const { data: sectors = [] } = useSectorStrength();
-  const { data: depth } = useDepth(sym);
-  const { data: fundData } = useFundamentals(sym);
+  const { data: depth } = useDepth(sym, exchange);
+  const { data: fundData } = useFundamentals(sym, exchange);
   const fund = fundData?.fundamentals as any | undefined;
   const { data: insightData, isLoading: insightLoading, error: insightError } = useStockInsight(sym);
   const refreshInsight = useRefreshStockInsight();
+  const { data: news = [] } = useMarketNews(sym, exchange);
+  const { data: corpActions = [] } = useCorporateActions(sym, exchange);
+  const syncNews = useSyncNewsAndActions();
   const insight = insightData?.payload;
   const sectorRow = useMemo(
     () => sectors.find((s) => s.sector === score?.sector),
@@ -197,6 +209,15 @@ export default function Analysis() {
           index="MK.ANL"
           live={isLoading ? "warn" : "ok"}
           style={{ flex: 1, minHeight: 0 }}
+          actions={
+            <div style={{ display: "flex", gap: 4 }}>
+              {(["NSE", "BSE"] as const).map((ex) => (
+                <Btn key={ex} size="sm" variant={exchange === ex ? "primary" : "ghost"} onClick={() => setExchange(ex)}>
+                  {ex}
+                </Btn>
+              ))}
+            </div>
+          }
         >
           <FullscreenShell fullscreen={fs} onExit={() => setFs(false)} title={`${sym} · ${tf}`}>
             <ChartToolbar
@@ -437,6 +458,45 @@ export default function Analysis() {
             {fund.industry && <Row label="Industry">{fund.industry}</Row>}
           </HudPanel>
         )}
+
+        {/* News & Corporate Actions — synced on demand, not on a universe-wide cron */}
+        <HudPanel flow title="News & Corporate Actions" index="A8"
+          actions={
+            <Btn size="sm" variant="ghost" disabled={!sym || syncNews.isPending}
+              onClick={() => sym && syncNews.mutate({ symbol: sym, exchange })}
+              aria-label="sync news and corporate actions">
+              <RefreshCw size={11} />
+            </Btn>
+          }>
+          {corpActions.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div className="hud-label" style={{ marginBottom: 4 }}>Corporate Actions</div>
+              {corpActions.map((a) => (
+                <Row key={a.id} label={a.action_type} mono>
+                  {a.ex_date ? new Date(a.ex_date).toLocaleDateString([], { day: "2-digit", month: "short", year: "numeric" }) : "—"}
+                  {a.details?.subject && <span style={{ color: "var(--text-dim)", marginLeft: 6, fontSize: 10 }}>{a.details.subject}</span>}
+                </Row>
+              ))}
+            </div>
+          )}
+          {news.length === 0 ? (
+            <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              {syncNews.isPending ? "syncing…" : "no news synced yet — press refresh"}
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {news.map((n) => (
+                <a key={n.id} href={n.url ?? undefined} target="_blank" rel="noreferrer"
+                  style={{ fontSize: 11, color: "var(--text)", textDecoration: "none", display: "block" }}>
+                  <div>{n.headline}</div>
+                  <div style={{ color: "var(--text-dim)", fontSize: 10, marginTop: 2 }}>
+                    {n.source ?? "Yahoo Finance"}{n.published_at ? ` · ${new Date(n.published_at).toLocaleDateString([], { day: "2-digit", month: "short" })}` : ""}
+                  </div>
+                </a>
+              ))}
+            </div>
+          )}
+        </HudPanel>
       </div>
     </div>
   );
