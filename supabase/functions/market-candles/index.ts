@@ -6,9 +6,16 @@ import { yahooChartRetry, toYahooSymbol } from "../_shared/market/yahooClient.ts
 import { getActiveProvider } from "../_shared/market/provider.ts";
 
 const INTRADAY: Record<string, { interval: string; range: string }> = {
+  "1m": { interval: "1m", range: "7d" },
+  "3m": { interval: "2m", range: "7d" },
   "5m": { interval: "5m", range: "5d" },
   "15m": { interval: "15m", range: "30d" },
-  "1h": { interval: "1h", range: "60d" },
+  "30m": { interval: "30m", range: "30d" },
+  "1h": { interval: "60m", range: "60d" },
+  "2h": { interval: "60m", range: "60d" },
+  "4h": { interval: "60m", range: "60d" },
+  "1W": { interval: "1wk", range: "5y" },
+  "1M": { interval: "1mo", range: "10y" },
 };
 
 Deno.serve(async (req) => {
