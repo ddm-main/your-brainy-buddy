@@ -50,13 +50,12 @@ export function HudPanel({
   return (
     <section
       className={cn("hud-panel mounted", className)}
-      data-flow={flow ? "true" : undefined}
       style={{
         display: "flex",
         flexDirection: "column",
         flex: "0 0 auto",
-        // Keep decorative ::before/::after shimmer clipped even in flow mode;
-        // content that needs to escape uses the body which stays visible.
+        // Keep decorative ::before/::after shimmer clipped; content that
+        // needs to escape uses the body, which stays visible.
         overflow: "hidden",
         ...(style || {}),
       }}
@@ -94,12 +93,16 @@ export function HudPanel({
       <div
         className={cn("relative", bodyClass)}
         style={{
-          flex: flow ? "0 0 auto" : "1 1 0",
-          minHeight: flow ? undefined : 0,
+          // `1 1 auto` makes the body grow with its content in a normal
+          // content-flow column AND fill a fixed-height parent section
+          // (e.g. Home's `.home-cell > *` flex:1 override) — so we no
+          // longer need per-callsite `flow`/fill toggles.
+          flex: "1 1 auto",
+          minHeight: 0,
           padding: 12,
           display: "flex",
           flexDirection: "column",
-          overflow: flow ? "visible" : "hidden",
+          overflow: "visible",
         }}
       >
         {children}
