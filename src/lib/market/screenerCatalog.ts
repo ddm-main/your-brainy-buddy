@@ -19,17 +19,21 @@ export type FilterCategory =
  *   - all       : every active row (structural columns)
  *   - eq        : equity instruments only (ETFs excluded)
  *   - eq_profit : equities with positive EPS (loss-makers have no meaningful PE/PEG)
+ *   - eq_profit_pe : eq_profit, AND the PE value itself must be present — a row with
+ *                    valid EPS but a missing PE (a real data-source gap) is N/A, not
+ *                    "out of range."
  *   - eq_owner  : equities where any ownership number was reported
  *   - tech      : rows with a trade_date (i.e. an EOD score row exists)
  */
-export type ApplicabilityScope = "all" | "eq" | "eq_profit" | "eq_owner" | "tech";
+export type ApplicabilityScope = "all" | "eq" | "eq_profit" | "eq_profit_pe" | "eq_owner" | "tech";
 
 export function rowIsApplicable(row: Record<string, any>, scope: ApplicabilityScope): boolean {
   const type = row.instrument_type ?? "EQ";
   switch (scope) {
     case "all":       return true;
     case "eq":        return type === "EQ";
-    case "eq_profit": return type === "EQ" && row.eps_ttm != null && Number(row.eps_ttm) > 0;
+    case "eq_profit": return type === "EQ" && row.eps != null && Number(row.eps) > 0;
+    case "eq_profit_pe": return type === "EQ" && row.eps != null && Number(row.eps) > 0 && row.pe != null;
     case "eq_owner":  return type === "EQ" && (row.promoter_holding != null || row.fii_holding != null || row.dii_holding != null);
     case "tech":      return row.trade_date != null;
   }
@@ -87,23 +91,23 @@ export const FILTERS: FilterDef[] = [
   { id: "pct_from_52w_high",  label: "% from 52w High",   category: "basics",     kind: "number", unit: "%", min: -100, max: 20, step: 1, scope: "tech" },
 
   // Valuation — most require positive earnings to be meaningful.
-  { id: "pe_ttm",             label: "PE (TTM)",          category: "valuation",  kind: "number", unit: "x", min: 0, max: 300, step: 1, fundamental: true, scope: "eq_profit" },
+  { id: "pe",                 label: "PE (TTM)",          category: "valuation",  kind: "number", unit: "x", min: 0, max: 300, step: 1, fundamental: true, scope: "eq_profit_pe" },
   { id: "pb",                 label: "P/B",               category: "valuation",  kind: "number", unit: "x", min: 0, max: 50, step: 0.1, fundamental: true, scope: "eq" },
   { id: "peg",                label: "PEG",               category: "valuation",  kind: "number", unit: "x", min: 0, max: 10, step: 0.1, fundamental: true, scope: "eq_profit" },
   { id: "dividend_yield",     label: "Dividend Yield",    category: "valuation",  kind: "number", unit: "%", min: 0, max: 15, step: 0.1, fundamental: true, scope: "eq", nullMeansZero: true },
-  { id: "eps_ttm",            label: "EPS (TTM)",         category: "valuation",  kind: "number", unit: "₹", min: -500, max: 5000, step: 1, fundamental: true, scope: "eq" },
+  { id: "eps",                label: "EPS (TTM)",         category: "valuation",  kind: "number", unit: "₹", min: -500, max: 5000, step: 1, fundamental: true, scope: "eq" },
   { id: "book_value",         label: "Book Value",        category: "valuation",  kind: "number", unit: "₹", min: 0, max: 20000, step: 1, fundamental: true, scope: "eq" },
 
   // Profitability
   { id: "roe",                label: "ROE",               category: "profitability", kind: "number", unit: "%", min: -50, max: 100, step: 1, fundamental: true, scope: "eq" },
 
   // Growth
-  { id: "revenue_growth_yoy", label: "Revenue Growth YoY", category: "growth",    kind: "number", unit: "%", min: -50, max: 200, step: 1, fundamental: true, scope: "eq" },
-  { id: "profit_growth_yoy",  label: "Profit Growth YoY",  category: "growth",    kind: "number", unit: "%", min: -100, max: 300, step: 1, fundamental: true, scope: "eq" },
-  { id: "eps_growth_yoy",     label: "EPS Growth YoY",     category: "growth",    kind: "number", unit: "%", min: -100, max: 300, step: 1, fundamental: true, scope: "eq" },
+  { id: "sales_growth",       label: "Revenue Growth YoY", category: "growth",    kind: "number", unit: "%", min: -50, max: 200, step: 1, fundamental: true, scope: "eq" },
+  { id: "profit_growth",      label: "Profit Growth YoY",  category: "growth",    kind: "number", unit: "%", min: -100, max: 300, step: 1, fundamental: true, scope: "eq" },
+  { id: "eps_growth",         label: "EPS Growth YoY",     category: "growth",    kind: "number", unit: "%", min: -100, max: 300, step: 1, fundamental: true, scope: "eq" },
 
   // Financial Health
-  { id: "debt_to_equity",     label: "Debt / Equity",     category: "health",     kind: "number", unit: "x", min: 0, max: 10, step: 0.1, fundamental: true, scope: "eq", nullMeansZero: true },
+  { id: "debt_equity",        label: "Debt / Equity",     category: "health",     kind: "number", unit: "x", min: 0, max: 10, step: 0.1, fundamental: true, scope: "eq", nullMeansZero: true },
   { id: "current_ratio",      label: "Current Ratio",     category: "health",     kind: "number", unit: "x", min: 0, max: 10, step: 0.1, fundamental: true, scope: "eq" },
   { id: "quick_ratio",        label: "Quick Ratio",       category: "health",     kind: "number", unit: "x", min: 0, max: 10, step: 0.1, fundamental: true, scope: "eq" },
 
@@ -112,12 +116,12 @@ export const FILTERS: FilterDef[] = [
   { id: "dii_holding",        label: "Institutional Hold", category: "ownership", kind: "number", unit: "%", min: 0, max: 100, step: 1, fundamental: true, scope: "eq_owner" },
 
   // Technicals — depend on an EOD score row.
-  { id: "rsi14",              label: "RSI (14)",          category: "technicals", kind: "number", min: 0, max: 100, step: 1, scope: "tech" },
-  { id: "adx14",              label: "ADX (14)",          category: "technicals", kind: "number", min: 0, max: 100, step: 1, scope: "tech" },
+  { id: "rsi",                label: "RSI (14)",          category: "technicals", kind: "number", min: 0, max: 100, step: 1, scope: "tech" },
+  { id: "adx",                label: "ADX (14)",          category: "technicals", kind: "number", min: 0, max: 100, step: 1, scope: "tech" },
   { id: "macd_hist",          label: "MACD Hist",         category: "technicals", kind: "number", min: -50, max: 50, step: 0.1, scope: "tech" },
   { id: "bb_width",           label: "BB Width",          category: "technicals", kind: "number", min: 0, max: 1, step: 0.01, scope: "tech" },
   { id: "atr_pct",            label: "ATR %",             category: "technicals", kind: "number", unit: "%", min: 0, max: 20, step: 0.1, scope: "tech" },
-  { id: "above_ema200",       label: "Above 200 EMA",     category: "technicals", kind: "boolean", scope: "tech" },
+  { id: "above_ema_200",      label: "Above 200 EMA",     category: "technicals", kind: "boolean", scope: "tech" },
 
   // Momentum & Volume
   { id: "change_pct",         label: "Change %",          category: "momentum",   kind: "number", unit: "%", min: -20, max: 20, step: 0.1, scope: "tech" },
@@ -199,6 +203,27 @@ export function coverageOf(rows: Array<Record<string, any>>, filterId: string): 
     }
   }
   return { has, total: scoped.length };
+}
+
+/** How many rows are being silently dropped by the currently-active filters purely
+ *  because their value hasn't synced yet — as opposed to genuinely being out of range.
+ *  Only counts filters with a bound actually set, non-nullMeansZero, numeric. A row
+ *  missing data for more than one active filter is only counted once. */
+export function excludedByMissingData(rows: Array<Record<string, any>>, active: ActiveFilter[]): number {
+  const missing = new Set<string>();
+  for (const af of active) {
+    const def = FILTER_BY_ID[af.id];
+    if (!def || def.kind !== "number" || def.nullMeansZero) continue;
+    const hasBound = (af.min !== undefined && af.min !== "") || (af.max !== undefined && af.max !== "");
+    if (!hasBound) continue;
+    const scope: ApplicabilityScope = def.scope ?? (def.fundamental ? "eq" : "all");
+    for (const r of rows) {
+      if (!rowIsApplicable(r, scope)) continue;
+      const v = r[af.id];
+      if (v == null || Number.isNaN(v)) missing.add(`${r.symbol}:${r.exchange}`);
+    }
+  }
+  return missing.size;
 }
 
 
