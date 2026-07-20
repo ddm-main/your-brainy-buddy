@@ -148,8 +148,17 @@ function QuickAdd({ onCreated }: { onCreated: () => void }) {
   };
 
   return (
-    <form onSubmit={submit} style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto auto", gap: 8, alignItems: "end" }}>
-      <div>
+    <form
+      onSubmit={submit}
+      style={{
+        display: "grid",
+        gridTemplateColumns: "minmax(240px, 1fr) auto auto auto auto",
+        gap: 10,
+        alignItems: "end",
+      }}
+      className="quick-add-form"
+    >
+      <div style={{ minWidth: 0 }}>
         <label style={labelStyle}>new task</label>
         <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. review Axis card statement" style={{ ...inputStyle, width: "100%" }} />
       </div>
@@ -164,17 +173,18 @@ function QuickAdd({ onCreated }: { onCreated: () => void }) {
             { value: "high", label: "high" },
             { value: "urgent", label: "urgent" },
           ]}
-          style={{ minWidth: 120 }}
+          style={{ minWidth: 110 }}
         />
       </div>
       <div>
         <label style={labelStyle}>due</label>
         <HudDatePicker value={due} onChange={setDue} style={{ minWidth: 140 }} />
       </div>
-      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-hud)", textTransform: "uppercase", letterSpacing: "0.14em", cursor: "pointer" }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-hud)", textTransform: "uppercase", letterSpacing: "0.14em", cursor: "pointer", whiteSpace: "nowrap", paddingBottom: 6 }}>
         <input type="checkbox" checked={focus} onChange={(e) => setFocus(e.target.checked)} /> focus
       </label>
       <Btn type="submit" variant="primary" disabled={busy || !title.trim()}>{busy ? "…" : "+ add"}</Btn>
     </form>
   );
 }
+
