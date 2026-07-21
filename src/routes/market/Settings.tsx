@@ -26,10 +26,7 @@ type Settings = {
   last_error: string | null;
   ucc: string | null;
   greeting_name: string | null;
-  // Ciphertext presence only — never rendered/decrypted client-side. Used
-  // purely to show which credentials are already saved, so a returning
-  // user isn't guessing whether "blank to keep" actually has anything to
-  // keep.
+  // Ciphertext presence only — never rendered/decrypted client-side.
   totp_secret_enc: string | null;
   mobile_number_enc: string | null;
   mpin_enc: string | null;
@@ -38,16 +35,11 @@ type Settings = {
 const KOTAK_DEFAULT_BASE = "https://gw-napi.kotaksecurities.com";
 const KOTAK_DEFAULT_WS = "wss://mlhsm.kotaksecurities.com";
 
-// What each provider actually feeds into the app.
 const FETCHES: Record<Provider, string[]> = {
   yahoo: ["Quotes", "OHLC charts", "Fundamentals", "52-week range", "Indices"],
   kotak_neo: ["Holdings", "Positions", "Orders", "Live LTP", "Broker session"],
 };
 
-// Secondary data providers — priority-chain fallbacks used by the sync
-// pipelines (market-fmp-sync, market-fundamentals-global-sync, screener
-// technicals). None of these hold a per-user broker session; "Test" pings
-// the provider directly and reports API-key / reachability status.
 const SERVICE_PROVIDERS: ServiceProvider[] = ["fmp", "alpha_vantage", "nse", "bse"];
 const SERVICE_META: Record<ServiceProvider, { name: string; role: string; fetches: string[]; needsKey: boolean }> = {
   fmp: { name: "Financial Modeling Prep", role: "Fundamentals", fetches: ["Market cap", "PE / PB / ROE / ROCE", "Balance sheet", "Cash flow", "Growth ratios"], needsKey: true },
@@ -62,7 +54,6 @@ export default function MarketSettings() {
   const [busy, setBusy] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
 
-  // Kotak form state (secrets never repopulate on load).
   const [consumerKey, setConsumerKey] = useState("");
   const [mobile, setMobile] = useState("");
   const [mpin, setMpin] = useState("");
@@ -86,9 +77,8 @@ export default function MarketSettings() {
     const k = map.kotak_neo;
     if (k) {
       setConsumerKey(k.consumer_key ?? ""); setUcc(k.ucc ?? "");
-      // Mobile number is low-sensitivity contact info, not a credential —
-      // shown back in full so it's actually verifiable, unlike MPIN/TOTP
-      // secret which stay write-only (never decrypted to the browser).
+      // Mobile number is low-sensitivity contact info — shown back in full.
+      // MPIN/TOTP secret stay write-only, never decrypted to the browser.
       if (k.mobile_number_enc) {
         try {
           const r = await callFn("market-kotak-mobile", {});
@@ -129,9 +119,8 @@ export default function MarketSettings() {
   const startLogin = async () => {
     setBusy("login");
     try {
-      // Persist typed-but-unsaved fields first — login-start reads from the DB, and
-      // secrets (mobile/MPIN/TOTP) never repopulate on reload. `undefined` fields are
-      // skipped server-side, so blank fields never clear stored secrets.
+      // Persist typed-but-unsaved fields first — login-start reads from the
+      // DB, and blank fields never clear stored secrets (skipped via undefined).
       await callFn("market-config-save", {
         provider: "kotak_neo",
         consumer_key: consumerKey || undefined,
@@ -225,12 +214,9 @@ export default function MarketSettings() {
   const needsKotakBasics = !consumerKey.trim() || !ucc.trim();
   const kotakStatus = kotak?.connection_status ?? "not configured";
   const kotakConfigured = !!kotak?.consumer_key;
-  // Kotak sessions die every night near midnight IST no matter what — that's
-  // the broker's constraint, not something this app can change. The only
-  // thing that determines whether you have to manually reconnect every
-  // morning is whether a TOTP secret is saved: with it, the 9:05 IST cron
-  // (and a same-day fallback the moment any Kotak call gets a 401) silently
-  // re-logs in unattended; without it, every expiry needs a fresh manual OTP.
+  const kotakBroken = kotakConfigured && ["expired", "error"].includes(kotakStatus);
+  // Only whether a TOTP secret is saved decides if reconnect is unattended —
+  // Kotak itself hard-expires every session nightly regardless.
   const autoLoginEnabled = !!kotak?.totp_secret_enc;
 
   const pipelineSummary = useMemo(() => {
@@ -242,17 +228,59 @@ export default function MarketSettings() {
       .join(" · ");
   }, [pipeline]);
 
+  const kotakExpanded = (editing || kotak?.connection_status === "pending_otp") && (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {editing && (
+        <>
+          <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
+            Encrypted at rest, never sent back. <span style={{ color: "var(--ok)" }}>✓ saved</span> = blank keeps the existing value.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <Field label="Consumer Key" value={consumerKey} setValue={setConsumerKey} placeholder="From Kotak Neo → Trade API" saved={!!kotak?.consumer_key} />
+            <Field label="UCC (Client Code)" value={ucc} setValue={setUcc} placeholder="e.g. ABC123" saved={!!kotak?.ucc} />
+            <Field label="Mobile Number" value={mobile} setValue={setMobile} placeholder="+91XXXXXXXXXX" saved={!!kotak?.mobile_number_enc} />
+            <Field label="MPIN" value={mpin} setValue={setMpin} placeholder="6-digit" type="password" saved={!!kotak?.mpin_enc} />
+            <Field label="TOTP Secret" value={totpSecret} setValue={setTotpSecret} placeholder="Base32 — enables auto-login" type="password" saved={!!kotak?.totp_secret_enc} />
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Btn onClick={saveConfig} disabled={busy !== null} variant="primary">
+              <LockKeyhole size={11} style={{ marginRight: 4 }} />{busy === "save" ? "saving…" : "Save"}
+            </Btn>
+            <Btn onClick={startLogin} disabled={busy !== null || needsKotakBasics} title={needsKotakBasics ? "Save Consumer Key and UCC first" : undefined}>
+              {busy === "login" ? "logging in…" : "Login to Kotak"}
+            </Btn>
+            <Btn onClick={refreshSession} disabled={busy !== null}>
+              {busy === "refresh" ? "refreshing…" : "Refresh session"}
+            </Btn>
+          </div>
+        </>
+      )}
+      {kotak?.connection_status === "pending_otp" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: editing ? 12 : 0, borderTop: editing ? "1px solid var(--edge)" : undefined }}>
+          <div style={{ fontSize: 11, color: "var(--text-dim)" }}>Enter the current 6-digit TOTP (Kotak Neo → API TOTP).</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+            <div style={{ flex: 1, maxWidth: 200 }}>
+              <input value={otp} onChange={(e) => setOtp(e.target.value)} style={{ ...inputStyle, width: "100%" }} inputMode="numeric" autoFocus placeholder="6-digit code" />
+            </div>
+            <Btn onClick={completeOtp} disabled={busy !== null} variant="primary">
+              {busy === "otp" ? "validating…" : "Complete login"}
+            </Btn>
+          </div>
+          {otpError && <div style={{ fontSize: 11, color: "var(--danger)", wordBreak: "break-word" }}>{otpError}</div>}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <HudPanel flow title="Data Providers" index="MK.S1" live={kotakConnected ? "ok" : "idle"}>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {/* Yahoo — always-on market data */}
           <ProviderCard
             name="Yahoo Finance" role="Market data" fetches={FETCHES.yahoo}
             status="available" statusTone="ok" live={liveProvider === "yahoo"}
             actions={<Btn size="sm" onClick={() => testConnection("yahoo")} disabled={busy !== null}><TestTube2 size={11} style={{ marginRight: 4 }} />Test</Btn>}
           />
-          {/* Kotak Neo — broker */}
           <ProviderCard
             name="Kotak Neo" role="Broker" fetches={FETCHES.kotak_neo}
             status={kotakStatus} statusTone={kotakConnected ? "ok" : kotakStatus === "pending_otp" ? "warn" : kotak?.last_error ? "err" : "neutral"}
@@ -270,8 +298,14 @@ export default function MarketSettings() {
               </div>
             }
             error={kotak?.last_error ?? undefined}
+            expanded={kotakExpanded}
             actions={
               <>
+                {kotakBroken && !editing && (
+                  <Btn size="sm" variant="primary" onClick={startLogin} disabled={busy !== null}>
+                    {busy === "login" ? "reconnecting…" : "Re-login"}
+                  </Btn>
+                )}
                 <Btn size="sm" onClick={() => testConnection("kotak_neo")} disabled={busy !== null}><TestTube2 size={11} style={{ marginRight: 4 }} />Test</Btn>
                 <Btn size="sm" variant={editing ? "primary" : "ghost"} onClick={() => setEditing((v) => !v)}>
                   <Pencil size={11} style={{ marginRight: 4 }} />{editing ? "Close" : kotakConfigured ? "Edit" : "Add credentials"}
@@ -286,7 +320,7 @@ export default function MarketSettings() {
         <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
           Fallbacks when Kotak/Yahoo miss a field. FMP/Alpha Vantage need an API key (Supabase secret).
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           {SERVICE_PROVIDERS.map((prov) => {
             const meta = SERVICE_META[prov];
             const status = serviceStatus[prov];
@@ -309,63 +343,6 @@ export default function MarketSettings() {
           })}
         </div>
       </HudPanel>
-
-      {!editing && kotakConfigured && ["expired", "error"].includes(kotakStatus) && (
-        <HudPanel flow title="Kotak Session Expired" index="MK.S2">
-          <div style={{ fontSize: 12, color: autoLoginEnabled ? "var(--text-dim)" : "var(--warn)", marginBottom: 10 }}>
-            {autoLoginEnabled
-              ? "Reconnecting with saved credentials — nothing to re-enter."
-              : "No TOTP secret saved — needs a fresh code each time. Save one in Edit to stop this."}
-          </div>
-          <Btn onClick={startLogin} disabled={busy !== null} variant="primary">
-            {busy === "login" ? "reconnecting…" : "Re-login"}
-          </Btn>
-        </HudPanel>
-      )}
-
-      {editing && (
-        <HudPanel flow title="Kotak Neo — Credentials" index="MK.S2">
-          <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12 }}>
-            Encrypted at rest, never sent back. <span style={{ color: "var(--ok)" }}>✓ saved</span> = blank keeps the existing value.
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <Field label="Consumer Key" value={consumerKey} setValue={setConsumerKey} placeholder="From Kotak Neo → Trade API" saved={!!kotak?.consumer_key} />
-            <Field label="UCC (Client Code)" value={ucc} setValue={setUcc} placeholder="e.g. ABC123" saved={!!kotak?.ucc} />
-            <Field label="Mobile Number" value={mobile} setValue={setMobile} placeholder="+91XXXXXXXXXX" saved={!!kotak?.mobile_number_enc} />
-            <Field label="MPIN" value={mpin} setValue={setMpin} placeholder="6-digit" type="password" saved={!!kotak?.mpin_enc} />
-            <Field label="TOTP Secret" value={totpSecret} setValue={setTotpSecret} placeholder="Base32 — enables auto-login" type="password" saved={!!kotak?.totp_secret_enc} />
-          </div>
-          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-            <Btn onClick={saveConfig} disabled={busy !== null} variant="primary">
-              <LockKeyhole size={11} style={{ marginRight: 4 }} />{busy === "save" ? "saving…" : "Save"}
-            </Btn>
-            <Btn onClick={startLogin} disabled={busy !== null || needsKotakBasics} title={needsKotakBasics ? "Save Consumer Key and UCC first" : undefined}>
-              {busy === "login" ? "logging in…" : "Login to Kotak"}
-            </Btn>
-            <Btn onClick={refreshSession} disabled={busy !== null}>
-              {busy === "refresh" ? "refreshing…" : "Refresh session"}
-            </Btn>
-          </div>
-        </HudPanel>
-      )}
-
-      {kotak?.connection_status === "pending_otp" && (
-        <HudPanel flow title="Complete Login — TOTP" index="MK.S3">
-          <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 8 }}>
-            Enter the current 6-digit TOTP from your authenticator app (Kotak Neo → API TOTP).
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-            <div style={{ flex: 1, maxWidth: 200 }}>
-              <div style={labelStyle}>TOTP code</div>
-              <input value={otp} onChange={(e) => setOtp(e.target.value)} style={{ ...inputStyle, width: "100%" }} inputMode="numeric" autoFocus />
-            </div>
-            <Btn onClick={completeOtp} disabled={busy !== null} variant="primary">
-              {busy === "otp" ? "validating…" : "Complete login"}
-            </Btn>
-          </div>
-          {otpError && <div style={{ marginTop: 8, fontSize: 12, color: "var(--danger)", wordBreak: "break-word" }}>{otpError}</div>}
-        </HudPanel>
-      )}
 
       <HudPanel flow title="Data Pipeline" index="MK.S4">
         <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12 }}>
@@ -396,11 +373,11 @@ export default function MarketSettings() {
 }
 
 function ProviderCard({
-  name, role, fetches, status, statusTone, live, actions, meta, error,
+  name, role, fetches, status, statusTone, live, actions, meta, error, expanded,
 }: {
   name: string; role: string; fetches: string[];
   status: string; statusTone: "ok" | "warn" | "err" | "neutral"; live?: boolean;
-  actions: React.ReactNode; meta?: React.ReactNode; error?: string;
+  actions: React.ReactNode; meta?: React.ReactNode; error?: string; expanded?: React.ReactNode;
 }) {
   return (
     <div style={{ border: "1px solid var(--edge)", borderRadius: 4, padding: "10px 12px", background: "rgba(255,255,255,0.015)" }}>
@@ -416,6 +393,7 @@ function ProviderCard({
       </div>
       {meta && <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-dim)" }}>{meta}</div>}
       {error && <div style={{ marginTop: 6, fontSize: 11, color: "var(--danger)" }}>Last error: {error}</div>}
+      {expanded && <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--edge)" }}>{expanded}</div>}
     </div>
   );
 }
@@ -424,12 +402,9 @@ const MASK_DOTS = "••••••••••••";
 
 function Field({ label, value, setValue, placeholder, type = "text", saved }: { label: string; value: string; setValue: (v: string) => void; placeholder?: string; type?: string; saved?: boolean }) {
   // A saved field with nothing typed shows a dot mask instead of a truly
-  // empty box — an empty input with grey placeholder text reads as "nothing
-  // here" even when something real is stored underneath (mobile number
-  // whenever the reveal call hasn't resolved, MPIN and TOTP secret always,
-  // by design). The mask is display-only: it's never written into `value`,
-  // so it can never be accidentally submitted as real data. Clicking in
-  // swaps to a real empty box ready for fresh input.
+  // empty box, so it's visually obvious something real is stored. Display-
+  // only — never written into `value`, so it can't be submitted as data.
+  // Focusing swaps to a real empty box ready for fresh input.
   const [touched, setTouched] = useState(false);
   const showMask = saved && !touched && !value;
   return (
