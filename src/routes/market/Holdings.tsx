@@ -51,17 +51,21 @@ export default function Holdings() {
     setConnected((st?.[0] as any)?.active_provider ?? null);
     const symbols = [...new Set((data ?? []).map((h: any) => h.symbol))];
     if (symbols.length > 0) {
+      // Keyed by symbol:exchange (quoteKey), not bare symbol — a symbol can
+      // legitimately exist on both NSE and BSE with different rows in these
+      // tables; a bare-symbol key let a BSE holding silently pick up the
+      // NSE row's sector/score (or vice versa) whichever was iterated last.
       const [{ data: sc }, { data: st2 }] = await Promise.all([
         supabase.from("market_stock_scores")
-          .select("symbol,breakout_score,prebreakout_score,score_components")
+          .select("symbol,exchange,breakout_score,prebreakout_score,score_components")
           .in("symbol", symbols),
-        supabase.from("market_stocks").select("symbol,sector").in("symbol", symbols),
+        supabase.from("market_stocks").select("symbol,exchange,sector").in("symbol", symbols),
       ]);
       const map: ScoreMap = {};
-      for (const s of (sc ?? []) as any[]) map[s.symbol] = s;
+      for (const s of (sc ?? []) as any[]) map[quoteKey(s.exchange, s.symbol)] = s;
       setScores(map);
       const secMap: Record<string, string | null> = {};
-      for (const s of (st2 ?? []) as any[]) secMap[s.symbol] = s.sector ?? null;
+      for (const s of (st2 ?? []) as any[]) secMap[quoteKey(s.exchange, s.symbol)] = s.sector ?? null;
       setSectors(secMap);
     }
   };
@@ -123,14 +127,15 @@ export default function Holdings() {
 
   const totals = useMemo(() => {
     // A holding with no resolvable live price is excluded from current/P&L
-    // (unknown, not zero) — its invested capital is excluded too so the two
-    // stay comparable, rather than quietly understating P&L against the full
-    // invested amount.
-    let invested = 0, current = 0, knownInvested = 0, unresolved = 0;
+    // (unknown, not zero) — `invested` uses the same resolved-only basis
+    // (knownInvested) so Current − Invested always equals the displayed P&L;
+    // previously `invested` summed every holding unconditionally while
+    // current/P&L excluded unresolved ones, so the three numbers on screen
+    // could silently disagree whenever some (not all) holdings lacked a quote.
+    let current = 0, knownInvested = 0, unresolved = 0;
     const dayPnls: Array<number | null> = [];
     for (const h of rows) {
       const calc = holdingPnl({ quantity: h.quantity, avgPrice: h.avg_price, quote: quotes[quoteKey(h.exchange, h.symbol)] });
-      invested += calc.invested;
       if (calc.current == null) { unresolved++; continue; }
       knownInvested += calc.invested;
       current += calc.current;
@@ -138,15 +143,21 @@ export default function Holdings() {
     }
     const dayPnl = sumNullable(dayPnls);
     const prevValue = dayPnl == null ? null : current - dayPnl;
-    const dayPnlPct = dayPnl == null || !prevValue ? null : (dayPnl / prevValue) * 100;
-    const pnl = unresolved === rows.length ? null : current - knownInvested;
-    const pnlPct = pnl == null ? null : knownInvested ? (pnl / knownInvested) * 100 : 0;
-    return { invested, current: unresolved === rows.length ? null : current, pnl, pnlPct, dayPnl, dayPnlPct, unresolved };
+    const dayPnlPct = dayPnl == null || !prevValue ? null : (dayPnl / Math.abs(prevValue)) * 100;
+    const allUnresolved = rows.length > 0 && unresolved === rows.length;
+    const pnl = allUnresolved ? null : current - knownInvested;
+    const pnlPct = pnl == null ? null : knownInvested ? (pnl / Math.abs(knownInvested)) * 100 : null;
+    return {
+      invested: allUnresolved ? null : knownInvested,
+      current: allUnresolved ? null : current,
+      pnl, pnlPct, dayPnl, dayPnlPct, unresolved,
+    };
   }, [rows, quotes]);
 
   const allocationInput = useMemo(
     () => rows.map((h) => ({
       symbol: h.symbol,
+      exchange: h.exchange,
       currentValue: holdingPnl({ quantity: h.quantity, avgPrice: h.avg_price, quote: quotes[quoteKey(h.exchange, h.symbol)] }).current ?? 0,
     })),
     [rows, quotes],
@@ -167,7 +178,7 @@ export default function Holdings() {
         </div>
       }>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 8 }}>
-          <Stat label="Invested" value={inr(totals.invested)} />
+          <Stat label="Invested" value={totals.invested == null ? "—" : inr(totals.invested)} />
           <Stat label="Current Value" value={totals.current == null ? "—" : inr(totals.current)} />
           <Stat label="Total P&L" value={totals.pnl == null ? "—" : inr(totals.pnl)} tone={totals.pnl == null ? undefined : totals.pnl >= 0 ? "ok" : "err"} />
           <Stat label="Return %" value={totals.pnlPct == null ? "—" : `${totals.pnlPct.toFixed(2)}%`} tone={totals.pnlPct == null ? undefined : totals.pnlPct >= 0 ? "ok" : "err"} />
@@ -249,7 +260,7 @@ export default function Holdings() {
                       })()}
                     </td>
                     <td style={td}>
-                      <ScoreBadge score={scores[h.symbol]?.breakout_score} components={scores[h.symbol]?.score_components?.breakout} label="breakout components" />
+                      <ScoreBadge score={scores[quoteKey(h.exchange, h.symbol)]?.breakout_score} components={scores[quoteKey(h.exchange, h.symbol)]?.score_components?.breakout} label="breakout components" />
                     </td>
                     <td style={td}><Chip tone={q?.stale ? "warn" : h.source === "manual" ? "neutral" : "accent"}>{q?.stale ? "stale" : h.source}</Chip></td>
                     <td style={td}>

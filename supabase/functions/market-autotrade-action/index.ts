@@ -4,10 +4,32 @@
 // what would fire, without placing an order — for validating a rule before
 // arming it).
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
+import { istTradeDate } from "../_shared/market/cron.ts";
 import { getActiveProvider } from "../_shared/market/provider.ts";
 import { kotakCancelOrder, withKotakSession } from "../_shared/market/kotakClient.ts";
 import { encryptValue } from "../_shared/market/provider.ts";
 import { evaluateGroups, type ScreenerGroup } from "../_shared/market/conditions.ts";
+
+// Mirrors market-autotrade-eval's mirrorAutotradeExit — "flatten" places a
+// real exit order outside the normal eval loop, so it needs the same
+// best-effort sync into market_positions or a manually-flattened AutoTrade
+// position would leave its mirrored row open forever.
+async function mirrorAutotradeExit(
+  svc: ReturnType<typeof svcClient>, userId: string, ruleId: string | null,
+  symbol: string, exchange: string, exitPrice: number,
+) {
+  if (!ruleId) return; // no rule to tag the mirrored entry with — nothing to match against
+  const { data: openRow } = await svc.from("market_positions")
+    .select("id,quantity,entry_price")
+    .eq("user_id", userId).eq("symbol", symbol).eq("exchange", exchange)
+    .eq("journal_notes", `AutoTrade:${ruleId}`).is("closed_at", null)
+    .order("opened_at", { ascending: true }).limit(1).maybeSingle();
+  if (!openRow) return;
+  const pnl = (exitPrice - Number(openRow.entry_price)) * Number(openRow.quantity);
+  await svc.from("market_positions").update({
+    closed_at: new Date().toISOString(), exit_price: exitPrice, pnl,
+  }).eq("id", openRow.id);
+}
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
@@ -49,6 +71,9 @@ Deno.serve(async (req) => {
         quantity: qty, order_type: "MARKET", product, requested_price: ltp ?? null,
         broker_order_id: result.orderId, status: "placed", reason: "manual flatten", placed_at: new Date().toISOString(),
       });
+      try {
+        await mirrorAutotradeExit(svc, userId, ruleId, symbol, exchange, ltp ?? 0);
+      } catch { /* best-effort mirror — the real flatten already fired */ }
       await svc.from("market_autotrade_log").insert({ user_id: userId, rule_id: ruleId, level: "fired", message: `Manually flattened ${symbol} qty ${qty} — order ${result.orderId}` });
       return jsonResponse(req, { ok: true, orderId: result.orderId, quantity: qty });
     }
@@ -79,12 +104,19 @@ Deno.serve(async (req) => {
         const { data: items } = await svc.from("market_watchlist_items").select("symbol,exchange").eq("watchlist_id", rule.watchlist_id);
         scopeSymbols = (items ?? []) as Array<{ symbol: string; exchange: string }>;
       }
+      // Must query the same table the real eval loop uses (market-autotrade-eval
+      // reads market_data, unified field names like rsi/adx/ltp/above_ema_200) —
+      // this used to query the legacy market_stock_scores table, whose columns
+      // are named differently (rsi14/adx14/close/above_ema200), so every
+      // condition column lookup silently missed and "would fire" was checked
+      // against fields that don't exist on that row shape at all.
       const symbols = [...new Set(scopeSymbols.map((s) => s.symbol))];
-      const { data: scoreRows } = symbols.length ? await svc.from("market_stock_scores").select("*").in("symbol", symbols) : { data: [] };
+      const today = istTradeDate();
+      const { data: scoreRows } = symbols.length ? await svc.from("market_data").select("*").in("symbol", symbols) : { data: [] };
       const scoreByKey = new Map((scoreRows ?? []).map((s: any) => [`${s.symbol}:${s.exchange}`, s]));
       const results = scopeSymbols.map((scope) => {
         const scoreRow = scoreByKey.get(`${scope.symbol}:${scope.exchange}`);
-        const wouldFire = !!scoreRow && evaluateGroups(scoreRow, rule.entry_conditions as ScreenerGroup[]);
+        const wouldFire = !!scoreRow && evaluateGroups(scoreRow, rule.entry_conditions as ScreenerGroup[], today);
         return { symbol: scope.symbol, exchange: scope.exchange, wouldFire, hasScoreData: !!scoreRow };
       });
       return jsonResponse(req, { ok: true, results });

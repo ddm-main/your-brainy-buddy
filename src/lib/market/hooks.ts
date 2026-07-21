@@ -6,7 +6,6 @@ import type {
   ApiSettings,
   BreadthDaily,
   CandlesResponse,
-  Holding,
   IndexConstituent,
   IndexQuote,
   IndexWatchRow,
@@ -101,18 +100,6 @@ export function useQuotesBatched(keys: string[], chunkSize = QUOTE_BATCH_SIZE) {
   return { quotes, isFetching: anyFetching, anyFailed, chunkCount: chunks.length };
 }
 
-export function useHoldings() {
-  return useQuery({
-    queryKey: ["market", "holdings"],
-    queryFn: async (): Promise<Holding[]> => {
-      const { data, error } = await supabase
-        .from("market_holdings").select("*").order("symbol");
-      if (error) throw error;
-      return (data ?? []) as Holding[];
-    },
-  });
-}
-
 export function usePositions() {
   return useQuery({
     queryKey: ["market", "positions"],
@@ -122,14 +109,6 @@ export function usePositions() {
       if (error) throw error;
       return (data ?? []) as Position[];
     },
-  });
-}
-
-export function useSyncHoldings() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: () => callMarketFn("market-sync-holdings"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["market", "holdings"] }),
   });
 }
 

@@ -50,6 +50,45 @@ async function log(svc: SupabaseClient, userId: string, level: "info" | "skip" |
   await svc.from("market_autotrade_log").insert({ user_id: userId, rule_id: ruleId ?? null, level, message, meta: meta ?? null });
 }
 
+// market_autotrade_orders stays the internal source of truth for AutoTrade's
+// own P&L/circuit-breaker logic (computeOpenPositions above) — this is a
+// best-effort mirror into market_positions so a bot-opened position is also
+// visible on the Positions page, Holdings/Dashboard portfolio totals, etc.,
+// which previously excluded AutoTrade exposure entirely (it only showed up
+// in AutoTrade's own panel, or after a manual "sync from Kotak" click).
+// market_positions has no rule_id column — journal_notes carries an
+// `AutoTrade:<rule.id>` tag so exit can find the right open row even if two
+// different rules happen to hold the same symbol at once. v1 is long-only
+// (see file header), so side is always "long" here.
+const AUTOTRADE_TAG = (ruleId: string) => `AutoTrade:${ruleId}`;
+
+async function mirrorAutotradeEntry(
+  svc: SupabaseClient, userId: string, ruleId: string,
+  symbol: string, exchange: string, quantity: number, entryPrice: number,
+) {
+  await svc.from("market_positions").insert({
+    user_id: userId, symbol, exchange, side: "long",
+    quantity, entry_price: entryPrice,
+    journal_notes: AUTOTRADE_TAG(ruleId), is_broker_synced: true,
+  });
+}
+
+async function mirrorAutotradeExit(
+  svc: SupabaseClient, userId: string, ruleId: string,
+  symbol: string, exchange: string, exitPrice: number,
+) {
+  const { data: openRow } = await svc.from("market_positions")
+    .select("id,quantity,entry_price")
+    .eq("user_id", userId).eq("symbol", symbol).eq("exchange", exchange)
+    .eq("journal_notes", AUTOTRADE_TAG(ruleId)).is("closed_at", null)
+    .order("opened_at", { ascending: true }).limit(1).maybeSingle();
+  if (!openRow) return; // no mirrored row (e.g. entry mirror failed) — don't fail the real exit over it
+  const pnl = (exitPrice - Number(openRow.entry_price)) * Number(openRow.quantity);
+  await svc.from("market_positions").update({
+    closed_at: new Date().toISOString(), exit_price: exitPrice, pnl,
+  }).eq("id", openRow.id);
+}
+
 // Net open AutoTrade positions from the order ledger — market_autotrade_orders
 // is the source of truth, not a separate positions table. Entry avg price is
 // a simple weighted average across all filled entry legs for that
@@ -187,6 +226,9 @@ Deno.serve(async (req) => {
               requested_price: orderInput.price ?? ltp, broker_order_id: result.orderId, status: "placed",
               reason: exitReason, placed_at: new Date().toISOString(),
             });
+            try {
+              await mirrorAutotradeExit(svc, userId, rule.id, pos.symbol, pos.exchange, orderInput.price ?? ltp);
+            } catch { /* best-effort mirror — the real exit already fired, don't let this look like a failure */ }
             await log(svc, userId, "fired", `Exit fired for ${pos.symbol} (${exitReason}) — order ${result.orderId}`, rule.id);
             totalFired++;
             openPositions = openPositions.filter((p) => p !== pos);
@@ -244,6 +286,9 @@ Deno.serve(async (req) => {
                 requested_price: orderInput.price ?? ltp, broker_order_id: result.orderId, status: "placed",
                 reason: "entry conditions met", placed_at: new Date().toISOString(),
               });
+              try {
+                await mirrorAutotradeEntry(svc, userId, rule.id, scope.symbol, scope.exchange, qty, orderInput.price ?? ltp);
+              } catch { /* best-effort mirror — the real entry already fired, don't let this look like a failure */ }
               await log(svc, userId, "fired", `Entry fired for ${scope.symbol} qty ${qty} — order ${result.orderId}`, rule.id);
               totalFired++;
               openPositions.push({ ruleId: rule.id, symbol: scope.symbol, exchange: scope.exchange, qty, entryPrice: ltp });

@@ -102,16 +102,24 @@ export default function Positions() {
   };
 
   const totals = useMemo(() => {
-    let unrealized = 0;
+    // A position with no resolvable live quote contributes "unknown," not
+    // "zero," to the total — matching holdingPnl's contract (pnl.ts:22-25).
+    // Previously `unrealized` started at 0 and only ever incremented on a
+    // resolved quote, so a page-load-before-quotes-arrive (or a
+    // market-quotes failure) rendered "₹0" in green, implying a flat book
+    // when the true P&L was simply unknown.
+    let unrealized = 0, unresolved = 0;
     const dayPnls: Array<number | null> = [];
     for (const p of open) {
       const calc = positionPnl({ quantity: p.quantity, entryPrice: p.entry_price, side: p.side, quote: quoteMap.get(quoteKey(p.exchange, p.symbol)) });
-      if (calc.unrealized != null) unrealized += calc.unrealized;
+      if (calc.unrealized == null) { unresolved++; continue; }
+      unrealized += calc.unrealized;
       dayPnls.push(calc.todayPnl);
     }
+    const allUnresolved = open.length > 0 && unresolved === open.length;
     const day = sumNullable(dayPnls);
     const realized = closed.reduce((a, p) => a + (p.pnl ?? 0), 0);
-    return { unrealized, day, realized };
+    return { unrealized: allUnresolved ? null : unrealized, day, realized, unresolved };
   }, [open, closed, quoteMap]);
 
   const columns = useMemo<ColumnDef<Position, any>[]>(() => [
@@ -199,7 +207,7 @@ export default function Positions() {
       }>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 8 }}>
           <Stat label="Open Positions" value={String(open.length)} />
-          <Stat label="Unrealized P&L" value={inr(totals.unrealized)} tone={totals.unrealized >= 0 ? "ok" : "err"} />
+          <Stat label="Unrealized P&L" value={totals.unrealized == null ? "—" : inr(totals.unrealized)} tone={totals.unrealized == null ? undefined : totals.unrealized >= 0 ? "ok" : "err"} />
           <Stat label="Today" value={totals.day == null ? "—" : inr(totals.day)} tone={totals.day == null ? undefined : totals.day >= 0 ? "ok" : "err"} />
           <Stat label="Realized (closed)" value={inr(totals.realized)} tone={totals.realized >= 0 ? "ok" : "err"} />
         </div>

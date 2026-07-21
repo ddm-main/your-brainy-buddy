@@ -34,13 +34,22 @@ export function holdingPnl(input: { quantity: number; avgPrice: number; quote?: 
   const ltp = quoteLtp;
   const current = ltp * quantity;
   const totalPnl = current - invested;
-  const totalPnlPct = invested ? (totalPnl / invested) * 100 : 0;
+  // Divide by the magnitude, not the signed value — `invested`/`prevValue`
+  // flip sign with `quantity` (e.g. a short via a negative-quantity holding
+  // row, which the schema permits: no CHECK constraint, no side column),
+  // which previously inverted the displayed percentage relative to the
+  // correctly-signed ₹ figure right next to it. positionPnl() avoids this
+  // by deriving direction from an explicit `side` enum instead of
+  // quantity's sign; holdings has no such field, so magnitude-of-denominator
+  // is the fix here. Null (not 0) when there's no denominator to divide by —
+  // "unknown" is not "unchanged," matching this function's own convention.
+  const totalPnlPct = invested ? (totalPnl / Math.abs(invested)) * 100 : null;
   const dayChange = getTrustedDayChange(input.quote);
   const todayPnl = dayChange == null ? null : dayChange * quantity;
   // % against yesterday's closing value (current minus today's move), not
   // against invested — matches how Kite/Groww pair ₹ with % for "today".
   const prevValue = todayPnl == null ? null : current - todayPnl;
-  const todayPnlPct = todayPnl == null || !prevValue ? null : (todayPnl / prevValue) * 100;
+  const todayPnlPct = todayPnl == null || !prevValue ? null : (todayPnl / Math.abs(prevValue)) * 100;
   return { ltp, invested, current, totalPnl, totalPnlPct, todayPnl, todayPnlPct };
 }
 

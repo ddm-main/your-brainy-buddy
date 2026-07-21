@@ -197,33 +197,43 @@ Deno.serve(async (req) => {
 
     // ---- Portfolio value snapshots — once daily, now that today's EOD
     // closes are in `rows`. A holding whose symbol has no close this run
-    // (not yet synced) makes that user's total_value/total_pnl null rather
-    // than an understated number that looks complete — same null-safety
-    // contract as holdingPnl() in src/lib/market/pnl.ts, reimplemented here
-    // rather than importing across the frontend/edge-function boundary.
+    // (not yet synced) is excluded from value/invested/pnl (unknown, not
+    // zero) rather than making an understated number that looks complete —
+    // same null-safety contract as holdingPnl() in src/lib/market/pnl.ts,
+    // reimplemented here rather than importing across the frontend/edge-
+    // function boundary. Only nulls the whole day's totals when EVERY
+    // holding is unresolved; previously any single unresolved holding
+    // nulled the entire day even if the rest had resolved, inconsistent
+    // with Holdings.tsx's own partial-sum-when-possible policy.
     try {
       const { data: allHoldings } = await svc.from("market_holdings")
         .select("user_id,symbol,exchange,quantity,avg_price");
       if (allHoldings?.length) {
         const closeByKey = new Map<string, number>();
         for (const r of rows) if (r.ltp != null) closeByKey.set(`${r.symbol}:${r.exchange}`, r.ltp);
-        const byUser = new Map<string, { value: number; invested: number; unresolved: number }>();
+        const byUser = new Map<string, { value: number; knownInvested: number; unresolved: number; count: number }>();
         for (const h of allHoldings) {
-          const cur = byUser.get(h.user_id) ?? { value: 0, invested: 0, unresolved: 0 };
-          const invested = Number(h.avg_price) * Number(h.quantity);
-          cur.invested += invested;
+          const cur = byUser.get(h.user_id) ?? { value: 0, knownInvested: 0, unresolved: 0, count: 0 };
+          cur.count++;
           const ltp = closeByKey.get(`${h.symbol}:${h.exchange}`);
-          if (ltp != null) cur.value += ltp * Number(h.quantity);
-          else cur.unresolved++;
+          if (ltp != null) {
+            cur.value += ltp * Number(h.quantity);
+            cur.knownInvested += Number(h.avg_price) * Number(h.quantity);
+          } else {
+            cur.unresolved++;
+          }
           byUser.set(h.user_id, cur);
         }
-        const snapshotRows = [...byUser.entries()].map(([user_id, v]) => ({
-          user_id, snapshot_date: today,
-          total_value: v.unresolved === 0 ? v.value : null,
-          total_invested: v.invested,
-          total_pnl: v.unresolved === 0 ? v.value - v.invested : null,
-          unresolved_count: v.unresolved,
-        }));
+        const snapshotRows = [...byUser.entries()].map(([user_id, v]) => {
+          const allUnresolved = v.unresolved === v.count;
+          return {
+            user_id, snapshot_date: today,
+            total_value: allUnresolved ? null : v.value,
+            total_invested: allUnresolved ? null : v.knownInvested,
+            total_pnl: allUnresolved ? null : v.value - v.knownInvested,
+            unresolved_count: v.unresolved,
+          };
+        });
         if (snapshotRows.length > 0) {
           await svc.from("market_portfolio_snapshots").upsert(snapshotRows, { onConflict: "user_id,snapshot_date" });
         }
