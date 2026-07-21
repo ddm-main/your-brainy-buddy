@@ -1,17 +1,20 @@
-// market-autotrade-eval — 1-min cron during IST market hours. Per user with
-// AutoTrade enabled: checks the daily-loss circuit breaker, evaluates exit
-// conditions for open AutoTrade positions, then entry conditions for armed
-// rules, and places real orders against the user's connected Kotak Neo
-// account. Every tick/skip/fire/error is written to market_autotrade_log —
-// this function spends real money unattended, so nothing here fails silent.
+// market-autotrade-eval — 1-min cron during IST market hours. Per user who
+// has ever configured AutoTrade: reconciles the order ledger against the
+// broker's real position book, evaluates exit conditions for open AutoTrade
+// positions (always — even if the account is disabled, see below), then
+// entry conditions for armed rules (gated on `enabled`), and places real
+// orders against the user's connected Kotak Neo account. Every tick/skip/
+// fire/error is written to market_autotrade_log — this function spends real
+// money unattended, so nothing here fails silent.
 //
 // Scope (v1): long-only. Rules BUY to enter and SELL to exit; there is no
 // short-selling path. This halves the risk surface (no margin/short-product
 // handling) for the first version of a feature that places live orders.
-import { corsFor, preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
+import { preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret, istTradeDate, isTradingHoliday } from "../_shared/market/cron.ts";
 import { getActiveProvider, type PlaceOrderInput } from "../_shared/market/provider.ts";
 import { evaluateGroups, type ScreenerGroup } from "../_shared/market/conditions.ts";
+import { reconcileOpenPositions, type OpenPosition } from "../_shared/market/autotradeReconcile.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 
 function marketOpenNow(): boolean {
@@ -21,6 +24,16 @@ function marketOpenNow(): boolean {
   const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
   return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
 }
+
+// A tick slow enough to still be running when the next cron fire starts
+// (broker latency, many rules/users) must not let two ticks act on the same
+// stale "no open position yet" snapshot and double-fire an entry. This lease
+// is a plain conditional UPDATE (atomic in Postgres regardless of the
+// stateless REST connection each call uses) — not a session-level advisory
+// lock, which wouldn't survive across separate supabase-js calls anyway.
+// Stale-lease recovery after LEASE_MS so a crashed invocation can't wedge a
+// user out of evaluation forever.
+const LEASE_MS = 3 * 60_000;
 
 interface Settings {
   user_id: string;
@@ -44,10 +57,24 @@ interface OrderRow {
   status: string; filled_price: number | null; requested_price: number | null;
   filled_at: string | null; created_at: string;
 }
-interface OpenPosition { ruleId: string; symbol: string; exchange: string; qty: number; entryPrice: number }
 
 async function log(svc: SupabaseClient, userId: string, level: "info" | "skip" | "error" | "fired", message: string, ruleId?: string, meta?: unknown) {
   await svc.from("market_autotrade_log").insert({ user_id: userId, rule_id: ruleId ?? null, level, message, meta: meta ?? null });
+}
+
+// Throttled: a symbol whose data is stale keeps being stale tick after
+// tick, and without throttling this would write a log row every minute for
+// as long as it stays stale — spam that would drown out real signal. One
+// distinguishing note per rule+symbol per hour is enough to debug "why does
+// this rule never fire" without flooding the log.
+async function logStaleOnce(svc: SupabaseClient, userId: string, ruleId: string, symbol: string, tradeDate: unknown, today: string) {
+  const marker = `stale:${ruleId}:${symbol}`;
+  const oneHourAgo = new Date(Date.now() - 3600_000).toISOString();
+  const { data: recent } = await svc.from("market_autotrade_log")
+    .select("id").eq("user_id", userId).eq("rule_id", ruleId)
+    .ilike("message", `%${marker}%`).gte("created_at", oneHourAgo).limit(1);
+  if (recent?.length) return;
+  await log(svc, userId, "skip", `[${marker}] ${symbol}: skipped — market data is stale (last synced ${tradeDate ?? "never"}, expected ${today})`, ruleId);
 }
 
 // market_autotrade_orders stays the internal source of truth for AutoTrade's
@@ -117,22 +144,44 @@ Deno.serve(async (req) => {
     const svc = svcClient();
     if (await isTradingHoliday(svc, istTradeDate())) return jsonResponse(req, { ok: true, note: "market_closed_holiday" });
 
+    // Every user who's ever configured AutoTrade — not just enabled=true.
+    // A disabled account (manually, or via circuit breaker) can still hold
+    // real open positions that need exit/stop-loss protection and broker
+    // reconciliation; only NEW entries are gated on `enabled`. Previously
+    // this query filtered to enabled=true, so once the circuit breaker (or
+    // the user) disabled AutoTrade, any still-open position was excluded
+    // from every future tick forever — zero automated protection until the
+    // account was manually re-enabled.
     const { data: settingsRows } = await svc.from("market_autotrade_settings")
-      .select("user_id,enabled,max_capital_per_rule,max_open_positions,daily_loss_limit")
-      .eq("enabled", true);
+      .select("user_id,enabled,max_capital_per_rule,max_open_positions,daily_loss_limit");
     if (!settingsRows?.length) return jsonResponse(req, { ok: true, users: 0 });
 
     let totalFired = 0;
+    let usersProcessed = 0;
     for (const settings of settingsRows as Settings[]) {
       const userId = settings.user_id;
+
+      const now = new Date();
+      const staleBefore = new Date(now.getTime() - LEASE_MS).toISOString();
+      const { data: leased } = await svc.from("market_autotrade_settings")
+        .update({ eval_lock_at: now.toISOString() })
+        .eq("user_id", userId)
+        .or(`eval_lock_at.is.null,eval_lock_at.lt.${staleBefore}`)
+        .select("user_id");
+      if (!leased?.length) continue; // another tick already holds this user's lease
+
       try {
+        usersProcessed++;
+        // Ordered by created_at so the per-symbol dedup below (whichever
+        // armed rule reaches a symbol first wins it for this tick) is
+        // deterministic across ticks rather than depending on unspecified
+        // row order.
         const { data: rules } = await svc.from("market_autotrade_rules")
-          .select("*").eq("user_id", userId).eq("is_armed", true);
-        if (!rules?.length) continue;
+          .select("*").eq("user_id", userId).eq("is_armed", true).order("created_at", { ascending: true });
 
         const { provider, settings: kotakSettings } = await getActiveProvider(svc, userId);
         if (provider.name !== "kotak_neo" || !kotakSettings || kotakSettings.connection_status !== "connected") {
-          await log(svc, userId, "skip", "Kotak not connected — AutoTrade paused for this tick");
+          if (rules?.length) await log(svc, userId, "skip", "Kotak not connected — AutoTrade paused for this tick");
           continue;
         }
 
@@ -142,16 +191,22 @@ Deno.serve(async (req) => {
         const orders = (allOrders ?? []) as OrderRow[];
         let openPositions = computeOpenPositions(orders);
 
+        // Reconcile against the broker's real position book BEFORE anything
+        // else uses openPositions — closes the gap where an order we think
+        // is "placed" was actually rejected, or Kotak force-squared-off an
+        // MIS position near close, both of which previously left a phantom
+        // open position in our ledger forever.
+        if (openPositions.length > 0) {
+          openPositions = await reconcileOpenPositions(svc, provider, userId, openPositions);
+        }
+
+        if (!rules?.length && openPositions.length === 0) continue; // nothing to do for this user this tick
+
         // Daily-loss circuit breaker: realized P&L from today's filled exits
         // (weighted-avg entry price per rule+symbol+exchange) plus unrealized
-        // P&L on currently-open positions at the latest live quote.
+        // P&L on currently-open (now reconciled) positions at the latest live quote.
         const today = istTradeDate();
         const todaysExits = orders.filter((o) => o.leg === "exit" && o.status === "filled" && o.filled_at && istTradeDate(new Date(o.filled_at)) === today);
-        const entryAvgByKey = new Map<string, number>();
-        for (const p of computeOpenPositions(orders.filter((o) => o.leg === "entry"))) entryAvgByKey.set(`${p.ruleId}:${p.symbol}:${p.exchange}`, p.entryPrice);
-        // Positions that are now fully closed still need an entry avg for
-        // realized P&L — recompute across the whole ledger per key, not just
-        // the still-open ones.
         const allEntryAvg = new Map<string, number>();
         {
           const byKey = new Map<string, { qty: number; cost: number }>();
@@ -185,22 +240,31 @@ Deno.serve(async (req) => {
           } catch { /* unrealized stays partial if quotes fail — realized still governs */ }
         }
         const todayPnl = realized + unrealized;
-        if (todayPnl <= -Math.abs(settings.daily_loss_limit)) {
+
+        // Circuit breaker blocks NEW entries only. It does not skip exits —
+        // a real open position still needs its stop-loss/target/exit-condition
+        // protection precisely when something has gone wrong enough to trip
+        // the breaker; leaving it completely unmanaged until the user
+        // notices and manually re-enables AutoTrade was the opposite of
+        // what a circuit breaker is for.
+        let entriesBlocked = !settings.enabled;
+        if (settings.enabled && todayPnl <= -Math.abs(settings.daily_loss_limit)) {
           await svc.from("market_autotrade_settings").update({
             enabled: false,
             disabled_reason: `Daily loss limit breached: ₹${todayPnl.toFixed(0)} (limit ₹${settings.daily_loss_limit})`,
             disabled_at: new Date().toISOString(),
           }).eq("user_id", userId);
-          await log(svc, userId, "fired", `Circuit breaker tripped — AutoTrade disabled. Today's P&L ₹${todayPnl.toFixed(0)} breached limit ₹${settings.daily_loss_limit}`);
-          continue;
+          await log(svc, userId, "fired", `Circuit breaker tripped — new entries blocked. Open positions still get stop-loss/target/exit protection this and future ticks. Today's P&L ₹${todayPnl.toFixed(0)} breached limit ₹${settings.daily_loss_limit}`);
+          entriesBlocked = true;
         }
 
-        const ruleById = new Map(rules.map((r: Rule) => [r.id, r as Rule]));
+        const ruleById = new Map((rules ?? []).map((r: Rule) => [r.id, r as Rule]));
 
-        // ---- Exits first: free up position slots before considering entries ----
+        // ---- Exits first: free up position slots before considering entries.
+        // Runs regardless of entriesBlocked — see comment above. ----
         for (const pos of openPositions) {
           const rule = ruleById.get(pos.ruleId);
-          if (!rule) continue;
+          if (!rule) continue; // rule deleted/unarmed since the position opened — nothing to evaluate against; flatten manually from the UI
           try {
             const quotes = await provider.getQuotes([`${pos.exchange}:${pos.symbol}`]);
             const ltp = quotes[0]?.price;
@@ -237,6 +301,8 @@ Deno.serve(async (req) => {
           }
         }
 
+        if (entriesBlocked) continue;
+
         // ---- Entries ----
         for (const rule of rules as Rule[]) {
           if (!rule.entry_conditions?.length) continue;
@@ -261,8 +327,21 @@ Deno.serve(async (req) => {
             const scoreByKey = new Map((scoreRows ?? []).map((s: any) => [`${s.symbol}:${s.exchange}`, s]));
 
             for (const scope of scopeSymbols) {
+              // Per-symbol dedup across ALL rules, not just this one — v1
+              // caps exposure to a single instrument at at most one
+              // AutoTrade-opened position at a time, regardless of how many
+              // armed rules target it, so max_capital_per_rule can't be
+              // silently multiplied by stacking overlapping rules on the
+              // same symbol.
+              if (openPositions.some((p) => p.symbol === scope.symbol && p.exchange === scope.exchange)) continue;
+
               const scoreRow = scoreByKey.get(`${scope.symbol}:${scope.exchange}`);
-              if (!scoreRow || !evaluateGroups(scoreRow, rule.entry_conditions, today)) continue;
+              if (!scoreRow) continue;
+              if (scoreRow.trade_date !== today) {
+                await logStaleOnce(svc, userId, rule.id, scope.symbol, scoreRow.trade_date, today);
+                continue;
+              }
+              if (!evaluateGroups(scoreRow, rule.entry_conditions, today)) continue;
 
               const quotes = await provider.getQuotes([`${scope.exchange}:${scope.symbol}`]);
               const ltp = quotes[0]?.price;
@@ -301,9 +380,11 @@ Deno.serve(async (req) => {
       } catch (e) {
         // one user's failure shouldn't block everyone else's evaluation
         await log(svc, userId, "error", `AutoTrade tick failed: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        await svc.from("market_autotrade_settings").update({ eval_lock_at: null }).eq("user_id", userId);
       }
     }
-    return jsonResponse(req, { ok: true, users: settingsRows.length, fired: totalFired });
+    return jsonResponse(req, { ok: true, users: usersProcessed, fired: totalFired });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }

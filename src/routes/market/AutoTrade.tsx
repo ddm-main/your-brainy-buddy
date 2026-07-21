@@ -127,7 +127,11 @@ export default function AutoTrade() {
       header: "Armed", id: "armed", meta: { align: "right" as const },
       cell: ({ row }: { row: { original: AutoTradeRule } }) => (
         <Btn size="sm" variant={row.original.is_armed ? "primary" : "ghost"}
-          onClick={() => setArmed.mutate({ id: row.original.id, armed: !row.original.is_armed })}>
+          onClick={() => {
+            const arming = !row.original.is_armed;
+            if (arming && !confirm(`Arm "${row.original.name}"? It will start placing real orders on the next eval tick.`)) return;
+            setArmed.mutate({ id: row.original.id, armed: arming });
+          }}>
           {row.original.is_armed ? "armed" : "disarmed"}
         </Btn>
       ),
@@ -153,7 +157,7 @@ export default function AutoTrade() {
       <HudPanel flow title="AutoTrade Control" index="AT.01" live={settings?.enabled ? "ok" : "idle"}>
         {settings?.disabled_reason && (
           <div style={{ padding: 10, marginBottom: 10, border: "1px solid var(--danger)", background: "rgba(255,95,109,0.08)", fontSize: 12, color: "var(--danger)" }}>
-            Circuit breaker tripped: {settings.disabled_reason}
+            Circuit breaker tripped: {settings.disabled_reason} — new entries are blocked; open positions still get stop-loss/target/exit protection.
           </div>
         )}
         <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
@@ -370,6 +374,7 @@ function RuleEditor({ rule, watchlists, onClose, onSave }: {
     if (scopeType === "symbol" && !symbol.trim()) { alert("Symbol required"); return null; }
     if (scopeType === "watchlist" && !watchlistId) { alert("Watchlist required"); return null; }
     if (entry.length === 0) { alert("At least one entry condition required"); return null; }
+    if (!(Number(sizingValue) > 0)) { alert("Sizing must be a positive number — a rule saved with 0 or blank sizing silently never fires"); return null; }
     return {
       id: rule?.id,
       name: name.trim(),
@@ -489,8 +494,15 @@ function RuleEditor({ rule, watchlists, onClose, onSave }: {
         </div>
 
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <Btn onClick={() => { const p = buildPayload(); if (p) onSave(p, rule?.is_armed ?? false); }}>save draft</Btn>
-          <Btn variant="primary" onClick={() => { const p = buildPayload(); if (p) onSave(p, true); }}>arm this rule</Btn>
+          {/* Always disarms, even when editing an already-armed rule — "draft"
+              means not live. Silently keeping is_armed=true here used to let
+              an edited (possibly very different) rule keep trading unattended
+              the moment you saved, with no re-confirmation. */}
+          <Btn onClick={() => { const p = buildPayload(); if (p) onSave(p, false); }}>save draft</Btn>
+          <Btn variant="primary" onClick={() => {
+            if (!confirm("Arm this rule? It will start placing real orders on the next eval tick.")) return;
+            const p = buildPayload(); if (p) onSave(p, true);
+          }}>arm this rule</Btn>
         </div>
       </div>
     </div>

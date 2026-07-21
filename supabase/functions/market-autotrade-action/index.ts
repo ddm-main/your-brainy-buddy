@@ -51,7 +51,13 @@ Deno.serve(async (req) => {
         .select("id,rule_id,symbol,exchange,leg,quantity,status,filled_price,requested_price,product")
         .eq("user_id", userId).eq("symbol", symbol).eq("exchange", exchange)
         .in("status", ["placed", "filled"]);
-      const rows = (orders ?? []).filter((o) => !ruleId || o.rule_id === ruleId);
+      // Strict equality (including null-to-null for an orphaned position
+      // whose rule was since deleted) — the old `!ruleId ||` short-circuit
+      // meant a null ruleId matched EVERY order for this symbol regardless
+      // of which rule opened it, so flattening one orphaned position could
+      // net/close a different, still-active rule's position in the same
+      // symbol along with it.
+      const rows = (orders ?? []).filter((o) => o.rule_id === ruleId);
       let qty = 0;
       for (const o of rows) qty += o.leg === "entry" ? o.quantity : -o.quantity;
       if (qty <= 0) return errorResponse(req, "No open AutoTrade position for this symbol");
@@ -61,6 +67,21 @@ Deno.serve(async (req) => {
       if (provider.name !== "kotak_neo" || !settings || settings.connection_status !== "connected") {
         return errorResponse(req, "Kotak Neo not connected", 400);
       }
+
+      // Never try to sell more than the broker actually shows — our ledger
+      // can overstate qty if a prior order was rejected, or the position
+      // was already closed outside AutoTrade (manually, or an MIS
+      // square-off) and never reconciled. If quotable at all, the check
+      // itself failing falls through to the ledger qty (same as pre-fix
+      // behavior) rather than blocking a flatten the user explicitly asked for.
+      try {
+        const brokerPositions = await provider.getPositions();
+        const real = brokerPositions.find((p) => p.symbol === symbol && p.exchange === exchange);
+        const realQty = real?.quantity ?? 0;
+        if (realQty <= 0) return errorResponse(req, "Broker shows no open position for this symbol — ledger was stale, nothing to flatten", 400);
+        if (realQty < qty) qty = realQty;
+      } catch { /* provider check failed — fall through and trust the ledger qty */ }
+
       const quotes = await provider.getQuotes([`${exchange}:${symbol}`]);
       const ltp = quotes[0]?.price;
       const result = await provider.placeOrder({
