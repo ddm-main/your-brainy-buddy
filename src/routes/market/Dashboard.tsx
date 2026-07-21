@@ -8,6 +8,7 @@ import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip } from "@/components/hud/HudControls";
 import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
+import { WatchlistPanel } from "@/components/market/WatchlistPanel";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "@/lib/market/api";
 import { useIndices, useIndexWatch, useIndexWatchMutations, useMarketSettings, useQuotes, useStockScores } from "@/lib/market/hooks";
@@ -283,12 +284,13 @@ export default function MarketDashboard() {
                 <StatTile label={`${counts?.holdings ?? 0} held · ${counts?.watchlist ?? 0} watched`} value="" to="/market/holdings" />
               </div>
             ) : (
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--text-dim)" }}>
+              <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
                 <Link to="/market/holdings" style={{ color: "var(--accent)", textDecoration: "none" }}>+ add holdings</Link>
-                <Link to="/market/watchlist" style={{ color: "var(--accent)", textDecoration: "none" }}>+ watchlist</Link>
               </div>
             )}
           </HudPanel>
+
+          <WatchlistPanel />
         </div>
       </div>
 

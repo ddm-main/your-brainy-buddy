@@ -8,11 +8,9 @@ import { useRealtimeTicks } from "@/lib/market/useRealtimeTicks";
 
 const Dashboard = lazy(() => import("@/routes/market/Dashboard"));
 const Holdings = lazy(() => import("@/routes/market/Holdings"));
-const Watchlist = lazy(() => import("@/routes/market/Watchlist"));
 const Positions = lazy(() => import("@/routes/market/Positions"));
 const Screener = lazy(() => import("@/routes/market/Screener"));
 const Analysis = lazy(() => import("@/routes/market/Analysis"));
-const Alerts = lazy(() => import("@/routes/market/Alerts"));
 const Backtesting = lazy(() => import("@/routes/market/Backtesting"));
 const MarketSettings = lazy(() => import("@/routes/market/Settings"));
 const Planner = lazy(() => import("@/routes/market/Planner"));
@@ -38,12 +36,6 @@ const GROUPS: Group[] = [
     subs: [
       { to: "/market/holdings", label: "Holdings" },
       { to: "/market/positions", label: "Positions" },
-    ] },
-  { key: "watch", label: "Watchlists & Alerts", to: "/market/watchlist",
-    match: (p) => /^\/market\/(watchlist|alerts)/.test(p),
-    subs: [
-      { to: "/market/watchlist", label: "Watchlists" },
-      { to: "/market/alerts", label: "Alerts" },
     ] },
   { key: "autotrade", label: "AutoTrade", to: "/market/autotrade",
     match: (p) => /^\/market\/autotrade/.test(p), subs: [] },
@@ -133,11 +125,9 @@ export default function Market() {
               <Route index element={<Dashboard />} />
               <Route path="holdings" element={<Holdings />} />
               <Route path="positions" element={<Positions />} />
-              <Route path="watchlist" element={<Watchlist />} />
               <Route path="screener" element={<Screener />} />
               <Route path="analysis" element={<Navigate to="/market/screener" replace />} />
               <Route path="analysis/:symbol" element={<Analysis />} />
-              <Route path="alerts" element={<Alerts />} />
               <Route path="backtesting" element={<Backtesting />} />
               <Route path="planner" element={<Planner />} />
               <Route path="ai" element={<AIEngine />} />

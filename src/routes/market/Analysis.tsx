@@ -2,7 +2,8 @@
 // Chart fills the viewport height; indicators are computed client-side in
 // CandleChart, so toggles work even before the EOD pipeline has run.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Navigate, useParams, useSearchParams } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
@@ -10,6 +11,7 @@ import { TradingViewChart, tvInterval } from "@/components/market/TradingViewCha
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { ChartToolbar, DEFAULT_SETTINGS, type ChartSettings } from "@/components/market/ChartToolbar";
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
+import { NewAlertModal, StockAlertsPanel } from "@/components/market/StockAlerts";
 import { DEFAULT_STUDIES, makeStudy, normalizeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
 import { fmtNum, fmtInt, fmtPct } from "@/components/hud/DataTable";
 import { useBreadth, useCandles, useCorporateActions, useDepth, useFundamentals, useMarketNews, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores, useSyncNewsAndActions } from "@/lib/market/hooks";
@@ -62,7 +64,7 @@ function loadState(): Persisted {
 
 export default function Analysis() {
   const { symbol } = useParams();
-  const nav = useNavigate();
+  const qc = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const exchange = (searchParams.get("exchange") ?? "NSE").toUpperCase() === "BSE" ? "BSE" : "NSE";
   const setExchange = (ex: "NSE" | "BSE") => {
@@ -81,6 +83,7 @@ export default function Analysis() {
   const [studies, setStudies] = useState<Study[]>(initial.studies);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [settings, setSettings] = useState<ChartSettings>(initial.settings);
+  const [alertModalOpen, setAlertModalOpen] = useState(false);
   const chartWrapRef = useRef<HTMLDivElement>(null);
   const notify = useNotifications((s) => s.add);
 
@@ -236,7 +239,7 @@ export default function Analysis() {
               tvMode={tvMode}
               onTvMode={setTvMode}
               onFullscreen={() => setFs(true)}
-              onAlert={() => nav(`/market/alerts?symbol=${sym}`)}
+              onAlert={() => setAlertModalOpen(true)}
               onScreenshot={handleScreenshot}
               onSaveLayout={handleSaveLayout}
             />
@@ -290,6 +293,8 @@ export default function Analysis() {
             {quote?.stale && <Chip tone="warn">stale</Chip>}
           </div>
         </HudPanel>
+
+        <StockAlertsPanel symbol={sym} exchange={exchange} />
 
         {depth && (depth.bids.length > 0 || depth.asks.length > 0) && (
           <HudPanel flow title="Market Depth" index="A2">
@@ -498,6 +503,11 @@ export default function Analysis() {
           )}
         </HudPanel>
       </div>
+
+      {alertModalOpen && (
+        <NewAlertModal symbol={sym} exchange={exchange} onClose={() => setAlertModalOpen(false)}
+          onCreated={() => { qc.invalidateQueries({ queryKey: ["market", "alerts", sym, exchange] }); setAlertModalOpen(false); }} />
+      )}
     </div>
   );
 }

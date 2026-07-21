@@ -10,6 +10,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
 import { ChartToolbar, DEFAULT_SETTINGS, type ChartSettings } from "@/components/market/ChartToolbar";
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
+import { NewAlertModal } from "@/components/market/StockAlerts";
 import { DEFAULT_STUDIES, makeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
 import { TradingViewChart, tvInterval } from "@/components/market/TradingViewChart";
 import { FullscreenShell } from "@/components/market/FullscreenShell";
@@ -47,6 +48,7 @@ export default function IndexDetail() {
   const [studies, setStudies] = useState<Study[]>(DEFAULT_STUDIES);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [settings, setSettings] = useState<ChartSettings>(DEFAULT_SETTINGS);
+  const [alertModalOpen, setAlertModalOpen] = useState(false);
   const chartWrapRef = useRef<HTMLDivElement>(null);
   const notify = useNotifications((s) => s.add);
   const addStudy = useCallback((t: IndicatorType) => setStudies((s) => [...s, makeStudy(t)]), []);
@@ -167,7 +169,7 @@ export default function IndexDetail() {
                 setTvMode(v);
               }}
               onFullscreen={() => setFs(true)}
-              onAlert={() => nav(`/market/alerts?symbol=${symbol}`)}
+              onAlert={() => setAlertModalOpen(true)}
               onScreenshot={handleScreenshot}
               onSaveLayout={handleSaveLayout}
             />
@@ -205,6 +207,11 @@ export default function IndexDetail() {
 
       {tab === "constituents" && cSlug && (
         <ConstituentsPanel slug={cSlug} onRow={(s) => nav(`/market/analysis/${s}`)} />
+      )}
+
+      {alertModalOpen && (
+        <NewAlertModal symbol={symbol} exchange="NSE" onClose={() => setAlertModalOpen(false)}
+          onCreated={() => setAlertModalOpen(false)} />
       )}
     </div>
   );
