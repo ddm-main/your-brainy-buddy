@@ -126,20 +126,6 @@ export default function MarketSettings() {
     finally { setBusy(null); }
   };
 
-  const setActive = async (prov: Provider) => {
-    setBusy("activate");
-    try {
-      if (prov === "yahoo") {
-        push("Yahoo Finance is always available for quotes and charts", "ok");
-      } else {
-        await callFn("market-config-save", { provider: "kotak_neo", consumer_key: consumerKey || undefined, ucc: ucc || undefined });
-        push("Kotak Neo selected — save credentials and login to activate broker sync", "ok");
-      }
-      await load();
-    } catch (e) { push(toSafeError(e, "Activate failed").message, "err"); }
-    finally { setBusy(null); }
-  };
-
   const startLogin = async () => {
     setBusy("login");
     try {
@@ -272,28 +258,20 @@ export default function MarketSettings() {
             status={kotakStatus} statusTone={kotakConnected ? "ok" : kotakStatus === "pending_otp" ? "warn" : kotak?.last_error ? "err" : "neutral"}
             live={liveProvider === "kotak_neo"}
             meta={
-              <>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
                 {kotakConnected && kotak?.greeting_name && <span>Connected: <b style={{ color: "var(--accent)" }}>{kotak.greeting_name}</b></span>}
                 {kotak?.token_expires_at && (
-                  <span style={{ marginLeft: kotakConnected ? 12 : 0 }} title="Kotak's broker API hard-expires every session nightly near midnight IST for every app, by their design — not something this app controls. Auto-login means you never have to act on it.">
-                    {autoLoginEnabled
-                      ? `Auto-renews nightly · current session valid until ${new Date(kotak.token_expires_at).toLocaleString()}`
-                      : `Session valid until ${new Date(kotak.token_expires_at).toLocaleString()} — then needs a manual reconnect`}
+                  <span title="Kotak hard-expires every session nightly near midnight IST for every app — not app-controlled. Auto-login means it renews without you.">
+                    {autoLoginEnabled ? "Auto-renews nightly" : "Manual reconnect needed after"} · valid until {new Date(kotak.token_expires_at).toLocaleString()}
                   </span>
                 )}
-                {kotak?.last_sync_at && <span style={{ marginLeft: 12 }}>Last sync {new Date(kotak.last_sync_at).toLocaleString()}</span>}
-                {kotakConfigured && (
-                  <span style={{ marginLeft: 12, display: "inline-flex", alignItems: "center", gap: 4 }}>
-                    <Chip tone={autoLoginEnabled ? "ok" : "warn"}>{autoLoginEnabled ? "auto-login on" : "auto-login off"}</Chip>
-                    {!autoLoginEnabled && <span style={{ color: "var(--text-dim)" }}>— will need a manual OTP again tomorrow</span>}
-                  </span>
-                )}
-              </>
+                {kotak?.last_sync_at && <span>Last sync {new Date(kotak.last_sync_at).toLocaleString()}</span>}
+                {kotakConfigured && <Chip tone={autoLoginEnabled ? "ok" : "warn"}>{autoLoginEnabled ? "auto-login on" : "auto-login off"}</Chip>}
+              </div>
             }
             error={kotak?.last_error ?? undefined}
             actions={
               <>
-                {!kotakConnected && <Btn size="sm" onClick={() => setActive("kotak_neo")} disabled={busy !== null}>Make active</Btn>}
                 <Btn size="sm" onClick={() => testConnection("kotak_neo")} disabled={busy !== null}><TestTube2 size={11} style={{ marginRight: 4 }} />Test</Btn>
                 <Btn size="sm" variant={editing ? "primary" : "ghost"} onClick={() => setEditing((v) => !v)}>
                   <Pencil size={11} style={{ marginRight: 4 }} />{editing ? "Close" : kotakConfigured ? "Edit" : "Add credentials"}
@@ -306,7 +284,7 @@ export default function MarketSettings() {
 
       <HudPanel flow title="Secondary Providers" index="MK.S1B" live="idle">
         <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
-          Priority-chain fallbacks used by the sync pipelines when Kotak/Yahoo don't cover a field (fundamentals, technicals, exchange metadata). FMP and Alpha Vantage need a free-tier API key set as a Supabase secret — Test reports whether one is configured and reachable.
+          Fallbacks when Kotak/Yahoo miss a field. FMP/Alpha Vantage need an API key (Supabase secret).
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {SERVICE_PROVIDERS.map((prov) => {
@@ -334,18 +312,11 @@ export default function MarketSettings() {
 
       {!editing && kotakConfigured && ["expired", "error"].includes(kotakStatus) && (
         <HudPanel flow title="Kotak Session Expired" index="MK.S2">
-          {autoLoginEnabled ? (
-            <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
-              Kotak sessions reset daily near midnight IST. Reconnect using your saved credentials — nothing to re-enter.
-            </div>
-          ) : (
-            <div style={{ fontSize: 12, color: "var(--warn)", marginBottom: 10 }}>
-              No TOTP secret saved, so this needs a fresh 6-digit code from your authenticator app —
-              same as every other day. To stop doing this daily, open <b>Edit</b> above and save your
-              TOTP Secret (Kotak Neo app → API TOTP) once; JARVIS will then re-log in automatically
-              every morning without you.
-            </div>
-          )}
+          <div style={{ fontSize: 12, color: autoLoginEnabled ? "var(--text-dim)" : "var(--warn)", marginBottom: 10 }}>
+            {autoLoginEnabled
+              ? "Reconnecting with saved credentials — nothing to re-enter."
+              : "No TOTP secret saved — needs a fresh code each time. Save one in Edit to stop this."}
+          </div>
           <Btn onClick={startLogin} disabled={busy !== null} variant="primary">
             {busy === "login" ? "reconnecting…" : "Re-login"}
           </Btn>
@@ -355,11 +326,7 @@ export default function MarketSettings() {
       {editing && (
         <HudPanel flow title="Kotak Neo — Credentials" index="MK.S2">
           <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12 }}>
-            Stored encrypted at rest — never sent back to this page once saved. Fields marked{" "}
-            <span style={{ color: "var(--ok)" }}>✓ saved</span> below already have a value: leave them
-            blank and they're reused as-is, so once everything is saved once, re-logging in (or the
-            nightly auto-login) needs nothing typed here at all — not even MPIN. Only fill a field in
-            to replace what's stored (e.g. your MPIN changed on Kotak's side).
+            Encrypted at rest, never sent back. <span style={{ color: "var(--ok)" }}>✓ saved</span> = blank keeps the existing value.
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <Field label="Consumer Key" value={consumerKey} setValue={setConsumerKey} placeholder="From Kotak Neo → Trade API" saved={!!kotak?.consumer_key} />
@@ -444,9 +411,8 @@ function ProviderCard({
         {live && <Chip tone="accent">live</Chip>}
         <span style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap" }}>{actions}</span>
       </div>
-      <div style={{ marginTop: 8, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-        <span style={{ fontSize: 9, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.18em" }}>Fetches</span>
-        {fetches.map((f) => <Chip key={f} tone="neutral">{f}</Chip>)}
+      <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>
+        {fetches.join(" · ")}
       </div>
       {meta && <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-dim)" }}>{meta}</div>}
       {error && <div style={{ marginTop: 6, fontSize: 11, color: "var(--danger)" }}>Last error: {error}</div>}
