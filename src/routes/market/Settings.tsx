@@ -27,8 +27,12 @@ type Settings = {
   ucc: string | null;
   greeting_name: string | null;
   // Ciphertext presence only — never rendered/decrypted client-side. Used
-  // purely to tell whether unattended daily re-login is actually possible.
+  // purely to show which credentials are already saved, so a returning
+  // user isn't guessing whether "blank to keep" actually has anything to
+  // keep.
   totp_secret_enc: string | null;
+  mobile_number_enc: string | null;
+  mpin_enc: string | null;
 };
 
 const KOTAK_DEFAULT_BASE = "https://gw-napi.kotaksecurities.com";
@@ -341,15 +345,18 @@ export default function MarketSettings() {
       {editing && (
         <HudPanel flow title="Kotak Neo — Credentials" index="MK.S2">
           <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12 }}>
-            Stored encrypted at rest. Sessions expire daily near midnight IST — save the TOTP secret
-            (Kotak Neo app → API TOTP) and JARVIS re-logs in automatically each morning.
+            Stored encrypted at rest — never sent back to this page once saved. Fields marked{" "}
+            <span style={{ color: "var(--ok)" }}>✓ saved</span> below already have a value: leave them
+            blank and they're reused as-is, so once everything is saved once, re-logging in (or the
+            nightly auto-login) needs nothing typed here at all — not even MPIN. Only fill a field in
+            to replace what's stored (e.g. your MPIN changed on Kotak's side).
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-            <Field label="Consumer Key" value={consumerKey} setValue={setConsumerKey} placeholder="From Kotak Neo → Trade API" />
-            <Field label="UCC (Client Code)" value={ucc} setValue={setUcc} placeholder="e.g. ABC123" />
-            <Field label="Mobile Number" value={mobile} setValue={setMobile} placeholder="+91XXXXXXXXXX (blank to keep)" />
-            <Field label="MPIN" value={mpin} setValue={setMpin} placeholder="6-digit (blank to keep)" type="password" />
-            <Field label="TOTP Secret" value={totpSecret} setValue={setTotpSecret} placeholder="Base32 — enables auto-login" type="password" />
+            <Field label="Consumer Key" value={consumerKey} setValue={setConsumerKey} placeholder="From Kotak Neo → Trade API" saved={!!kotak?.consumer_key} />
+            <Field label="UCC (Client Code)" value={ucc} setValue={setUcc} placeholder="e.g. ABC123" saved={!!kotak?.ucc} />
+            <Field label="Mobile Number" value={mobile} setValue={setMobile} placeholder="+91XXXXXXXXXX" saved={!!kotak?.mobile_number_enc} />
+            <Field label="MPIN" value={mpin} setValue={setMpin} placeholder="6-digit" type="password" saved={!!kotak?.mpin_enc} />
+            <Field label="TOTP Secret" value={totpSecret} setValue={setTotpSecret} placeholder="Base32 — enables auto-login" type="password" saved={!!kotak?.totp_secret_enc} />
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
             <Btn onClick={saveConfig} disabled={busy !== null} variant="primary">
@@ -437,11 +444,16 @@ function ProviderCard({
   );
 }
 
-function Field({ label, value, setValue, placeholder, type = "text" }: { label: string; value: string; setValue: (v: string) => void; placeholder?: string; type?: string }) {
+function Field({ label, value, setValue, placeholder, type = "text", saved }: { label: string; value: string; setValue: (v: string) => void; placeholder?: string; type?: string; saved?: boolean }) {
   return (
     <div>
-      <div style={labelStyle}>{label}</div>
-      <input type={type} value={value} onChange={(e) => setValue(e.target.value)} placeholder={placeholder} style={{ ...inputStyle, width: "100%" }} autoComplete="off" />
+      <div style={labelStyle}>
+        {label}
+        {saved && <span style={{ marginLeft: 6, color: "var(--ok)", textTransform: "none", letterSpacing: 0 }}>✓ saved</span>}
+      </div>
+      <input type={type} value={value} onChange={(e) => setValue(e.target.value)}
+        placeholder={saved ? `${placeholder} — blank keeps saved value` : placeholder}
+        style={{ ...inputStyle, width: "100%" }} autoComplete="off" />
     </div>
   );
 }
