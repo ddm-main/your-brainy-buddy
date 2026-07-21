@@ -61,7 +61,6 @@ export default function MarketSettings() {
 
   // Kotak form state (secrets never repopulate on load).
   const [consumerKey, setConsumerKey] = useState("");
-  const [consumerSecret, setConsumerSecret] = useState("");
   const [mobile, setMobile] = useState("");
   const [mpin, setMpin] = useState("");
   const [ucc, setUcc] = useState("");
@@ -100,14 +99,13 @@ export default function MarketSettings() {
       await callFn("market-config-save", {
         provider: "kotak_neo",
         consumer_key: consumerKey || null,
-        consumer_secret: consumerSecret || null,
         mobile_number: mobile || null,
         mpin: mpin || null,
         totp_secret: totpSecret || null,
         ucc: ucc || undefined,
         base_url: KOTAK_DEFAULT_BASE, ws_url: KOTAK_DEFAULT_WS,
       });
-      setConsumerSecret(""); setMpin(""); setMobile(""); setTotpSecret("");
+      setMpin(""); setMobile(""); setTotpSecret("");
       push("Configuration saved", "ok");
       await load();
     } catch (e) { push(toSafeError(e, "Save failed").message, "err"); }
@@ -140,13 +138,12 @@ export default function MarketSettings() {
         mobile_number: mobile || undefined,
         mpin: mpin || undefined,
         totp_secret: totpSecret || undefined,
-        consumer_secret: consumerSecret || undefined,
         ucc: ucc || undefined,
       });
-      setConsumerSecret(""); setMpin(""); setMobile(""); setTotpSecret("");
+      setMpin(""); setMobile(""); setTotpSecret("");
       const r = await callFn("market-kotak-login-start", {});
       if (r?.auto) push(`Connected as ${r?.greeting_name ?? "Kotak user"} (auto TOTP)`, "ok");
-      else if (r?.needs_totp) push("Enter the 6-digit TOTP below", "ok");
+      else if (r?.needs_totp) push(r?.message ?? "Enter the 6-digit TOTP below", r?.message ? "warn" : "ok");
       else push(r?.message ?? "Login started", "ok");
       await load();
     } catch (e) { push(toSafeError(e, "Login failed").message, "err"); }
@@ -347,7 +344,6 @@ export default function MarketSettings() {
             <Field label="Mobile Number" value={mobile} setValue={setMobile} placeholder="+91XXXXXXXXXX (blank to keep)" />
             <Field label="MPIN" value={mpin} setValue={setMpin} placeholder="6-digit (blank to keep)" type="password" />
             <Field label="TOTP Secret" value={totpSecret} setValue={setTotpSecret} placeholder="Base32 — enables auto-login" type="password" />
-            <Field label="Consumer Secret" value={consumerSecret} setValue={setConsumerSecret} placeholder="Optional" type="password" />
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
             <Btn onClick={saveConfig} disabled={busy !== null} variant="primary">

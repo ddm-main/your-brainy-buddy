@@ -3,7 +3,7 @@
 // authenticated user for their own row ("Refresh session" button).
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
-import { KOTAK_SETTINGS_COLS, type KotakSettings, kotakAutoLogin, persistSession } from "../_shared/market/kotakClient.ts";
+import { KOTAK_SETTINGS_COLS, type KotakSettings, KotakError, kotakAutoLogin, persistSession } from "../_shared/market/kotakClient.ts";
 import { encryptValue } from "../_shared/market/provider.ts";
 
 Deno.serve(async (req) => {
@@ -38,8 +38,17 @@ Deno.serve(async (req) => {
         results.push({ user_id: row.user_id, ok: true, greeting_name: sess.greetingName });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
+        // Not a KotakError means the secret itself failed to decode, not a
+        // broker/network hiccup — it'll fail identically every night
+        // forever. Clear it so the auto-login status shown in Settings
+        // reflects reality instead of silently retrying a known-dead value.
+        const badSecret = !(e instanceof KotakError);
         await svc.from("market_api_settings")
-          .update({ connection_status: "error", last_error: `refresh: ${msg}` })
+          .update({
+            connection_status: "error",
+            last_error: badSecret ? `Saved TOTP secret is invalid (${msg}) — cleared, re-save it to restore auto-login.` : `refresh: ${msg}`,
+            ...(badSecret ? { totp_secret_enc: null } : {}),
+          })
           .eq("id", row.id);
         results.push({ user_id: row.user_id, ok: false, error: msg });
       }

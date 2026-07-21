@@ -1,6 +1,7 @@
 // market-config-save — save/activate provider config; encrypts secrets.
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { encryptStatementPassword } from "../_shared/crypto.ts";
+import { base32Decode } from "../_shared/market/totp.ts";
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
@@ -18,11 +19,24 @@ Deno.serve(async (req) => {
 
     const patch: Record<string, unknown> = { user_id: auth.userId, active_provider: provider, updated_at: new Date().toISOString() };
     if (b?.consumer_key !== undefined) patch.consumer_key = b.consumer_key;
-    if (b?.consumer_secret) patch.consumer_secret_enc = await enc(b.consumer_secret);
     if (b?.mobile_number) patch.mobile_number_enc = await enc(b.mobile_number);
-    if (b?.password) patch.password_enc = await enc(b.password);
     if (b?.mpin) patch.mpin_enc = await enc(b.mpin);
-    if (b?.totp_secret) patch.totp_secret_enc = await enc(String(b.totp_secret).replace(/\s+/g, ""));
+    if (b?.totp_secret) {
+      // Authenticator apps commonly display the secret grouped for
+      // readability ("JBSW-Y3DP-EHPK-3PXP" or with spaces) — strip both,
+      // not just whitespace, before validating. Reject anything that still
+      // isn't valid base32 right here instead of silently storing it: a bad
+      // secret otherwise only surfaces as a cryptic decode error at the
+      // worst possible time (mid-login, or on the unattended nightly cron),
+      // and once stored it gets retried and fails identically forever.
+      const cleaned = String(b.totp_secret).replace(/[\s-]+/g, "").toUpperCase();
+      try {
+        base32Decode(cleaned);
+      } catch {
+        return errorResponse(req, "That TOTP secret isn't valid base32 (letters A-Z and digits 2-7 only) — check for typos or extra characters copied from Kotak Neo.", 400);
+      }
+      patch.totp_secret_enc = await enc(cleaned);
+    }
     if (b?.ucc !== undefined) patch.ucc = String(b.ucc).trim().toUpperCase() || null;
     if (b?.base_url !== undefined) patch.base_url = b.base_url;
     if (b?.ws_url !== undefined) patch.ws_url = b.ws_url;
