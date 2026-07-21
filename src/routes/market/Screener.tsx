@@ -685,37 +685,16 @@ function InlineFilterEditor({ def, af, rows, sectorList, industryList, onChange,
           onChange={(values) => (values.length === 0 ? onClear() : onChange({ values }))}
         />
       ) : (
-        <>
-          {def.id === "market_cap" && (
-            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 4 }}>
-              {CAP_TIERS.map((t) => {
-                const isSel = af?.min === t.min && (af?.max ?? undefined) === t.max;
-                return (
-                  <button key={t.id} className="hud-btn" data-variant={isSel ? "primary" : "ghost"} data-size="sm"
-                    onClick={() => onChange({ min: t.min, max: t.max ?? "" })}>{t.label.split(" ")[0]}</button>
-                );
-              })}
-            </div>
-          )}
-          {cov.has > 0 && def.min !== undefined && def.max !== undefined && (
-            <HistogramSlider
-              values={(rows as any[]).map((r) => r[def.id])}
-              min={def.min} max={def.max} step={def.step ?? 1}
-              lo={af?.min} hi={af?.max}
-              onChange={(patch) => onChange(patch)}
-            />
-          )}
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <input type="number" value={af?.min ?? ""} step={def.step}
-              placeholder={def.min !== undefined ? String(def.min) : "min"}
-              onChange={(e) => onChange({ min: e.target.value === "" ? "" : Number(e.target.value) })} style={inpS} />
-            <span style={{ fontSize: 9, color: "var(--text-muted)" }}>–</span>
-            <input type="number" value={af?.max ?? ""} step={def.step}
-              placeholder={def.max !== undefined ? String(def.max) : "max"}
-              onChange={(e) => onChange({ max: e.target.value === "" ? "" : Number(e.target.value) })} style={inpS} />
-            {def.unit && <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{def.unit}</span>}
-          </div>
-        </>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input type="number" value={af?.min ?? ""} step={def.step}
+            placeholder={def.min !== undefined ? String(def.min) : "min"}
+            onChange={(e) => onChange({ min: e.target.value === "" ? "" : Number(e.target.value) })} style={inpS} />
+          <span style={{ fontSize: 9, color: "var(--text-muted)" }}>–</span>
+          <input type="number" value={af?.max ?? ""} step={def.step}
+            placeholder={def.max !== undefined ? String(def.max) : "max"}
+            onChange={(e) => onChange({ max: e.target.value === "" ? "" : Number(e.target.value) })} style={inpS} />
+          {def.unit && <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{def.unit}</span>}
+        </div>
       )}
     </div>
   );
