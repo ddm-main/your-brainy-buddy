@@ -455,14 +455,27 @@ function ProviderCard({
   );
 }
 
+const MASK_DOTS = "••••••••••••";
+
 function Field({ label, value, setValue, placeholder, type = "text", saved }: { label: string; value: string; setValue: (v: string) => void; placeholder?: string; type?: string; saved?: boolean }) {
+  // A saved field with nothing typed shows a dot mask instead of a truly
+  // empty box — an empty input with grey placeholder text reads as "nothing
+  // here" even when something real is stored underneath (mobile number
+  // whenever the reveal call hasn't resolved, MPIN and TOTP secret always,
+  // by design). The mask is display-only: it's never written into `value`,
+  // so it can never be accidentally submitted as real data. Clicking in
+  // swaps to a real empty box ready for fresh input.
+  const [touched, setTouched] = useState(false);
+  const showMask = saved && !touched && !value;
   return (
     <div>
       <div style={labelStyle}>
         {label}
         {saved && <span style={{ marginLeft: 6, color: "var(--ok)", textTransform: "none", letterSpacing: 0 }}>✓ saved</span>}
       </div>
-      <input type={type} value={value} onChange={(e) => setValue(e.target.value)}
+      <input type={type} value={showMask ? MASK_DOTS : value}
+        onFocus={() => { if (showMask) setTouched(true); }}
+        onChange={(e) => { setTouched(true); setValue(e.target.value); }}
         placeholder={saved ? `${placeholder} — blank keeps saved value` : placeholder}
         style={{ ...inputStyle, width: "100%" }} autoComplete="off" />
     </div>
