@@ -229,13 +229,13 @@ export default function MarketSettings() {
   }, [pipeline]);
 
   const kotakExpanded = (editing || kotak?.connection_status === "pending_otp") && (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {editing && (
         <>
           <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
             Encrypted at rest, never sent back. <span style={{ color: "var(--ok)" }}>✓ saved</span> = blank keeps the existing value.
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             <Field label="Consumer Key" value={consumerKey} setValue={setConsumerKey} placeholder="From Kotak Neo → Trade API" saved={!!kotak?.consumer_key} />
             <Field label="UCC (Client Code)" value={ucc} setValue={setUcc} placeholder="e.g. ABC123" saved={!!kotak?.ucc} />
             <Field label="Mobile Number" value={mobile} setValue={setMobile} placeholder="+91XXXXXXXXXX" saved={!!kotak?.mobile_number_enc} />
@@ -256,7 +256,7 @@ export default function MarketSettings() {
         </>
       )}
       {kotak?.connection_status === "pending_otp" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: editing ? 12 : 0, borderTop: editing ? "1px solid var(--edge)" : undefined }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingTop: editing ? 8 : 0, borderTop: editing ? "1px solid var(--edge)" : undefined }}>
           <div style={{ fontSize: 11, color: "var(--text-dim)" }}>Enter the current 6-digit TOTP (Kotak Neo → API TOTP).</div>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
             <div style={{ flex: 1, maxWidth: 200 }}>
@@ -273,9 +273,9 @@ export default function MarketSettings() {
   );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <HudPanel flow title="Data Providers" index="MK.S1" live={kotakConnected ? "ok" : "idle"}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <ProviderCard
             name="Yahoo Finance" role="Market data" fetches={FETCHES.yahoo}
             status="available" statusTone="ok" live={liveProvider === "yahoo"}
@@ -317,10 +317,10 @@ export default function MarketSettings() {
       </HudPanel>
 
       <HudPanel flow title="Secondary Providers" index="MK.S1B" live="idle">
-        <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6 }}>
           Fallbacks when Kotak/Yahoo miss a field. FMP/Alpha Vantage need an API key (Supabase secret).
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
           {SERVICE_PROVIDERS.map((prov) => {
             const meta = SERVICE_META[prov];
             const status = serviceStatus[prov];
@@ -345,10 +345,10 @@ export default function MarketSettings() {
       </HudPanel>
 
       <HudPanel flow title="Data Pipeline" index="MK.S4">
-        <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 12 }}>
+        <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 8 }}>
           Run in order when the dashboard/screener are empty: Universe → EOD Batch → Aggregates.
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           <Btn onClick={() => runPipeline("market-scrips-sync", "Universe sync")} disabled={busy !== null}>
             <Database size={11} style={{ marginRight: 4 }} />{busy === "market-scrips-sync" ? "syncing…" : "Sync universe"}
           </Btn>
@@ -363,8 +363,8 @@ export default function MarketSettings() {
             <Database size={11} style={{ marginRight: 4 }} />{busy === "market-fundamentals-global-sync" ? "syncing… (~2 min)" : "Sync fundamentals"}
           </Btn>
         </div>
-        {pipelineSummary && <div style={{ marginTop: 10, fontSize: 11, color: "var(--accent-soft)", lineHeight: 1.5 }}>{pipelineSummary}</div>}
-        <div style={{ marginTop: 10, fontSize: 11, color: "var(--text-muted)" }}>
+        {pipelineSummary && <div style={{ marginTop: 6, fontSize: 11, color: "var(--accent-soft)", lineHeight: 1.5 }}>{pipelineSummary}</div>}
+        <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>
           Then verify in <Link to="/market/screener" style={{ color: "var(--accent)" }}>Screener</Link> or <Link to="/market" style={{ color: "var(--accent)" }}>Dashboard</Link>.
         </div>
       </HudPanel>
@@ -380,20 +380,20 @@ function ProviderCard({
   actions: React.ReactNode; meta?: React.ReactNode; error?: string; expanded?: React.ReactNode;
 }) {
   return (
-    <div style={{ border: "1px solid var(--edge)", borderRadius: 4, padding: "10px 12px", background: "rgba(255,255,255,0.015)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+    <div style={{ border: "1px solid var(--edge)", borderRadius: 4, padding: "7px 10px", background: "rgba(255,255,255,0.015)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <span style={{ fontFamily: "var(--font-hud)", fontSize: 14, color: "var(--text)", letterSpacing: "0.04em" }}>{name}</span>
         <span style={{ fontSize: 10, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.16em" }}>{role}</span>
         <Chip tone={statusTone}>{status}</Chip>
         {live && <Chip tone="accent">live</Chip>}
         <span style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap" }}>{actions}</span>
       </div>
-      <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>
+      <div style={{ marginTop: 3, fontSize: 11, color: "var(--text-muted)" }}>
         {fetches.join(" · ")}
       </div>
-      {meta && <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-dim)" }}>{meta}</div>}
-      {error && <div style={{ marginTop: 6, fontSize: 11, color: "var(--danger)" }}>Last error: {error}</div>}
-      {expanded && <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--edge)" }}>{expanded}</div>}
+      {meta && <div style={{ marginTop: 3, fontSize: 11, color: "var(--text-dim)" }}>{meta}</div>}
+      {error && <div style={{ marginTop: 3, fontSize: 11, color: "var(--danger)" }}>Last error: {error}</div>}
+      {expanded && <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--edge)" }}>{expanded}</div>}
     </div>
   );
 }
