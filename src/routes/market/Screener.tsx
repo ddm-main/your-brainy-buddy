@@ -10,7 +10,7 @@ import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
-import { HistogramSlider } from "@/components/market/HistogramSlider";
+
 import { useQuotes, useSavedScreeners, useScreenerMutations, marketOpen } from "@/lib/market/hooks";
 import { quoteKey } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
