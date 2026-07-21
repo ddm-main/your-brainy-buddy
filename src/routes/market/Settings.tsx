@@ -260,7 +260,13 @@ export default function MarketSettings() {
             meta={
               <>
                 {kotakConnected && kotak?.greeting_name && <span>Connected: <b style={{ color: "var(--accent)" }}>{kotak.greeting_name}</b></span>}
-                {kotak?.token_expires_at && <span style={{ marginLeft: kotakConnected ? 12 : 0 }}>Token expires {new Date(kotak.token_expires_at).toLocaleString()}</span>}
+                {kotak?.token_expires_at && (
+                  <span style={{ marginLeft: kotakConnected ? 12 : 0 }} title="Kotak's broker API hard-expires every session nightly near midnight IST for every app, by their design — not something this app controls. Auto-login means you never have to act on it.">
+                    {autoLoginEnabled
+                      ? `Auto-renews nightly · current session valid until ${new Date(kotak.token_expires_at).toLocaleString()}`
+                      : `Session valid until ${new Date(kotak.token_expires_at).toLocaleString()} — then needs a manual reconnect`}
+                  </span>
+                )}
                 {kotak?.last_sync_at && <span style={{ marginLeft: 12 }}>Last sync {new Date(kotak.last_sync_at).toLocaleString()}</span>}
                 {kotakConfigured && (
                   <span style={{ marginLeft: 12, display: "inline-flex", alignItems: "center", gap: 4 }}>
