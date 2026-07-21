@@ -437,7 +437,7 @@ export default function Screener() {
       </HudPanel>
 
       {/* Two-pane workspace: filters sidebar (universe + add/remove filters) + results */}
-      <div style={{ display: "grid", gridTemplateColumns: "336px 1fr", gap: 12, alignItems: "start" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "370px 1fr", gap: 12, alignItems: "start" }}>
         <FilterRail rows={rows} active={active} onAdd={addFilter} onChange={setFilterValue} onClear={removeFilter}
           sectorList={sectorList} industryList={industryList}
           universe={universe} onUniverseChange={setUniverse} />
