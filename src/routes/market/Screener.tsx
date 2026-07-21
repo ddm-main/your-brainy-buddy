@@ -16,6 +16,7 @@ import { useQuotes, useQuotesBatched, useSavedScreeners, useScreenerMutations, m
 import { quoteKey } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
 import { useScreenerData, useScreenerSectors, useScreenerIndustries, type ScreenerRow } from "@/lib/market/screenerRun";
+import { todayIstDateString } from "@/lib/market/liveSnapshot";
 import { useUi } from "@/store/uiStore";
 import { supabase } from "@/integrations/supabase/client";
 import type { SavedScreener } from "@/lib/market/types";
@@ -35,7 +36,7 @@ import {
   type FilterDef,
   type UniverseId,
 } from "@/lib/market/screenerCatalog";
-import { Check, Database, Download, Plus, RotateCcw, Save, Search, Sparkles, X } from "lucide-react";
+import { AlertTriangle, Check, Database, Download, Plus, RotateCcw, Save, Search, Sparkles, X } from "lucide-react";
 
 // ---- Columns ----
 interface ColSpec { id: string; label: string; align?: "right" | "left"; default?: boolean }
@@ -159,6 +160,24 @@ export default function Screener() {
   // filters (1D Return, Volume, Breakout, …) only trust rows on the freshest
   // trade_date actually present, everything else is treated as N/A.
   const latestTradeDate = useMemo(() => latestTradeDateOf(rows), [rows]);
+
+  // Relative freshness (above) can't catch a pipeline that's stale across a
+  // large chunk of the universe at once — those rows aren't outliers
+  // relative to each other, they just look like "today's data." This checks
+  // the freshest trade_date actually present against today's real IST date,
+  // allowing extra slack on Mondays (Fri/Sat/Sun is a normal gap before the
+  // day's EOD pipeline has run yet) so it doesn't false-positive every
+  // Monday morning.
+  const dataStaleDays = useMemo(() => {
+    if (!latestTradeDate) return null;
+    const latest = Date.parse(`${latestTradeDate}T00:00:00Z`);
+    const today = Date.parse(`${todayIstDateString()}T00:00:00Z`);
+    if (!Number.isFinite(latest) || !Number.isFinite(today)) return null;
+    return Math.round((today - latest) / 86_400_000);
+  }, [latestTradeDate]);
+  const istDow = new Date(Date.now() + 5.5 * 3600_000).getUTCDay(); // 0=Sun..6=Sat, IST-shifted
+  const staleThresholdDays = istDow === 1 ? 3 : 1; // Monday: Fri/Sat/Sun gap is normal
+  const isDataStale = dataStaleDays != null && dataStaleDays > staleThresholdDays;
 
   // Change %/Price come from the once-daily EOD pipeline (market_stock_scores),
   // while the results table's Chg%/Price columns overlay a live quote for
@@ -470,6 +489,18 @@ export default function Screener() {
         <></>
       </HudPanel>
 
+      {isDataStale && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8, padding: "8px 12px",
+          border: "1px solid var(--danger)", borderRadius: 2, background: "rgba(255,80,80,0.08)",
+        }}>
+          <AlertTriangle size={14} color="var(--danger)" style={{ flexShrink: 0 }} />
+          <span style={{ fontSize: 12, color: "var(--danger)" }}>
+            Data is {dataStaleDays} day{dataStaleDays === 1 ? "" : "s"} behind — the EOD pipeline hasn't caught up to today.
+            Results may not reflect real recent moves. Trigger a manual sync from the ⋯ menu below, or wait for the next scheduled run.
+          </span>
+        </div>
+      )}
 
       {/* Two-pane workspace: filters sidebar (universe + add/remove filters) + results */}
       <div style={{ display: "grid", gridTemplateColumns: "370px 1fr", gap: 12, alignItems: "start" }}>
