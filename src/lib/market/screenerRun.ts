@@ -131,13 +131,107 @@ async function fetchScreenerRows(): Promise<any[]> {
   }
   return rows;
 }
-...
-          rel_strength_nifty: num(s.rel_strength_nifty),
-          breakout_score:    s.breakout_score ?? null,
-          prebreakout_score: s.prebreakout_score ?? null,
-          score_components:  s.score_components ?? null,
-        };
+
+export function useScreenerData(universe: UniverseId) {
+  return useQuery({
+    queryKey: ["market", "screener-rows-v3", universe],
+    queryFn: async (): Promise<ScreenerRow[]> => {
+      const universeSet = await fetchUniverseSymbols(universe);
+      const allRows = await fetchScreenerRows();
+      const filtered = universeSet ? allRows.filter((r) => universeSet.has(r.symbol)) : allRows;
+      if (filtered.length === 0) return [];
+      const symbols = filtered.map((r) => r.symbol);
+
+      // Batch index memberships
+      const members: any[] = [];
+      for (let i = 0; i < symbols.length; i += 500) {
+        const slice = symbols.slice(i, i + 500);
+        const { data } = await supabase
+          .from("market_index_members")
+          .select("symbol, index_key")
+          .in("symbol", slice)
+          .in("index_key", ["NIFTY50", "BANKNIFTY", "FINNIFTY"]);
+        members.push(...(data ?? []));
+      }
+      const idxSets = { NIFTY50: new Set<string>(), BANKNIFTY: new Set<string>(), FINNIFTY: new Set<string>() };
+      members.forEach((m: any) => {
+        const k = m.index_key as keyof typeof idxSets;
+        if (idxSets[k]) idxSets[k].add(m.symbol);
       });
+
+      const num = (v: any): number | null => (v == null || Number.isNaN(Number(v))) ? null : Number(v);
+      return filtered.map((s): ScreenerRow => ({
+        symbol: s.symbol,
+        exchange: s.exchange,
+        trade_date: s.trade_date ?? null,
+        sector:       s.sector ?? null,
+        company_name: s.company_name ?? null,
+        market_cap:   num(s.market_cap),
+        is_nifty500:  Boolean(s.is_nifty500),
+        industry:     s.industry ?? null,
+        in_nifty50:   idxSets.NIFTY50.has(s.symbol),
+        in_banknifty: idxSets.BANKNIFTY.has(s.symbol),
+        in_finnifty:  idxSets.FINNIFTY.has(s.symbol),
+        instrument_type:   s.instrument_type ?? "EQ",
+
+        // view uses `close`; client model uses `ltp`
+        ltp:               num(s.close ?? s.ltp),
+        previous_close:    num(s.previous_close),
+        change_abs:        num(s.change_abs),
+        change_pct:        num(s.change_pct),
+
+        // view uses `pe_ttm`, `eps_ttm`, `debt_to_equity`, `*_growth_yoy`
+        pe:                num(s.pe_ttm ?? s.pe),
+        pb:                num(s.pb),
+        peg:               num(s.peg),
+        eps:               num(s.eps_ttm ?? s.eps),
+        book_value:        num(s.book_value),
+        dividend_yield:    num(s.dividend_yield),
+        roe:               num(s.roe),
+        roce:              num(s.roce),
+        debt_equity:       num(s.debt_to_equity ?? s.debt_equity),
+        current_ratio:     num(s.current_ratio),
+        quick_ratio:       num(s.quick_ratio),
+        sales:             num(s.revenue_ttm_cr ?? s.sales),
+        net_profit:        num(s.profit_ttm_cr ?? s.net_profit),
+        sales_growth:      num(s.revenue_growth_yoy ?? s.sales_growth),
+        profit_growth:     num(s.profit_growth_yoy ?? s.profit_growth),
+        eps_growth:        num(s.eps_growth_yoy ?? s.eps_growth),
+        promoter_holding:  num(s.promoter_holding),
+        dii_holding:       num(s.dii_holding ?? s.fii_holding),
+        high_52w:          num(s.high_52w),
+        low_52w:           num(s.low_52w),
+
+        // view uses `rsi14`, `adx14`, `atr14`, `ema20`..`ema200`
+        volume:            num(s.volume),
+        rel_volume:        num(s.rel_volume),
+        ema_20:            num(s.ema20 ?? s.ema_20),
+        ema_50:            num(s.ema50 ?? s.ema_50),
+        ema_100:           num(s.ema100 ?? s.ema_100),
+        ema_200:           num(s.ema200 ?? s.ema_200),
+        rsi:               num(s.rsi14 ?? s.rsi),
+        macd:              num(s.macd),
+        macd_signal:       num(s.macd_signal),
+        macd_hist:         num(s.macd_hist),
+        adx:               num(s.adx14 ?? s.adx),
+        atr:               num(s.atr14 ?? s.atr),
+        atr_pct:           num(s.atr_pct),
+        bb_upper:          num(s.bb_upper),
+        bb_lower:          num(s.bb_lower),
+        bb_width:          num(s.bb_width),
+        bb_squeeze:        s.bb_squeeze ?? null,
+        pct_from_52w_high: num(s.pct_from_52w_high),
+        above_ema_200:     s.above_ema200 ?? s.above_ema_200 ?? null,
+        higher_lows:       s.higher_lows ?? null,
+        near_resistance:   s.near_resistance ?? null,
+        resistance_level:  num(s.resistance_level),
+        support_level:     num(s.support_level),
+        sector_strength:   num(s.sector_strength),
+        rel_strength_nifty: num(s.rel_strength_nifty),
+        breakout_score:    s.breakout_score ?? null,
+        prebreakout_score: s.prebreakout_score ?? null,
+        score_components:  s.score_components ?? null,
+      }));
     },
     staleTime: 60_000,
   });
