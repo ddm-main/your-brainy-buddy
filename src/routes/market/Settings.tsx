@@ -26,6 +26,9 @@ type Settings = {
   last_error: string | null;
   ucc: string | null;
   greeting_name: string | null;
+  // Ciphertext presence only — never rendered/decrypted client-side. Used
+  // purely to tell whether unattended daily re-login is actually possible.
+  totp_secret_enc: string | null;
 };
 
 const KOTAK_DEFAULT_BASE = "https://gw-napi.kotaksecurities.com";
@@ -225,6 +228,13 @@ export default function MarketSettings() {
   const needsKotakBasics = !consumerKey.trim() || !ucc.trim();
   const kotakStatus = kotak?.connection_status ?? "not configured";
   const kotakConfigured = !!kotak?.consumer_key;
+  // Kotak sessions die every night near midnight IST no matter what — that's
+  // the broker's constraint, not something this app can change. The only
+  // thing that determines whether you have to manually reconnect every
+  // morning is whether a TOTP secret is saved: with it, the 9:05 IST cron
+  // (and a same-day fallback the moment any Kotak call gets a 401) silently
+  // re-logs in unattended; without it, every expiry needs a fresh manual OTP.
+  const autoLoginEnabled = !!kotak?.totp_secret_enc;
 
   const pipelineSummary = useMemo(() => {
     if (!pipeline) return null;
@@ -255,6 +265,12 @@ export default function MarketSettings() {
                 {kotakConnected && kotak?.greeting_name && <span>Connected: <b style={{ color: "var(--accent)" }}>{kotak.greeting_name}</b></span>}
                 {kotak?.token_expires_at && <span style={{ marginLeft: kotakConnected ? 12 : 0 }}>Token expires {new Date(kotak.token_expires_at).toLocaleString()}</span>}
                 {kotak?.last_sync_at && <span style={{ marginLeft: 12 }}>Last sync {new Date(kotak.last_sync_at).toLocaleString()}</span>}
+                {kotakConfigured && (
+                  <span style={{ marginLeft: 12, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <Chip tone={autoLoginEnabled ? "ok" : "warn"}>{autoLoginEnabled ? "auto-login on" : "auto-login off"}</Chip>
+                    {!autoLoginEnabled && <span style={{ color: "var(--text-dim)" }}>— will need a manual OTP again tomorrow</span>}
+                  </span>
+                )}
               </>
             }
             error={kotak?.last_error ?? undefined}
@@ -301,9 +317,18 @@ export default function MarketSettings() {
 
       {!editing && kotakConfigured && ["expired", "error"].includes(kotakStatus) && (
         <HudPanel flow title="Kotak Session Expired" index="MK.S2">
-          <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
-            Kotak sessions reset daily near midnight IST. Reconnect using your saved credentials — nothing to re-enter.
-          </div>
+          {autoLoginEnabled ? (
+            <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
+              Kotak sessions reset daily near midnight IST. Reconnect using your saved credentials — nothing to re-enter.
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: "var(--warn)", marginBottom: 10 }}>
+              No TOTP secret saved, so this needs a fresh 6-digit code from your authenticator app —
+              same as every other day. To stop doing this daily, open <b>Edit</b> above and save your
+              TOTP Secret (Kotak Neo app → API TOTP) once; JARVIS will then re-log in automatically
+              every morning without you.
+            </div>
+          )}
           <Btn onClick={startLogin} disabled={busy !== null} variant="primary">
             {busy === "login" ? "reconnecting…" : "Re-login"}
           </Btn>
