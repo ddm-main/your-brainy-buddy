@@ -273,8 +273,9 @@ export default function MarketSettings() {
   );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <HudPanel flow title="Data Providers" index="MK.S1" live={kotakConnected ? "ok" : "idle"}>
+    <HudPanel flow title="Market Config" index="MK.S1" live={kotakConnected ? "ok" : "idle"}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <SectionLabel>Data Providers</SectionLabel>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <ProviderCard
             name="Yahoo Finance" role="Market data" fetches={FETCHES.yahoo}
@@ -314,10 +315,9 @@ export default function MarketSettings() {
             }
           />
         </div>
-      </HudPanel>
 
-      <HudPanel flow title="Secondary Providers" index="MK.S1B" live="idle">
-        <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 6 }}>
+        <SectionLabel>Secondary Providers</SectionLabel>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: -4 }}>
           Fallbacks when Kotak/Yahoo miss a field. FMP/Alpha Vantage need an API key (Supabase secret).
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
@@ -342,10 +342,9 @@ export default function MarketSettings() {
             );
           })}
         </div>
-      </HudPanel>
 
-      <HudPanel flow title="Data Pipeline" index="MK.S4">
-        <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 8 }}>
+        <SectionLabel>Data Pipeline</SectionLabel>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: -4 }}>
           Run in order when the dashboard/screener are empty: Universe → EOD Batch → Aggregates.
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -367,7 +366,18 @@ export default function MarketSettings() {
         <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>
           Then verify in <Link to="/market/screener" style={{ color: "var(--accent)" }}>Screener</Link> or <Link to="/market" style={{ color: "var(--accent)" }}>Dashboard</Link>.
         </div>
-      </HudPanel>
+      </div>
+    </HudPanel>
+  );
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{
+      fontSize: 10, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.16em",
+      paddingBottom: 4, borderBottom: "1px solid var(--edge)",
+    }}>
+      {children}
     </div>
   );
 }
