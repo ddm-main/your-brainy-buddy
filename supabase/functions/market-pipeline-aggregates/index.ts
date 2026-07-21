@@ -166,15 +166,32 @@ Deno.serve(async (req) => {
         const ctx = { sectorStrength, regime, relStrengthNifty: relStrength, deliveryPct: r.delivery_percent ?? null };
         const bs = breakoutScore(snap, ctx);
         const ps = preBreakoutScore(snap, ctx);
+        const scoreComponents = { breakout: bs.components, prebreakout: ps.components };
+        const nowIso = new Date().toISOString();
         const { error } = await svc.from("market_data").update({
           sector_strength: Math.round(sectorStrength * 100) / 100,
           rel_strength_nifty: relStrength != null ? Math.round(relStrength * 100) / 100 : null,
           breakout_score: bs.score,
           prebreakout_score: ps.score,
-          score_components: { breakout: bs.components, prebreakout: ps.components },
-          last_updated: new Date().toISOString(),
+          score_components: scoreComponents,
+          last_updated: nowIso,
         }).eq("symbol", r.symbol).eq("exchange", r.exchange);
         if (!error) updated++;
+        // Dual-write the final (post-market-context) score back to the legacy
+        // table — market-pipeline-eod only ever writes a *preliminary* score
+        // here (neutral sectorStrength/regime/relStrength), and this pass was
+        // never filling in the real one, so every consumer still reading
+        // market_stock_scores directly (market-index-constituents,
+        // market-stock-insight, market-ai-recommend, market-autotrade-action)
+        // was permanently stuck on the pre-context number.
+        await svc.from("market_stock_scores").update({
+          sector_strength: Math.round(sectorStrength * 100) / 100,
+          rel_strength_nifty: relStrength != null ? Math.round(relStrength * 100) / 100 : null,
+          breakout_score: bs.score,
+          prebreakout_score: ps.score,
+          score_components: scoreComponents,
+          computed_at: nowIso,
+        }).eq("symbol", r.symbol).eq("exchange", r.exchange);
       }));
     }
 

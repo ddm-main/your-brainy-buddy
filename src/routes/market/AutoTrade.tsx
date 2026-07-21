@@ -11,7 +11,7 @@ import { relTime } from "@/lib/db";
 import { supabase } from "@/integrations/supabase/client";
 import { useQuery } from "@tanstack/react-query";
 import { useMarketSettings } from "@/lib/market/hooks";
-import { FILTERS, FILTER_BY_ID, type FilterDef } from "@/lib/market/screenerCatalog";
+import { FILTER_BY_ID, type FilterDef } from "@/lib/market/screenerCatalog";
 import type { ScreenerCondition, ScreenerGroup } from "@/lib/market/types";
 import {
   useAutoTradeAction,

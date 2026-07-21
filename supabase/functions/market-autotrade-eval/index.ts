@@ -172,7 +172,7 @@ Deno.serve(async (req) => {
             let exitReason: string | null = null;
             if (rule.stop_loss_pct != null && changePct <= -Math.abs(rule.stop_loss_pct)) exitReason = `stop-loss ${rule.stop_loss_pct}%`;
             else if (rule.target_pct != null && changePct >= Math.abs(rule.target_pct)) exitReason = `target ${rule.target_pct}%`;
-            else if (rule.exit_conditions?.length && scoreRow && evaluateGroups(scoreRow, rule.exit_conditions)) exitReason = "exit condition met";
+            else if (rule.exit_conditions?.length && scoreRow && evaluateGroups(scoreRow, rule.exit_conditions, today)) exitReason = "exit condition met";
             if (!exitReason) continue;
 
             const orderInput: PlaceOrderInput = {
@@ -220,7 +220,7 @@ Deno.serve(async (req) => {
 
             for (const scope of scopeSymbols) {
               const scoreRow = scoreByKey.get(`${scope.symbol}:${scope.exchange}`);
-              if (!scoreRow || !evaluateGroups(scoreRow, rule.entry_conditions)) continue;
+              if (!scoreRow || !evaluateGroups(scoreRow, rule.entry_conditions, today)) continue;
 
               const quotes = await provider.getQuotes([`${scope.exchange}:${scope.symbol}`]);
               const ltp = quotes[0]?.price;

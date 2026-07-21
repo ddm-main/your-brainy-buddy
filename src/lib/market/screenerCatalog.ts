@@ -112,6 +112,7 @@ export const FILTERS: FilterDef[] = [
 
   // Profitability
   { id: "roe",                label: "ROE",               category: "profitability", kind: "number", unit: "%", min: -50, max: 100, step: 1, fundamental: true, scope: "eq" },
+  { id: "roce",               label: "ROCE",              category: "profitability", kind: "number", unit: "%", min: -50, max: 100, step: 1, fundamental: true, scope: "eq" },
 
   // Growth
   { id: "sales_growth",       label: "Revenue Growth YoY", category: "growth",    kind: "number", unit: "%", min: -50, max: 200, step: 1, fundamental: true, scope: "eq" },

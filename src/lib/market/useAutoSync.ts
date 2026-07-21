@@ -13,6 +13,8 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
+import { todayIstDateString } from "./liveSnapshot";
+import { marketOpen } from "./hooks";
 
 const KEYS = {
   fund: "market:auto:fund:last",
@@ -62,8 +64,12 @@ async function needsScoresRefresh(): Promise<boolean> {
     .limit(1)
     .maybeSingle();
   if (!data?.trade_date) return true;
-  // If newest score row is older than today (server date), refresh.
-  const today = new Date().toISOString().slice(0, 10);
+  // Was comparing against the UTC calendar date and had no "market closed
+  // since" check at all, so this fired starting right after IST midnight —
+  // hours before the market even opens — rather than only after today's
+  // close as the module doc above promises. IST date + only-after-close.
+  if (marketOpen()) return false;
+  const today = todayIstDateString();
   return String(data.trade_date) < today;
 }
 

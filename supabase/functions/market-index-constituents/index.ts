@@ -139,6 +139,12 @@ async function persistMembers(svc: ReturnType<typeof svcClient>, slug: string, m
       ...(indexKey === "NIFTY500" ? { is_nifty500: true } : {}),
     }));
     await svc.from("market_stocks").upsert(batch, { onConflict: "symbol,exchange" });
+    // Dual-write the same membership/universe flags into market_data — the
+    // table screener/alerts/autotrade actually read. Without this, a symbol
+    // newly promoted into an index here showed correct membership in
+    // market_stocks but stayed stale/absent in market_data until the next
+    // full weekly market-scrips-sync reconciled it.
+    await svc.from("market_data").upsert(batch, { onConflict: "symbol,exchange" });
   }
   return rows.length;
 }

@@ -446,13 +446,13 @@ export default function Analysis() {
         {/* Fundamentals */}
         {fund && (
           <HudPanel flow title="Fundamentals" index="A7">
-            <Row label="Market Cap" mono>{fund.marketCap ? `₹${fmtNum(fund.marketCap / 1e7, 0)} Cr` : "—"}</Row>
-            <Row label="P/E (TTM)" mono>{fmtNum(fund.trailingPE ?? fund.peRatio, 2)}</Row>
-            <Row label="P/B" mono>{fmtNum(fund.priceToBook, 2)}</Row>
-            <Row label="EPS (TTM)" mono>{fmtNum(fund.trailingEps ?? fund.eps, 2)}</Row>
-            <Row label="ROE" mono>{fund.returnOnEquity != null ? fmtPct(fund.returnOnEquity * 100) : "—"}</Row>
-            <Row label="Debt/Equity" mono>{fmtNum(fund.debtToEquity, 2)}</Row>
-            <Row label="Div Yield" mono>{fund.dividendYield != null ? fmtPct(fund.dividendYield * 100) : "—"}</Row>
+            <Row label="Market Cap" mono>{fund.market_cap ? `₹${fmtNum(fund.market_cap / 1e7, 0)} Cr` : "—"}</Row>
+            <Row label="P/E (TTM)" mono>{fmtNum(fund.pe_ttm, 2)}</Row>
+            <Row label="P/B" mono>{fmtNum(fund.price_to_book, 2)}</Row>
+            <Row label="EPS (TTM)" mono>{fmtNum(fund.eps_ttm, 2)}</Row>
+            <Row label="ROE" mono>{fund.roe != null ? fmtPct(fund.roe * 100) : "—"}</Row>
+            <Row label="Debt/Equity" mono>{fmtNum(fund.debt_to_equity, 2)}</Row>
+            <Row label="Div Yield" mono>{fund.dividend_yield != null ? fmtPct(fund.dividend_yield * 100) : "—"}</Row>
             <Row label="Beta" mono>{fmtNum(fund.beta, 2)}</Row>
             {fund.sector && <Row label="Sector">{fund.sector}</Row>}
             {fund.industry && <Row label="Industry">{fund.industry}</Row>}

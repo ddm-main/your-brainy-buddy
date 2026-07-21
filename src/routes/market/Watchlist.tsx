@@ -24,7 +24,6 @@ export default function Watchlist() {
   const [newList, setNewList] = useState("");
   const [newSym, setNewSym] = useState("");
   const [newEx, setNewEx] = useState("NSE");
-  const [busy, setBusy] = useState<string | null>(null);
 
   const load = async () => {
     const [{ data: wl, error: e1 }, { data: it, error: e2 }] = await Promise.all([
@@ -138,7 +137,7 @@ export default function Watchlist() {
                 </select>
               </div>
               <Btn onClick={addItem}><Plus size={11} style={{ marginRight: 4 }} /> add</Btn>
-              <Btn onClick={() => refetchQuotes()} disabled={busy !== null}>
+              <Btn onClick={() => refetchQuotes()} disabled={quotesFetching}>
                 <RefreshCw size={11} style={{ marginRight: 4 }} /> {quotesFetching ? "refreshing…" : "refresh"}
               </Btn>
             </div>

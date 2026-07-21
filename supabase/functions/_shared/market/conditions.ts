@@ -52,8 +52,19 @@ export function applyGroupsToQuery<T extends { or: (s: string) => any; filter: (
 // Pure in-memory evaluation — used for exit conditions, which are checked
 // against a single already-fetched score row per open position rather than
 // issued as a fresh query.
-export function evaluateGroups(row: Record<string, unknown>, groups: ScreenerGroup[]): boolean {
+//
+// `requireTradeDate`: market-pipeline-eod advances a symbol's sync cursor
+// even when its fetch fails, so a symbol whose data keeps failing to sync
+// keeps an old trade_date indefinitely while still looking "synced" — an
+// AutoTrade rule could otherwise fire an entry/exit off a technical/momentum
+// value that's days old. When supplied (callers should pass today's IST
+// trade date), a row whose trade_date doesn't match is never considered a
+// match, full stop — same defense the screener's filterMatches has via its
+// scope-aware applicability check, simplified here since this function has
+// no per-column scope metadata to work with.
+export function evaluateGroups(row: Record<string, unknown>, groups: ScreenerGroup[], requireTradeDate?: string | null): boolean {
   if (!groups || groups.length === 0) return false;
+  if (requireTradeDate != null && row.trade_date !== requireTradeDate) return false;
   return groups.some((g) =>
     g.conditions.every((c) => {
       const v = row[c.column];

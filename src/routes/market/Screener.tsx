@@ -54,6 +54,7 @@ const COLUMNS: ColSpec[] = [
   { id: "eps",                label: "EPS",           align: "right" },
   { id: "book_value",         label: "Book Val",      align: "right" },
   { id: "roe",                label: "ROE",           align: "right", default: true },
+  { id: "roce",               label: "ROCE",          align: "right" },
   { id: "debt_equity",        label: "D/E",           align: "right", default: true },
   { id: "sales_growth",       label: "Rev Grw",       align: "right" },
   { id: "profit_growth",      label: "PAT Grw",       align: "right" },
@@ -402,6 +403,9 @@ export default function Screener() {
       eps: { header: "EPS", accessorKey: "eps", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
       book_value: { header: "Book Val", accessorKey: "book_value", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
       roe: { header: "ROE", accessorKey: "roe", meta: { align: "right" }, cell: ({ getValue }) => {
+        const v = getValue() as number | null; return v == null ? "—" : `${v.toFixed(1)}%`;
+      }},
+      roce: { header: "ROCE", accessorKey: "roce", meta: { align: "right" }, cell: ({ getValue }) => {
         const v = getValue() as number | null; return v == null ? "—" : `${v.toFixed(1)}%`;
       }},
       debt_equity: { header: "D/E", accessorKey: "debt_equity", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 2) },
