@@ -11,7 +11,7 @@ import { toSafeError } from "@/lib/errors";
 import { Database, LockKeyhole, Pencil, Play, RefreshCw, TestTube2 } from "lucide-react";
 
 type Provider = "kotak_neo" | "yahoo";
-type ServiceProvider = "fmp" | "alpha_vantage" | "nse" | "bse" | "stooq";
+type ServiceProvider = "fmp" | "alpha_vantage" | "nse" | "bse";
 
 type Settings = {
   id?: string;
@@ -48,13 +48,12 @@ const FETCHES: Record<Provider, string[]> = {
 // pipelines (market-fmp-sync, market-fundamentals-global-sync, screener
 // technicals). None of these hold a per-user broker session; "Test" pings
 // the provider directly and reports API-key / reachability status.
-const SERVICE_PROVIDERS: ServiceProvider[] = ["fmp", "alpha_vantage", "nse", "bse", "stooq"];
+const SERVICE_PROVIDERS: ServiceProvider[] = ["fmp", "alpha_vantage", "nse", "bse"];
 const SERVICE_META: Record<ServiceProvider, { name: string; role: string; fetches: string[]; needsKey: boolean }> = {
   fmp: { name: "Financial Modeling Prep", role: "Fundamentals", fetches: ["Market cap", "PE / PB / ROE / ROCE", "Balance sheet", "Cash flow", "Growth ratios"], needsKey: true },
   alpha_vantage: { name: "Alpha Vantage", role: "Technicals", fetches: ["SMA / EMA", "RSI", "MACD", "ADX / ATR", "Bollinger Bands"], needsKey: true },
   nse: { name: "NSE", role: "Exchange data", fetches: ["Market status", "Index constituents", "Bulk / block deals", "Corporate actions", "Holidays"], needsKey: false },
   bse: { name: "BSE", role: "Exchange data", fetches: ["Corporate actions", "Announcements", "Circulars"], needsKey: false },
-  stooq: { name: "Stooq", role: "Backup prices", fetches: ["Daily OHLCV (backup)"], needsKey: false },
 };
 
 export default function MarketSettings() {
@@ -73,7 +72,7 @@ export default function MarketSettings() {
   const [otpError, setOtpError] = useState<string | null>(null);
   const [pipeline, setPipeline] = useState<Record<string, unknown> | null>(null);
   const [serviceStatus, setServiceStatus] = useState<Record<ServiceProvider, { ok: boolean; detail: string | null; testedAt: string } | null>>(
-    { fmp: null, alpha_vantage: null, nse: null, bse: null, stooq: null },
+    { fmp: null, alpha_vantage: null, nse: null, bse: null },
   );
 
   const load = async () => {

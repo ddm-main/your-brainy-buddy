@@ -79,6 +79,16 @@ export async function fmpProfile(symbol: string, exchange = "NSE"): Promise<FmpP
     const evCr = num(p.enterpriseValue) ? num(p.enterpriseValue)! / 1e7 * usdToInr : null;
     const sharesCr = num(p.sharesOutstanding) ? num(p.sharesOutstanding)! / 1e7 : null;
 
+    // `range` is a "low-high" string (e.g. "1234.56-2345.67") — running it
+    // through num() first (as the old code did) always returns null, since
+    // Number() can't parse a hyphenated range as a single value, so that
+    // branch of the old ternary was silently dead and this always fell back
+    // to 52WeekHigh/52WeekLow regardless of what `range` actually held.
+    // Split the string directly instead.
+    const [rangeLow, rangeHigh] = typeof p.range === "string"
+      ? p.range.split("-").map((s: string) => Number(s.trim()))
+      : [NaN, NaN];
+
     return {
       symbol: fmpSym,
       company_name: str(p.companyName, p.name),
@@ -89,8 +99,8 @@ export async function fmpProfile(symbol: string, exchange = "NSE"): Promise<FmpP
       shares_outstanding: sharesCr,
       beta: num(p.beta),
       ltp: num(p.price, p.lastPrice),
-      high_52w: num(p.range)?.toString().split("-")[1] ? Number(num(p.range)!.toString().split("-")[1]) : num(p["52WeekHigh"]),
-      low_52w: num(p.range)?.toString().split("-")[0] ? Number(num(p.range)!.toString().split("-")[0]) : num(p["52WeekLow"]),
+      high_52w: Number.isFinite(rangeHigh) ? rangeHigh : num(p["52WeekHigh"]),
+      low_52w: Number.isFinite(rangeLow) ? rangeLow : num(p["52WeekLow"]),
     };
   } catch (e) {
     console.error(`FMP profile failed for ${fmpSym}:`, e);

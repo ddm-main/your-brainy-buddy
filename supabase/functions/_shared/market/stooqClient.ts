@@ -90,8 +90,16 @@ export async function stooqDailyPrices(
     if (!r.ok) {
       throw new Error(`Stooq API ${r.status}`);
     }
-    const csv = await r.text();
-    return parseStooqCsv(csv);
+    const body = await r.text();
+    // Stooq's public /q/d/l/ CSV endpoint now sits behind a JS proof-of-work
+    // challenge page (returns text/html with an inline crypto.subtle
+    // hash-cash script instead of CSV) — a server-side fetch can't execute
+    // it, and this isn't a data gap to retry, it's a structural block.
+    // Surfacing it distinctly here rather than parsing garbage as "no rows."
+    if (body.trimStart().startsWith("<!DOCTYPE") || body.includes("__verify")) {
+      throw new Error("Stooq now requires a browser JS challenge — the public CSV endpoint is no longer scriptable");
+    }
+    return parseStooqCsv(body);
   } catch (e) {
     console.error(`Stooq daily prices failed for ${stooqSym}:`, e);
     return [];

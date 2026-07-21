@@ -1,7 +1,9 @@
 // market-test-connection — live probe of any configured data provider.
 // Kotak/Yahoo: full MarketProvider.testAuth() (validates session / fetches a quote).
-// FMP/Alpha Vantage/NSE/BSE/Stooq: lightweight direct probes — these aren't
+// FMP/Alpha Vantage/NSE/BSE: lightweight direct probes — these aren't
 // per-user broker sessions, just service-level API reachability + key checks.
+// (Stooq used to be here too — retired, see resolver.ts's PRIORITY_CHAINS
+// comment: its public endpoint now sits behind a browser anti-bot challenge.)
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { getActiveProvider, kotakProvider, yahooProvider } from "../_shared/market/provider.ts";
 import { KOTAK_SETTINGS_COLS, type KotakSettings } from "../_shared/market/kotakClient.ts";
@@ -9,7 +11,6 @@ import { fmpProfile } from "../_shared/market/fmpClient.ts";
 import { alphaRSI } from "../_shared/market/alphaVantageClient.ts";
 import { nseMarketStatus } from "../_shared/market/nseClient.ts";
 import { bseCirculars } from "../_shared/market/bseClient.ts";
-import { stooqLatestPrice } from "../_shared/market/stooqClient.ts";
 
 const PROBE_SYMBOL = "RELIANCE";
 
@@ -31,10 +32,6 @@ async function probeService(provider: string): Promise<{ ok: boolean; detail: st
       const rows = await bseCirculars();
       return { ok: true, detail: `BSE reachable — ${rows.length} recent circulars` };
     }
-    case "stooq": {
-      const price = await stooqLatestPrice(PROBE_SYMBOL, "NSE");
-      return price != null ? { ok: true, detail: `Stooq reachable — ${PROBE_SYMBOL} @ ${price}` } : { ok: false, detail: "Stooq returned no data" };
-    }
     default:
       return { ok: false, detail: "Provider connector is not enabled" };
   }
@@ -49,7 +46,7 @@ Deno.serve(async (req) => {
     const requested = String(body?.provider ?? "active");
     const svc = svcClient();
 
-    if (["fmp", "alpha_vantage", "nse", "bse", "stooq"].includes(requested)) {
+    if (["fmp", "alpha_vantage", "nse", "bse"].includes(requested)) {
       const result = await probeService(requested).catch((e) => ({
         ok: false,
         detail: e instanceof Error ? e.message : String(e),

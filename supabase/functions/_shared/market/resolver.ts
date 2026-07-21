@@ -6,7 +6,6 @@ import { getActiveProvider } from "./provider.ts";
 import { nseEquityMeta } from "./nseClient.ts";
 import * as fmp from "./fmpClient.ts";
 import * as alpha from "./alphaVantageClient.ts";
-import * as stooq from "./stooqClient.ts";
 import { yahooQuote } from "./yahooClient.ts";
 
 type FieldName = string;
@@ -31,8 +30,12 @@ interface Provider {
 
 // Provider priority chains per field type
 const PRIORITY_CHAINS: Record<string, string[]> = {
-  // Live price — Kotak (real-time) → Yahoo (delayed) → Stooq (EOD backup)
-  ltp: ["kotak", "yahoo", "stooq"],
+  // Live price — Kotak (real-time) → Yahoo (delayed). Stooq used to be a
+  // third fallback here, but its public CSV endpoint now sits behind a
+  // browser JS anti-bot challenge a server-side fetch can't pass — kept out
+  // of the chain rather than spending a doomed round-trip on every call
+  // that falls through Kotak and Yahoo both.
+  ltp: ["kotak", "yahoo"],
   previous_close: ["kotak", "yahoo"],
   volume: ["kotak", "yahoo"],
   change_abs: ["kotak", "yahoo"],
@@ -145,13 +148,6 @@ async function getProviderFetcher(
       };
     }
 
-    case "stooq": {
-      return async (symbol, exchange) => {
-        const price = await stooq.stooqLatestPrice(symbol, exchange);
-        return price ? { price } : null;
-      };
-    }
-
     case "computed": {
       // Computed indicators are handled by the pipeline (market-pipeline-aggregates)
       // Resolver returns null here; caller should read from market_data table
@@ -254,11 +250,6 @@ function extractFieldValue(field: FieldName, providerData: any, providerName: st
       if (field === "ema_20") return providerData.ema_20 ?? null;
       if (field === "bb_upper") return providerData.bb_upper ?? null;
       if (field === "bb_lower") return providerData.bb_lower ?? null;
-      return null;
-    }
-
-    case "stooq": {
-      if (field === "ltp") return providerData.price ?? null;
       return null;
     }
 
