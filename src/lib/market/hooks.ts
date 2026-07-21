@@ -1,5 +1,5 @@
 // React Query hooks for the Market section. Query keys live under ["market", ...].
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "./api";
 import type {
@@ -65,6 +65,40 @@ export function useQuotes(keys: string[]) {
     // EOD tick, rather than freezing on whichever LTP raced in at 15:30.
     refetchInterval: marketOpen() ? 1_000 : justClosedWindow() ? 15_000 : false,
   });
+}
+
+const QUOTE_BATCH_SIZE = 200;
+
+// Chunked variant for large candidate sets (e.g. screener live-filter overlay
+// against hundreds/thousands of symbols) — unlike useQuotes above, this does
+// NOT poll every second; a full-universe 1s poll would hammer the Kotak/Yahoo
+// rate limits this app is already tight against (see the "quotes degraded"
+// banner elsewhere). Each chunk is its own react-query entry via useQueries
+// so chunks can fail/retry independently without invalidating the rest.
+export function useQuotesBatched(keys: string[], chunkSize = QUOTE_BATCH_SIZE) {
+  const sortedKeys = [...keys].sort();
+  const chunks: string[][] = [];
+  for (let i = 0; i < sortedKeys.length; i += chunkSize) chunks.push(sortedKeys.slice(i, i + chunkSize));
+
+  const results = useQueries({
+    queries: chunks.map((chunk) => ({
+      queryKey: ["market", "quotes-batch", chunk.join(",")],
+      queryFn: () => callMarketFn<{ quotes: Quote[]; source: string }>("market-quotes", { symbols: chunk }),
+      enabled: chunk.length > 0,
+      staleTime: 20_000,
+      refetchInterval: false as const,
+    })),
+  });
+
+  const quotes: Quote[] = [];
+  let anyFailed = false;
+  let anyFetching = false;
+  for (const r of results) {
+    if (r.data?.quotes) quotes.push(...r.data.quotes);
+    if (r.isError) anyFailed = true;
+    if (r.isFetching) anyFetching = true;
+  }
+  return { quotes, isFetching: anyFetching, anyFailed, chunkCount: chunks.length };
 }
 
 export function useHoldings() {

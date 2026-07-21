@@ -23,11 +23,20 @@ export type FilterCategory =
  *                    valid EPS but a missing PE (a real data-source gap) is N/A, not
  *                    "out of range."
  *   - eq_owner  : equities where any ownership number was reported
- *   - tech      : rows with a trade_date (i.e. an EOD score row exists)
+ *   - tech      : rows with a trade_date (i.e. an EOD score row exists) that matches
+ *                 the freshest trade_date seen across the loaded set, when known.
  */
 export type ApplicabilityScope = "all" | "eq" | "eq_profit" | "eq_profit_pe" | "eq_owner" | "tech";
 
-export function rowIsApplicable(row: Record<string, any>, scope: ApplicabilityScope): boolean {
+// market-pipeline-eod stamps a symbol's sync cursor even when the fetch
+// fails (so one bad symbol can't wedge the whole pipeline) — the side effect
+// is that a symbol whose Yahoo fetch keeps failing (rename, delisting, thin
+// data) keeps whatever trade_date/change_pct it last successfully computed,
+// possibly days old, while every other column still reads as "synced." A
+// stale row's "1D Return" isn't today's move at all, so tech-scoped filters
+// (change_pct, volume, breakout_score, …) need to know the freshest
+// trade_date actually present to tell "no data" apart from "old data."
+export function rowIsApplicable(row: Record<string, any>, scope: ApplicabilityScope, latestTradeDate?: string | null): boolean {
   const type = row.instrument_type ?? "EQ";
   switch (scope) {
     case "all":       return true;
@@ -35,7 +44,10 @@ export function rowIsApplicable(row: Record<string, any>, scope: ApplicabilitySc
     case "eq_profit": return type === "EQ" && row.eps != null && Number(row.eps) > 0;
     case "eq_profit_pe": return type === "EQ" && row.eps != null && Number(row.eps) > 0 && row.pe != null;
     case "eq_owner":  return type === "EQ" && (row.promoter_holding != null || row.fii_holding != null || row.dii_holding != null);
-    case "tech":      return row.trade_date != null;
+    case "tech":
+      if (row.trade_date == null) return false;
+      if (latestTradeDate != null && row.trade_date !== latestTradeDate) return false;
+      return true;
   }
 }
 
@@ -157,6 +169,17 @@ export function canonicalFilterId(id: string): string {
   return FILTER_ID_ALIASES[id] ?? id;
 }
 
+// The freshest trade_date actually present in the loaded set — rows stuck on
+// an older date (sync kept failing for that symbol) are not "today's data."
+// ISO "YYYY-MM-DD" strings compare correctly lexicographically.
+export function latestTradeDateOf(rows: Array<{ trade_date?: string | null }>): string | null {
+  let latest: string | null = null;
+  for (const r of rows) {
+    if (r.trade_date && (!latest || r.trade_date > latest)) latest = r.trade_date;
+  }
+  return latest;
+}
+
 export const FILTER_BY_ID: Record<string, FilterDef> = Object.fromEntries(FILTERS.map((f) => [f.id, f]));
 
 // ----- Active filter state -----
@@ -174,7 +197,7 @@ export interface ActiveFilter {
  *   - Numeric filter with no min/max set → matches everything.
  *   - Numeric filter with a bound + `nullMeansZero` → NULL is treated as 0.
  *   - Numeric filter with a bound and no `nullMeansZero` → NULL is excluded. */
-export function filterMatches(row: Record<string, any>, af: ActiveFilter): boolean {
+export function filterMatches(row: Record<string, any>, af: ActiveFilter, latestTradeDate?: string | null): boolean {
   const filterId = canonicalFilterId(af.id);
   const def = FILTER_BY_ID[filterId];
   if (!def) return true;
@@ -187,7 +210,7 @@ export function filterMatches(row: Record<string, any>, af: ActiveFilter): boole
   // untouched so that, e.g., an ETF is not dropped by a PE filter. Technical filters
   // are strict: if a row has no technical row/date, it cannot prove it matches.
   const scope: ApplicabilityScope = def.scope ?? (def.fundamental ? "eq" : "all");
-  if (!rowIsApplicable(row, scope)) return scope !== "tech";
+  if (!rowIsApplicable(row, scope, latestTradeDate)) return scope !== "tech";
   const v = row[filterId];
   if (def.kind === "boolean") {
     return Boolean(v) === af.bool;
@@ -211,12 +234,12 @@ export function filterMatches(row: Record<string, any>, af: ActiveFilter): boole
 
 /** Coverage over the applicable set: rows outside the filter's scope are excluded
  *  from both numerator and denominator, so "% coverage" is meaningful. */
-export function coverageOf(rows: Array<Record<string, any>>, filterId: string): { has: number; total: number } {
+export function coverageOf(rows: Array<Record<string, any>>, filterId: string, latestTradeDate?: string | null): { has: number; total: number } {
   const canonicalId = canonicalFilterId(filterId);
   const def = FILTER_BY_ID[canonicalId];
   if (!def) return { has: 0, total: rows.length };
   const scope: ApplicabilityScope = def.scope ?? (def.fundamental ? "eq" : "all");
-  const scoped = rows.filter((r) => rowIsApplicable(r, scope));
+  const scoped = rows.filter((r) => rowIsApplicable(r, scope, latestTradeDate));
   let has = 0;
   for (const r of scoped) {
     const v = r[canonicalId];
@@ -234,7 +257,7 @@ export function coverageOf(rows: Array<Record<string, any>>, filterId: string): 
  *  because their value hasn't synced yet — as opposed to genuinely being out of range.
  *  Only counts filters with a bound actually set, non-nullMeansZero, numeric. A row
  *  missing data for more than one active filter is only counted once. */
-export function excludedByMissingData(rows: Array<Record<string, any>>, active: ActiveFilter[]): number {
+export function excludedByMissingData(rows: Array<Record<string, any>>, active: ActiveFilter[], latestTradeDate?: string | null): number {
   const missing = new Set<string>();
   for (const af of active) {
     const filterId = canonicalFilterId(af.id);
@@ -244,7 +267,7 @@ export function excludedByMissingData(rows: Array<Record<string, any>>, active: 
     if (!hasBound) continue;
     const scope: ApplicabilityScope = def.scope ?? (def.fundamental ? "eq" : "all");
     for (const r of rows) {
-      if (!rowIsApplicable(r, scope)) {
+      if (!rowIsApplicable(r, scope, latestTradeDate)) {
         if (scope === "tech") missing.add(`${r.symbol}:${r.exchange}`);
         continue;
       }

@@ -7,11 +7,12 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import type { ColumnDef } from "@tanstack/react-table";
 import { HudPanel } from "@/components/hud/HudPanel";
+import { HudModal } from "@/components/hud/HudModal";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 
-import { useQuotes, useSavedScreeners, useScreenerMutations, marketOpen } from "@/lib/market/hooks";
+import { useQuotes, useQuotesBatched, useSavedScreeners, useScreenerMutations, marketOpen } from "@/lib/market/hooks";
 import { quoteKey } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
 import { useScreenerData, useScreenerSectors, useScreenerIndustries, type ScreenerRow } from "@/lib/market/screenerRun";
@@ -25,11 +26,11 @@ import {
   FILTER_BY_ID,
   PRESETS,
   UNIVERSES,
-  
   filterMatches,
   coverageOf,
   excludedByMissingData,
   canonicalFilterId,
+  latestTradeDateOf,
   type ActiveFilter,
   type FilterDef,
   type UniverseId,
@@ -72,11 +73,9 @@ const COLS_STORE_KEY = "screener.visibleCols.v3";
 const PAGE_SIZE_KEY  = "screener.pageSize.v2";
 const AUTO_SYNC_STORE_KEY = "screener.autoFundamentalsSyncAt.v1";
 // Change%/Price filters run against a live-quote overlay (matching what the
-// results table displays) when the market's open and the candidate set after
-// every other filter is small enough to batch-quote without hammering the
-// broker API — beyond this, fall back to the last EOD close/change% rather
-// than fetching thousands of live quotes on every filter tweak.
-const LIVE_FILTER_CANDIDATE_CAP = 300;
+// results table displays) whenever the market's open — batched via
+// useQuotesBatched so the full candidate set is covered rather than silently
+// falling back to yesterday's close past some cap.
 const LIVE_SENSITIVE_FILTER_IDS = new Set(["change_pct", "ltp"]);
 
 function normalizeActiveFilters(filters: ActiveFilter[]): ActiveFilter[] {
@@ -152,6 +151,14 @@ export default function Screener() {
   const { data: saved = [] } = useSavedScreeners();
   const { save, remove } = useScreenerMutations();
 
+  // A symbol whose sync keeps failing (rename, delisting, thin Yahoo data)
+  // keeps its last-successful trade_date/change_pct indefinitely — the pipeline
+  // still advances its cursor so it isn't retried, but the row silently looks
+  // "synced" while its numbers are for some earlier day, not today. Tech-scoped
+  // filters (1D Return, Volume, Breakout, …) only trust rows on the freshest
+  // trade_date actually present, everything else is treated as N/A.
+  const latestTradeDate = useMemo(() => latestTradeDateOf(rows), [rows]);
+
   // Change %/Price come from the once-daily EOD pipeline (market_stock_scores),
   // while the results table's Chg%/Price columns overlay a live quote for
   // display — filtering on the stale value while showing the live one meant a
@@ -170,38 +177,43 @@ export default function Screener() {
     let out: ScreenerRow[] = rows;
     for (const af of active) {
       if (deferLiveFilters && LIVE_SENSITIVE_FILTER_IDS.has(af.id)) continue;
-      out = out.filter((r) => filterMatches(r as any, af));
+      out = out.filter((r) => filterMatches(r as any, af, latestTradeDate));
     }
     return out;
-  }, [rows, active, deferLiveFilters]);
+  }, [rows, active, deferLiveFilters, latestTradeDate]);
 
-  const liveFilterTooManyCandidates = deferLiveFilters && preLiveFiltered.length > LIVE_FILTER_CANDIDATE_CAP;
+  // No candidate-count cap: a Price/1D-Return filter silently falling back to
+  // yesterday's close for large candidate sets was dropping rows whose live
+  // move crossed the filter boundary even though their EOD value didn't —
+  // exactly the symbols that diverged from parity checks against other
+  // screeners. Batched (chunks of 200, one-shot per filter change — not
+  // polled every second) so the full universe doesn't hammer Kotak/Yahoo.
   const liveFilterKeys = useMemo(
-    () => (deferLiveFilters && !liveFilterTooManyCandidates ? preLiveFiltered.map((r) => `${r.exchange ?? "NSE"}:${r.symbol}`) : []),
-    [deferLiveFilters, liveFilterTooManyCandidates, preLiveFiltered],
+    () => (deferLiveFilters ? preLiveFiltered.map((r) => `${r.exchange ?? "NSE"}:${r.symbol}`) : []),
+    [deferLiveFilters, preLiveFiltered],
   );
-  const { data: liveFilterQuotesData } = useQuotes(liveFilterKeys);
+  const { quotes: liveFilterQuotes, anyFailed: liveFilterFetchFailed, isFetching: liveFilterFetching } = useQuotesBatched(liveFilterKeys);
   const liveFilterQuoteByKey = useMemo(() => {
     const m = new Map<string, { ltp: number; change_pct: number | null }>();
-    for (const q of liveFilterQuotesData?.quotes ?? []) m.set(quoteKey(q.exchange, q.symbol), q);
+    for (const q of liveFilterQuotes) m.set(quoteKey(q.exchange, q.symbol), q);
     return m;
-  }, [liveFilterQuotesData]);
+  }, [liveFilterQuotes]);
 
   const filtered = useMemo(() => {
     if (!deferLiveFilters) return preLiveFiltered;
     return preLiveFiltered.filter((r) => {
-      const live = liveFilterTooManyCandidates ? undefined : liveFilterQuoteByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
+      const live = liveFilterQuoteByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
       const overlaid = {
         ...r,
         ltp: live?.ltp ?? r.ltp,
         change_pct: live?.change_pct ?? r.change_pct,
       };
       for (const af of liveSensitiveActive) {
-        if (!filterMatches(overlaid as any, af)) return false;
+        if (!filterMatches(overlaid as any, af, latestTradeDate)) return false;
       }
       return true;
     });
-  }, [preLiveFiltered, deferLiveFilters, liveFilterTooManyCandidates, liveFilterQuoteByKey, liveSensitiveActive]);
+  }, [preLiveFiltered, deferLiveFilters, liveFilterQuoteByKey, liveSensitiveActive, latestTradeDate]);
 
   useEffect(() => { setPage(0); }, [active, universe, pageSize]);
 
@@ -331,11 +343,18 @@ export default function Screener() {
   // `pageSize`, never the full universe) — 1s refresh during market hours.
   // When the live-filter pass above already fetched a superset (candidates
   // pre-pagination), reuse that instead of firing a second overlapping batch.
+  // Skip entirely when the market's closed: useQuotes still does one fetch on
+  // mount regardless of polling interval, and that live number was silently
+  // overriding the table's Price/Chg% display with a value computed
+  // differently from the stored EOD figure the filters matched against —
+  // rows would show in the results for a 1D-Return range their visible Chg%
+  // didn't remotely resemble. Closed market -> table shows the same stored
+  // r.ltp/r.change_pct the filters used, full stop.
   const quoteKeys = useMemo(
     () => paged.map((r) => `${r.exchange ?? "NSE"}:${r.symbol}`),
     [paged],
   );
-  const skipPageQuoteFetch = deferLiveFilters && !liveFilterTooManyCandidates;
+  const skipPageQuoteFetch = deferLiveFilters || !marketIsOpen;
   const { data: liveQuotesData } = useQuotes(skipPageQuoteFetch ? [] : quoteKeys);
   const pushTicks = useLiveTickStore((s) => s.ticks);
   const liveQuoteByKey = useMemo(() => {
@@ -491,9 +510,11 @@ export default function Screener() {
                     {liveSensitiveActive.length > 0 && (
                       !marketIsOpen
                         ? <Chip tone="neutral">EOD</Chip>
-                        : liveFilterTooManyCandidates
-                          ? <Chip tone="warn">EOD · {preLiveFiltered.length} cand.</Chip>
-                          : <Chip tone="ok">Live</Chip>
+                        : liveFilterFetchFailed
+                          ? <Chip tone="err">EOD (live fetch failed) · {preLiveFiltered.length} cand.</Chip>
+                          : liveFilterFetching
+                            ? <Chip tone="warn">Live · loading…</Chip>
+                            : <Chip tone="ok">Live · {preLiveFiltered.length} cand.</Chip>
                     )}
                   </div>
                 )}
@@ -616,7 +637,7 @@ function AddFilterPicker({ activeIds, onPick, rows }: {
               <div key={cat.id}>
                 <div style={{ padding: "4px 8px", fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.2em", textTransform: "uppercase", borderBottom: "1px solid var(--edge)" }}>{cat.label}</div>
                 {inCat.map((f) => {
-                  const cov = coverageOf(rows as any[], f.id);
+                  const cov = coverageOf(rows as any[], f.id, latestTradeDateOf(rows));
                   const pct = cov.total ? Math.round((cov.has / cov.total) * 100) : 0;
                   const covTone: "ok" | "warn" | "err" | undefined = pct >= 90 ? undefined : pct >= 50 ? "warn" : "err";
                   return (
@@ -647,7 +668,7 @@ function InlineFilterEditor({ def, af, rows, sectorList, industryList, onChange,
   sectorList: string[]; industryList: string[];
   onChange: (patch: Partial<ActiveFilter>) => void; onClear: () => void;
 }) {
-  const cov = coverageOf(rows as any[], def.id);
+  const cov = coverageOf(rows as any[], def.id, latestTradeDateOf(rows));
   const pct = cov.total ? Math.round((cov.has / cov.total) * 100) : 0;
   const covTone: "ok" | "warn" | "err" | undefined = pct >= 90 ? undefined : pct >= 50 ? "warn" : "err";
   const isActive = af !== undefined;
@@ -727,7 +748,7 @@ function PresetPicker({ onPick, rows }: { onPick: (id: string) => void; rows: Sc
               {PRESETS.filter((p) => p.group === g).map((p) => {
                 // Coverage warning if any required col has <50% coverage.
                 const missing = (p.requires ?? []).filter((rid) => {
-                  const c = coverageOf(rows as any[], rid);
+                  const c = coverageOf(rows as any[], rid, latestTradeDateOf(rows));
                   return c.total > 0 && c.has / c.total < 0.5;
                 });
                 return (
@@ -979,6 +1000,7 @@ function ColumnPresetPicker({ onPick }: { onPick: (cols: string[]) => void }) {
 // ============================================================================
 function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]; universe: UniverseId; filteredCount: number; loading: boolean }) {
   const push = useUi((s) => s.push);
+  const [gapsOpen, setGapsOpen] = useState(false);
   const qc = useQueryClient();
   const [busy, setBusy] = useState<null | "fund" | "eod" | "agg">(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -986,6 +1008,7 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
   const menuTriggerRef = useRef<HTMLButtonElement>(null);
   const menuPopRef = useRef<HTMLDivElement>(null);
   const menuPos = useAnchoredPos(menuTriggerRef, menuOpen, "right", 180);
+  const latestTradeDate = useMemo(() => latestTradeDateOf(rows), [rows]);
 
   // Live pipeline status from the DB view — reflects reality regardless of
   // whether the current user has ever triggered a sync from this browser.
@@ -1021,7 +1044,10 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
   // Coverage stats: prefer authoritative DB view; fall back to loaded rows.
   const stats = useMemo(() => {
     const equities = rows.filter((r) => (r.instrument_type ?? "EQ") === "EQ");
-    const withScore = rows.filter((r) => r.trade_date != null);
+    // Only rows on the freshest trade_date count as "synced" — a symbol
+    // stuck on an old date (sync keeps failing for it) isn't today's data,
+    // even though it still has a non-null trade_date.
+    const withScore = rows.filter((r) => r.trade_date != null && (latestTradeDate == null || r.trade_date === latestTradeDate));
     const withSector = equities.filter((r) => r.sector != null).length;
     const withTech = withScore.filter((r) => r.rsi != null || r.adx != null).length;
     return {
@@ -1033,7 +1059,30 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
       techTotal: withScore.length,
       nonEquity: rows.length - equities.length,
     };
-  }, [rows, pipeline]);
+  }, [rows, pipeline, latestTradeDate]);
+
+  // Rows the pipeline should have priced but didn't — computed client-side
+  // from the already-loaded universe (no new view/migration needed). Named
+  // gaps beat a vague "N excluded" count when chasing parity mismatches.
+  // Includes rows stuck on a stale trade_date, not just fully-missing ones —
+  // those are the ones that silently pass tech-scoped filters with numbers
+  // that aren't for today.
+  const gaps = useMemo(() => {
+    return rows
+      .filter((r) => (r.instrument_type ?? "EQ") === "EQ")
+      .map((r) => {
+        const isStale = r.trade_date != null && latestTradeDate != null && r.trade_date !== latestTradeDate;
+        const missing = [
+          r.trade_date == null && "no EOD row",
+          isStale && `stale EOD (${r.trade_date})`,
+          r.ltp == null && "no price",
+          r.change_pct == null && "no change%",
+          r.volume == null && "no volume",
+        ].filter((x): x is string => !!x);
+        return missing.length > 0 ? { symbol: r.symbol, exchange: r.exchange, missing } : null;
+      })
+      .filter((x): x is { symbol: string; exchange: string; missing: string[] } => x != null);
+  }, [rows, latestTradeDate]);
 
   const trigger = async (
     fn: "market-fundamentals-global-sync" | "market-pipeline-eod" | "market-pipeline-aggregates",
@@ -1091,8 +1140,29 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
       <Chip tone={fundPct >= 95 ? "ok" : fundPct >= 80 ? "warn" : "err"}>Fund {fundPct}%</Chip>
       <Chip tone={sectorPct >= 95 ? "ok" : sectorPct >= 80 ? "warn" : "err"}>Sector {sectorPct}%</Chip>
       <Chip tone={techPct >= 95 ? "ok" : techPct >= 80 ? "warn" : "err"}>Tech {techPct}%</Chip>
+      {gaps.length > 0 && (
+        <button onClick={() => setGapsOpen(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }} title="Symbols missing price/change/volume — click to list">
+          <Chip tone={gaps.length > stats.total * 0.1 ? "err" : "warn"}>{gaps.length} gaps</Chip>
+        </button>
+      )}
       {stats.fundFailed > 0 && <Chip tone="err">{stats.fundFailed} fail</Chip>}
       {scoresStale && <Chip tone="err">EOD {scoresStaleDays}d old</Chip>}
+      <HudModal open={gapsOpen} onClose={() => setGapsOpen(false)} title={`Data gaps · ${gaps.length}`} width={480}>
+        <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10 }}>
+          Equities missing an EOD row, price, change%, or volume — these are silently excluded from any filter that needs those fields, not "out of range."
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          {gaps.slice(0, 300).map((g) => (
+            <div key={`${g.symbol}:${g.exchange}`} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11, padding: "3px 0", borderBottom: "1px solid var(--edge)" }}>
+              <span style={{ color: "var(--accent)" }}>{g.symbol}</span>
+              <span style={{ color: "var(--text-muted)", textAlign: "right" }}>{g.missing.join(", ")}</span>
+            </div>
+          ))}
+        </div>
+        {gaps.length > 300 && (
+          <div style={{ marginTop: 8, fontSize: 10, color: "var(--text-muted)" }}>+{gaps.length - 300} more</div>
+        )}
+      </HudModal>
       <div ref={menuRef} style={{ marginLeft: "auto", position: "relative" }}>
         <button ref={menuTriggerRef} className="hud-btn" data-variant="ghost" data-size="sm"
           onClick={() => setMenuOpen((o) => !o)} disabled={busy !== null}
