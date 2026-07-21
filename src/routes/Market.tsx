@@ -5,6 +5,7 @@ import { lazy, Suspense } from "react";
 import ErrorBoundary from "@/components/hud/ErrorBoundary";
 import { useMarketAutoSync } from "@/lib/market/useAutoSync";
 import { useRealtimeTicks } from "@/lib/market/useRealtimeTicks";
+import { KotakReconnectModal } from "@/components/market/KotakReconnectModal";
 
 const Dashboard = lazy(() => import("@/routes/market/Dashboard"));
 const Holdings = lazy(() => import("@/routes/market/Holdings"));
@@ -101,6 +102,7 @@ export default function Market() {
 
   return (
     <div style={{ padding: 12, height: "100%", display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
+      <KotakReconnectModal />
       <div role="tablist" aria-label="Market sections" style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
         {GROUPS.map((g) => {
           const active = g.key === activeGroup.key;
