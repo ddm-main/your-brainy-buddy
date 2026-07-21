@@ -5,11 +5,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { HudPanel } from "@/components/hud/HudPanel";
-import { Btn, inputStyle } from "@/components/hud/HudControls";
+import { Btn } from "@/components/hud/HudControls";
 import { supabase } from "@/integrations/supabase/client";
 import { useUi } from "@/store/uiStore";
-import { Plus, RefreshCw, Trash2 } from "lucide-react";
-import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
+import { RefreshCw, Trash2 } from "lucide-react";
+import { SymbolSearchInput, type SymbolOption } from "@/components/market/SymbolSearchInput";
 import { quoteKey } from "@/lib/market/pnl";
 import { useQuotes } from "@/lib/market/hooks";
 import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
@@ -22,8 +22,8 @@ export function WatchlistPanel() {
   const [items, setItems] = useState<Item[]>([]);
   const [listId, setListId] = useState<string | null>(null);
   const [newSym, setNewSym] = useState("");
-  const [newEx, setNewEx] = useState("NSE");
   const [loading, setLoading] = useState(true);
+  const [adding, setAdding] = useState(false);
 
   const load = async () => {
     const { data: wl, error: e1 } = await supabase.from("market_watchlists")
@@ -52,25 +52,37 @@ export function WatchlistPanel() {
   const liveTicks = useLiveTickStore((s) => s.ticks);
   const quotes = useMemo(() => mergeLiveQuotes(restQuotes, liveTicks), [restQuotes, liveTicks]);
 
-  const addItem = async () => {
-    const symbol = newSym.trim().toUpperCase();
-    if (!symbol) return;
-    const { data: u } = await supabase.auth.getUser();
-    if (!u.user) return;
-    let id = listId;
-    if (!id) {
-      const { data, error } = await supabase.from("market_watchlists")
-        .insert({ name: "Watchlist", user_id: u.user.id } as any).select("id").single();
-      if (error) { push(error.message, "err"); return; }
-      id = (data as any).id;
-      setListId(id);
+  // Only reachable by picking a suggestion from SymbolSearchInput — every
+  // suggestion comes straight out of market_data, so there's no path to
+  // watch a symbol that isn't a real, tracked stock (the old free-text "+"
+  // button let anything through, including plain typos).
+  const addVerified = async (opt: SymbolOption) => {
+    setAdding(true);
+    try {
+      const { data: u } = await supabase.auth.getUser();
+      if (!u.user) return;
+      let id = listId;
+      if (!id) {
+        const { data, error } = await supabase.from("market_watchlists")
+          .insert({ name: "Watchlist", user_id: u.user.id } as any).select("id").single();
+        if (error) { push(error.message, "err"); return; }
+        id = (data as any).id;
+        setListId(id);
+      }
+      const { error } = await supabase.from("market_watchlist_items").insert({
+        user_id: u.user.id, watchlist_id: id, symbol: opt.symbol, exchange: opt.exchange,
+      } as any);
+      if (error) {
+        // 23505 = unique_violation on (watchlist_id, symbol, exchange)
+        push(error.code === "23505" ? `${opt.symbol} is already in your watchlist` : error.message, "err");
+        return;
+      }
+      setNewSym("");
+      push(`${opt.symbol} added`, "ok");
+      await load();
+    } finally {
+      setAdding(false);
     }
-    const { error } = await supabase.from("market_watchlist_items").insert({
-      user_id: u.user.id, watchlist_id: id, symbol, exchange: newEx,
-    } as any);
-    if (error) { push(error.message, "err"); return; }
-    setNewSym("");
-    await load();
   };
 
   const removeItem = async (id: string) => {
@@ -85,14 +97,13 @@ export function WatchlistPanel() {
         <RefreshCw size={11} />
       </Btn>
     }>
-      <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-        <SymbolSearchInput value={newSym} onChange={setNewSym} placeholder="Add symbol"
-          onSelect={(o) => setNewEx(o.exchange)} onEnter={addItem}
-          containerStyle={{ flex: 1 }} />
-        <select value={newEx} onChange={(e) => setNewEx(e.target.value)} style={{ ...inputStyle, width: 62, padding: "6px 4px" }}>
-          <option>NSE</option><option>BSE</option>
-        </select>
-        <Btn size="sm" onClick={addItem}><Plus size={11} /></Btn>
+      <div style={{ marginBottom: 8 }}>
+        <SymbolSearchInput value={newSym} onChange={setNewSym}
+          placeholder={adding ? "adding…" : "Search symbol or company…"}
+          onSelect={addVerified} disabled={adding} />
+        <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 3 }}>
+          pick a result to add — only tracked symbols can be watched
+        </div>
       </div>
 
       {loading ? (

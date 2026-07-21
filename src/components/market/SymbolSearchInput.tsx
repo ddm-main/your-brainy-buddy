@@ -9,7 +9,7 @@ import { inputStyle as baseInputStyle } from "@/components/hud/HudControls";
 export type SymbolOption = { symbol: string; exchange: string; company_name: string | null };
 
 export function SymbolSearchInput({
-  value, onChange, onSelect, onEnter, exchange, placeholder, autoFocus, id,
+  value, onChange, onSelect, onEnter, exchange, placeholder, autoFocus, id, disabled,
   containerStyle, inputStyle: inputStyleOverride,
 }: {
   value: string;
@@ -22,6 +22,7 @@ export function SymbolSearchInput({
   placeholder?: string;
   autoFocus?: boolean;
   id?: string;
+  disabled?: boolean;
   containerStyle?: React.CSSProperties;
   inputStyle?: React.CSSProperties;
 }) {
@@ -91,7 +92,8 @@ export function SymbolSearchInput({
         placeholder={placeholder}
         autoFocus={autoFocus}
         autoComplete="off"
-        style={{ ...baseInputStyle, width: "100%", ...inputStyleOverride }}
+        disabled={disabled}
+        style={{ ...baseInputStyle, width: "100%", opacity: disabled ? 0.6 : 1, ...inputStyleOverride }}
       />
       {open && options.length > 0 && (
         <div
