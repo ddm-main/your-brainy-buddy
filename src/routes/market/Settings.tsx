@@ -290,10 +290,10 @@ export default function MarketSettings() {
                 {kotakConnected && kotak?.greeting_name && <span>Connected: <b style={{ color: "var(--accent)" }}>{kotak.greeting_name}</b></span>}
                 {kotak?.token_expires_at && (
                   <span title="Kotak hard-expires every session nightly near midnight IST for every app — not app-controlled. Auto-login means it renews without you.">
-                    {autoLoginEnabled ? "Auto-renews nightly" : "Manual reconnect needed after"} · valid until {new Date(kotak.token_expires_at).toLocaleString()}
+                    {autoLoginEnabled ? "Fresh until" : "Valid until"} {new Date(kotak.token_expires_at).toLocaleDateString([], { day: "2-digit", month: "short" })}
+                    {!autoLoginEnabled && ", then reconnect manually"}
                   </span>
                 )}
-                {kotak?.last_sync_at && <span>Last sync {new Date(kotak.last_sync_at).toLocaleString()}</span>}
                 {kotakConfigured && <Chip tone={autoLoginEnabled ? "ok" : "warn"}>{autoLoginEnabled ? "auto-login on" : "auto-login off"}</Chip>}
               </div>
             }
