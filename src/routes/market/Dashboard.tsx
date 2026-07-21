@@ -5,12 +5,12 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import type { ColumnDef } from "@tanstack/react-table";
 import { HudPanel } from "@/components/hud/HudPanel";
-import { Btn, Chip, inputStyle, labelStyle } from "@/components/hud/HudControls";
+import { Btn, Chip } from "@/components/hud/HudControls";
 import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "@/lib/market/api";
-import { useIndices, useIndexWatch, useIndexWatchMutations, useMarketSettings, useQuotes, useSectorStrength, useStockScores } from "@/lib/market/hooks";
+import { useIndices, useIndexWatch, useIndexWatchMutations, useMarketSettings, useQuotes, useStockScores } from "@/lib/market/hooks";
 import { ALL_PRESETS, GLOBAL_PRESETS, INDIAN_PRESETS, type IndexPreset } from "@/lib/market/indices";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
@@ -20,34 +20,15 @@ import type { Quote, StockScore } from "@/lib/market/types";
 import { holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
 
-const BREAKOUT_FILTERS_STORE = "jarvis.dashboard.breakoutFilters.v1";
-interface BreakoutFilters {
-  minBreakout: number | "";
-  minRsi: number | "";
-  minRvol: number | "";
-  minChg: number | "";
-  sector: string;
-  limit: number;
-}
-const defaultBreakoutFilters: BreakoutFilters = { minBreakout: 60, minRsi: "", minRvol: "", minChg: "", sector: "", limit: 12 };
-function loadBreakoutFilters(): BreakoutFilters {
-  try {
-    const raw = JSON.parse(localStorage.getItem(BREAKOUT_FILTERS_STORE) ?? "{}");
-    return { ...defaultBreakoutFilters, ...raw };
-  } catch { return defaultBreakoutFilters; }
-}
+const BREAKOUT_MIN_SCORE = 60;
+const BREAKOUT_ROWS = 12;
 
 export default function MarketDashboard() {
   const push = useUi((s) => s.push);
   const nav = useNavigate();
   const qc = useQueryClient();
-  const [insight, setInsight] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [manageOpen, setManageOpen] = useState(false);
-  const [bFilters, setBFilters] = useState<BreakoutFilters>(loadBreakoutFilters);
-  useEffect(() => {
-    localStorage.setItem(BREAKOUT_FILTERS_STORE, JSON.stringify(bFilters));
-  }, [bFilters]);
 
   useEffect(() => {
     const handler = () => qc.invalidateQueries({ queryKey: ["market"] });
@@ -57,7 +38,6 @@ export default function MarketDashboard() {
 
 
   const { data: indicesData, refetch: refetchIndices, isFetching: indicesFetching } = useIndices();
-  const { data: sectors = [] } = useSectorStrength();
   const { data: settings = [] } = useMarketSettings();
   // Fetched pool is wider than what's shown (12) so the filter bar below has
   // something to narrow beyond the top-15-by-score slice.
@@ -156,15 +136,6 @@ export default function MarketDashboard() {
 
   const connected = settings.find((s) => s.connection_status === "connected")?.active_provider ?? null;
 
-  const loadInsight = async () => {
-    setBusy("insight");
-    try {
-      const r = await callMarketFn<{ summary?: string }>("market-morning-insight");
-      setInsight(r?.summary ?? "");
-    } catch (e) { push(toSafeError(e, "AI insight failed").message, "err"); }
-    finally { setBusy(null); }
-  };
-
   // Bootstrap the data pipeline on demand so the dashboard fills without
   // waiting for the evening cron. Runs the same steps cron would run.
   const primeData = async () => {
@@ -226,41 +197,13 @@ export default function MarketDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   ], [liveByKey]);
 
-  const breakoutSectors = useMemo(
-    () => Array.from(new Set(topBreakouts.map((s) => s.sector).filter((s): s is string => !!s))).sort(),
+  const filteredBreakouts = useMemo(
+    () => topBreakouts.filter((s) => (s.breakout_score ?? 0) >= BREAKOUT_MIN_SCORE).slice(0, BREAKOUT_ROWS),
     [topBreakouts],
-  );
-  const filteredBreakouts = useMemo(() => {
-    const { minBreakout, minRsi, minRvol, minChg, sector, limit } = bFilters;
-    return topBreakouts
-      .filter((s) => (s.breakout_score ?? 0) >= (minBreakout === "" ? 0 : minBreakout))
-      .filter((s) => minRsi === "" || (s.rsi14 ?? -Infinity) >= minRsi)
-      .filter((s) => minRvol === "" || (s.rel_volume ?? -Infinity) >= minRvol)
-      .filter((s) => minChg === "" || ((liveFor(s)?.change_pct ?? s.change_pct) ?? -Infinity) >= minChg)
-      .filter((s) => !sector || s.sector === sector)
-      .slice(0, limit || 12);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [topBreakouts, bFilters, liveByKey]);
-
-  const ETF_RE = /(BEES|IETF|LIQUID|ETF|GOLD|SILVER)/i;
-  const filteredPreBreakouts = useMemo(
-    () => preBreakouts.filter((s) => {
-      if ((s.prebreakout_score ?? 0) < 60) return false;
-      if (ETF_RE.test(s.symbol)) return false;
-      if (!s.sector) return false;
-      const flags = [s.bb_squeeze, s.higher_lows, s.near_resistance].filter(Boolean).length;
-      return flags >= 1;
-    }).slice(0, 12),
-    [preBreakouts],
-  );
-
-  const filteredSectors = useMemo(
-    () => sectors.filter((s) => s.sector && s.sector.toLowerCase() !== "unknown").slice(0, 8),
-    [sectors],
   );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, height: "100%", minHeight: 0 }}>
       <HudPanel flow title="Market Summary" live={indicesFetching ? "warn" : "ok"} actions={
         <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
           {!connected && (
@@ -300,10 +243,11 @@ export default function MarketDashboard() {
         </div>
       </HudPanel>
 
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(260px, 1fr)", gap: 10, alignItems: "start" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(260px, 1fr)", gap: 10, flex: "1 1 auto", minHeight: 0 }}>
         <HudPanel
           flow
           title="Top Breakouts"
+          style={{ flex: 1, minHeight: 0 }}
           actions={
             <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.1em", textTransform: "uppercase" }}>
               {liveQuoteState === "push" && <Chip tone="ok">push · relay live</Chip>}
@@ -316,12 +260,12 @@ export default function MarketDashboard() {
           <div style={{ fontSize: 10, color: "var(--text-muted)", marginBottom: 6 }}>
             Score/RSI/RVol are end-of-day (recomputed once daily, same as standard technical scoring) — price & chg% update live.
           </div>
-          <BreakoutFilterBar filters={bFilters} onChange={setBFilters} sectors={breakoutSectors} />
           <DataTable
             columns={breakoutColumns}
             data={filteredBreakouts}
             onRowClick={(r) => nav(`/market/analysis/${r.symbol}`)}
             initialSort={[{ id: "breakout_score", desc: true }]}
+            maxHeight="100%"
             emptyLabel={`no breakouts match — ${filteredBreakouts.length === 0 && topBreakouts.length > 0 ? "try loosening the filters" : "≥60 score"}`}
             emptyHint="run the data pipeline from Settings, or wait for the evening cron"
           />
@@ -345,61 +289,7 @@ export default function MarketDashboard() {
               </div>
             )}
           </HudPanel>
-
-          <HudPanel flow title="Sector Strength">
-            {filteredSectors.length === 0 ? (
-              <div className="hud-label" style={{ color: "var(--text-dim)" }}>pipeline pending</div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column" }}>
-                {filteredSectors.map((s) => (
-                  <div key={s.sector} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, padding: "3px 0", borderBottom: "1px solid var(--edge)" }}>
-                    <span style={{ color: (s.strength_rank ?? 99) <= 3 ? "var(--ok)" : "var(--text-dim)" }}>
-                      #{s.strength_rank} {s.sector}
-                    </span>
-                    <span style={{ color: (s.avg_change_pct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)", fontVariantNumeric: "tabular-nums" }}>
-                      {s.avg_change_pct == null ? "—" : `${s.avg_change_pct >= 0 ? "+" : ""}${s.avg_change_pct.toFixed(2)}%`}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </HudPanel>
         </div>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(260px, 1fr)", gap: 10, alignItems: "start" }}>
-        <HudPanel flow title="Pre-Breakout Watch">
-          {filteredPreBreakouts.length === 0 ? (
-            <div className="hud-label" style={{ color: "var(--text-dim)" }}>no coiled setups yet</div>
-          ) : (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 4 }}>
-              {filteredPreBreakouts.map((s) => (
-                <div key={s.id} onClick={() => nav(`/market/analysis/${s.symbol}`)}
-                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 6px", border: "1px solid var(--edge)", cursor: "pointer", fontSize: 12 }}>
-                  <span>
-                    <span style={{ color: "var(--accent)" }}>{s.symbol}</span>
-                    <span style={{ display: "inline-flex", gap: 3, marginLeft: 6 }}>
-                      {s.bb_squeeze && <Chip tone="accent">sq</Chip>}
-                      {s.higher_lows && <Chip tone="ok">HL</Chip>}
-                      {s.near_resistance && <Chip tone="warn">@r</Chip>}
-                    </span>
-                  </span>
-                  <ScoreBadge score={s.prebreakout_score} components={s.score_components?.prebreakout} label="pre-breakout components" />
-                </div>
-              ))}
-            </div>
-          )}
-        </HudPanel>
-
-        <HudPanel flow title="AI Insight" actions={
-          <Btn size="sm" onClick={loadInsight} disabled={busy !== null}>
-            <Sparkles size={11} style={{ marginRight: 4 }} /> {busy === "insight" ? "…" : "generate"}
-          </Btn>
-        }>
-          {insight
-            ? <div style={{ fontSize: 12, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{insight}</div>
-            : <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 10 }}>tap generate for today's brief</div>}
-        </HudPanel>
       </div>
 
       {manageOpen && <ManageIndicesDialog onClose={() => setManageOpen(false)} />}
@@ -509,59 +399,6 @@ function ManageIndicesDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-
-function BreakoutFilterBar({ filters, onChange, sectors }: {
-  filters: BreakoutFilters;
-  onChange: (f: BreakoutFilters) => void;
-  sectors: string[];
-}) {
-  const set = <K extends keyof BreakoutFilters>(key: K, value: BreakoutFilters[K]) => onChange({ ...filters, [key]: value });
-  const numInput = (label: string, key: "minBreakout" | "minRsi" | "minRvol" | "minChg", width = 64) => (
-    <div>
-      <div style={labelStyle}>{label}</div>
-      <input
-        type="number"
-        value={filters[key]}
-        onChange={(e) => set(key, e.target.value === "" ? "" : Number(e.target.value))}
-        style={{ ...inputStyle, padding: "4px 6px", fontSize: 11, width }}
-      />
-    </div>
-  );
-  const isDefault = JSON.stringify(filters) === JSON.stringify(defaultBreakoutFilters);
-  return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end", padding: "8px 0", marginBottom: 4, borderBottom: "1px solid var(--edge)" }}>
-      {numInput("Min Breakout", "minBreakout")}
-      {numInput("Min RSI", "minRsi")}
-      {numInput("Min RVol", "minRvol")}
-      {numInput("Min Chg %", "minChg")}
-      <div>
-        <div style={labelStyle}>Sector</div>
-        <select
-          value={filters.sector}
-          onChange={(e) => set("sector", e.target.value)}
-          style={{ ...inputStyle, padding: "4px 6px", fontSize: 11, width: 140 }}
-        >
-          <option value="">All</option>
-          {sectors.map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
-      </div>
-      <div>
-        <div style={labelStyle}>Rows</div>
-        <input
-          type="number"
-          value={filters.limit}
-          onChange={(e) => set("limit", e.target.value === "" ? 12 : Number(e.target.value))}
-          style={{ ...inputStyle, padding: "4px 6px", fontSize: 11, width: 56 }}
-        />
-      </div>
-      {!isDefault && (
-        <Btn size="sm" variant="ghost" onClick={() => onChange(defaultBreakoutFilters)} title="Reset filters">
-          reset
-        </Btn>
-      )}
-    </div>
-  );
-}
 
 function StatTile({ label, value, to, tone }: { label: string; value: string; to?: string; tone?: "ok" | "err" | "accent" }) {
   const color = tone === "ok" ? "var(--ok)" : tone === "err" ? "var(--danger)" : "var(--accent)";

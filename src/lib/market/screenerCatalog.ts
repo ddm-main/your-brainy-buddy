@@ -86,7 +86,7 @@ export const FILTERS: FilterDef[] = [
   { id: "market_cap",         label: "Market Cap",        category: "basics",     kind: "number", unit: "Cr", min: 0, max: 2_500_000, step: 500, scope: "all" },
   { id: "sector",             label: "Sector",            category: "basics",     kind: "enum", scope: "eq" },
   { id: "industry",           label: "Industry",          category: "basics",     kind: "enum", scope: "eq" },
-  { id: "close",              label: "Price",             category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "all" },
+  { id: "ltp",                label: "Price",             category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "all" },
   { id: "volume",             label: "Volume",            category: "basics",     kind: "number", min: 0, max: 200_000_000, step: 100_000, scope: "tech" },
   { id: "pct_from_52w_high",  label: "% from 52w High",   category: "basics",     kind: "number", unit: "%", min: -100, max: 20, step: 1, scope: "tech" },
 
@@ -124,7 +124,7 @@ export const FILTERS: FilterDef[] = [
   { id: "above_ema_200",      label: "Above 200 EMA",     category: "technicals", kind: "boolean", scope: "tech" },
 
   // Momentum & Volume
-  { id: "change_pct",         label: "Change %",          category: "momentum",   kind: "number", unit: "%", min: -20, max: 20, step: 0.1, scope: "tech" },
+  { id: "change_pct",         label: "1D Return %",       category: "momentum",   kind: "number", unit: "%", min: -20, max: 20, step: 0.1, scope: "tech" },
   { id: "rel_volume",         label: "Rel Volume",        category: "momentum",   kind: "number", unit: "x", min: 0, max: 20, step: 0.1, scope: "tech" },
   { id: "rel_strength_nifty", label: "RS vs NIFTY",       category: "momentum",   kind: "number", unit: "%", min: -50, max: 50, step: 1, scope: "tech" },
   { id: "sector_strength",    label: "Sector Strength",   category: "momentum",   kind: "number", min: 0, max: 1, step: 0.05, scope: "tech" },

@@ -30,11 +30,10 @@ import {
   coverageOf,
   excludedByMissingData,
   type ActiveFilter,
-  type FilterCategory,
   type FilterDef,
   type UniverseId,
 } from "@/lib/market/screenerCatalog";
-import { Check, ChevronDown, ChevronRight, Database, Download, RotateCcw, Save, Search, Sparkles, X } from "lucide-react";
+import { Check, Database, Download, Plus, RotateCcw, Save, Search, Sparkles, X } from "lucide-react";
 
 // ---- Columns ----
 interface ColSpec { id: string; label: string; align?: "right" | "left"; default?: boolean }
@@ -69,7 +68,6 @@ const COLUMNS: ColSpec[] = [
 ];
 const DEFAULT_COLS = COLUMNS.filter((c) => c.default).map((c) => c.id);
 const COLS_STORE_KEY = "screener.visibleCols.v3";
-const OPEN_STORE_KEY = "screener.openCats.v2";
 const PAGE_SIZE_KEY  = "screener.pageSize.v2";
 const AUTO_SYNC_STORE_KEY = "screener.autoFundamentalsSyncAt.v1";
 // Change%/Price filters run against a live-quote overlay (matching what the
@@ -78,7 +76,7 @@ const AUTO_SYNC_STORE_KEY = "screener.autoFundamentalsSyncAt.v1";
 // broker API — beyond this, fall back to the last EOD close/change% rather
 // than fetching thousands of live quotes on every filter tweak.
 const LIVE_FILTER_CANDIDATE_CAP = 300;
-const LIVE_SENSITIVE_FILTER_IDS = new Set(["change_pct", "close"]);
+const LIVE_SENSITIVE_FILTER_IDS = new Set(["change_pct", "ltp"]);
 
 function fmtBound(def: FilterDef, v: number | "" | undefined): string {
   if (v === undefined || v === "") return "*";
@@ -180,7 +178,7 @@ export default function Screener() {
       for (const af of liveSensitiveActive) {
         const overlaid = af.id === "change_pct"
           ? { ...r, change_pct: live?.change_pct ?? r.change_pct }
-          : { ...r, close: live?.ltp ?? r.ltp };
+          : { ...r, ltp: live?.ltp ?? r.ltp };
         if (!filterMatches(overlaid as any, af)) return false;
       }
       return true;
@@ -223,8 +221,12 @@ export default function Screener() {
   };
 
 
+  // "+ Add Filter" picker: bring a filter into the sidebar with an empty
+  // value, ready to edit — bypasses setFilterValue's auto-drop-when-empty
+  // (below) since an intentionally-just-added filter should stick around
+  // with blank inputs, not vanish immediately.
   const addFilter = (fid: string) => {
-    if (active.some((a) => a.id === fid)) { push("Filter already added", "warn"); return; }
+    if (active.some((a) => a.id === fid)) return;
     const def = FILTER_BY_ID[fid]; if (!def) return;
     const initial: ActiveFilter =
       def.kind === "boolean" ? { id: fid, bool: true } :
@@ -232,8 +234,23 @@ export default function Screener() {
       { id: fid };
     setActive((a) => [...a, initial]);
   };
-  const updateFilter = (fid: string, patch: Partial<ActiveFilter>) =>
-    setActive((a) => a.map((af) => af.id === fid ? { ...af, ...patch } : af));
+
+  // Inline sidebar editors call this directly on every keystroke/toggle —
+  // adds the filter to `active` on first non-empty value, drops it again
+  // once cleared back to empty, so there's no separate add/remove step.
+  const setFilterValue = (fid: string, patch: Partial<ActiveFilter>) => {
+    setActive((a) => {
+      const existing = a.find((x) => x.id === fid);
+      const merged: ActiveFilter = existing ? { ...existing, ...patch } : { id: fid, ...patch };
+      const isEmpty =
+        (merged.min === undefined || merged.min === "") &&
+        (merged.max === undefined || merged.max === "") &&
+        merged.bool === undefined &&
+        (!merged.values || merged.values.length === 0);
+      if (isEmpty) return a.filter((x) => x.id !== fid);
+      return existing ? a.map((x) => (x.id === fid ? merged : x)) : [...a, merged];
+    });
+  };
   const removeFilter = (fid: string) => setActive((a) => a.filter((af) => af.id !== fid));
 
   const applyPreset = (id: string) => {
@@ -404,17 +421,6 @@ export default function Screener() {
         }
       >
         <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
-          <div>
-            <div style={labelStyle}>Universe</div>
-            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-              {UNIVERSES.map((u) => (
-                <button key={u.id} onClick={() => setUniverse(u.id)}
-                  className="hud-btn" data-variant={universe === u.id ? "primary" : "ghost"} data-size="sm">
-                  {u.label}
-                </button>
-              ))}
-            </div>
-          </div>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
             <span
               style={{ fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-dim)", letterSpacing: "0.14em", textTransform: "uppercase", border: "1px solid var(--edge)", borderRadius: 2, padding: "2px 6px" }}
@@ -430,25 +436,13 @@ export default function Screener() {
         <DataHealthStrip rows={rows} universe={universe} />
       </HudPanel>
 
-      {/* Two-pane workspace */}
-      <div style={{ display: "grid", gridTemplateColumns: "280px 1fr", gap: 12, alignItems: "start" }}>
-        <FilterRail rows={rows} active={active} onAdd={addFilter} sectorList={sectorList} industryList={industryList} />
+      {/* Two-pane workspace: filters sidebar (universe + add/remove filters) + results */}
+      <div style={{ display: "grid", gridTemplateColumns: "336px 1fr", gap: 12, alignItems: "start" }}>
+        <FilterRail rows={rows} active={active} onAdd={addFilter} onChange={setFilterValue} onClear={removeFilter}
+          sectorList={sectorList} industryList={industryList}
+          universe={universe} onUniverseChange={setUniverse} />
 
         <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
-          {/* Active filters (query chips + editors) */}
-          <HudPanel flow title="Query" index="MK.SC1">
-            {active.length === 0 ? (
-              <EmptyState hint="pick a preset or add filters from the left rail">no filters yet</EmptyState>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {active.map((af) => (
-                  <FilterRow key={af.id} af={af} rows={rows} sectorList={sectorList} industryList={industryList}
-                    onUpdate={(patch) => updateFilter(af.id, patch)} onRemove={() => removeFilter(af.id)} />
-                ))}
-              </div>
-            )}
-          </HudPanel>
-
           {/* Results */}
           <HudPanel flow title={`Results · ${filtered.length}${filtered.length !== rows.length ? ` of ${rows.length}` : ""}`}
             index="MK.SC2" live={isFetching ? "warn" : error ? "err" : "ok"}
@@ -478,16 +472,17 @@ export default function Screener() {
                   emptyLabel={rows.length === 0 && !isFetching ? "market pipeline is warming up" : "no matches"}
                   emptyHint={rows.length === 0 && !isFetching ? "automatic sync is enabled; refresh shortly" : "loosen the filters or change the universe"}
                 />
-                {/* Coverage note */}
+                {/* Applied filters + coverage note — the sidebar edits values inline with
+                    no separate query list, so this is the only place the active ranges
+                    are visible at a glance. */}
                 {active.length > 0 && rows.length > 0 && (
                   <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-                    <span style={{ fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.16em", textTransform: "uppercase" }}>Data coverage</span>
+                    <span style={{ fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.16em", textTransform: "uppercase" }}>Applied</span>
                     {active.map((af) => {
                       const c = coverageOf(rows as any[], af.id);
                       const pct = c.total ? Math.round((c.has / c.total) * 100) : 0;
                       const tone: "ok" | "warn" | "err" = pct >= 90 ? "ok" : pct >= 50 ? "warn" : "err";
-                      const def = FILTER_BY_ID[af.id];
-                      return <Chip key={af.id} tone={tone}>{def?.label ?? af.id}: {c.has}/{c.total}</Chip>;
+                      return <Chip key={af.id} tone={tone}>{chipDesc(af)} · {c.has}/{c.total}</Chip>;
                     })}
                     {(() => {
                       const excluded = excludedByMissingData(rows as any[], active);
@@ -533,79 +528,196 @@ export default function Screener() {
 }
 
 // ============================================================================
-// Left rail — collapsible category groups + search + coverage chips
+// Left rail — Tickertape-style: Stock Universe fixed at top, then only the
+// filters the user has explicitly added (each editable inline, removable),
+// with a "+ Add Filter" picker below to bring in more.
 // ============================================================================
-function FilterRail({ rows, active, onAdd, sectorList, industryList }: {
-  rows: ScreenerRow[]; active: ActiveFilter[]; onAdd: (id: string) => void;
+function FilterRail({ rows, active, onAdd, onChange, onClear, sectorList, industryList, universe, onUniverseChange }: {
+  rows: ScreenerRow[]; active: ActiveFilter[];
+  onAdd: (id: string) => void;
+  onChange: (id: string, patch: Partial<ActiveFilter>) => void;
+  onClear: (id: string) => void;
   sectorList: string[]; industryList: string[];
+  universe: UniverseId; onUniverseChange: (u: UniverseId) => void;
 }) {
-  const [q, setQ] = useState("");
-  const [open, setOpen] = useState<Record<FilterCategory, boolean>>(() => {
-    try { const raw = localStorage.getItem(OPEN_STORE_KEY); if (raw) return JSON.parse(raw); } catch { /* */ }
-    return { basics: true, valuation: true, profitability: true, growth: false, health: false, ownership: false, technicals: true, momentum: false, signals: false };
-  });
-  useEffect(() => { try { localStorage.setItem(OPEN_STORE_KEY, JSON.stringify(open)); } catch { /* */ } }, [open]);
-  const activeIds = new Set(active.map((a) => a.id));
-  const term = q.trim().toLowerCase();
-
   return (
     <HudPanel flow title="Filters" index="MK.SC-R"
       actions={<span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)" }}>{active.length} active</span>}
     >
-      <div style={{ position: "relative", marginBottom: 8 }}>
-        <Search size={11} style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="search filters…"
-          style={{ ...inputStyle, padding: "6px 8px 6px 24px", fontSize: 12, width: "100%" }} />
+      <div style={{ borderBottom: "1px solid var(--edge)", paddingBottom: 10, marginBottom: 10 }}>
+        <div style={labelStyle}>Stock Universe</div>
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
+          {UNIVERSES.map((u) => (
+            <button key={u.id} onClick={() => onUniverseChange(u.id)}
+              className="hud-btn" data-variant={universe === u.id ? "primary" : "ghost"} data-size="sm">
+              {u.label}
+            </button>
+          ))}
+        </div>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: "72vh", overflowY: "auto", paddingRight: 4 }}>
-        {CATEGORIES.map((cat) => {
-          const inCat = FILTERS.filter((f) => f.category === cat.id && (!term || f.label.toLowerCase().includes(term)));
-          if (term && inCat.length === 0) return null;
-          const isOpen = term ? true : open[cat.id];
-          const activeInCat = FILTERS.filter((f) => f.category === cat.id && activeIds.has(f.id)).length;
-          return (
-            <div key={cat.id} style={{ borderTop: "1px solid var(--edge)", paddingTop: 4 }}>
-              <button onClick={() => setOpen((o) => ({ ...o, [cat.id]: !o[cat.id] }))}
-                style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%",
-                         background: "transparent", border: "none", padding: "4px 2px", cursor: "pointer",
-                         color: "var(--text)", fontFamily: "var(--font-hud)", fontSize: 11, letterSpacing: "0.12em", textTransform: "uppercase" }}>
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                  {isOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-                  {cat.label}
-                </span>
-                {activeInCat > 0 && <Chip tone="accent">{activeInCat}</Chip>}
-              </button>
-              {isOpen && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 2, paddingLeft: 4, marginTop: 2 }}>
-                  {inCat.map((f) => {
-                    const cov = coverageOf(rows as any[], f.id);
-                    const pct = cov.total ? Math.round((cov.has / cov.total) * 100) : 0;
-                    const covTone: "ok" | "warn" | "err" | undefined = pct >= 90 ? undefined : pct >= 50 ? "warn" : "err";
-                    const disabled = activeIds.has(f.id);
-                    return (
-                      <button key={f.id} disabled={disabled} onClick={() => onAdd(f.id)}
-                        title={f.hint}
-                        style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6,
-                                 padding: "4px 6px", background: "transparent", border: "1px solid transparent",
-                                 borderRadius: 2, cursor: disabled ? "not-allowed" : "pointer",
-                                 opacity: disabled ? 0.4 : 1, color: "var(--text)", textAlign: "left", fontSize: 11 }}
-                        onMouseEnter={(e) => !disabled && (e.currentTarget.style.background = "rgba(53,214,237,0.08)")}
-                        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-                        <span>{f.label}</span>
-                        <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
-                          {rows.length > 0 && f.kind !== "boolean" && covTone && <Chip tone={covTone}>{pct}%</Chip>}
-                          {disabled && <Chip tone="ok">✓</Chip>}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 14, maxHeight: "calc(100vh - 340px)", overflowY: "auto", paddingRight: 4 }}>
+        {active.length === 0 ? (
+          <div className="hud-label" style={{ color: "var(--text-dim)" }}>no filters added yet</div>
+        ) : (
+          active.map((af) => {
+            const def = FILTER_BY_ID[af.id]; if (!def) return null;
+            return (
+              <InlineFilterEditor key={af.id} def={def} af={af} rows={rows}
+                sectorList={sectorList} industryList={industryList}
+                onChange={(patch) => onChange(af.id, patch)}
+                onClear={() => onClear(af.id)} />
+            );
+          })
+        )}
+      </div>
+
+      <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--edge)" }}>
+        <AddFilterPicker activeIds={new Set(active.map((a) => a.id))} onPick={onAdd} rows={rows} />
       </div>
     </HudPanel>
+  );
+}
+
+// "+ Add Filter" — anchored popover (same pattern as PresetPicker/SavedPicker)
+// listing the full category tree, filtered to hide filters already added.
+function AddFilterPicker({ activeIds, onPick, rows }: {
+  activeIds: Set<string>; onPick: (id: string) => void; rows: ScreenerRow[];
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const pos = useAnchoredPos(triggerRef, open, "right", 300);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (triggerRef.current?.contains(t) || popRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+  const term = q.trim().toLowerCase();
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button ref={triggerRef} className="hud-btn" data-variant="primary" data-size="sm"
+        onClick={() => setOpen((o) => !o)} style={{ width: "100%" }}>
+        <Plus size={11} style={{ marginRight: 4 }} />Add Filter
+      </button>
+      {open && pos && createPortal(
+        <div ref={popRef} style={{ ...popoverStyle, ...pos, width: 300, maxHeight: 440, overflowY: "auto" }}>
+          <div style={{ position: "relative", padding: 6, borderBottom: "1px solid var(--edge)" }}>
+            <Search size={11} style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="search filters…" autoFocus
+              style={{ ...inputStyle, padding: "6px 8px 6px 24px", fontSize: 12, width: "100%" }} />
+          </div>
+          {CATEGORIES.map((cat) => {
+            const inCat = FILTERS.filter((f) => f.category === cat.id && !activeIds.has(f.id) && (!term || f.label.toLowerCase().includes(term)));
+            if (inCat.length === 0) return null;
+            return (
+              <div key={cat.id}>
+                <div style={{ padding: "4px 8px", fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.2em", textTransform: "uppercase", borderBottom: "1px solid var(--edge)" }}>{cat.label}</div>
+                {inCat.map((f) => {
+                  const cov = coverageOf(rows as any[], f.id);
+                  const pct = cov.total ? Math.round((cov.has / cov.total) * 100) : 0;
+                  const covTone: "ok" | "warn" | "err" | undefined = pct >= 90 ? undefined : pct >= 50 ? "warn" : "err";
+                  return (
+                    <button key={f.id} onClick={() => { onPick(f.id); setOpen(false); }}
+                      title={f.hint}
+                      style={{ ...popoverItem, padding: "6px 8px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}
+                      onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(53,214,237,0.08)")}
+                      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+                      <span>{f.label}</span>
+                      {rows.length > 0 && f.kind !== "boolean" && covTone && <Chip tone={covTone}>{pct}%</Chip>}
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+// Compact per-filter editor rendered inline in the sidebar — value changes
+// go straight to `active` (see setFilterValue), no add/remove step.
+function InlineFilterEditor({ def, af, rows, sectorList, industryList, onChange, onClear }: {
+  def: FilterDef; af: ActiveFilter | undefined; rows: ScreenerRow[];
+  sectorList: string[]; industryList: string[];
+  onChange: (patch: Partial<ActiveFilter>) => void; onClear: () => void;
+}) {
+  const cov = coverageOf(rows as any[], def.id);
+  const pct = cov.total ? Math.round((cov.has / cov.total) * 100) : 0;
+  const covTone: "ok" | "warn" | "err" | undefined = pct >= 90 ? undefined : pct >= 50 ? "warn" : "err";
+  const isActive = af !== undefined;
+  const inpS: React.CSSProperties = { ...inputStyle, padding: "4px 6px", width: "100%", fontSize: 11 };
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, marginBottom: 4 }}>
+        <span style={{ fontSize: 11, color: isActive ? "var(--accent)" : "var(--text)" }} title={def.hint}>{def.label}</span>
+        <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+          {rows.length > 0 && def.kind !== "boolean" && covTone && <Chip tone={covTone}>{pct}%</Chip>}
+          {isActive && (
+            <button onClick={onClear} title="Clear" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", display: "flex", padding: 0 }}>
+              <X size={10} />
+            </button>
+          )}
+        </span>
+      </div>
+
+      {def.kind === "boolean" ? (
+        <div style={{ display: "flex", gap: 4 }}>
+          <button className="hud-btn" data-variant={af?.bool === true ? "primary" : "ghost"} data-size="sm" onClick={() => onChange({ bool: true })}>true</button>
+          <button className="hud-btn" data-variant={af?.bool === false ? "primary" : "ghost"} data-size="sm" onClick={() => onChange({ bool: false })}>false</button>
+        </div>
+      ) : def.kind === "enum" ? (
+        <EnumMultiSelect
+          options={def.id === "sector" ? sectorList : def.id === "industry" ? industryList : (def.options ?? [])}
+          values={af?.values ?? []}
+          onChange={(values) => (values.length === 0 ? onClear() : onChange({ values }))}
+        />
+      ) : (
+        <>
+          {def.id === "market_cap" && (
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 4 }}>
+              {CAP_TIERS.map((t) => {
+                const isSel = af?.min === t.min && (af?.max ?? undefined) === t.max;
+                return (
+                  <button key={t.id} className="hud-btn" data-variant={isSel ? "primary" : "ghost"} data-size="sm"
+                    onClick={() => onChange({ min: t.min, max: t.max ?? "" })}>{t.label.split(" ")[0]}</button>
+                );
+              })}
+            </div>
+          )}
+          {cov.has > 0 && def.min !== undefined && def.max !== undefined && (
+            <HistogramSlider
+              values={(rows as any[]).map((r) => r[def.id])}
+              min={def.min} max={def.max} step={def.step ?? 1}
+              lo={af?.min} hi={af?.max}
+              onChange={(patch) => onChange(patch)}
+            />
+          )}
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <input type="number" value={af?.min ?? ""} step={def.step}
+              placeholder={def.min !== undefined ? String(def.min) : "min"}
+              onChange={(e) => onChange({ min: e.target.value === "" ? "" : Number(e.target.value) })} style={inpS} />
+            <span style={{ fontSize: 9, color: "var(--text-muted)" }}>–</span>
+            <input type="number" value={af?.max ?? ""} step={def.step}
+              placeholder={def.max !== undefined ? String(def.max) : "max"}
+              onChange={(e) => onChange({ max: e.target.value === "" ? "" : Number(e.target.value) })} style={inpS} />
+            {def.unit && <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{def.unit}</span>}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -709,98 +821,6 @@ function SavedPicker({ saved, onLoad, onDelete }: {
         </div>,
         document.body,
       )}
-    </div>
-  );
-}
-
-// ============================================================================
-// Filter row editor
-// ============================================================================
-function FilterRow({ af, rows, sectorList, industryList, onUpdate, onRemove }: {
-  af: ActiveFilter; rows: ScreenerRow[]; sectorList: string[]; industryList: string[];
-  onUpdate: (patch: Partial<ActiveFilter>) => void; onRemove: () => void;
-}) {
-  const def = FILTER_BY_ID[af.id]; if (!def) return null;
-  const inpS: React.CSSProperties = { ...inputStyle, padding: "4px 6px", width: 92, fontSize: 12 };
-  const cov = coverageOf(rows as any[], af.id);
-  const pct = cov.total ? Math.round((cov.has / cov.total) * 100) : 0;
-
-  return (
-    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "6px 8px", border: "1px solid var(--edge)", background: "rgba(255,255,255,0.02)" }}>
-      <div style={{ minWidth: 180, display: "flex", alignItems: "center", gap: 6 }}>
-        <span style={{ fontSize: 12, color: "var(--text)" }}>{def.label}</span>
-        {def.hint && <span style={{ fontSize: 10, color: "var(--text-muted)" }}>· {def.hint}</span>}
-      </div>
-
-      {def.kind === "boolean" ? (
-        <div style={{ display: "flex", gap: 4 }}>
-          <button className="hud-btn" data-variant={af.bool === true ? "primary" : "ghost"} data-size="sm" onClick={() => onUpdate({ bool: true })}>true</button>
-          <button className="hud-btn" data-variant={af.bool === false ? "primary" : "ghost"} data-size="sm" onClick={() => onUpdate({ bool: false })}>false</button>
-          <button className="hud-btn" data-variant={af.bool === undefined ? "primary" : "ghost"} data-size="sm" onClick={() => onUpdate({ bool: undefined })} title="Either — filter matches all rows">either</button>
-        </div>
-      ) : def.kind === "enum" ? (
-        <EnumMultiSelect
-          options={af.id === "sector" ? sectorList : af.id === "industry" ? industryList : (def.options ?? [])}
-          values={af.values ?? []}
-          onChange={(values) => onUpdate({ values })}
-        />
-      ) : (
-        <>
-          {/* Cap-tier chips for market_cap */}
-          {af.id === "market_cap" && (
-            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-              {CAP_TIERS.map((t) => {
-                const isSel = af.min === t.min && (af.max ?? undefined) === t.max;
-                return (
-                  <button key={t.id}
-                    className="hud-btn" data-variant={isSel ? "primary" : "ghost"} data-size="sm"
-                    onClick={() => onUpdate({ min: t.min, max: t.max ?? "" })}>{t.label.split(" ")[0]}</button>
-                );
-              })}
-            </div>
-          )}
-          {/* Histogram + range slider (Tickertape-style distribution). */}
-          {cov.has > 0 && def.min !== undefined && def.max !== undefined && (
-            <HistogramSlider
-              values={(rows as any[]).map((r) => r[af.id])}
-              min={def.min}
-              max={def.max}
-              step={def.step ?? 1}
-              lo={af.min}
-              hi={af.max}
-              onChange={(patch) => onUpdate(patch)}
-            />
-          )}
-          <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-hud)" }}>MIN</span>
-          <input type="number" value={af.min ?? ""} step={def.step}
-            placeholder={def.min !== undefined ? String(def.min) : ""}
-            onChange={(e) => onUpdate({ min: e.target.value === "" ? "" : Number(e.target.value) })} style={inpS} />
-          <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-hud)" }}>MAX</span>
-          <input type="number" value={af.max ?? ""} step={def.step}
-            placeholder={def.max !== undefined ? String(def.max) : ""}
-            onChange={(e) => onUpdate({ max: e.target.value === "" ? "" : Number(e.target.value) })} style={inpS} />
-          {def.unit && <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{def.unit}</span>}
-        </>
-      )}
-
-      <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
-        {def.kind !== "boolean" && rows.length > 0 && cov.has === 0 && (
-          <span
-            title="This column has no data yet — run Sync fundamentals in the Data Health strip below."
-            style={{ fontSize: 10, color: "#ffb400", fontFamily: "var(--font-hud)", letterSpacing: "0.12em", textTransform: "uppercase" }}>
-            no data · sync fundamentals
-          </span>
-        )}
-        {def.kind !== "boolean" && rows.length > 0 && (
-          <Chip tone={pct >= 90 ? "ok" : pct >= 50 ? "warn" : "err"}>{cov.has}/{cov.total}</Chip>
-        )}
-        <span style={{ fontSize: 10, color: "var(--accent-soft)", fontFamily: "var(--font-hud)", letterSpacing: "0.12em" }}>
-          {chipDesc(af)}
-        </span>
-        <button className="hud-btn" data-variant="ghost" data-size="sm" title="Remove" onClick={onRemove}>
-          <X size={11} />
-        </button>
-      </div>
     </div>
   );
 }

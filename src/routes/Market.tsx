@@ -15,7 +15,6 @@ const Analysis = lazy(() => import("@/routes/market/Analysis"));
 const Alerts = lazy(() => import("@/routes/market/Alerts"));
 const Backtesting = lazy(() => import("@/routes/market/Backtesting"));
 const MarketSettings = lazy(() => import("@/routes/market/Settings"));
-const StockTable = lazy(() => import("@/routes/market/StockTable"));
 const Planner = lazy(() => import("@/routes/market/Planner"));
 const AIEngine = lazy(() => import("@/routes/market/AIEngine"));
 const IndexDetail = lazy(() => import("@/routes/market/IndexDetail"));
@@ -33,11 +32,7 @@ const GROUPS: Group[] = [
   { key: "overview", label: "Overview", to: "/market",
     match: (p) => p === "/market" || p === "/market/" || /^\/market\/index\//.test(p), subs: [] },
   { key: "screener", label: "Screener", to: "/market/screener",
-    match: (p) => /^\/market\/(screener|stocks)/.test(p),
-    subs: [
-      { to: "/market/screener", label: "Screener" },
-      { to: "/market/stocks", label: "All Stocks" },
-    ] },
+    match: (p) => /^\/market\/screener/.test(p), subs: [] },
   { key: "portfolio", label: "Portfolio", to: "/market/holdings",
     match: (p) => /^\/market\/(holdings|positions)/.test(p),
     subs: [
@@ -147,7 +142,6 @@ export default function Market() {
               <Route path="planner" element={<Planner />} />
               <Route path="ai" element={<AIEngine />} />
               <Route path="ai/:symbol" element={<AIEngine />} />
-              <Route path="stocks" element={<StockTable />} />
               <Route path="index/:symbol" element={<IndexDetail />} />
               <Route path="autotrade" element={<AutoTrade />} />
               <Route path="settings" element={<MarketSettings />} />
