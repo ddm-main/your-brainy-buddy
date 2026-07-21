@@ -29,6 +29,7 @@ import {
   filterMatches,
   coverageOf,
   excludedByMissingData,
+  canonicalFilterId,
   type ActiveFilter,
   type FilterDef,
   type UniverseId,
@@ -78,6 +79,17 @@ const AUTO_SYNC_STORE_KEY = "screener.autoFundamentalsSyncAt.v1";
 const LIVE_FILTER_CANDIDATE_CAP = 300;
 const LIVE_SENSITIVE_FILTER_IDS = new Set(["change_pct", "ltp"]);
 
+function normalizeActiveFilters(filters: ActiveFilter[]): ActiveFilter[] {
+  const byId = new Map<string, ActiveFilter>();
+  for (const raw of filters) {
+    if (!raw?.id) continue;
+    const id = canonicalFilterId(raw.id);
+    if (!FILTER_BY_ID[id]) continue;
+    byId.set(id, { ...byId.get(id), ...raw, id });
+  }
+  return Array.from(byId.values());
+}
+
 function fmtBound(def: FilterDef, v: number | "" | undefined): string {
   if (v === undefined || v === "") return "*";
   const digits = def.step && def.step < 1 ? 2 : 0;
@@ -86,8 +98,9 @@ function fmtBound(def: FilterDef, v: number | "" | undefined): string {
 }
 
 function chipDesc(af: ActiveFilter): string {
-  const def = FILTER_BY_ID[af.id];
-  if (!def) return af.id;
+  const id = canonicalFilterId(af.id);
+  const def = FILTER_BY_ID[id];
+  if (!def) return id;
   if (def.kind === "boolean") return af.bool === undefined ? def.label : `${def.label}: ${af.bool ? "yes" : "no"}`;
   if (def.kind === "enum")    return af.values && af.values.length ? `${def.label}: ${af.values.length} sel` : def.label;
   const lo = af.min !== undefined && af.min !== "" ? fmtBound(def, af.min) : null;
@@ -146,7 +159,10 @@ export default function Screener() {
   // those two filters to a second pass, applied against the same live overlay
   // the columns already use, once the candidate set is narrowed by everything
   // else and small enough to batch-quote.
-  const liveSensitiveActive = useMemo(() => active.filter((af) => LIVE_SENSITIVE_FILTER_IDS.has(af.id)), [active]);
+  const liveSensitiveActive = useMemo(
+    () => normalizeActiveFilters(active).filter((af) => LIVE_SENSITIVE_FILTER_IDS.has(af.id)),
+    [active],
+  );
   const marketIsOpen = marketOpen();
   const deferLiveFilters = marketIsOpen && liveSensitiveActive.length > 0;
 
@@ -172,13 +188,15 @@ export default function Screener() {
   }, [liveFilterQuotesData]);
 
   const filtered = useMemo(() => {
-    if (!deferLiveFilters || liveFilterTooManyCandidates) return preLiveFiltered;
+    if (!deferLiveFilters) return preLiveFiltered;
     return preLiveFiltered.filter((r) => {
-      const live = liveFilterQuoteByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
+      const live = liveFilterTooManyCandidates ? undefined : liveFilterQuoteByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
+      const overlaid = {
+        ...r,
+        ltp: live?.ltp ?? r.ltp,
+        change_pct: live?.change_pct ?? r.change_pct,
+      };
       for (const af of liveSensitiveActive) {
-        const overlaid = af.id === "change_pct"
-          ? { ...r, change_pct: live?.change_pct ?? r.change_pct }
-          : { ...r, ltp: live?.ltp ?? r.ltp };
         if (!filterMatches(overlaid as any, af)) return false;
       }
       return true;
@@ -199,7 +217,7 @@ export default function Screener() {
       const raw = new TextDecoder().decode(bytes);
       const parsed = JSON.parse(raw);
       if (parsed?.universe) setUniverse(parsed.universe as UniverseId);
-      if (Array.isArray(parsed?.active)) setActive(parsed.active);
+      if (Array.isArray(parsed?.active)) setActive(normalizeActiveFilters(parsed.active));
     } catch { /* ignore malformed */ }
   }, []);
   useEffect(() => {
@@ -226,12 +244,13 @@ export default function Screener() {
   // (below) since an intentionally-just-added filter should stick around
   // with blank inputs, not vanish immediately.
   const addFilter = (fid: string) => {
-    if (active.some((a) => a.id === fid)) return;
-    const def = FILTER_BY_ID[fid]; if (!def) return;
+    const id = canonicalFilterId(fid);
+    if (active.some((a) => canonicalFilterId(a.id) === id)) return;
+    const def = FILTER_BY_ID[id]; if (!def) return;
     const initial: ActiveFilter =
-      def.kind === "boolean" ? { id: fid, bool: true } :
-      def.kind === "enum"    ? { id: fid, values: [] } :
-      { id: fid };
+      def.kind === "boolean" ? { id, bool: true } :
+      def.kind === "enum"    ? { id, values: [] } :
+      { id };
     setActive((a) => [...a, initial]);
   };
 
@@ -239,23 +258,27 @@ export default function Screener() {
   // adds the filter to `active` on first non-empty value, drops it again
   // once cleared back to empty, so there's no separate add/remove step.
   const setFilterValue = (fid: string, patch: Partial<ActiveFilter>) => {
+    const id = canonicalFilterId(fid);
     setActive((a) => {
-      const existing = a.find((x) => x.id === fid);
-      const merged: ActiveFilter = existing ? { ...existing, ...patch } : { id: fid, ...patch };
+      const existing = a.find((x) => canonicalFilterId(x.id) === id);
+      const merged: ActiveFilter = existing ? { ...existing, ...patch, id } : { id, ...patch };
       const isEmpty =
         (merged.min === undefined || merged.min === "") &&
         (merged.max === undefined || merged.max === "") &&
         merged.bool === undefined &&
         (!merged.values || merged.values.length === 0);
-      if (isEmpty) return a.filter((x) => x.id !== fid);
-      return existing ? a.map((x) => (x.id === fid ? merged : x)) : [...a, merged];
+      if (isEmpty) return a.filter((x) => canonicalFilterId(x.id) !== id);
+      return existing ? a.map((x) => (canonicalFilterId(x.id) === id ? merged : x)) : [...a, merged];
     });
   };
-  const removeFilter = (fid: string) => setActive((a) => a.filter((af) => af.id !== fid));
+  const removeFilter = (fid: string) => {
+    const id = canonicalFilterId(fid);
+    setActive((a) => a.filter((af) => canonicalFilterId(af.id) !== id));
+  };
 
   const applyPreset = (id: string) => {
     const p = PRESETS.find((x) => x.id === id); if (!p) return;
-    setActive(p.filters);
+    setActive(normalizeActiveFilters(p.filters));
     if (p.universe) setUniverse(p.universe);
     push(`Loaded preset: ${p.name}`, "ok");
   };
@@ -272,19 +295,20 @@ export default function Screener() {
     const f: any = s.filters;
     if (f && typeof f === "object" && !Array.isArray(f) && (f.v === 2 || f.v === 3)) {
       setUniverse((f.universe as UniverseId) ?? "all");
-      setActive(Array.isArray(f.active) ? f.active : []);
+      setActive(Array.isArray(f.active) ? normalizeActiveFilters(f.active) : []);
     } else if (Array.isArray(f)) {
       const conds = f[0]?.conditions ?? [];
       const mapped: ActiveFilter[] = [];
       for (const c of conds) {
-        if (!FILTER_BY_ID[c.column]) continue;
-        const isBool = FILTER_BY_ID[c.column].kind === "boolean";
-        if (isBool) mapped.push({ id: c.column, bool: c.op === "is_true" });
-        else if (c.op === "gte" || c.op === "gt") mapped.push({ id: c.column, min: Number(c.value) });
-        else if (c.op === "lte" || c.op === "lt") mapped.push({ id: c.column, max: Number(c.value) });
-        else if (c.op === "eq") mapped.push({ id: c.column, min: Number(c.value), max: Number(c.value) });
+        const id = canonicalFilterId(c.column);
+        if (!FILTER_BY_ID[id]) continue;
+        const isBool = FILTER_BY_ID[id].kind === "boolean";
+        if (isBool) mapped.push({ id, bool: c.op === "is_true" });
+        else if (c.op === "gte" || c.op === "gt") mapped.push({ id, min: Number(c.value) });
+        else if (c.op === "lte" || c.op === "lt") mapped.push({ id, max: Number(c.value) });
+        else if (c.op === "eq") mapped.push({ id, min: Number(c.value), max: Number(c.value) });
       }
-      setActive(mapped); setUniverse("all");
+      setActive(normalizeActiveFilters(mapped)); setUniverse("all");
     }
     push(`Loaded: ${s.name}`, "ok");
   };
@@ -420,21 +444,9 @@ export default function Screener() {
           </div>
         }
       >
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
-          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-            <span
-              style={{ fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-dim)", letterSpacing: "0.14em", textTransform: "uppercase", border: "1px solid var(--edge)", borderRadius: 2, padding: "2px 6px" }}
-              title="Screener universe/scoring pipeline currently covers NSE-listed stocks only — BSE-only listings aren't tracked here."
-            >
-              NSE universe
-            </span>
-            <div style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.16em", textTransform: "uppercase" }}>
-              {isFetching ? "loading…" : `${filtered.length} of ${rows.length} stocks`}
-            </div>
-          </div>
-        </div>
-        <DataHealthStrip rows={rows} universe={universe} />
+        <></>
       </HudPanel>
+
 
       {/* Two-pane workspace: filters sidebar (universe + add/remove filters) + results */}
       <div style={{ display: "grid", gridTemplateColumns: "370px 1fr", gap: 12, alignItems: "start" }}>
@@ -472,34 +484,16 @@ export default function Screener() {
                   emptyLabel={rows.length === 0 && !isFetching ? "market pipeline is warming up" : "no matches"}
                   emptyHint={rows.length === 0 && !isFetching ? "automatic sync is enabled; refresh shortly" : "loosen the filters or change the universe"}
                 />
-                {/* Applied filters + coverage note — the sidebar edits values inline with
-                    no separate query list, so this is the only place the active ranges
-                    are visible at a glance. */}
                 {active.length > 0 && rows.length > 0 && (
                   <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
                     <span style={{ fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.16em", textTransform: "uppercase" }}>Applied</span>
-                    {active.map((af) => {
-                      const c = coverageOf(rows as any[], af.id);
-                      const pct = c.total ? Math.round((c.has / c.total) * 100) : 0;
-                      const tone: "ok" | "warn" | "err" = pct >= 90 ? "ok" : pct >= 50 ? "warn" : "err";
-                      return <Chip key={af.id} tone={tone}>{chipDesc(af)} · {c.has}/{c.total}</Chip>;
-                    })}
-                    {(() => {
-                      const excluded = excludedByMissingData(rows as any[], active);
-                      return excluded > 0 ? (
-                        <Chip tone="warn" key="excluded">{excluded} excluded — no synced data yet (not out of range)</Chip>
-                      ) : null;
-                    })()}
-                  </div>
-                )}
-                {liveSensitiveActive.length > 0 && (
-                  <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-                    {!marketIsOpen ? (
-                      <Chip tone="neutral">Change%/Price filtering last EOD close — market closed</Chip>
-                    ) : liveFilterTooManyCandidates ? (
-                      <Chip tone="warn">{preLiveFiltered.length} candidates — too many for live filtering (cap {LIVE_FILTER_CANDIDATE_CAP}), using last EOD close. Narrow with another filter first.</Chip>
-                    ) : (
-                      <Chip tone="ok">Change%/Price filtering live</Chip>
+                    {active.map((af) => <Chip key={af.id} tone="neutral">{chipDesc(af)}</Chip>)}
+                    {liveSensitiveActive.length > 0 && (
+                      !marketIsOpen
+                        ? <Chip tone="neutral">EOD</Chip>
+                        : liveFilterTooManyCandidates
+                          ? <Chip tone="warn">EOD · {preLiveFiltered.length} cand.</Chip>
+                          : <Chip tone="ok">Live</Chip>
                     )}
                   </div>
                 )}
@@ -983,7 +977,7 @@ function ColumnPresetPicker({ onPick }: { onPick: (cols: string[]) => void }) {
 // background hook (`useMarketAutoSync`). Users only see a "last synced X ago"
 // line; a discreet overflow menu keeps force-resync available for power users.
 // ============================================================================
-function DataHealthStrip({ rows }: { rows: ScreenerRow[]; universe: UniverseId }) {
+function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]; universe: UniverseId; filteredCount: number; loading: boolean }) {
   const push = useUi((s) => s.push);
   const qc = useQueryClient();
   const [busy, setBusy] = useState<null | "fund" | "eod" | "agg">(null);
@@ -1024,30 +1018,22 @@ function DataHealthStrip({ rows }: { rows: ScreenerRow[]; universe: UniverseId }
     return () => document.removeEventListener("mousedown", onDoc);
   }, [menuOpen]);
 
-  // Coverage stats — scope by applicability.
-  //  Fundamentals: equity rows are the denominator; ETFs are structurally N/A.
-  //  Sector: equity rows are the denominator (ETFs have no sector).
-  //  Technicals: rows with a trade_date are the denominator (rows without an EOD score legitimately have no RSI).
+  // Coverage stats: prefer authoritative DB view; fall back to loaded rows.
   const stats = useMemo(() => {
     const equities = rows.filter((r) => (r.instrument_type ?? "EQ") === "EQ");
     const withScore = rows.filter((r) => r.trade_date != null);
-    const total = equities.length;
-    // market_data has no sync_status column (that was market_fundamentals_global's
-    // field) — infer coverage from which core fundamentals actually landed.
-    const ok      = equities.filter((r) => r.pe != null && r.roe != null).length;
-    const partial = equities.filter((r) => !(r.pe != null && r.roe != null) && (r.pe != null || r.roe != null || r.market_cap != null)).length;
-    const failed  = equities.filter((r) => r.pe == null && r.roe == null && r.market_cap == null).length;
-    const withTech = withScore.filter((r) => r.rsi != null || r.adx != null).length;
     const withSector = equities.filter((r) => r.sector != null).length;
+    const withTech = withScore.filter((r) => r.rsi != null || r.adx != null).length;
     return {
-      total,
-      ok, partial, failed,
-      withTech, techTotal: withScore.length,
-      withSector,
+      total: pipeline?.active_stocks ?? equities.length,
+      fundOk: pipeline?.fundamentals_covered ?? equities.filter((r) => r.pe != null || r.roe != null || r.market_cap != null).length,
+      fundFailed: pipeline?.fundamentals_failed ?? 0,
+      sectorOk: withSector,
+      techOk: withTech,
+      techTotal: withScore.length,
       nonEquity: rows.length - equities.length,
     };
-  }, [rows]);
-
+  }, [rows, pipeline]);
 
   const trigger = async (
     fn: "market-fundamentals-global-sync" | "market-pipeline-eod" | "market-pipeline-aggregates",
@@ -1063,7 +1049,6 @@ function DataHealthStrip({ rows }: { rows: ScreenerRow[]; universe: UniverseId }
         const { error } = await supabase.functions.invoke(fn, { body: {} });
         if (error) throw error;
       } else {
-        // Drain up to 30 chunks, silently.
         for (let i = 0; i < 30; i++) {
           const { data, error } = await supabase.functions.invoke(fn, { body: {} });
           if (error) throw error;
@@ -1078,14 +1063,10 @@ function DataHealthStrip({ rows }: { rows: ScreenerRow[]; universe: UniverseId }
   };
 
   const pctOf = (n: number, d: number) => d ? Math.round((n / d) * 100) : 0;
-  const healthyPct = pctOf(stats.ok + stats.partial, stats.total);
-  const sectorPct  = pctOf(stats.withSector, stats.total);
-  const techPct    = pctOf(stats.withTech, stats.techTotal);
-  const anyLow = healthyPct < 80 || sectorPct < 80 || techPct < 80;
+  const fundPct = pctOf(stats.fundOk, stats.total);
+  const sectorPct = pctOf(stats.sectorOk, stats.total);
+  const techPct = pctOf(stats.techOk, stats.techTotal);
 
-  // Calendar days between the EOD pipeline's last trade_date and today (IST).
-  // >3 comfortably survives a normal weekend gap (Fri close still "fresh" on
-  // Monday) while still catching a genuinely stuck/broken pipeline.
   const scoresLastTradeDate = pipeline?.scores_last_trade_date;
   const scoresStaleDays = useMemo((): number | null => {
     if (!scoresLastTradeDate) return null;
@@ -1099,78 +1080,41 @@ function DataHealthStrip({ rows }: { rows: ScreenerRow[]; universe: UniverseId }
 
   if (rows.length === 0) return null;
 
-  // Relative-time formatter.
-  const ago = (iso: string | null | undefined): string => {
-    if (!iso) return "never";
-    const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
-    if (mins < 1) return "just now";
-    if (mins < 60) return `${mins}m ago`;
-    const hrs = Math.floor(mins / 60);
-    if (hrs < 24) return `${hrs}h ago`;
-    return `${Math.floor(hrs / 24)}d ago`;
-  };
-
   return (
-    <>
-      {scoresStale && (
-        <div style={{
-          marginTop: 8, padding: "8px 10px", border: "1px solid var(--danger)",
-          background: "rgba(255,95,109,0.08)", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap",
-        }}>
-          <span style={{ fontSize: 12, color: "var(--danger)" }}>
-            ⚠ EOD technical data last updated {pipeline?.scores_last_trade_date} ({scoresStaleDays}d ago) — Change %, RSI,
-            and related filters may not reflect current prices.
-          </span>
-          <Btn size="sm" variant="danger" onClick={() => trigger("market-pipeline-eod", "EOD technicals", "eod")} disabled={busy !== null}>
-            {busy === "eod" ? "syncing…" : "resync now"}
-          </Btn>
-        </div>
-      )}
-      <div style={{
-      marginTop: 8, padding: "6px 10px", border: `1px solid ${anyLow ? "var(--warn, #ffb400)" : "var(--edge)"}`,
-      background: anyLow ? "rgba(255,180,0,0.05)" : "rgba(53,214,237,0.03)",
-      display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap",
+    <div style={{
+      display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap",
+      padding: "4px 0",
     }}>
-      <span style={{ fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.18em", textTransform: "uppercase", color: "var(--text-muted)" }}>
-        Data Health · applicable rows only
+      <span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
+        {loading ? "loading…" : `${filteredCount} / ${stats.total}`}
       </span>
-      <Chip tone={healthyPct >= 95 ? "ok" : healthyPct >= 80 ? "warn" : "err"}>
-        Fundamentals {stats.ok + stats.partial}/{stats.total} · {healthyPct}%
-      </Chip>
-      <Chip tone={sectorPct >= 95 ? "ok" : sectorPct >= 80 ? "warn" : "err"}>Sector {stats.withSector}/{stats.total} · {sectorPct}%</Chip>
-      <Chip tone={techPct >= 95 ? "ok" : techPct >= 80 ? "warn" : "err"}>Technicals {stats.withTech}/{stats.techTotal} · {techPct}%</Chip>
-      {stats.failed > 0 && <Chip tone="err">{stats.failed} upstream failures</Chip>}
-      {stats.nonEquity > 0 && (
-        <span style={{ fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.14em" }}>
-          excludes {stats.nonEquity} ETF/non-equity
-        </span>
-      )}
-      <span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.14em" }}>
-        Fundamentals synced {ago(pipeline?.fundamentals_last_updated_at)} · Scores {pipeline?.scores_last_trade_date ?? "—"}
-      </span>
+      <Chip tone={fundPct >= 95 ? "ok" : fundPct >= 80 ? "warn" : "err"}>Fund {fundPct}%</Chip>
+      <Chip tone={sectorPct >= 95 ? "ok" : sectorPct >= 80 ? "warn" : "err"}>Sector {sectorPct}%</Chip>
+      <Chip tone={techPct >= 95 ? "ok" : techPct >= 80 ? "warn" : "err"}>Tech {techPct}%</Chip>
+      {stats.fundFailed > 0 && <Chip tone="err">{stats.fundFailed} fail</Chip>}
+      {scoresStale && <Chip tone="err">EOD {scoresStaleDays}d old</Chip>}
       <div ref={menuRef} style={{ marginLeft: "auto", position: "relative" }}>
         <button ref={menuTriggerRef} className="hud-btn" data-variant="ghost" data-size="sm"
           onClick={() => setMenuOpen((o) => !o)} disabled={busy !== null}
-          title="Force a resync — runs immediately instead of waiting for the next background pass.">
-          {busy ? "syncing…" : "⋯ Force resync"}
+          title="Force a resync">
+          {busy ? "syncing…" : "⋯"}
         </button>
         {menuOpen && menuPos && createPortal(
           <div ref={menuPopRef} style={{ ...popoverStyle, ...menuPos }}>
             <button style={popoverItem} onClick={() => trigger("market-fundamentals-global-sync", "Fundamentals", "fund")}>
-              <Database size={11} style={{ marginRight: 6 }} />Fundamentals (stale/failed only)
+              <Database size={11} style={{ marginRight: 6 }} />Resync fundamentals
             </button>
             <button style={popoverItem} onClick={() => trigger("market-pipeline-eod", "EOD technicals", "eod")}>
-              Recompute technical indicators
+              Recompute technicals
             </button>
             <button style={popoverItem} onClick={() => trigger("market-pipeline-aggregates", "Aggregates", "agg")}>
-              Recompute breadth &amp; sector strength
+              Recompute breadth
             </button>
           </div>,
           document.body,
         )}
       </div>
-      </div>
-    </>
+    </div>
   );
 }
 

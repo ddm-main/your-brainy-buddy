@@ -5,12 +5,14 @@ const EmailConfig = lazy(() => import("@/routes/config/EmailConfig"));
 const ConfigHome = lazy(() => import("@/routes/config/ConfigHome"));
 const FinanceConfig = lazy(() => import("@/routes/config/FinanceConfig"));
 const ProjectsConfig = lazy(() => import("@/routes/config/ProjectsConfig"));
+const MarketConfig = lazy(() => import("@/routes/config/MarketConfig"));
 
 const TABS = [
   { to: "/config", label: "Home", exact: true },
   { to: "/config/email", label: "Email" },
   { to: "/config/finance", label: "Finance" },
   { to: "/config/projects", label: "Projects" },
+  { to: "/config/market", label: "Market" },
 ] as { to: string; label: string; exact?: boolean }[];
 
 const tabBase: React.CSSProperties = {
@@ -46,6 +48,7 @@ export default function Config() {
             <Route path="email/*" element={<EmailConfig />} />
             <Route path="finance/*" element={<FinanceConfig />} />
             <Route path="projects" element={<ProjectsConfig />} />
+            <Route path="market" element={<MarketConfig />} />
           </Routes>
         </Suspense>
       </div>

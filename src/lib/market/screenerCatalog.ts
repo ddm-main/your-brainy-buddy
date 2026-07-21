@@ -137,6 +137,26 @@ export const FILTERS: FilterDef[] = [
   { id: "near_resistance",    label: "Near Resistance",   category: "signals",    kind: "boolean", scope: "tech" },
 ];
 
+export const FILTER_ID_ALIASES: Record<string, string> = {
+  close: "ltp",
+  price: "ltp",
+  last_price: "ltp",
+  pe_ttm: "pe",
+  rsi14: "rsi",
+  rsi_14: "rsi",
+  adx14: "adx",
+  adx_14: "adx",
+  above_ema200: "above_ema_200",
+  above_200dma: "above_ema_200",
+  pct_chg: "change_pct",
+  chg_pct: "change_pct",
+  one_day_return: "change_pct",
+};
+
+export function canonicalFilterId(id: string): string {
+  return FILTER_ID_ALIASES[id] ?? id;
+}
+
 export const FILTER_BY_ID: Record<string, FilterDef> = Object.fromEntries(FILTERS.map((f) => [f.id, f]));
 
 // ----- Active filter state -----
@@ -155,24 +175,27 @@ export interface ActiveFilter {
  *   - Numeric filter with a bound + `nullMeansZero` → NULL is treated as 0.
  *   - Numeric filter with a bound and no `nullMeansZero` → NULL is excluded. */
 export function filterMatches(row: Record<string, any>, af: ActiveFilter): boolean {
-  const def = FILTER_BY_ID[af.id];
+  const filterId = canonicalFilterId(af.id);
+  const def = FILTER_BY_ID[filterId];
   if (!def) return true;
+  if (def.kind === "boolean" && af.bool === undefined) return true;
+  if (def.kind === "enum" && (!af.values || af.values.length === 0)) return true;
+  const minNum = af.min === undefined || af.min === "" || Number.isNaN(Number(af.min)) ? null : Number(af.min);
+  const maxNum = af.max === undefined || af.max === "" || Number.isNaN(Number(af.max)) ? null : Number(af.max);
+  if (def.kind === "number" && minNum === null && maxNum === null) return true;
   // Applicability: rows outside the scope are excluded from filtering — they pass through
-  // untouched so that, e.g., an ETF is not dropped by a PE filter.
+  // untouched so that, e.g., an ETF is not dropped by a PE filter. Technical filters
+  // are strict: if a row has no technical row/date, it cannot prove it matches.
   const scope: ApplicabilityScope = def.scope ?? (def.fundamental ? "eq" : "all");
-  if (!rowIsApplicable(row, scope)) return true;
-  const v = row[af.id];
+  if (!rowIsApplicable(row, scope)) return scope !== "tech";
+  const v = row[filterId];
   if (def.kind === "boolean") {
-    if (af.bool === undefined) return true;
     return Boolean(v) === af.bool;
   }
   if (def.kind === "enum") {
-    if (!af.values || af.values.length === 0) return true;
-    return typeof v === "string" && af.values.includes(v);
+    const values = af.values ?? [];
+    return typeof v === "string" && values.includes(v);
   }
-  const minNum = af.min === undefined || af.min === "" || Number.isNaN(Number(af.min)) ? null : Number(af.min);
-  const maxNum = af.max === undefined || af.max === "" || Number.isNaN(Number(af.max)) ? null : Number(af.max);
-  if (minNum === null && maxNum === null) return true;
   let n: number;
   if (v == null || Number.isNaN(v)) {
     if (def.nullMeansZero) n = 0;
@@ -180,6 +203,7 @@ export function filterMatches(row: Record<string, any>, af: ActiveFilter): boole
   } else {
     n = Number(v);
   }
+  if (!Number.isFinite(n)) return false;
   if (minNum !== null && n < minNum) return false;
   if (maxNum !== null && n > maxNum) return false;
   return true;
@@ -188,13 +212,14 @@ export function filterMatches(row: Record<string, any>, af: ActiveFilter): boole
 /** Coverage over the applicable set: rows outside the filter's scope are excluded
  *  from both numerator and denominator, so "% coverage" is meaningful. */
 export function coverageOf(rows: Array<Record<string, any>>, filterId: string): { has: number; total: number } {
-  const def = FILTER_BY_ID[filterId];
+  const canonicalId = canonicalFilterId(filterId);
+  const def = FILTER_BY_ID[canonicalId];
   if (!def) return { has: 0, total: rows.length };
   const scope: ApplicabilityScope = def.scope ?? (def.fundamental ? "eq" : "all");
   const scoped = rows.filter((r) => rowIsApplicable(r, scope));
   let has = 0;
   for (const r of scoped) {
-    const v = r[filterId];
+    const v = r[canonicalId];
     if (def.kind === "boolean") { if (v !== null && v !== undefined) has++; }
     else if (def.kind === "enum") { if (typeof v === "string" && v.length > 0) has++; }
     else {
@@ -212,14 +237,18 @@ export function coverageOf(rows: Array<Record<string, any>>, filterId: string): 
 export function excludedByMissingData(rows: Array<Record<string, any>>, active: ActiveFilter[]): number {
   const missing = new Set<string>();
   for (const af of active) {
-    const def = FILTER_BY_ID[af.id];
+    const filterId = canonicalFilterId(af.id);
+    const def = FILTER_BY_ID[filterId];
     if (!def || def.kind !== "number" || def.nullMeansZero) continue;
     const hasBound = (af.min !== undefined && af.min !== "") || (af.max !== undefined && af.max !== "");
     if (!hasBound) continue;
     const scope: ApplicabilityScope = def.scope ?? (def.fundamental ? "eq" : "all");
     for (const r of rows) {
-      if (!rowIsApplicable(r, scope)) continue;
-      const v = r[af.id];
+      if (!rowIsApplicable(r, scope)) {
+        if (scope === "tech") missing.add(`${r.symbol}:${r.exchange}`);
+        continue;
+      }
+      const v = r[filterId];
       if (v == null || Number.isNaN(v)) missing.add(`${r.symbol}:${r.exchange}`);
     }
   }

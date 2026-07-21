@@ -14,7 +14,7 @@ export const INDIAN_PRESETS: IndexPreset[] = [
   { symbol: "^NSEI",               name: "Nifty 50",         region: "IN", nse_symbol: "NIFTY",      fno_enabled: true,  constituents_slug: "nifty50",         tv: "NSE:NIFTY" },
   { symbol: "^BSESN",              name: "Sensex",           region: "IN", fno_enabled: false,                                                                    tv: "BSE:SENSEX" },
   { symbol: "^NSEBANK",            name: "Bank Nifty",       region: "IN", nse_symbol: "BANKNIFTY",  fno_enabled: true,  constituents_slug: "niftybank",       tv: "NSE:BANKNIFTY" },
-  { symbol: "NIFTY_FIN_SERVICE.NS",name: "Fin Nifty",        region: "IN", nse_symbol: "FINNIFTY",   fno_enabled: true,  constituents_slug: "niftyfinservice", tv: "NSE:CNXFINANCE" },
+  
   { symbol: "NIFTY_MID_SELECT.NS", name: "Midcap Select",    region: "IN", nse_symbol: "MIDCPNIFTY", fno_enabled: true,                                            tv: "NSE:NIFTY_MID_SELECT" },
   { symbol: "NIFTY_MIDCAP_100.NS", name: "Midcap 100",       region: "IN",                                             constituents_slug: "niftymidcap100",  tv: "NSE:CNXMIDCAP" },
   { symbol: "^CNXSC",              name: "Smallcap",         region: "IN",                                             constituents_slug: "niftysmallcap100", tv: "NSE:CNXSMALLCAP" },

@@ -84,7 +84,7 @@ export function useMarketAutoSync(): void {
             console.warn("[market auto-sync] fundamentals:", msg);
           }
         });
-        if (!cancelled) qc.invalidateQueries({ queryKey: ["market", "screener-rows-v2"] });
+        if (!cancelled) qc.invalidateQueries({ queryKey: ["market", "screener-rows-v3"] });
       }
 
       // Scores / EOD pass.

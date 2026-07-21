@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
 import { supabase } from "@/integrations/supabase/client";
-import { Mail, Landmark, FolderKanban, LogOut, type LucideIcon } from "lucide-react";
+import { Mail, Landmark, FolderKanban, LogOut, LineChart, type LucideIcon } from "lucide-react";
 
 type Card = {
   to: string;
@@ -16,6 +16,7 @@ const CARDS: Card[] = [
   { to: "/config/email",    label: "Email",    desc: "Mailbox connections, sync rules, filters",              table: "email_accounts", icon: Mail },
   { to: "/config/finance",  label: "Finance",  desc: "Banks, accounts, cards, loans, goals, subscriptions",   table: "",               icon: Landmark },
   { to: "/config/projects", label: "Projects", desc: "Active projects and areas",                              table: "projects",       icon: FolderKanban },
+  { to: "/config/market",   label: "Market",   desc: "Data pipeline health, fundamentals & technicals resync", table: "market_stocks",  icon: LineChart },
 ];
 
 export default function ConfigHome() {
