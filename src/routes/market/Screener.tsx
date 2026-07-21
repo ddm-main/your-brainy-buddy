@@ -25,7 +25,7 @@ import {
   FILTER_BY_ID,
   PRESETS,
   UNIVERSES,
-  CAP_TIERS,
+  
   filterMatches,
   coverageOf,
   excludedByMissingData,
