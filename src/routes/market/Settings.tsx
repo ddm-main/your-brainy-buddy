@@ -85,7 +85,18 @@ export default function MarketSettings() {
     }
     setRows(map);
     const k = map.kotak_neo;
-    if (k) { setConsumerKey(k.consumer_key ?? ""); setUcc(k.ucc ?? ""); }
+    if (k) {
+      setConsumerKey(k.consumer_key ?? ""); setUcc(k.ucc ?? "");
+      // Mobile number is low-sensitivity contact info, not a credential —
+      // shown back in full so it's actually verifiable, unlike MPIN/TOTP
+      // secret which stay write-only (never decrypted to the browser).
+      if (k.mobile_number_enc) {
+        try {
+          const r = await callFn("market-kotak-mobile", {});
+          setMobile(r?.mobile_number ?? "");
+        } catch { /* non-critical — form still works, just won't prefill */ }
+      }
+    }
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
 
