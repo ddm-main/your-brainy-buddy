@@ -7,6 +7,7 @@ import { useMemo, useState } from "react";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { DataTable, fmtNum } from "@/components/hud/DataTable";
+import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 import { relTime } from "@/lib/db";
 import { supabase } from "@/integrations/supabase/client";
 import { useQuery } from "@tanstack/react-query";
@@ -414,7 +415,9 @@ function RuleEditor({ rule, watchlists, onClose, onSave }: {
             <>
               <div>
                 <div style={labelStyle}>Symbol</div>
-                <input value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} placeholder="RELIANCE" style={{ ...inputStyle, width: 140 }} />
+                <SymbolSearchInput value={symbol} onChange={(v) => setSymbol(v.toUpperCase())}
+                  onSelect={(o) => { setSymbol(o.symbol); setExchange(o.exchange as "NSE" | "BSE"); }}
+                  exchange={exchange} placeholder="RELIANCE" containerStyle={{ width: 140 }} />
               </div>
               <div>
                 <div style={labelStyle}>Exchange</div>

@@ -10,6 +10,7 @@ import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { Plus, RefreshCw, Trash2, Download } from "lucide-react";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
+import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 import { approxAnnualizedReturnPct, holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 import { useQuotes } from "@/lib/market/hooks";
 import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
@@ -212,7 +213,12 @@ export default function Holdings() {
 
         {showForm && (
           <div style={{ padding: 12, border: "1px solid var(--edge)", marginBottom: 12, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-            <Input label="Symbol" value={form.symbol} onChange={(v) => setForm({ ...form, symbol: v })} placeholder="RELIANCE" />
+            <div>
+              <div style={labelStyle}>Symbol</div>
+              <SymbolSearchInput value={form.symbol} onChange={(v) => setForm({ ...form, symbol: v })}
+                onSelect={(o) => setForm({ ...form, symbol: o.symbol, exchange: o.exchange })}
+                placeholder="RELIANCE" />
+            </div>
             <Select label="Exchange" value={form.exchange} options={["NSE", "BSE"]} onChange={(v) => setForm({ ...form, exchange: v })} />
             <Input label="Quantity" value={form.quantity} onChange={(v) => setForm({ ...form, quantity: v })} type="number" />
             <Input label="Avg Buy Price" value={form.avg_price} onChange={(v) => setForm({ ...form, avg_price: v })} type="number" />

@@ -5,6 +5,7 @@ import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { fmtInt, fmtNum } from "@/components/hud/DataTable";
 import { useOptionChain } from "@/lib/market/hooks";
+import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 
 const PRESETS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "RELIANCE", "HDFCBANK", "TCS", "INFY"];
 
@@ -37,9 +38,10 @@ export default function OptionChain() {
         <div style={{ display: "flex", gap: 8, alignItems: "flex-end", maxWidth: 400 }}>
           <div style={{ flex: 1 }}>
             <div style={labelStyle}>Symbol</div>
-            <input value={search} onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && search.trim()) nav(`/market/options/${search.trim().toUpperCase()}`); }}
-              placeholder="NIFTY" style={inputStyle} autoFocus />
+            <SymbolSearchInput value={search} onChange={setSearch}
+              onSelect={(o) => nav(`/market/options/${o.symbol}`)}
+              onEnter={() => search.trim() && nav(`/market/options/${search.trim().toUpperCase()}`)}
+              placeholder="NIFTY" autoFocus />
           </div>
           <Btn variant="primary" onClick={() => search.trim() && nav(`/market/options/${search.trim().toUpperCase()}`)}>Load</Btn>
         </div>

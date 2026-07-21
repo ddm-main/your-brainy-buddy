@@ -6,6 +6,7 @@ import { Btn, Chip, inputStyle, labelStyle } from "@/components/hud/HudControls"
 import { fmtNum, fmtPct } from "@/components/hud/DataTable";
 import { computePlan, loadPlannerDefaults, savePlannerDefaults } from "@/lib/market/planner";
 import { useQuotes } from "@/lib/market/hooks";
+import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 
 export default function Planner() {
   const defaults = useMemo(loadPlannerDefaults, []);
@@ -59,8 +60,8 @@ export default function Planner() {
       <HudPanel flow title="Trade Setup" index="MK.PLN.1">
         <Field label="Symbol (optional, to pull LTP)">
           <div style={{ display: "flex", gap: 6 }}>
-            <input value={symbol} onChange={(e) => setSymbol(e.target.value)}
-              placeholder="RELIANCE" style={{ ...inputStyle, flex: 1 }} />
+            <SymbolSearchInput value={symbol} onChange={setSymbol} exchange="NSE"
+              placeholder="RELIANCE" containerStyle={{ flex: 1 }} />
             <Btn size="sm" onClick={useLtp} disabled={!ltp}>Use LTP</Btn>
           </div>
           {ltp && <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>LTP ₹{fmtNum(ltp)}</div>}

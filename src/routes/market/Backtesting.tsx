@@ -11,6 +11,7 @@ import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { Play, Plus, Trash2 } from "lucide-react";
 import { fmtNum, fmtPct } from "@/components/hud/DataTable";
+import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 
 type Strategy = { id: string; name: string; description: string | null; strategy: any; created_at: string };
 type Result = {
@@ -236,7 +237,7 @@ function NewStrategyModal({ onClose, onCreated }: { onClose: () => void; onCreat
         </div>
         <div>
           <div style={labelStyle}>Symbol</div>
-          <input value={symbol} onChange={(e) => setSymbol(e.target.value)} placeholder="RELIANCE" style={inputStyle}/>
+          <SymbolSearchInput value={symbol} onChange={setSymbol} exchange="NSE" placeholder="RELIANCE" />
         </div>
         <div>
           <div style={labelStyle}>Rule</div>

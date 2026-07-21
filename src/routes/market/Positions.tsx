@@ -5,6 +5,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { DataTable, fmtNum, PctCell } from "@/components/hud/DataTable";
+import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 import { supabase } from "@/integrations/supabase/client";
 import { useMarketSettings, usePositions, useQuotes, useSyncPositions } from "@/lib/market/hooks";
 import { useQueryClient } from "@tanstack/react-query";
@@ -216,7 +217,13 @@ export default function Positions() {
       {showForm && (
         <HudPanel flow title="New Position" index="MK.P2">
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-            <Input label="Symbol" value={form.symbol} onChange={(v) => setForm({ ...form, symbol: v })} placeholder="RELIANCE" />
+            <div>
+              <div style={labelStyle}>Symbol</div>
+              <SymbolSearchInput value={form.symbol} onChange={(v) => setForm({ ...form, symbol: v })}
+                onSelect={(o) => setForm({ ...form, symbol: o.symbol, exchange: o.exchange })}
+                placeholder="RELIANCE" />
+            </div>
+            <Select label="Exchange" value={form.exchange} options={["NSE", "BSE"]} onChange={(v) => setForm({ ...form, exchange: v })} />
             <Select label="Side" value={form.side} options={["long", "short"]} onChange={(v) => setForm({ ...form, side: v })} />
             <Input label="Quantity" value={form.quantity} onChange={(v) => setForm({ ...form, quantity: v })} type="number" />
             <Input label="Entry Price" value={form.entry_price} onChange={(v) => setForm({ ...form, entry_price: v })} type="number" />

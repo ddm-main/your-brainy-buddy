@@ -4,9 +4,10 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { HudPanel } from "@/components/hud/HudPanel";
-import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
+import { Btn, Chip, EmptyState, labelStyle } from "@/components/hud/HudControls";
 import { fmtNum, fmtInt } from "@/components/hud/DataTable";
 import { useRefreshStockInsight, useStockInsight, useStockScores } from "@/lib/market/hooks";
+import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 import { RefreshCw, Sparkles } from "lucide-react";
 
 const VERDICT_TONE: Record<string, "ok" | "err" | "warn" | "accent"> = {
@@ -31,9 +32,10 @@ export default function AIEngine() {
         <div style={{ display: "flex", gap: 8, alignItems: "flex-end", maxWidth: 420 }}>
           <div style={{ flex: 1 }}>
             <div style={labelStyle}>Symbol</div>
-            <input value={search} onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && search.trim()) nav(`/market/ai/${search.trim().toUpperCase()}`); }}
-              placeholder="RELIANCE" style={{ ...inputStyle, width: "100%" }} autoFocus />
+            <SymbolSearchInput value={search} onChange={setSearch}
+              onSelect={(o) => nav(`/market/ai/${o.symbol}`)}
+              onEnter={() => search.trim() && nav(`/market/ai/${search.trim().toUpperCase()}`)}
+              placeholder="RELIANCE" autoFocus />
           </div>
           <Btn variant="primary" onClick={() => search.trim() && nav(`/market/ai/${search.trim().toUpperCase()}`)}>
             <Sparkles size={11} style={{ marginRight: 4 }} /> Analyze

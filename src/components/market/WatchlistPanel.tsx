@@ -9,6 +9,7 @@ import { Btn, inputStyle } from "@/components/hud/HudControls";
 import { supabase } from "@/integrations/supabase/client";
 import { useUi } from "@/store/uiStore";
 import { Plus, RefreshCw, Trash2 } from "lucide-react";
+import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 import { quoteKey } from "@/lib/market/pnl";
 import { useQuotes } from "@/lib/market/hooks";
 import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
@@ -85,8 +86,9 @@ export function WatchlistPanel() {
       </Btn>
     }>
       <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-        <input value={newSym} onChange={(e) => setNewSym(e.target.value)} placeholder="Add symbol"
-          style={{ ...inputStyle, flex: 1 }} onKeyDown={(e) => e.key === "Enter" && addItem()} />
+        <SymbolSearchInput value={newSym} onChange={setNewSym} placeholder="Add symbol"
+          onSelect={(o) => setNewEx(o.exchange)} onEnter={addItem}
+          containerStyle={{ flex: 1 }} />
         <select value={newEx} onChange={(e) => setNewEx(e.target.value)} style={{ ...inputStyle, width: 62, padding: "6px 4px" }}>
           <option>NSE</option><option>BSE</option>
         </select>
