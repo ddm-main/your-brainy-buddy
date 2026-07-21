@@ -3,16 +3,32 @@
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import type { UniverseId } from "./screenerCatalog";
-import type { StockScore } from "./types";
 
-export interface ScreenerRow extends StockScore {
+// Shape of a market_data row as consumed by the screener/StockTable — the
+// unified schema (see 20260721000000_market_multi_provider.sql), NOT the
+// legacy market_stock_scores shape (StockScore in ./types) which uses
+// different field names (close/rsi14/ema20/above_ema200 etc). Those two
+// tables are dual-written by market-pipeline-eod but have distinct schemas;
+// don't conflate them.
+export interface ScreenerRow {
+  symbol: string;
+  exchange: string;
+  trade_date: string | null;
   company_name: string | null;
+  sector: string | null;
+  industry: string | null;
+  instrument_type?: string | null;
   market_cap: number | null; // ₹ Cr
   is_nifty500: boolean;
-  industry: string | null;
   in_nifty50: boolean;
   in_banknifty: boolean;
   in_finnifty: boolean;
+
+  ltp: number | null;
+  previous_close: number | null;
+  change_abs: number | null;
+  change_pct: number | null;
+
   // fundamentals (unified schema)
   pe: number | null;
   pb: number | null;
@@ -34,7 +50,36 @@ export interface ScreenerRow extends StockScore {
   dii_holding: number | null;
   high_52w: number | null;
   low_52w: number | null;
-  instrument_type?: string | null;
+
+  // technicals (unified schema)
+  volume: number | null;
+  rel_volume: number | null;
+  ema_20: number | null;
+  ema_50: number | null;
+  ema_100: number | null;
+  ema_200: number | null;
+  rsi: number | null;
+  macd: number | null;
+  macd_signal: number | null;
+  macd_hist: number | null;
+  adx: number | null;
+  atr: number | null;
+  atr_pct: number | null;
+  bb_upper: number | null;
+  bb_lower: number | null;
+  bb_width: number | null;
+  bb_squeeze: boolean | null;
+  pct_from_52w_high: number | null;
+  above_ema_200: boolean | null;
+  higher_lows: boolean | null;
+  near_resistance: boolean | null;
+  resistance_level: number | null;
+  support_level: number | null;
+  sector_strength: number | null;
+  rel_strength_nifty: number | null;
+  breakout_score: number | null;
+  prebreakout_score: number | null;
+  score_components: { breakout?: Record<string, number>; prebreakout?: Record<string, number> } | null;
 }
 
 
@@ -117,7 +162,9 @@ export function useScreenerData(universe: UniverseId) {
       return filtered.map((s): ScreenerRow => {
         const num = (v: any): number | null => (v == null || Number.isNaN(Number(v))) ? null : Number(v);
         return {
-          ...(s as StockScore),
+          symbol: s.symbol,
+          exchange: s.exchange,
+          trade_date: s.trade_date ?? null,
           sector:       s.sector ?? null,
           company_name: s.company_name ?? null,
           market_cap:   num(s.market_cap),
@@ -126,6 +173,13 @@ export function useScreenerData(universe: UniverseId) {
           in_nifty50:   idxSets.NIFTY50.has(s.symbol),
           in_banknifty: idxSets.BANKNIFTY.has(s.symbol),
           in_finnifty:  idxSets.FINNIFTY.has(s.symbol),
+          instrument_type:   s.instrument_type ?? "EQ",
+
+          ltp:               num(s.ltp),
+          previous_close:    num(s.previous_close),
+          change_abs:        num(s.change_abs),
+          change_pct:        num(s.change_pct),
+
           pe:                num(s.pe),
           pb:                num(s.pb),
           peg:               num(s.peg),
@@ -146,7 +200,35 @@ export function useScreenerData(universe: UniverseId) {
           dii_holding:       num(s.dii_holding ?? s.fii_holding),
           high_52w:          num(s.high_52w),
           low_52w:           num(s.low_52w),
-          instrument_type:   s.instrument_type ?? "EQ",
+
+          volume:            num(s.volume),
+          rel_volume:        num(s.rel_volume),
+          ema_20:            num(s.ema_20),
+          ema_50:            num(s.ema_50),
+          ema_100:           num(s.ema_100),
+          ema_200:           num(s.ema_200),
+          rsi:               num(s.rsi),
+          macd:              num(s.macd),
+          macd_signal:       num(s.macd_signal),
+          macd_hist:         num(s.macd_hist),
+          adx:               num(s.adx),
+          atr:               num(s.atr),
+          atr_pct:           num(s.atr_pct),
+          bb_upper:          num(s.bb_upper),
+          bb_lower:          num(s.bb_lower),
+          bb_width:          num(s.bb_width),
+          bb_squeeze:        s.bb_squeeze ?? null,
+          pct_from_52w_high: num(s.pct_from_52w_high),
+          above_ema_200:     s.above_ema_200 ?? null,
+          higher_lows:       s.higher_lows ?? null,
+          near_resistance:   s.near_resistance ?? null,
+          resistance_level:  num(s.resistance_level),
+          support_level:     num(s.support_level),
+          sector_strength:   num(s.sector_strength),
+          rel_strength_nifty: num(s.rel_strength_nifty),
+          breakout_score:    s.breakout_score ?? null,
+          prebreakout_score: s.prebreakout_score ?? null,
+          score_components:  s.score_components ?? null,
         };
       });
     },

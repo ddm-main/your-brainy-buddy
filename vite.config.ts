@@ -7,9 +7,6 @@ export default defineConfig({
   resolve: {
     alias: { "@": path.resolve(__dirname, "src") },
   },
-  optimizeDeps: {
-    force: true,
-  },
   server: {
     host: "0.0.0.0",
     port: 8080,

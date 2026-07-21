@@ -1,6 +1,6 @@
 // All-Stocks table under Analysis — technicals + fundamentals for every stock in
 // one sortable grid. Replaces the old Option Chain tab. Data comes from the same
-// server view the Screener uses (market_screener_rows), so it always covers the
+// unified market_data table the Screener uses, so it always covers the
 // full active universe. Click a row to open its Analysis chart.
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -21,8 +21,8 @@ const VIEWS: Array<{ id: View; label: string }> = [
 
 // Column groups. Symbol + price are always shown; the rest depend on the view.
 const IDENTITY = ["symbol", "sector", "close", "change_pct"];
-const TECHNICAL = ["rsi14", "macd", "adx14", "atr_pct", "bb_width", "rel_volume", "pct_from_52w_high", "breakout_score", "prebreakout_score", "setup"];
-const FUNDAMENTAL = ["market_cap", "pe_ttm", "pb", "peg", "eps_ttm", "roe", "roce", "debt_to_equity", "revenue_growth_yoy", "profit_growth_yoy", "dividend_yield", "promoter_holding"];
+const TECHNICAL = ["rsi", "macd", "adx", "atr_pct", "bb_width", "rel_volume", "pct_from_52w_high", "breakout_score", "prebreakout_score", "setup"];
+const FUNDAMENTAL = ["market_cap", "pe", "pb", "peg", "eps", "roe", "roce", "debt_equity", "sales_growth", "profit_growth", "dividend_yield", "promoter_holding"];
 
 const num = (d = 2) => ({ getValue }: any) => fmtNum(getValue() as number | null, d);
 const pct = () => ({ getValue }: any) => <PctCell value={getValue() as number | null} />;
@@ -39,12 +39,12 @@ const COLS: Record<string, ColumnDef<ScreenerRow, any>> = {
     ),
   },
   sector: { header: "Sector", accessorKey: "sector", cell: ({ getValue }) => <span style={{ fontSize: 11 }}>{(getValue() as string) ?? "—"}</span> },
-  close: { header: "Price", accessorKey: "close", meta: { align: "right" }, cell: num(2) },
+  close: { header: "Price", accessorKey: "ltp", meta: { align: "right" }, cell: num(2) },
   change_pct: { header: "Chg %", accessorKey: "change_pct", meta: { align: "right" }, cell: pct() },
   // technical
-  rsi14: { header: "RSI", accessorKey: "rsi14", meta: { align: "right" }, cell: num(0) },
+  rsi: { header: "RSI", accessorKey: "rsi", meta: { align: "right" }, cell: num(0) },
   macd: { header: "MACD", accessorKey: "macd", meta: { align: "right" }, cell: num(2) },
-  adx14: { header: "ADX", accessorKey: "adx14", meta: { align: "right" }, cell: num(0) },
+  adx: { header: "ADX", accessorKey: "adx", meta: { align: "right" }, cell: num(0) },
   atr_pct: { header: "ATR %", accessorKey: "atr_pct", meta: { align: "right" }, cell: num(2) },
   bb_width: { header: "BB Wid", accessorKey: "bb_width", meta: { align: "right" }, cell: num(3) },
   rel_volume: { header: "RVol", accessorKey: "rel_volume", meta: { align: "right" }, cell: num(1) },
@@ -64,21 +64,21 @@ const COLS: Record<string, ColumnDef<ScreenerRow, any>> = {
         {row.original.bb_squeeze && <Chip tone="accent">squeeze</Chip>}
         {row.original.higher_lows && <Chip tone="ok">HL</Chip>}
         {row.original.near_resistance && <Chip tone="warn">@res</Chip>}
-        {row.original.above_ema200 && <Chip tone="ok">&gt;200</Chip>}
+        {row.original.above_ema_200 && <Chip tone="ok">&gt;200</Chip>}
       </span>
     ),
   },
   // fundamental
   market_cap: { header: "Mcap (Cr)", accessorKey: "market_cap", meta: { align: "right" }, cell: ({ getValue }) => fmtInt(getValue() as number | null) },
-  pe_ttm: { header: "PE", accessorKey: "pe_ttm", meta: { align: "right" }, cell: num(1) },
+  pe: { header: "PE", accessorKey: "pe", meta: { align: "right" }, cell: num(1) },
   pb: { header: "PB", accessorKey: "pb", meta: { align: "right" }, cell: num(1) },
   peg: { header: "PEG", accessorKey: "peg", meta: { align: "right" }, cell: num(2) },
-  eps_ttm: { header: "EPS", accessorKey: "eps_ttm", meta: { align: "right" }, cell: num(1) },
+  eps: { header: "EPS", accessorKey: "eps", meta: { align: "right" }, cell: num(1) },
   roe: { header: "ROE", accessorKey: "roe", meta: { align: "right" }, cell: pctSuffix(1) },
   roce: { header: "ROCE", accessorKey: "roce", meta: { align: "right" }, cell: pctSuffix(1) },
-  debt_to_equity: { header: "D/E", accessorKey: "debt_to_equity", meta: { align: "right" }, cell: num(2) },
-  revenue_growth_yoy: { header: "Rev Grw", accessorKey: "revenue_growth_yoy", meta: { align: "right" }, cell: pct() },
-  profit_growth_yoy: { header: "PAT Grw", accessorKey: "profit_growth_yoy", meta: { align: "right" }, cell: pct() },
+  debt_equity: { header: "D/E", accessorKey: "debt_equity", meta: { align: "right" }, cell: num(2) },
+  sales_growth: { header: "Rev Grw", accessorKey: "sales_growth", meta: { align: "right" }, cell: pct() },
+  profit_growth: { header: "PAT Grw", accessorKey: "profit_growth", meta: { align: "right" }, cell: pct() },
   dividend_yield: { header: "Div Yld", accessorKey: "dividend_yield", meta: { align: "right" }, cell: pctSuffix(2) },
   promoter_holding: { header: "Promoter %", accessorKey: "promoter_holding", meta: { align: "right" }, cell: pctSuffix(1) },
 };

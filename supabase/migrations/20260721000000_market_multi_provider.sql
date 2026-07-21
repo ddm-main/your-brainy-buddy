@@ -120,6 +120,10 @@ CREATE TABLE IF NOT EXISTS public.market_data (
   kotak_token text,
   yahoo_symbol text,
 
+  -- Sync cursors (per-provider, so each sync job can page independently)
+  fmp_synced_at timestamptz,
+  alpha_synced_at timestamptz,
+
   PRIMARY KEY (symbol, exchange)
 );
 
@@ -131,6 +135,7 @@ CREATE INDEX idx_market_data_roe ON public.market_data (roe DESC NULLS LAST) WHE
 CREATE INDEX idx_market_data_rsi ON public.market_data (rsi) WHERE is_active AND rsi IS NOT NULL;
 CREATE INDEX idx_market_data_breakout ON public.market_data (breakout_score DESC NULLS LAST) WHERE is_active;
 CREATE INDEX idx_market_data_universe_cursor ON public.market_data (in_universe, last_updated NULLS FIRST) WHERE is_active;
+CREATE INDEX idx_market_data_fmp_cursor ON public.market_data (fmp_synced_at NULLS FIRST) WHERE is_active AND instrument_type = 'EQ';
 CREATE INDEX idx_market_data_trade_date ON public.market_data (trade_date DESC NULLS LAST) WHERE is_active;
 
 GRANT SELECT ON public.market_data TO authenticated, anon;
@@ -319,3 +324,18 @@ RETURNS TABLE(symbol text, exchange text, count bigint) AS $$
   GROUP BY symbol, exchange
   HAVING count(*) > 1;
 $$ LANGUAGE SQL SECURITY DEFINER;
+
+-- -------------------------------------------------------------------------
+-- Cron: FMP nightly trickle (well after NSE close, budget ~35 symbols/run
+-- against the 250 req/day free-tier cap) and validation engine (after FMP
+-- and the EOD/aggregates passes have both landed).
+-- -------------------------------------------------------------------------
+SELECT cron.unschedule('market-fmp-sync') WHERE EXISTS (
+  SELECT 1 FROM cron.job WHERE jobname = 'market-fmp-sync');
+SELECT cron.schedule('market-fmp-sync', '30 16 * * 1-5',
+  $$SELECT public.market_cron_call('market-fmp-sync')$$);
+
+SELECT cron.unschedule('market-data-validation') WHERE EXISTS (
+  SELECT 1 FROM cron.job WHERE jobname = 'market-data-validation');
+SELECT cron.schedule('market-data-validation', '0 17 * * 1-5',
+  $$SELECT public.market_cron_call('market-data-validation')$$);

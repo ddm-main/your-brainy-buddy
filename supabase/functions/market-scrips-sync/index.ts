@@ -60,6 +60,21 @@ async function syncScripFile(
     if (batch.length === 0) return;
     const { error } = await svc.from("market_stocks").upsert(batch, { onConflict: "symbol,exchange" });
     if (!error) upserted += batch.length;
+    // Base rows into the unified market_data table so new listings enter the
+    // EOD/fundamentals pipelines — those read their worklist off market_stocks
+    // still, but the screener/alerts/autotrade paths read market_data only.
+    await svc.from("market_data").upsert(
+      batch.map((b) => ({
+        symbol: b.symbol,
+        exchange: b.exchange,
+        company_name: b.company_name,
+        instrument_type: b.instrument_type ?? "EQ",
+        kotak_token: b.token,
+        yahoo_symbol: b.yahoo_symbol,
+        is_active: b.is_active,
+      })),
+      { onConflict: "symbol,exchange" },
+    );
     batch = [];
   };
 
@@ -170,17 +185,28 @@ Deno.serve(async (req) => {
         { symbol: sym, exchange: "NSE", yahoo_symbol: `${sym}.NS`, is_active: true },
         { onConflict: "symbol,exchange", ignoreDuplicates: true },
       );
+      await svc.from("market_data").upsert(
+        { symbol: sym, exchange: "NSE", yahoo_symbol: `${sym}.NS`, is_active: true },
+        { onConflict: "symbol,exchange", ignoreDuplicates: true },
+      );
     }
     // Flag every active NSE equity as in_universe — the screener view and
     // sync pipelines now cover the full active set, not just Nifty 500 + user
     // holdings. Nifty 500 membership stays on is_nifty500 below.
     await svc.from("market_stocks").update({ in_universe: true }).eq("is_active", true).eq("exchange", "NSE");
+    await svc.from("market_data").update({ in_universe: true }).eq("is_active", true).eq("exchange", "NSE");
     // Flag is_nifty500 on the official (or fallback) list
     await svc.from("market_stocks").update({ is_nifty500: false }).eq("is_nifty500", true);
+    await svc.from("market_data").update({ is_nifty500: false }).eq("is_nifty500", true);
     for (let i = 0; i < nifty500List.length; i += 200) {
+      const slice = nifty500List.slice(i, i + 200);
       await svc.from("market_stocks")
         .update({ is_nifty500: true })
-        .in("symbol", nifty500List.slice(i, i + 200))
+        .in("symbol", slice)
+        .eq("exchange", "NSE");
+      await svc.from("market_data")
+        .update({ is_nifty500: true })
+        .in("symbol", slice)
         .eq("exchange", "NSE");
     }
 

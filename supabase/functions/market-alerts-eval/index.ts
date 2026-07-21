@@ -53,8 +53,8 @@ Deno.serve(async (req) => {
     }
 
     const symbols = [...new Set(alerts.map((a) => a.symbol))];
-    const { data: scores } = await svc.from("market_stock_scores")
-      .select("symbol,exchange,close,rsi14,ema20,ema50,ema200,breakout_score")
+    const { data: scores } = await svc.from("market_data")
+      .select("symbol,exchange,ltp,rsi,ema_20,ema_50,ema_200,breakout_score")
       .in("symbol", symbols);
     const scoreMap = new Map((scores ?? []).map((s) => [`${s.symbol}:${s.exchange}`, s]));
 
@@ -62,19 +62,19 @@ Deno.serve(async (req) => {
     const firedIds: string[] = [];
     for (const a of alerts) {
       const sc = scoreMap.get(`${a.symbol}:${a.exchange}`);
-      const px = quoteMap.get(`${a.symbol}:${a.exchange}`) ?? (sc?.close ? Number(sc.close) : undefined);
+      const px = quoteMap.get(`${a.symbol}:${a.exchange}`) ?? (sc?.ltp ? Number(sc.ltp) : undefined);
       let fires = false, val: number | null = null;
       switch (a.alert_type) {
         case "price_above": fires = px != null && px > (a.threshold ?? 0); val = px ?? null; break;
         case "price_below": fires = px != null && px < (a.threshold ?? 0); val = px ?? null; break;
         case "percent_change": {
-          const base = sc?.close ? Number(sc.close) : null;
+          const base = sc?.ltp ? Number(sc.ltp) : null;
           if (px != null && base) { const p = ((px - base) / base) * 100; fires = Math.abs(p) >= (a.threshold ?? 0); val = p; }
           break;
         }
-        case "rsi_above": fires = sc?.rsi14 != null && Number(sc.rsi14) > (a.threshold ?? 0); val = sc?.rsi14 ? Number(sc.rsi14) : null; break;
-        case "rsi_below": fires = sc?.rsi14 != null && Number(sc.rsi14) < (a.threshold ?? 0); val = sc?.rsi14 ? Number(sc.rsi14) : null; break;
-        case "ema_cross_up": fires = sc?.ema20 != null && sc?.ema50 != null && Number(sc.ema20) > Number(sc.ema50); val = sc?.ema20 ? Number(sc.ema20) : null; break;
+        case "rsi_above": fires = sc?.rsi != null && Number(sc.rsi) > (a.threshold ?? 0); val = sc?.rsi ? Number(sc.rsi) : null; break;
+        case "rsi_below": fires = sc?.rsi != null && Number(sc.rsi) < (a.threshold ?? 0); val = sc?.rsi ? Number(sc.rsi) : null; break;
+        case "ema_cross_up": fires = sc?.ema_20 != null && sc?.ema_50 != null && Number(sc.ema_20) > Number(sc.ema_50); val = sc?.ema_20 ? Number(sc.ema_20) : null; break;
         case "breakout": fires = sc?.breakout_score != null && Number(sc.breakout_score) >= (a.threshold ?? 70); val = sc?.breakout_score ? Number(sc.breakout_score) : null; break;
       }
       if (fires) {

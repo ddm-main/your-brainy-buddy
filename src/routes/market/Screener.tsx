@@ -47,28 +47,28 @@ const COLUMNS: ColSpec[] = [
   { id: "change_pct",         label: "Chg %",         align: "right", default: true },
   { id: "volume",             label: "Volume",        align: "right" },
   { id: "rel_volume",         label: "RVol",          align: "right" },
-  { id: "pe_ttm",             label: "PE",            align: "right", default: true },
+  { id: "pe",                 label: "PE",            align: "right", default: true },
   { id: "pb",                 label: "PB",            align: "right" },
   { id: "peg",                label: "PEG",           align: "right" },
-  { id: "eps_ttm",            label: "EPS",           align: "right" },
+  { id: "eps",                label: "EPS",           align: "right" },
   { id: "book_value",         label: "Book Val",      align: "right" },
   { id: "roe",                label: "ROE",           align: "right", default: true },
-  { id: "debt_to_equity",     label: "D/E",           align: "right", default: true },
-  { id: "revenue_growth_yoy", label: "Rev Grw",       align: "right" },
-  { id: "profit_growth_yoy",  label: "PAT Grw",       align: "right" },
-  { id: "eps_growth_yoy",     label: "EPS Grw",       align: "right" },
+  { id: "debt_equity",        label: "D/E",           align: "right", default: true },
+  { id: "sales_growth",       label: "Rev Grw",       align: "right" },
+  { id: "profit_growth",      label: "PAT Grw",       align: "right" },
+  { id: "eps_growth",         label: "EPS Grw",       align: "right" },
   { id: "dividend_yield",     label: "Div Yld",       align: "right" },
   { id: "promoter_holding",   label: "Promoter %",    align: "right" },
   { id: "dii_holding",        label: "Instl %",       align: "right" },
-  { id: "rsi14",              label: "RSI",           align: "right" },
-  { id: "adx14",              label: "ADX",           align: "right" },
+  { id: "rsi",                label: "RSI",           align: "right" },
+  { id: "adx",                label: "ADX",           align: "right" },
   { id: "pct_from_52w_high",  label: "52w Δ",         align: "right", default: true },
   { id: "breakout_score",     label: "Breakout",      align: "right", default: true },
   { id: "prebreakout_score",  label: "Pre-BO",        align: "right" },
   { id: "setup",              label: "Setup" },
 ];
 const DEFAULT_COLS = COLUMNS.filter((c) => c.default).map((c) => c.id);
-const COLS_STORE_KEY = "screener.visibleCols.v2";
+const COLS_STORE_KEY = "screener.visibleCols.v3";
 const OPEN_STORE_KEY = "screener.openCats.v2";
 const PAGE_SIZE_KEY  = "screener.pageSize.v2";
 const AUTO_SYNC_STORE_KEY = "screener.autoFundamentalsSyncAt.v1";
@@ -108,6 +108,7 @@ function toCsv(rows: ScreenerRow[], cols: string[]): string {
       if (r.near_resistance) tags.push("@res");
       return tags.join("|");
     }
+    if (c === "close") return r.ltp == null ? "" : String(r.ltp);
     const v = (r as any)[c];
     if (v == null) return "";
     if (typeof v === "string") return v.includes(",") ? `"${v.replace(/"/g, '""')}"` : v;
@@ -179,7 +180,7 @@ export default function Screener() {
       for (const af of liveSensitiveActive) {
         const overlaid = af.id === "change_pct"
           ? { ...r, change_pct: live?.change_pct ?? r.change_pct }
-          : { ...r, close: live?.ltp ?? r.close };
+          : { ...r, close: live?.ltp ?? r.ltp };
         if (!filterMatches(overlaid as any, af)) return false;
       }
       return true;
@@ -325,7 +326,7 @@ export default function Screener() {
       market_cap: { header: "Mcap (Cr)", accessorKey: "market_cap", meta: { align: "right" }, cell: ({ getValue }) => fmtInt(getValue() as number | null) },
       close: {
         header: "Price", id: "livePrice", meta: { align: "right" },
-        accessorFn: (r) => liveQuoteByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol))?.ltp ?? r.close,
+        accessorFn: (r) => liveQuoteByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol))?.ltp ?? r.ltp,
         cell: ({ getValue }) => fmtNum(getValue() as number | null),
       },
       change_pct: {
@@ -335,18 +336,18 @@ export default function Screener() {
       },
       volume: { header: "Vol", accessorKey: "volume", meta: { align: "right" }, cell: ({ getValue }) => fmtInt(getValue() as number | null) },
       rel_volume: { header: "RVol", accessorKey: "rel_volume", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
-      pe_ttm: { header: "PE", accessorKey: "pe_ttm", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
+      pe: { header: "PE", accessorKey: "pe", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
       pb: { header: "PB", accessorKey: "pb", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
       peg: { header: "PEG", accessorKey: "peg", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 2) },
-      eps_ttm: { header: "EPS", accessorKey: "eps_ttm", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
+      eps: { header: "EPS", accessorKey: "eps", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
       book_value: { header: "Book Val", accessorKey: "book_value", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
       roe: { header: "ROE", accessorKey: "roe", meta: { align: "right" }, cell: ({ getValue }) => {
         const v = getValue() as number | null; return v == null ? "—" : `${v.toFixed(1)}%`;
       }},
-      debt_to_equity: { header: "D/E", accessorKey: "debt_to_equity", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 2) },
-      revenue_growth_yoy: { header: "Rev Grw", accessorKey: "revenue_growth_yoy", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
-      profit_growth_yoy:  { header: "PAT Grw", accessorKey: "profit_growth_yoy",  meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
-      eps_growth_yoy:     { header: "EPS Grw", accessorKey: "eps_growth_yoy",     meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
+      debt_equity: { header: "D/E", accessorKey: "debt_equity", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 2) },
+      sales_growth: { header: "Rev Grw", accessorKey: "sales_growth", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
+      profit_growth: { header: "PAT Grw", accessorKey: "profit_growth", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
+      eps_growth:    { header: "EPS Grw", accessorKey: "eps_growth",    meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
       dividend_yield: { header: "Div Yld", accessorKey: "dividend_yield", meta: { align: "right" }, cell: ({ getValue }) => {
         const v = getValue() as number | null; return v == null ? "—" : `${v.toFixed(2)}%`;
       }},
@@ -356,8 +357,8 @@ export default function Screener() {
       dii_holding: { header: "Instl %", accessorKey: "dii_holding", meta: { align: "right" }, cell: ({ getValue }) => {
         const v = getValue() as number | null; return v == null ? "—" : `${v.toFixed(1)}%`;
       }},
-      rsi14: { header: "RSI", accessorKey: "rsi14", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 0) },
-      adx14: { header: "ADX", accessorKey: "adx14", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 0) },
+      rsi: { header: "RSI", accessorKey: "rsi", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 0) },
+      adx: { header: "ADX", accessorKey: "adx", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 0) },
       pct_from_52w_high: { header: "52w Δ", accessorKey: "pct_from_52w_high", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
       breakout_score: {
         header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },
@@ -1032,10 +1033,12 @@ function DataHealthStrip({ rows }: { rows: ScreenerRow[]; universe: UniverseId }
     const equities = rows.filter((r) => (r.instrument_type ?? "EQ") === "EQ");
     const withScore = rows.filter((r) => r.trade_date != null);
     const total = equities.length;
-    const ok      = equities.filter((r) => r.sync_status === "ok").length;
-    const partial = equities.filter((r) => r.sync_status === "partial").length;
-    const failed  = equities.filter((r) => r.sync_status === "failed").length;
-    const withTech = withScore.filter((r) => r.rsi14 != null || r.adx14 != null).length;
+    // market_data has no sync_status column (that was market_fundamentals_global's
+    // field) — infer coverage from which core fundamentals actually landed.
+    const ok      = equities.filter((r) => r.pe != null && r.roe != null).length;
+    const partial = equities.filter((r) => !(r.pe != null && r.roe != null) && (r.pe != null || r.roe != null || r.market_cap != null)).length;
+    const failed  = equities.filter((r) => r.pe == null && r.roe == null && r.market_cap == null).length;
+    const withTech = withScore.filter((r) => r.rsi != null || r.adx != null).length;
     const withSector = equities.filter((r) => r.sector != null).length;
     return {
       total,

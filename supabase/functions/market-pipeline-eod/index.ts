@@ -28,11 +28,11 @@ Deno.serve(async (req) => {
     const today = istTradeDate();
     const cutoff = `${today}T00:00:00Z`; // one pass per IST day
 
-    const { data: stocks, error } = await svc.from("market_data")
-      .select("symbol,exchange,yahoo_symbol,sector,last_updated")
+    const { data: stocks, error } = await svc.from("market_stocks")
+      .select("symbol,exchange,yahoo_symbol,sector,last_price_sync_at")
       .eq("is_active", true)
-      .or(`last_updated.is.null,last_updated.lt.${cutoff}`)
-      .order("last_updated", { ascending: true, nullsFirst: true })
+      .or(`last_price_sync_at.is.null,last_price_sync_at.lt.${cutoff}`)
+      .order("last_price_sync_at", { ascending: true, nullsFirst: true })
       .limit(CHUNK);
     if (error) return errorResponse(req, error.message, 500);
     if (!stocks || stocks.length === 0) {
@@ -86,10 +86,58 @@ Deno.serve(async (req) => {
           const bs = breakoutScore(snap, ctx);
           const ps = preBreakoutScore(snap, ctx);
 
-          // Update market_data with technical indicators + EOD price
+          // Dual-write: market_stock_scores stays the legacy table several
+          // consumers still read directly (Holdings/Watchlist/Screener.tsx,
+          // hooks.ts, market-stock-insight, market-ai-recommend,
+          // market-index-constituents, market-autotrade-action) — migrating
+          // all of them is out of scope for this pass. market_data is the
+          // new unified table the screener/alerts/autotrade paths read.
+          await svc.from("market_stock_scores").upsert({
+            symbol: stock.symbol,
+            exchange: stock.exchange,
+            trade_date: new Date(candles[candles.length - 1].time * 1000).toISOString().slice(0, 10),
+            close: snap.close,
+            change_pct: snap.changePct,
+            volume: snap.volume,
+            vol_avg20: snap.volAvg20,
+            rel_volume: snap.relVolume,
+            ema20: snap.ema20,
+            ema50: snap.ema50,
+            ema100: snap.ema100,
+            ema200: snap.ema200,
+            rsi14: snap.rsi14,
+            macd: snap.macd,
+            macd_signal: snap.macdSignal,
+            macd_hist: snap.macdHist,
+            adx14: snap.adx14,
+            atr14: snap.atr14,
+            atr_pct: snap.atrPct,
+            bb_upper: snap.bbUpper,
+            bb_lower: snap.bbLower,
+            bb_width: snap.bbWidth,
+            bb_squeeze: snap.bbSqueeze,
+            high_52w: snap.high52w,
+            low_52w: snap.low52w,
+            pct_from_52w_high: snap.pctFrom52wHigh,
+            above_ema200: snap.aboveEma200,
+            higher_lows: snap.higherLows,
+            near_resistance: snap.nearResistance,
+            resistance_level: snap.resistance,
+            support_level: snap.support,
+            sector: stock.sector ?? null,
+            breakout_score: bs.score,
+            prebreakout_score: ps.score,
+            score_components: { breakout: bs.components, prebreakout: ps.components },
+            computed_at: new Date().toISOString(),
+          }, { onConflict: "symbol,exchange" });
+
+          // Unified market_data — used by screener, alerts-eval, autotrade-eval.
           await svc.from("market_data").upsert({
             symbol: stock.symbol,
             exchange: stock.exchange,
+            sector: stock.sector ?? null,
+            yahoo_symbol: stock.yahoo_symbol ?? null,
+            is_active: true,
             trade_date: new Date(candles[candles.length - 1].time * 1000).toISOString().slice(0, 10),
             ltp: snap.close,
             previous_close: candles.length > 1 ? candles[candles.length - 2].close : null,
@@ -125,7 +173,6 @@ Deno.serve(async (req) => {
             prebreakout_score: ps.score,
             score_components: { breakout: bs.components, prebreakout: ps.components },
             data_source: {
-              ...(stock.data_source ?? {}),
               ltp: "yahoo",
               rsi: "computed",
               macd: "computed",
@@ -152,7 +199,11 @@ Deno.serve(async (req) => {
         } catch {
           failCount++;
         } finally {
-          // Cursor stamped via last_updated in market_data upsert
+          // Stamp the cursor either way so one bad symbol can't wedge the pipeline
+          await svc.from("market_stocks")
+            .update({ last_price_sync_at: new Date().toISOString() })
+            .eq("symbol", stock.symbol)
+            .eq("exchange", stock.exchange);
         }
       }
     });

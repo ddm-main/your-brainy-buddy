@@ -11,6 +11,7 @@ import { toSafeError } from "@/lib/errors";
 import { Database, LockKeyhole, Pencil, Play, RefreshCw, TestTube2 } from "lucide-react";
 
 type Provider = "kotak_neo" | "yahoo";
+type ServiceProvider = "fmp" | "alpha_vantage" | "nse" | "bse" | "stooq";
 
 type Settings = {
   id?: string;
@@ -36,6 +37,19 @@ const FETCHES: Record<Provider, string[]> = {
   kotak_neo: ["Holdings", "Positions", "Orders", "Live LTP", "Broker session"],
 };
 
+// Secondary data providers — priority-chain fallbacks used by the sync
+// pipelines (market-fmp-sync, market-fundamentals-global-sync, screener
+// technicals). None of these hold a per-user broker session; "Test" pings
+// the provider directly and reports API-key / reachability status.
+const SERVICE_PROVIDERS: ServiceProvider[] = ["fmp", "alpha_vantage", "nse", "bse", "stooq"];
+const SERVICE_META: Record<ServiceProvider, { name: string; role: string; fetches: string[]; needsKey: boolean }> = {
+  fmp: { name: "Financial Modeling Prep", role: "Fundamentals", fetches: ["Market cap", "PE / PB / ROE / ROCE", "Balance sheet", "Cash flow", "Growth ratios"], needsKey: true },
+  alpha_vantage: { name: "Alpha Vantage", role: "Technicals", fetches: ["SMA / EMA", "RSI", "MACD", "ADX / ATR", "Bollinger Bands"], needsKey: true },
+  nse: { name: "NSE", role: "Exchange data", fetches: ["Market status", "Index constituents", "Bulk / block deals", "Corporate actions", "Holidays"], needsKey: false },
+  bse: { name: "BSE", role: "Exchange data", fetches: ["Corporate actions", "Announcements", "Circulars"], needsKey: false },
+  stooq: { name: "Stooq", role: "Backup prices", fetches: ["Daily OHLCV (backup)"], needsKey: false },
+};
+
 export default function MarketSettings() {
   const push = useUi((s) => s.push);
   const [rows, setRows] = useState<Record<Provider, Settings | null>>({ kotak_neo: null, yahoo: null });
@@ -52,6 +66,9 @@ export default function MarketSettings() {
   const [otp, setOtp] = useState("");
   const [otpError, setOtpError] = useState<string | null>(null);
   const [pipeline, setPipeline] = useState<Record<string, unknown> | null>(null);
+  const [serviceStatus, setServiceStatus] = useState<Record<ServiceProvider, { ok: boolean; detail: string | null; testedAt: string } | null>>(
+    { fmp: null, alpha_vantage: null, nse: null, bse: null, stooq: null },
+  );
 
   const load = async () => {
     const { data, error } = await supabase.from("market_api_settings").select("*");
@@ -179,6 +196,19 @@ export default function MarketSettings() {
     finally { setBusy(null); }
   };
 
+  const testService = async (prov: ServiceProvider) => {
+    setBusy(`test-${prov}`);
+    try {
+      const r = await callFn("market-test-connection", { provider: prov });
+      setServiceStatus((s) => ({ ...s, [prov]: { ok: !!r?.ok, detail: r?.detail ?? null, testedAt: new Date().toISOString() } }));
+      push(r?.ok ? `${SERVICE_META[prov].name} OK` : `${SERVICE_META[prov].name} failed${r?.detail ? `: ${r.detail}` : ""}`, r?.ok ? "ok" : "err");
+    } catch (e) {
+      const msg = toSafeError(e, "Test failed").message;
+      setServiceStatus((s) => ({ ...s, [prov]: { ok: false, detail: msg, testedAt: new Date().toISOString() } }));
+      push(msg, "err");
+    } finally { setBusy(null); }
+  };
+
   const runPipeline = async (fn: string, label: string) => {
     setBusy(fn);
     try {
@@ -238,6 +268,34 @@ export default function MarketSettings() {
               </>
             }
           />
+        </div>
+      </HudPanel>
+
+      <HudPanel flow title="Secondary Providers" index="MK.S1B" live="idle">
+        <div style={{ fontSize: 12, color: "var(--text-dim)", marginBottom: 10 }}>
+          Priority-chain fallbacks used by the sync pipelines when Kotak/Yahoo don't cover a field (fundamentals, technicals, exchange metadata). FMP and Alpha Vantage need a free-tier API key set as a Supabase secret — Test reports whether one is configured and reachable.
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {SERVICE_PROVIDERS.map((prov) => {
+            const meta = SERVICE_META[prov];
+            const status = serviceStatus[prov];
+            const statusLabel = status ? (status.ok ? "reachable" : "failed") : meta.needsKey ? "untested" : "available";
+            const statusTone: "ok" | "warn" | "err" | "neutral" = status ? (status.ok ? "ok" : "err") : meta.needsKey ? "warn" : "neutral";
+            return (
+              <ProviderCard
+                key={prov}
+                name={meta.name} role={meta.role} fetches={meta.fetches}
+                status={statusLabel} statusTone={statusTone}
+                meta={status ? <span>Last test: {new Date(status.testedAt).toLocaleTimeString()}</span> : undefined}
+                error={status && !status.ok ? (status.detail ?? undefined) : undefined}
+                actions={
+                  <Btn size="sm" onClick={() => testService(prov)} disabled={busy !== null}>
+                    <TestTube2 size={11} style={{ marginRight: 4 }} />{busy === `test-${prov}` ? "testing…" : "Test"}
+                  </Btn>
+                }
+              />
+            );
+          })}
         </div>
       </HudPanel>
 

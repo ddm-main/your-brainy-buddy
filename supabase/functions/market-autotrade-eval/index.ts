@@ -166,7 +166,7 @@ Deno.serve(async (req) => {
             const quotes = await provider.getQuotes([`${pos.exchange}:${pos.symbol}`]);
             const ltp = quotes[0]?.price;
             if (ltp == null) continue;
-            const { data: scoreRow } = await svc.from("market_stock_scores").select("*")
+            const { data: scoreRow } = await svc.from("market_data").select("*")
               .eq("symbol", pos.symbol).eq("exchange", pos.exchange).maybeSingle();
             const changePct = ((ltp - pos.entryPrice) / pos.entryPrice) * 100;
             let exitReason: string | null = null;
@@ -215,7 +215,7 @@ Deno.serve(async (req) => {
             if (scopeSymbols.length === 0) continue;
 
             const symbols = [...new Set(scopeSymbols.map((s) => s.symbol))];
-            const { data: scoreRows } = await svc.from("market_stock_scores").select("*").in("symbol", symbols);
+            const { data: scoreRows } = await svc.from("market_data").select("*").in("symbol", symbols);
             const scoreByKey = new Map((scoreRows ?? []).map((s: any) => [`${s.symbol}:${s.exchange}`, s]));
 
             for (const scope of scopeSymbols) {

@@ -27,7 +27,7 @@ import {
 import { Plus, Power, Trash2, X } from "lucide-react";
 
 const RULE_FILTER_IDS = [
-  "close", "pct_from_52w_high", "rsi14", "adx14", "macd_hist", "bb_width", "atr_pct", "above_ema200",
+  "close", "pct_from_52w_high", "rsi", "adx", "macd_hist", "bb_width", "atr_pct", "above_ema_200",
   "change_pct", "rel_volume", "rel_strength_nifty", "sector_strength",
   "breakout_score", "prebreakout_score", "bb_squeeze", "higher_lows", "near_resistance",
 ];
