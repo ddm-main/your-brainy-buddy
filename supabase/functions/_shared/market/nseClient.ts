@@ -60,6 +60,33 @@ async function session(force = false): Promise<NseSession | null> {
   return cached;
 }
 
+/** Shared NSE-authenticated fetch: warms the homepage cookie (retrying once
+ *  if the response is 401/403) then GETs the target URL with the browser-like
+ *  headers Akamai requires. Used by bhavcopy/master/shares-outstanding sync. */
+export async function nseFetch(url: string, extraHeaders: Record<string, string> = {}, timeoutMs = 15000): Promise<Response | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const s = await session(attempt === 1);
+    if (!s) continue;
+    try {
+      const r = await fetchWithTimeout(url, {
+        headers: {
+          "User-Agent": UA,
+          Accept: "*/*",
+          "Accept-Language": "en-US,en;q=0.9",
+          Referer: NSE_HOME,
+          Cookie: s.cookie,
+          ...extraHeaders,
+        },
+      }, timeoutMs);
+      if (r.status === 401 || r.status === 403) { cached = null; continue; }
+      return r;
+    } catch {
+      cached = null;
+    }
+  }
+  return null;
+}
+
 const num = (...values: unknown[]): number | null => {
   for (const v of values) {
     if (v == null || v === "") continue;

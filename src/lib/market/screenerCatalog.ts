@@ -28,6 +28,12 @@ export type FilterCategory =
  */
 export type ApplicabilityScope = "all" | "eq" | "eq_profit" | "eq_profit_pe" | "eq_owner" | "tech";
 
+// Tech-scoped filters (close/volume/change_pct/rsi/…) require the row's
+// trade_date to be within N days of the freshest date in the loaded set.
+// 3 days covers the normal Fri→Mon weekend gap plus one skipped Yahoo session
+// while still excluding stale-forever rows the pipeline never re-fetches.
+export const TECH_FRESHNESS_LAG_DAYS = 3;
+
 // market-pipeline-eod stamps a symbol's sync cursor even when the fetch
 // fails (so one bad symbol can't wedge the whole pipeline) — the side effect
 // is that a symbol whose Yahoo fetch keeps failing (rename, delisting, thin
@@ -61,7 +67,7 @@ export function rowIsApplicable(row: Record<string, any>, scope: ApplicabilitySc
         const rowMs = Date.parse(`${row.trade_date}T00:00:00Z`);
         if (!Number.isFinite(latestMs) || !Number.isFinite(rowMs)) return false;
         const lagDays = Math.round((latestMs - rowMs) / 86_400_000);
-        if (lagDays < 0 || lagDays > 3) return false;
+        if (lagDays < 0 || lagDays > TECH_FRESHNESS_LAG_DAYS) return false;
       }
       return true;
   }
@@ -115,7 +121,7 @@ export const FILTERS: FilterDef[] = [
   { id: "market_cap",         label: "Market Cap",        category: "basics",     kind: "number", unit: "Cr", min: 0, max: 2_500_000, step: 500, scope: "all" },
   { id: "sector",             label: "Sector",            category: "basics",     kind: "enum", scope: "eq" },
   { id: "industry",           label: "Industry",          category: "basics",     kind: "enum", scope: "eq" },
-  { id: "ltp",                label: "Price",             category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "all" },
+  { id: "ltp",                label: "Price",             category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "tech" },
   { id: "volume",             label: "Volume",            category: "basics",     kind: "number", min: 0, max: 200_000_000, step: 100_000, scope: "tech" },
   { id: "pct_from_52w_high",  label: "% from 52w High",   category: "basics",     kind: "number", unit: "%", min: -100, max: 20, step: 1, scope: "tech" },
 

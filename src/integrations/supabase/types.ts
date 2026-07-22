@@ -2009,6 +2009,66 @@ export type Database = {
         }
         Relationships: []
       }
+      market_eod_nse: {
+        Row: {
+          close: number | null
+          created_at: string
+          delivery_pct: number | null
+          delivery_qty: number | null
+          fetched_at: string
+          high: number | null
+          low: number | null
+          open: number | null
+          prev_close: number | null
+          series: string | null
+          source: string
+          source_hash: string | null
+          symbol: string
+          trade_date: string
+          traded_value: number | null
+          updated_at: string
+          volume: number | null
+        }
+        Insert: {
+          close?: number | null
+          created_at?: string
+          delivery_pct?: number | null
+          delivery_qty?: number | null
+          fetched_at?: string
+          high?: number | null
+          low?: number | null
+          open?: number | null
+          prev_close?: number | null
+          series?: string | null
+          source?: string
+          source_hash?: string | null
+          symbol: string
+          trade_date: string
+          traded_value?: number | null
+          updated_at?: string
+          volume?: number | null
+        }
+        Update: {
+          close?: number | null
+          created_at?: string
+          delivery_pct?: number | null
+          delivery_qty?: number | null
+          fetched_at?: string
+          high?: number | null
+          low?: number | null
+          open?: number | null
+          prev_close?: number | null
+          series?: string | null
+          source?: string
+          source_hash?: string | null
+          symbol?: string
+          trade_date?: string
+          traded_value?: number | null
+          updated_at?: string
+          volume?: number | null
+        }
+        Relationships: []
+      }
       market_fundamentals: {
         Row: {
           created_at: string
@@ -2372,6 +2432,48 @@ export type Database = {
         }
         Relationships: []
       }
+      market_ingestion_runs: {
+        Row: {
+          duration_ms: number | null
+          error_message: string | null
+          finished_at: string | null
+          id: string
+          metadata: Json | null
+          rows_ingested: number | null
+          source: string
+          stage: string
+          started_at: string
+          status: string
+          trade_date: string | null
+        }
+        Insert: {
+          duration_ms?: number | null
+          error_message?: string | null
+          finished_at?: string | null
+          id?: string
+          metadata?: Json | null
+          rows_ingested?: number | null
+          source: string
+          stage: string
+          started_at?: string
+          status: string
+          trade_date?: string | null
+        }
+        Update: {
+          duration_ms?: number | null
+          error_message?: string | null
+          finished_at?: string | null
+          id?: string
+          metadata?: Json | null
+          rows_ingested?: number | null
+          source?: string
+          stage?: string
+          started_at?: string
+          status?: string
+          trade_date?: string | null
+        }
+        Relationships: []
+      }
       market_intraday_prices: {
         Row: {
           close: number | null
@@ -2435,6 +2537,45 @@ export type Database = {
           published_at?: string
           source?: string | null
           url?: string | null
+        }
+        Relationships: []
+      }
+      market_nse_master: {
+        Row: {
+          company_name: string | null
+          created_at: string
+          face_value: number | null
+          fetched_at: string
+          is_active: boolean
+          isin: string | null
+          listing_date: string | null
+          series: string | null
+          symbol: string
+          updated_at: string
+        }
+        Insert: {
+          company_name?: string | null
+          created_at?: string
+          face_value?: number | null
+          fetched_at?: string
+          is_active?: boolean
+          isin?: string | null
+          listing_date?: string | null
+          series?: string | null
+          symbol: string
+          updated_at?: string
+        }
+        Update: {
+          company_name?: string | null
+          created_at?: string
+          face_value?: number | null
+          fetched_at?: string
+          is_active?: boolean
+          isin?: string | null
+          listing_date?: string | null
+          series?: string | null
+          symbol?: string
+          updated_at?: string
         }
         Relationships: []
       }
@@ -2693,6 +2834,42 @@ export type Database = {
         }
         Relationships: []
       }
+      market_shares_outstanding: {
+        Row: {
+          as_of: string
+          created_at: string
+          fetched_at: string
+          free_float_shares: number | null
+          source: string
+          source_hash: string | null
+          symbol: string
+          total_shares: number | null
+          updated_at: string
+        }
+        Insert: {
+          as_of: string
+          created_at?: string
+          fetched_at?: string
+          free_float_shares?: number | null
+          source: string
+          source_hash?: string | null
+          symbol: string
+          total_shares?: number | null
+          updated_at?: string
+        }
+        Update: {
+          as_of?: string
+          created_at?: string
+          fetched_at?: string
+          free_float_shares?: number | null
+          source?: string
+          source_hash?: string | null
+          symbol?: string
+          total_shares?: number | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       market_stock_ai: {
         Row: {
           computed_at: string
@@ -2807,6 +2984,8 @@ export type Database = {
           trade_date: string | null
           vol_avg20: number | null
           volume: number | null
+          volume_bse: number | null
+          volume_nse: number | null
           vwap: number | null
         }
         Insert: {
@@ -2865,6 +3044,8 @@ export type Database = {
           trade_date?: string | null
           vol_avg20?: number | null
           volume?: number | null
+          volume_bse?: number | null
+          volume_nse?: number | null
           vwap?: number | null
         }
         Update: {
@@ -2923,6 +3104,8 @@ export type Database = {
           trade_date?: string | null
           vol_avg20?: number | null
           volume?: number | null
+          volume_bse?: number | null
+          volume_nse?: number | null
           vwap?: number | null
         }
         Relationships: []
@@ -2946,6 +3129,8 @@ export type Database = {
           market_cap: number | null
           next_earnings_at: string | null
           pe_ttm: number | null
+          price_sync_attempts: number
+          price_sync_attempts_day: string | null
           roe: number | null
           sector: string | null
           series: string | null
@@ -2973,6 +3158,8 @@ export type Database = {
           market_cap?: number | null
           next_earnings_at?: string | null
           pe_ttm?: number | null
+          price_sync_attempts?: number
+          price_sync_attempts_day?: string | null
           roe?: number | null
           sector?: string | null
           series?: string | null
@@ -3000,6 +3187,8 @@ export type Database = {
           market_cap?: number | null
           next_earnings_at?: string | null
           pe_ttm?: number | null
+          price_sync_attempts?: number
+          price_sync_attempts_day?: string | null
           roe?: number | null
           sector?: string | null
           series?: string | null
@@ -3008,6 +3197,45 @@ export type Database = {
           token?: string | null
           updated_at?: string
           yahoo_symbol?: string | null
+        }
+        Relationships: []
+      }
+      market_ticker_trace: {
+        Row: {
+          created_at: string
+          duration_ms: number | null
+          id: string
+          input_hash: string | null
+          notes: string | null
+          output_hash: string | null
+          params: Json | null
+          stage: string
+          symbol: string
+          trade_date: string
+        }
+        Insert: {
+          created_at?: string
+          duration_ms?: number | null
+          id?: string
+          input_hash?: string | null
+          notes?: string | null
+          output_hash?: string | null
+          params?: Json | null
+          stage: string
+          symbol: string
+          trade_date: string
+        }
+        Update: {
+          created_at?: string
+          duration_ms?: number | null
+          id?: string
+          input_hash?: string | null
+          notes?: string | null
+          output_hash?: string | null
+          params?: Json | null
+          stage?: string
+          symbol?: string
+          trade_date?: string
         }
         Relationships: []
       }
@@ -4156,6 +4384,7 @@ export type Database = {
           computed_at: string | null
           current_ratio: number | null
           data_as_of: string | null
+          data_provenance: Json | null
           debt_to_equity: number | null
           dii_holding: number | null
           dividend_yield: number | null
@@ -4189,12 +4418,14 @@ export type Database = {
           macd_hist: number | null
           macd_signal: number | null
           market_cap: number | null
+          market_cap_reported: number | null
           near_resistance: boolean | null
           pb: number | null
           pct_from_52w_high: number | null
           pe_ttm: number | null
           peg: number | null
           prebreakout_score: number | null
+          previous_close: number | null
           profit_growth_yoy: number | null
           profit_ttm_cr: number | null
           promoter_holding: number | null
@@ -4216,6 +4447,7 @@ export type Database = {
           sector: string | null
           sector_strength: number | null
           sme: boolean | null
+          strict_ok: boolean | null
           support_level: number | null
           symbol: string | null
           sync_source: string | null
@@ -4255,6 +4487,7 @@ export type Database = {
       }
       market_cron_call: { Args: { fn_name: string }; Returns: number }
       purge_old_jarvis_interactions: { Args: never; Returns: undefined }
+      purge_old_ticker_trace: { Args: never; Returns: undefined }
       seed_default_indices: { Args: { _uid: string }; Returns: undefined }
       verify_market_cron_secret: { Args: { _secret: string }; Returns: boolean }
     }

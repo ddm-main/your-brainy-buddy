@@ -29,9 +29,14 @@ Deno.serve(async (req) => {
     const cutoff = `${today}T00:00:00Z`; // one pass per IST day
 
     const { data: stocks, error } = await svc.from("market_stocks")
-      .select("symbol,exchange,yahoo_symbol,sector,last_price_sync_at")
+      .select("symbol,exchange,yahoo_symbol,sector,last_price_sync_at,price_sync_attempts,price_sync_attempts_day")
       .eq("is_active", true)
       .or(`last_price_sync_at.is.null,last_price_sync_at.lt.${cutoff}`)
+      // Cap same-day retries at 3 per symbol so a permanently-broken symbol
+      // (renamed, delisted, thin Yahoo data) can't wedge the chunk — but a
+      // transient 429/timeout no longer permanently freezes the row on
+      // yesterday's data (root cause of stale rows leaking into the screener).
+      .or(`price_sync_attempts_day.neq.${today},price_sync_attempts.lt.3`)
       .order("last_price_sync_at", { ascending: true, nullsFirst: true })
       .limit(CHUNK);
     if (error) return errorResponse(req, error.message, 500);
@@ -47,6 +52,7 @@ Deno.serve(async (req) => {
       while (work.length > 0) {
         const stock = work.shift();
         if (!stock) break;
+        let success = false;
         try {
           const candles = await yahooChartRetry(stock.yahoo_symbol ?? `${stock.symbol}.NS`, "2y", "1d");
           if (candles.length < 30) throw new Error("insufficient candles");
@@ -68,6 +74,22 @@ Deno.serve(async (req) => {
             throw new Error("price outlier rejected");
           }
 
+          // BSE volume for the same session — Tickertape's "Daily Volume"
+          // sums NSE + BSE traded quantity. Yahoo's `.BO` chart exposes the
+          // BSE session bar; treat any fetch failure as "no BSE listing" and
+          // fall back to NSE-only volume rather than failing the whole row.
+          const nseTradeDate = new Date(candles[candles.length - 1].time * 1000).toISOString().slice(0, 10);
+          let bseVolume: number | null = null;
+          try {
+            const bseCandles = await yahooChartRetry(`${stock.symbol}.BO`, "5d", "1d", 1);
+            const bseLast = bseCandles[bseCandles.length - 1];
+            if (bseLast) {
+              const bseDate = new Date(bseLast.time * 1000).toISOString().slice(0, 10);
+              if (bseDate === nseTradeDate) bseVolume = Number(bseLast.volume) || 0;
+            }
+          } catch { /* no BSE listing — fine */ }
+          const combinedVolume = bseVolume != null ? (snap.volume ?? 0) + bseVolume : snap.volume;
+
           // Last ~30 sessions into market_daily_prices
           const priceRows = candles.slice(-30).map((c) => ({
             symbol: stock.symbol,
@@ -86,19 +108,15 @@ Deno.serve(async (req) => {
           const bs = breakoutScore(snap, ctx);
           const ps = preBreakoutScore(snap, ctx);
 
-          // Dual-write: market_stock_scores stays the legacy table several
-          // consumers still read directly (Holdings/Watchlist/Screener.tsx,
-          // hooks.ts, market-stock-insight, market-ai-recommend,
-          // market-index-constituents, market-autotrade-action) — migrating
-          // all of them is out of scope for this pass. market_data is the
-          // new unified table the screener/alerts/autotrade paths read.
           await svc.from("market_stock_scores").upsert({
             symbol: stock.symbol,
             exchange: stock.exchange,
-            trade_date: new Date(candles[candles.length - 1].time * 1000).toISOString().slice(0, 10),
+            trade_date: nseTradeDate,
             close: snap.close,
             change_pct: snap.changePct,
-            volume: snap.volume,
+            volume: combinedVolume,
+            volume_nse: snap.volume,
+            volume_bse: bseVolume,
             vol_avg20: snap.volAvg20,
             rel_volume: snap.relVolume,
             ema20: snap.ema20,
@@ -131,59 +149,6 @@ Deno.serve(async (req) => {
             computed_at: new Date().toISOString(),
           }, { onConflict: "symbol,exchange" });
 
-          // Unified market_data — used by screener, alerts-eval, autotrade-eval.
-          await svc.from("market_data").upsert({
-            symbol: stock.symbol,
-            exchange: stock.exchange,
-            sector: stock.sector ?? null,
-            yahoo_symbol: stock.yahoo_symbol ?? null,
-            is_active: true,
-            trade_date: new Date(candles[candles.length - 1].time * 1000).toISOString().slice(0, 10),
-            ltp: snap.close,
-            previous_close: candles.length > 1 ? candles[candles.length - 2].close : null,
-            change_pct: snap.changePct,
-            change_abs: snap.changePct != null && candles.length > 1 ? snap.close - candles[candles.length - 2].close : null,
-            volume: snap.volume,
-            vol_avg_20: snap.volAvg20,
-            rel_volume: snap.relVolume,
-            ema_20: snap.ema20,
-            ema_50: snap.ema50,
-            ema_100: snap.ema100,
-            ema_200: snap.ema200,
-            rsi: snap.rsi14,
-            macd: snap.macd,
-            macd_signal: snap.macdSignal,
-            macd_hist: snap.macdHist,
-            adx: snap.adx14,
-            atr: snap.atr14,
-            atr_pct: snap.atrPct,
-            bb_upper: snap.bbUpper,
-            bb_lower: snap.bbLower,
-            bb_width: snap.bbWidth,
-            bb_squeeze: snap.bbSqueeze,
-            high_52w: snap.high52w,
-            low_52w: snap.low52w,
-            pct_from_52w_high: snap.pctFrom52wHigh,
-            above_ema_200: snap.aboveEma200,
-            higher_lows: snap.higherLows,
-            near_resistance: snap.nearResistance,
-            resistance_level: snap.resistance,
-            support_level: snap.support,
-            breakout_score: bs.score,
-            prebreakout_score: ps.score,
-            score_components: { breakout: bs.components, prebreakout: ps.components },
-            data_source: {
-              ltp: "yahoo",
-              rsi: "computed",
-              macd: "computed",
-              ema_20: "computed",
-              ema_50: "computed",
-              ema_100: "computed",
-              ema_200: "computed",
-            },
-            last_updated: new Date().toISOString(),
-          }, { onConflict: "symbol,exchange", ignoreDuplicates: false });
-
           // Chart overlays: last 250 points of EMA series
           const tail = candles.slice(-250);
           const offset = candles.length - tail.length;
@@ -196,14 +161,39 @@ Deno.serve(async (req) => {
           ], { onConflict: "symbol,exchange,timeframe,indicator" });
 
           okCount++;
-        } catch {
+          success = true;
+        } catch (err) {
           failCount++;
+          await svc.from("market_provider_health").insert({
+            provider: "yahoo", endpoint: "market-pipeline-eod", ok: false,
+            error: `${stock.symbol}: ${err instanceof Error ? err.message : String(err)}`,
+          });
         } finally {
-          // Stamp the cursor either way so one bad symbol can't wedge the pipeline
-          await svc.from("market_stocks")
-            .update({ last_price_sync_at: new Date().toISOString() })
-            .eq("symbol", stock.symbol)
-            .eq("exchange", stock.exchange);
+          // Success: mark sync fresh and reset the attempt counter.
+          // Failure: bump attempts (capped by the outer picker at 3/day) but
+          //          DO NOT advance last_price_sync_at, so the next chunk
+          //          re-selects this symbol instead of freezing yesterday's row.
+          if (success) {
+            await svc.from("market_stocks")
+              .update({
+                last_price_sync_at: new Date().toISOString(),
+                price_sync_attempts: 0,
+                price_sync_attempts_day: today,
+              })
+              .eq("symbol", stock.symbol)
+              .eq("exchange", stock.exchange);
+          } else {
+            const nextAttempts = stock.price_sync_attempts_day === today
+              ? (stock.price_sync_attempts ?? 0) + 1
+              : 1;
+            await svc.from("market_stocks")
+              .update({
+                price_sync_attempts: nextAttempts,
+                price_sync_attempts_day: today,
+              })
+              .eq("symbol", stock.symbol)
+              .eq("exchange", stock.exchange);
+          }
         }
       }
     });

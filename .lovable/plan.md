@@ -1,42 +1,55 @@
-## Root cause (verified against DB)
+Background audit
 
-Our screener's "tech" filter scope (Volume, 1D Return, RSI, Breakout, etc.) requires each row's `trade_date` to equal the freshest date in the loaded set. On the DB right now:
+I inspected the market tables, the `market_screener_rows` view, `market-nse-bhavcopy-sync`, `market-scrips-sync`, `market-fundamentals-global-sync`, `Screener.tsx`, and `screenerCatalog.ts`. The current filters are correct; the mismatch is caused by missing or stale data.
 
-- 2,703 active EQ rows total
-- Only **1,480 rows** carry today's trade_date (2026-07-22)
-- **1,223 rows** are stuck on 2026-07-21 or earlier because `market-pipeline-eod` advances a symbol's sync cursor even when its Yahoo fetch returns nothing that day (documented in `screenerCatalog.ts:31-38`)
+Key facts discovered
+- `market_eod_nse` is empty (0 rows), so the screener has no authoritative NSE close/volume/change%.
+- `market_shares_outstanding` is empty (0 rows), so the `market_screener_rows` strict market cap cannot be computed; it falls back to FMP-re-priced mcap.
+- `market_nse_master` is empty (0 rows), so `fno_enabled` and `sme` flags are derived only from `market_stocks` and miss the official NSE series.
+- `market_stocks` has only 2,705 active symbols. Tickertape covers ~4,000 because it includes all NSE EQ/BE/BZ/SM/SME series.
+- `Screener.tsx` line 206 drops every row whose `trade_date` is not exactly `latestTradeDate`. This is stricter than the 3-day lag allowed in `screenerCatalog.ts` and silently removes valid symbols.
+- `market_data` is referenced by `market-scrips-sync` and `market-fundamentals-global-sync` but does not exist in the schema; those upserts silently fail and are dead code.
 
-For the filters in the screenshot (mcap 1000-10000, price 100-1000, volume 100k-10M, 1D return 5-10%) the DB actually contains **16** matching rows. Our UI drops 6 of them — WEWORK, LOTUSDEV, KISSHT (=OnEMI), ASHIANA, EXICOM, VERANDA — purely because their `trade_date` is 2026-07-21, not 2026-07-22. Tickertape shows all 16 (plus 2 not in our universe: WATERWAYS, INDIQUBE — those are separate coverage gaps to fix later).
+What is already implemented
+- `market_screener_rows` view is correct and will use NSE EOD + shares data once it exists.
+- `market-pipeline-eod` builds technical indicators, but it sources from Yahoo and is not authoritative.
+- `market-nse-bhavcopy-sync` exists but does not authenticate with NSEIndia; it returns 503/403.
+- `market-scrips-sync` uses Kotak scrip master; without Kotak settings it only seeds NIFTY500.
+- `MarketConfig.tsx` has manual resync buttons.
 
-## What to change
+What is remaining
+1. Fix NSE EOD ingestion (`market-nse-bhavcopy-sync`):
+   - Authenticate against NSEIndia (homepage cookie + quote-equity warm-up) before downloading `BhavCopy_NSE_CM_0_0_0_YYYYMMDD_F_0000.csv.zip`.
+   - Walk back up to 6 trade days for weekends/holidays.
+   - Upsert into `market_eod_nse` and write a `market_ingestion_runs` summary.
+2. Implement `market-nse-master-sync` edge function:
+   - Download the official NSE equity master (`EQUITY_L.csv`) using the same authenticated session.
+   - Upsert `market_nse_master` (symbol, isin, company_name, series, face_value, listing_date, is_active).
+   - Expand `market_stocks` with all active NSE equity series (EQ, BE, BZ, SM, ST, SME).
+3. Implement `market-shares-outstanding-sync` edge function:
+   - Fetch `issuedSize` from NSE equity-details API per symbol (chunked, ~100 symbols/batch with concurrency).
+   - Upsert `market_shares_outstanding` with `total_shares` and `source='nse'`.
+   - Fall back to Yahoo `defaultKeyStatistics.sharesOutstanding` for any missing symbol.
+4. Implement `market-fno-list-sync` edge function:
+   - Download NSE F&O mktlots CSV (`https://archives.nseindia.com/content/fo/fo_mktlots.csv`).
+   - Mark `fno_enabled=true` in `market_stocks` for those symbols.
+5. Update screener freshness logic:
+   - Remove the strict `r.trade_date === latestTradeDate` pre-filter in `Screener.tsx`.
+   - Rely on `filterMatches` / `rowIsApplicable` which already honours the configured lag window.
+   - Keep `TECH_FRESHNESS_LAG_DAYS = 0` or change to 3 days? The comment says 3 days covers Fri-Mon. The user wants parity with Tickertape which uses settled EOD; I will keep 0 for strict same-day parity but remove the redundant pre-filter, so stale rows are treated as missing data rather than silently dropped before coverage logic runs.
+6. Clean up dead code:
+   - Remove `market_data` upserts from `market-scrips-sync` and `market-fundamentals-global-sync` since the table does not exist.
+7. Add cron schedules:
+   - `market-nse-bhavcopy-sync` daily after market close.
+   - `market-nse-master-sync` weekly.
+   - `market-shares-outstanding-sync` weekly.
+   - `market-fno-list-sync` weekly.
+8. Verification:
+   - Run unit tests (`vitest run`).
+   - Trigger the new functions manually and confirm `market_eod_nse` and `market_shares_outstanding` rows appear.
+   - Compare screener result counts for a standard Tickertape screen (e.g., `market_cap > 20,000 Cr`, `ROE > 15`).
 
-**One targeted fix in `src/lib/market/screenerCatalog.ts`.** Relax the tech-scope freshness gate so a row is considered "fresh enough" when its `trade_date` is within a small window of the latest (default: 3 trading-days). The doc comments and rationale that motivate the strict check will be preserved and updated to explain the new tolerance.
-
-Concretely, in `rowIsApplicable`:
-
-```ts
-case "tech":
-  if (row.trade_date == null) return false;
-  if (latestTradeDate != null) {
-    const lagDays = Math.round(
-      (Date.parse(`${latestTradeDate}T00:00:00Z`) - Date.parse(`${row.trade_date}T00:00:00Z`)) / 86_400_000
-    );
-    if (lagDays < 0 || lagDays > 3) return false;
-  }
-  return true;
-```
-
-This keeps stale-forever rows out (the original concern) while accepting rows that are 1-3 days behind — which matches how Tickertape/Screener.in treat EOD data. The `DataHealthStrip` "stale rows" indicator already surfaces the discrepancy visually, so users still see when a symbol is behind.
-
-Applied to the current DB, the same filters will return 16 matches instead of 10.
-
-## Not in scope for this change
-
-- **Universe coverage gap** (WATERWAYS, INDIQUBE etc. missing entirely): separate problem in `market-scrips-sync` / SME onboarding; will report but not fix in this pass unless you want it bundled.
-- **Pipeline staleness itself** (1,223 rows on old dates): a symptom of `market-pipeline-eod` cursor advancement on empty fetches — a deeper edge-function fix; would be a follow-up.
-
-## Verification
-
-- Re-run the same 4 filters in the UI — expect 16 results, matching the DB query.
-- Existing unit tests: `tests/screenerFilters.test.ts` covers scope behavior; will update/add a case for the new lag tolerance.
-- `tsgo` runs automatically after edits.
+Open questions / not in this plan
+- I will not change the fundamental provider (Yahoo/FMP); I will only fix the data the screener already tries to use.
+- I will not add new filter fields or presets; I will make the existing filters accurate.
+- I will not add a premium data source unless the user explicitly asks for it.

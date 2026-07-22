@@ -12,9 +12,7 @@ import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/
 import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 
-import { useQuotes, useQuotesBatched, useSavedScreeners, useScreenerMutations, marketOpen } from "@/lib/market/hooks";
-import { quoteKey } from "@/lib/market/pnl";
-import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { useSavedScreeners, useScreenerMutations } from "@/lib/market/hooks";
 import { useScreenerData, useScreenerSectors, useScreenerIndustries, type ScreenerRow } from "@/lib/market/screenerRun";
 import { todayIstDateString } from "@/lib/market/liveSnapshot";
 import { useUi } from "@/store/uiStore";
@@ -28,9 +26,9 @@ import {
   UNIVERSES,
   filterMatches,
   coverageOf,
-  excludedByMissingData,
   canonicalFilterId,
   latestTradeDateOf,
+  TECH_FRESHNESS_LAG_DAYS,
   type ActiveFilter,
   type FilterDef,
   type UniverseId,
@@ -81,12 +79,6 @@ const DEFAULT_COLS = COLUMNS.filter((c) => c.default).map((c) => c.id);
 const COLS_STORE_KEY = "screener.visibleCols.v3";
 const PAGE_SIZE_KEY  = "screener.pageSize.v2";
 const DEFAULT_SAVED_KEY = "market.screener.defaultSavedId";
-const AUTO_SYNC_STORE_KEY = "screener.autoFundamentalsSyncAt.v1";
-// Change%/Price filters run against a live-quote overlay (matching what the
-// results table displays) whenever the market's open — batched via
-// useQuotesBatched so the full candidate set is covered rather than silently
-// falling back to yesterday's close past some cap.
-const LIVE_SENSITIVE_FILTER_IDS = new Set(["change_pct", "ltp"]);
 
 function normalizeActiveFilters(filters: ActiveFilter[]): ActiveFilter[] {
   const byId = new Map<string, ActiveFilter>();
@@ -201,59 +193,22 @@ function ScreenerInner() {
   // those two filters to a second pass, applied against the same live overlay
   // the columns already use, once the candidate set is narrowed by everything
   // else and small enough to batch-quote.
-  const liveSensitiveActive = useMemo(
-    () => normalizeActiveFilters(active).filter((af) => LIVE_SENSITIVE_FILTER_IDS.has(af.id)),
-    [active],
-  );
-  const marketIsOpen = marketOpen();
-  const deferLiveFilters = marketIsOpen && liveSensitiveActive.length > 0;
-
-  const preLiveFiltered = useMemo(() => {
+  // Screener parity is EOD-first: filters and visible Price/Chg% are evaluated
+  // from the same settled row, matching Tickertape-style screeners. Live quote
+  // overlays made the result set drift during market hours.
+  // Freshness is enforced by rowIsApplicable inside filterMatches (tech scope),
+  // which allows a small lag window (see TECH_FRESHNESS_LAG_DAYS). Dropping
+  // every row not on the exact latestTradeDate here was silently removing
+  // symbols one trading-day behind (Yahoo skipped a session) and made the
+  // result count differ from Tickertape. The scoped applicability check now
+  // owns freshness; this pass just runs the active filters.
+  const filtered = useMemo(() => {
     let out: ScreenerRow[] = rows;
     for (const af of active) {
-      if (deferLiveFilters && LIVE_SENSITIVE_FILTER_IDS.has(af.id)) continue;
       out = out.filter((r) => filterMatches(r as any, af, latestTradeDate));
     }
     return out;
-  }, [rows, active, deferLiveFilters, latestTradeDate]);
-
-  // No candidate-count cap: a Price/1D-Return filter silently falling back to
-  // yesterday's close for large candidate sets was dropping rows whose live
-  // move crossed the filter boundary even though their EOD value didn't —
-  // exactly the symbols that diverged from parity checks against other
-  // screeners. Batched (chunks of 200, one-shot per filter change — not
-  // polled every second) so the full universe doesn't hammer Kotak/Yahoo.
-  const liveFilterKeys = useMemo(
-    () => (deferLiveFilters ? preLiveFiltered.map((r) => `${r.exchange ?? "NSE"}:${r.symbol}`) : []),
-    [deferLiveFilters, preLiveFiltered],
-  );
-  const { quotes: liveFilterQuotes, anyFailed: liveFilterFetchFailed, isFetching: liveFilterFetching } = useQuotesBatched(liveFilterKeys);
-  const liveFilterQuoteByKey = useMemo(() => {
-    const m = new Map<string, { ltp: number; change_pct: number | null }>();
-    for (const q of liveFilterQuotes) m.set(quoteKey(q.exchange, q.symbol), q);
-    return m;
-  }, [liveFilterQuotes]);
-
-  const filtered = useMemo(() => {
-    if (!deferLiveFilters) return preLiveFiltered;
-    return preLiveFiltered.filter((r) => {
-      const live = liveFilterQuoteByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
-      const overlaid = {
-        ...r,
-        ltp: live?.ltp ?? r.ltp,
-        change_pct: live?.change_pct ?? r.change_pct,
-        // When a live quote replaces the stored EOD value, treat the row as
-        // technically fresh for that filter's freshness gate — otherwise a
-        // symbol with stale trade_date but valid live quote would still be
-        // dropped by scope='tech' as "old data."
-        trade_date: live ? latestTradeDate ?? r.trade_date : r.trade_date,
-      };
-      for (const af of liveSensitiveActive) {
-        if (!filterMatches(overlaid as any, af, latestTradeDate)) return false;
-      }
-      return true;
-    });
-  }, [preLiveFiltered, deferLiveFilters, liveFilterQuoteByKey, liveSensitiveActive, latestTradeDate]);
+  }, [rows, active, latestTradeDate]);
 
 
   useEffect(() => { setPage(0); }, [active, universe, pageSize]);
@@ -440,59 +395,37 @@ function ScreenerInner() {
   const paged = useMemo(() => filtered.slice(pageStart, pageStart + pageSize), [filtered, pageStart, pageSize]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
 
-  // Live quotes for the rows actually rendered on this page (bounded to
-  // `pageSize`, never the full universe) — 1s refresh during market hours.
-  // When the live-filter pass above already fetched a superset (candidates
-  // pre-pagination), reuse that instead of firing a second overlapping batch.
-  // Skip entirely when the market's closed: useQuotes still does one fetch on
-  // mount regardless of polling interval, and that live number was silently
-  // overriding the table's Price/Chg% display with a value computed
-  // differently from the stored EOD figure the filters matched against —
-  // rows would show in the results for a 1D-Return range their visible Chg%
-  // didn't remotely resemble. Closed market -> table shows the same stored
-  // r.ltp/r.change_pct the filters used, full stop.
-  const quoteKeys = useMemo(
-    () => paged.map((r) => `${r.exchange ?? "NSE"}:${r.symbol}`),
-    [paged],
-  );
-  const skipPageQuoteFetch = deferLiveFilters || !marketIsOpen;
-  const { data: liveQuotesData } = useQuotes(skipPageQuoteFetch ? [] : quoteKeys);
-  const pushTicks = useLiveTickStore((s) => s.ticks);
-  const liveQuoteByKey = useMemo(() => {
-    const m = new Map<string, { ltp: number; change_pct: number | null }>();
-    for (const [k, q] of liveFilterQuoteByKey) m.set(k, q);
-    for (const q of liveQuotesData?.quotes ?? []) m.set(quoteKey(q.exchange, q.symbol), q);
-    for (const [key, tick] of Object.entries(pushTicks)) {
-      if (!isFreshTick(tick)) continue;
-      m.set(key, { ltp: tick.ltp, change_pct: tick.change_pct });
-    }
-    return m;
-  }, [liveFilterQuoteByKey, liveQuotesData, pushTicks]);
-
   const columns = useMemo<ColumnDef<ScreenerRow, any>[]>(() => {
     const all: Record<string, ColumnDef<ScreenerRow, any>> = {
       symbol: {
         header: "Symbol", accessorKey: "symbol",
-        cell: ({ row }) => (
-          <span>
-            <span style={{ color: "var(--accent)" }}>{row.original.symbol}</span>
-            {row.original.company_name && (
-              <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: 10 }}>{row.original.company_name}</span>
-            )}
-          </span>
-        ),
+        cell: ({ row }) => {
+          const stale = latestTradeDate != null && row.original.trade_date != null && row.original.trade_date !== latestTradeDate;
+          return (
+            <span>
+              <span style={{ color: "var(--accent)" }}>{row.original.symbol}</span>
+              {row.original.company_name && (
+                <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: 10 }}>{row.original.company_name}</span>
+              )}
+              {stale && (
+                <span title={`EOD stale: ${row.original.trade_date} vs latest ${latestTradeDate}`}
+                  style={{ marginLeft: 6, fontSize: 9, color: "var(--danger, #ff6a6a)", border: "1px solid currentColor", padding: "0 4px", borderRadius: 2 }}>STALE</span>
+              )}
+            </span>
+          );
+        },
       },
       sector:  { header: "Sector",  accessorKey: "sector",  cell: ({ getValue }) => <span style={{ fontSize: 11 }}>{getValue() as string ?? "—"}</span> },
       industry:{ header: "Industry",accessorKey: "industry",cell: ({ getValue }) => <span style={{ fontSize: 11 }}>{getValue() as string ?? "—"}</span> },
       market_cap: { header: "Mcap (Cr)", accessorKey: "market_cap", meta: { align: "right" }, cell: ({ getValue }) => fmtInt(getValue() as number | null) },
       close: {
         header: "Price", id: "livePrice", meta: { align: "right" },
-        accessorFn: (r) => liveQuoteByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol))?.ltp ?? r.ltp,
+        accessorFn: (r) => r.ltp,
         cell: ({ getValue }) => fmtNum(getValue() as number | null),
       },
       change_pct: {
         header: "Chg %", id: "liveChangePct", meta: { align: "right" },
-        accessorFn: (r) => liveQuoteByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol))?.change_pct ?? r.change_pct,
+        accessorFn: (r) => r.change_pct,
         cell: ({ getValue }) => <PctCell value={getValue() as number | null} />,
       },
       volume: { header: "Vol", accessorKey: "volume", meta: { align: "right" }, cell: ({ getValue }) => fmtInt(getValue() as number | null) },
@@ -555,7 +488,7 @@ function ScreenerInner() {
     };
     return visibleCols.map((id) => all[id]).filter(Boolean);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleCols, liveQuoteByKey]);
+  }, [visibleCols, latestTradeDate]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -641,6 +574,7 @@ function ScreenerInner() {
           universe={universe} onUniverseChange={setUniverse} />
 
         <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
+          <DataHealthStrip rows={rows} universe={universe} filteredCount={filtered.length} loading={isFetching} />
           {/* Results */}
           <HudPanel flow title={`Results · ${filtered.length}${filtered.length !== rows.length ? ` of ${rows.length}` : ""}${activeSaved ? `  ·  ${activeSaved.name}${isModified ? " (modified)" : ""}` : ""}`}
             index="MK.SC2" live={isFetching ? "warn" : error ? "err" : "ok"}
@@ -674,15 +608,7 @@ function ScreenerInner() {
                   <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
                     <span style={{ fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.16em", textTransform: "uppercase" }}>Applied</span>
                     {active.map((af) => <Chip key={af.id} tone="neutral">{chipDesc(af)}</Chip>)}
-                    {liveSensitiveActive.length > 0 && (
-                      !marketIsOpen
-                        ? <Chip tone="neutral">EOD</Chip>
-                        : liveFilterFetchFailed
-                          ? <Chip tone="err">EOD (live fetch failed) · {preLiveFiltered.length} cand.</Chip>
-                          : liveFilterFetching
-                            ? <Chip tone="warn">Live · loading…</Chip>
-                            : <Chip tone="ok">Live · {preLiveFiltered.length} cand.</Chip>
-                    )}
+                    <Chip tone="neutral">EOD</Chip>
                   </div>
                 )}
                 {/* Pagination */}
@@ -1153,13 +1079,28 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
     return () => document.removeEventListener("mousedown", onDoc);
   }, [menuOpen]);
 
+  const eodLagDays = (tradeDate: string | null | undefined): number | null => {
+    if (tradeDate == null || latestTradeDate == null) return null;
+    const latestMs = Date.parse(`${latestTradeDate}T00:00:00Z`);
+    const rowMs = Date.parse(`${tradeDate}T00:00:00Z`);
+    if (!Number.isFinite(latestMs) || !Number.isFinite(rowMs)) return null;
+    return Math.round((latestMs - rowMs) / 86_400_000);
+  };
+
   // Coverage stats: prefer authoritative DB view; fall back to loaded rows.
   const stats = useMemo(() => {
     const equities = rows.filter((r) => (r.instrument_type ?? "EQ") === "EQ");
-    // Only rows on the freshest trade_date count as "synced" — a symbol
-    // stuck on an old date (sync keeps failing for it) isn't today's data,
-    // even though it still has a non-null trade_date.
-    const withScore = rows.filter((r) => r.trade_date != null && (latestTradeDate == null || r.trade_date === latestTradeDate));
+    // Match filter semantics: rows within the 3-day EOD tolerance count as
+    // fresh enough; older rows are real gaps for technical filters.
+    const withScore = rows.filter((r) => {
+      if (r.trade_date == null) return false;
+      const lag = eodLagDays(r.trade_date);
+      return lag == null || (lag >= 0 && lag <= TECH_FRESHNESS_LAG_DAYS);
+    });
+    const lagOk = equities.filter((r) => {
+      const lag = eodLagDays(r.trade_date);
+      return lag != null && lag > 0 && lag <= TECH_FRESHNESS_LAG_DAYS;
+    }).length;
     const withSector = equities.filter((r) => r.sector != null).length;
     const withTech = withScore.filter((r) => r.rsi != null || r.adx != null).length;
     return {
@@ -1169,6 +1110,7 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
       sectorOk: withSector,
       techOk: withTech,
       techTotal: withScore.length,
+      lagOk,
       nonEquity: rows.length - equities.length,
     };
   }, [rows, pipeline, latestTradeDate]);
@@ -1183,7 +1125,8 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
     return rows
       .filter((r) => (r.instrument_type ?? "EQ") === "EQ")
       .map((r) => {
-        const isStale = r.trade_date != null && latestTradeDate != null && r.trade_date !== latestTradeDate;
+        const lag = eodLagDays(r.trade_date);
+        const isStale = lag != null && (lag < 0 || lag > TECH_FRESHNESS_LAG_DAYS);
         const missing = [
           r.trade_date == null && "no EOD row",
           isStale && `stale EOD (${r.trade_date})`,
@@ -1252,6 +1195,7 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
       <Chip tone={fundPct >= 95 ? "ok" : fundPct >= 80 ? "warn" : "err"}>Fund {fundPct}%</Chip>
       <Chip tone={sectorPct >= 95 ? "ok" : sectorPct >= 80 ? "warn" : "err"}>Sector {sectorPct}%</Chip>
       <Chip tone={techPct >= 95 ? "ok" : techPct >= 80 ? "warn" : "err"}>Tech {techPct}%</Chip>
+      {stats.lagOk > 0 && <Chip tone="neutral">{stats.lagOk} lag ok</Chip>}
       {gaps.length > 0 && (
         <button onClick={() => setGapsOpen(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }} title="Symbols missing price/change/volume — click to list">
           <Chip tone={gaps.length > stats.total * 0.1 ? "err" : "warn"}>{gaps.length} gaps</Chip>

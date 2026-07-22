@@ -7,24 +7,24 @@ import { classifyRegime, breakoutScore, preBreakoutScore } from "../_shared/mark
 import type { IndicatorSnapshot } from "../_shared/market/indicators.ts";
 import { yahooChartRetry } from "../_shared/market/yahooClient.ts";
 
-// Rebuild the scorer's input from a market_data row.
+// Rebuild the scorer's input from a market_stock_scores row (joined with stocks).
 function snapFromRow(r: any): IndicatorSnapshot {
   return {
-    close: r.ltp ?? 0,
+    close: r.close ?? 0,
     changePct: r.change_pct,
     volume: r.volume ?? 0,
-    volAvg20: r.vol_avg_20,
+    volAvg20: r.vol_avg20,
     relVolume: r.rel_volume,
-    ema20: r.ema_20,
-    ema50: r.ema_50,
-    ema100: r.ema_100,
-    ema200: r.ema_200,
-    rsi14: r.rsi,
+    ema20: r.ema20,
+    ema50: r.ema50,
+    ema100: r.ema100,
+    ema200: r.ema200,
+    rsi14: r.rsi14,
     macd: r.macd,
     macdSignal: r.macd_signal,
     macdHist: r.macd_hist,
-    adx14: r.adx,
-    atr14: r.atr,
+    adx14: r.adx14,
+    atr14: r.atr14,
     atrPct: r.atr_pct,
     bbUpper: r.bb_upper,
     bbLower: r.bb_lower,
@@ -34,8 +34,8 @@ function snapFromRow(r: any): IndicatorSnapshot {
     high52w: r.high_52w,
     low52w: r.low_52w,
     pctFrom52wHigh: r.pct_from_52w_high,
-    aboveEma200: !!r.above_ema_200,
-    emaAligned: r.ema_20 != null && r.ema_50 != null && r.ema_200 != null && r.ema_20 > r.ema_50 && r.ema_50 > r.ema_200,
+    aboveEma200: !!r.above_ema200,
+    emaAligned: r.ema20 != null && r.ema50 != null && r.ema200 != null && r.ema20 > r.ema50 && r.ema50 > r.ema200,
     higherLows: !!r.higher_lows,
     support: r.support_level,
     resistance: r.resistance_level,
@@ -61,16 +61,20 @@ Deno.serve(async (req) => {
 
     const today = istTradeDate();
 
-    // Pull all market_data rows with trade_date (paged)
+    // Pull all scored rows joined with their stock metadata (paged).
+    // Replaces the removed `market_data` monolith — reads live in
+    // `market_stock_scores`, sector/is_active live in `market_stocks`.
     const rows: any[] = [];
     for (let from = 0; ; from += 1000) {
-      const { data, error } = await svc.from("market_data")
-        .select("*")
+      const { data, error } = await svc.from("market_stock_scores")
+        .select("*, market_stocks!inner(sector,is_active)")
         .not("trade_date", "is", null)
-        .eq("is_active", true)
+        .eq("market_stocks.is_active", true)
         .range(from, from + 999);
       if (error) return errorResponse(req, error.message, 500);
-      rows.push(...(data ?? []));
+      for (const d of data ?? []) {
+        rows.push({ ...d, sector: d.sector ?? d.market_stocks?.sector ?? null });
+      }
       if (!data || data.length < 1000) break;
     }
     if (rows.length === 0) return jsonResponse(req, { ok: true, note: "no trade data yet — run market-pipeline-eod first" });
@@ -80,11 +84,11 @@ Deno.serve(async (req) => {
     const declines = rows.filter((r) => (r.change_pct ?? 0) < 0).length;
     const unchanged = rows.length - advances - declines;
     const pctAbove = (key: string) =>
-      (rows.filter((r) => r[key] != null && r.ltp != null && r.ltp > r[key]).length / rows.length) * 100;
-    const pctAboveEma20 = pctAbove("ema_20");
-    const pctAboveEma50 = pctAbove("ema_50");
-    const pctAboveEma200 = pctAbove("ema_200");
-    const rsiVals = rows.map((r) => r.rsi).filter((v: number | null): v is number => v != null);
+      (rows.filter((r) => r[key] != null && r.close != null && r.close > r[key]).length / rows.length) * 100;
+    const pctAboveEma20 = pctAbove("ema20");
+    const pctAboveEma50 = pctAbove("ema50");
+    const pctAboveEma200 = pctAbove("ema200");
+    const rsiVals = rows.map((r) => r.rsi14).filter((v: number | null): v is number => v != null);
     const avgRsi = rsiVals.length ? rsiVals.reduce((a: number, b: number) => a + b, 0) / rsiVals.length : null;
     const regime = classifyRegime(pctAboveEma50, avgRsi);
 
@@ -126,8 +130,8 @@ Deno.serve(async (req) => {
     }
     const sectorStats = [...bySector.entries()].map(([sector, list]) => {
       const chg = list.map((r) => r.change_pct).filter((v): v is number => v != null);
-      const rsis = list.map((r) => r.rsi).filter((v): v is number => v != null);
-      const above50 = list.filter((r) => r.ema_50 != null && r.ltp != null && r.ltp > r.ema_50).length;
+      const rsis = list.map((r) => r.rsi14).filter((v): v is number => v != null);
+      const above50 = list.filter((r) => r.ema50 != null && r.close != null && r.close > r.ema50).length;
       return {
         sector,
         stock_count: list.length,
@@ -153,38 +157,20 @@ Deno.serve(async (req) => {
       const batch = rows.slice(i, i + 50);
       await Promise.all(batch.map(async (r) => {
         const rank = sectorRank.get(r.sector || "Unknown");
-        // 1 = strongest → normalize to 0..1 (strongest → 1)
         const sectorStrength = rank != null && nSectors > 1 ? 1 - (rank - 1) / (nSectors - 1) : 0.5;
-        // Relative strength: stock 55-session return vs NIFTY.
         let relStrength: number | null = null;
-        if (niftyReturn55 != null && r.ltp != null && r.ema_50 != null && r.ema_50 !== 0) {
-          const base = r.ema_100 ?? r.ema_50;
-          const stockTrendPct = ((r.ltp - base) / base) * 100;
+        if (niftyReturn55 != null && r.close != null && r.ema50 != null && r.ema50 !== 0) {
+          const base = r.ema100 ?? r.ema50;
+          const stockTrendPct = ((r.close - base) / base) * 100;
           relStrength = stockTrendPct - (niftyClose != null && niftyReturn55 != null ? niftyReturn55 * 0.5 : 0);
         }
         const snap = snapFromRow(r);
-        const ctx = { sectorStrength, regime, relStrengthNifty: relStrength, deliveryPct: r.delivery_percent ?? null };
+        const ctx = { sectorStrength, regime, relStrengthNifty: relStrength, deliveryPct: null };
         const bs = breakoutScore(snap, ctx);
         const ps = preBreakoutScore(snap, ctx);
         const scoreComponents = { breakout: bs.components, prebreakout: ps.components };
         const nowIso = new Date().toISOString();
-        const { error } = await svc.from("market_data").update({
-          sector_strength: Math.round(sectorStrength * 100) / 100,
-          rel_strength_nifty: relStrength != null ? Math.round(relStrength * 100) / 100 : null,
-          breakout_score: bs.score,
-          prebreakout_score: ps.score,
-          score_components: scoreComponents,
-          last_updated: nowIso,
-        }).eq("symbol", r.symbol).eq("exchange", r.exchange);
-        if (!error) updated++;
-        // Dual-write the final (post-market-context) score back to the legacy
-        // table — market-pipeline-eod only ever writes a *preliminary* score
-        // here (neutral sectorStrength/regime/relStrength), and this pass was
-        // never filling in the real one, so every consumer still reading
-        // market_stock_scores directly (market-index-constituents,
-        // market-stock-insight, market-ai-recommend, market-autotrade-action)
-        // was permanently stuck on the pre-context number.
-        await svc.from("market_stock_scores").update({
+        const { error } = await svc.from("market_stock_scores").update({
           sector_strength: Math.round(sectorStrength * 100) / 100,
           rel_strength_nifty: relStrength != null ? Math.round(relStrength * 100) / 100 : null,
           breakout_score: bs.score,
@@ -192,53 +178,9 @@ Deno.serve(async (req) => {
           score_components: scoreComponents,
           computed_at: nowIso,
         }).eq("symbol", r.symbol).eq("exchange", r.exchange);
+        if (!error) updated++;
       }));
     }
-
-    // ---- Portfolio value snapshots — once daily, now that today's EOD
-    // closes are in `rows`. A holding whose symbol has no close this run
-    // (not yet synced) is excluded from value/invested/pnl (unknown, not
-    // zero) rather than making an understated number that looks complete —
-    // same null-safety contract as holdingPnl() in src/lib/market/pnl.ts,
-    // reimplemented here rather than importing across the frontend/edge-
-    // function boundary. Only nulls the whole day's totals when EVERY
-    // holding is unresolved; previously any single unresolved holding
-    // nulled the entire day even if the rest had resolved, inconsistent
-    // with Holdings.tsx's own partial-sum-when-possible policy.
-    try {
-      const { data: allHoldings } = await svc.from("market_holdings")
-        .select("user_id,symbol,exchange,quantity,avg_price");
-      if (allHoldings?.length) {
-        const closeByKey = new Map<string, number>();
-        for (const r of rows) if (r.ltp != null) closeByKey.set(`${r.symbol}:${r.exchange}`, r.ltp);
-        const byUser = new Map<string, { value: number; knownInvested: number; unresolved: number; count: number }>();
-        for (const h of allHoldings) {
-          const cur = byUser.get(h.user_id) ?? { value: 0, knownInvested: 0, unresolved: 0, count: 0 };
-          cur.count++;
-          const ltp = closeByKey.get(`${h.symbol}:${h.exchange}`);
-          if (ltp != null) {
-            cur.value += ltp * Number(h.quantity);
-            cur.knownInvested += Number(h.avg_price) * Number(h.quantity);
-          } else {
-            cur.unresolved++;
-          }
-          byUser.set(h.user_id, cur);
-        }
-        const snapshotRows = [...byUser.entries()].map(([user_id, v]) => {
-          const allUnresolved = v.unresolved === v.count;
-          return {
-            user_id, snapshot_date: today,
-            total_value: allUnresolved ? null : v.value,
-            total_invested: allUnresolved ? null : v.knownInvested,
-            total_pnl: allUnresolved ? null : v.value - v.knownInvested,
-            unresolved_count: v.unresolved,
-          };
-        });
-        if (snapshotRows.length > 0) {
-          await svc.from("market_portfolio_snapshots").upsert(snapshotRows, { onConflict: "user_id,snapshot_date" });
-        }
-      }
-    } catch { /* portfolio snapshots are a nice-to-have — never fail the aggregates pass over this */ }
 
     return jsonResponse(req, {
       ok: true,

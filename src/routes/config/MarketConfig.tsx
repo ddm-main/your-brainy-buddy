@@ -33,7 +33,7 @@ export default function MarketConfig() {
   const nav = useNavigate();
   const push = useUi((s) => s.push);
   const qc = useQueryClient();
-  const [busy, setBusy] = useState<null | "fund" | "eod" | "agg">(null);
+  const [busy, setBusy] = useState<null | "fund" | "eod" | "agg" | "nse" | "master" | "shares">(null);
   const mounted = useRef(true);
   useEffect(() => () => { mounted.current = false; }, []);
 
@@ -49,9 +49,9 @@ export default function MarketConfig() {
   });
 
   const trigger = async (
-    fn: "market-fundamentals-global-sync" | "market-pipeline-eod" | "market-pipeline-aggregates",
+    fn: "market-fundamentals-global-sync" | "market-pipeline-eod" | "market-pipeline-aggregates" | "market-nse-bhavcopy-sync" | "market-nse-master-sync" | "market-shares-outstanding-sync",
     label: string,
-    key: "fund" | "eod" | "agg",
+    key: "fund" | "eod" | "agg" | "nse" | "master" | "shares",
   ) => {
     if (busy) return;
     setBusy(key);
@@ -126,6 +126,21 @@ export default function MarketConfig() {
             Pipeline runs automatically via server crons and a silent background sync. Use these only if data looks stale.
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className="hud-btn" data-variant="ghost" data-size="sm" disabled={busy !== null}
+              onClick={() => trigger("market-nse-master-sync", "NSE master", "master")}>
+              <Database size={11} style={{ marginRight: 6, verticalAlign: "middle" }} />
+              {busy === "master" ? "syncing…" : "Sync NSE master (universe expansion)"}
+            </button>
+            <button className="hud-btn" data-variant="ghost" data-size="sm" disabled={busy !== null}
+              onClick={() => trigger("market-nse-bhavcopy-sync", "NSE bhavcopy", "nse")}>
+              <Database size={11} style={{ marginRight: 6, verticalAlign: "middle" }} />
+              {busy === "nse" ? "syncing…" : "Sync NSE bhavcopy (authoritative EOD)"}
+            </button>
+            <button className="hud-btn" data-variant="ghost" data-size="sm" disabled={busy !== null}
+              onClick={() => trigger("market-shares-outstanding-sync", "Shares outstanding", "shares")}>
+              <Database size={11} style={{ marginRight: 6, verticalAlign: "middle" }} />
+              {busy === "shares" ? "syncing…" : "Sync shares outstanding (true mcap)"}
+            </button>
             <button className="hud-btn" data-variant="ghost" data-size="sm" disabled={busy !== null}
               onClick={() => trigger("market-fundamentals-global-sync", "Fundamentals", "fund")}>
               <Database size={11} style={{ marginRight: 6, verticalAlign: "middle" }} />

@@ -104,6 +104,14 @@ describe("latestTradeDateOf + stale-trade_date gating", () => {
     expect(filterMatches(lag3, af, "2026-07-21")).toBe(true);
     expect(filterMatches(lag4, af, "2026-07-21")).toBe(false);
   });
+
+  it("a Price filter uses the same fresh-enough EOD gate as Volume and 1D Return", () => {
+    const freshEnough = { symbol: "OK", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-20", ltp: 250 };
+    const stale = { symbol: "OLD", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-16", ltp: 250 };
+    const af: ActiveFilter = { id: "ltp", min: 100, max: 1000 };
+    expect(filterMatches(freshEnough, af, "2026-07-22")).toBe(true);
+    expect(filterMatches(stale, af, "2026-07-22")).toBe(false);
+  });
 });
 
 describe("coverageOf — denominator is the scoped set, numerator is fields actually present", () => {
