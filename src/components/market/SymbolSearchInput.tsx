@@ -42,7 +42,7 @@ export function SymbolSearchInput({
         .select("symbol,exchange,company_name")
         .eq("is_active", true)
         .or(`symbol.ilike.${term}%,company_name.ilike.%${term}%`)
-        .limit(8);
+        .limit(10);
       if (exchange) q = q.eq("exchange", exchange);
       const { data } = await q;
       if (seq !== reqSeq.current) return; // stale response — a newer keystroke already fired
