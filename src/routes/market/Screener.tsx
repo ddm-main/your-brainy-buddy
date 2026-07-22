@@ -79,6 +79,7 @@ const DEFAULT_COLS = COLUMNS.filter((c) => c.default).map((c) => c.id);
 const COLS_STORE_KEY = "screener.visibleCols.v3";
 const PAGE_SIZE_KEY  = "screener.pageSize.v2";
 const DEFAULT_SAVED_KEY = "market.screener.defaultSavedId";
+const STATE_STORE_KEY = "screener.state.v2"; // { universe, active, savedId } — persists across visits so re-opening doesn't reset filters or the attached saved screen
 
 // Filter-id → column-id map used when the user has active filters. The
 // results grid then renders ONLY the columns matching what they filtered on
@@ -174,8 +175,11 @@ function ScreenerInner() {
   const push = useUi((s) => s.push);
   const nav = useNavigate();
 
-  const [universe, setUniverse] = useState<UniverseId>("all");
-  const [active, setActive] = useState<ActiveFilter[]>([]);
+  // Persisted across visits — the Screener page should resume where the user left it,
+  // not reset to All Stocks / no filters every time they navigate away and back.
+  const persisted = useMemo(() => safeStorage.getJSON<{ universe?: UniverseId; active?: ActiveFilter[]; savedId?: string | null } | null>(STATE_STORE_KEY, null), []);
+  const [universe, setUniverse] = useState<UniverseId>(persisted?.universe ?? "all");
+  const [active, setActive] = useState<ActiveFilter[]>(() => normalizeActiveFilters(persisted?.active ?? []));
   const [visibleCols, setVisibleCols] = useState<string[]>(() => {
     const parsed = safeStorage.getJSON<string[] | null>(COLS_STORE_KEY, null);
     return Array.isArray(parsed) && parsed.length > 0 ? parsed : DEFAULT_COLS;
@@ -252,7 +256,6 @@ function ScreenerInner() {
   const didHydrateFromUrlRef = useRef(false);
   useEffect(() => {
     if (didHydrateFromUrlRef.current) return;
-    didHydrateFromUrlRef.current = true;
     try {
       const p = new URLSearchParams(window.location.search).get("f");
       if (!p) return;
@@ -261,25 +264,22 @@ function ScreenerInner() {
       const parsed = JSON.parse(raw);
       if (parsed?.universe) setUniverse(parsed.universe as UniverseId);
       if (Array.isArray(parsed?.active)) setActive(normalizeActiveFilters(parsed.active));
+      didHydrateFromUrlRef.current = true;
     } catch { /* ignore malformed */ }
   }, []);
   useEffect(() => {
-    if (!didHydrateFromUrlRef.current) return;
     try {
-      const payload = JSON.stringify({ universe, active });
-      const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(payload)));
       const url = new URL(window.location.href);
-      if (active.length === 0 && universe === "all") url.searchParams.delete("f");
-      else url.searchParams.set("f", b64);
+      if (active.length === 0 && universe === "all") {
+        url.searchParams.delete("f");
+      } else {
+        const payload = JSON.stringify({ universe, active });
+        const b64 = btoa(String.fromCharCode(...new TextEncoder().encode(payload)));
+        url.searchParams.set("f", b64);
+      }
       window.history.replaceState(null, "", url.toString());
     } catch { /* */ }
   }, [universe, active]);
-  const shareLink = () => {
-    try {
-      navigator.clipboard?.writeText(window.location.href);
-      push("Share link copied", "ok");
-    } catch { push("Copy failed", "err"); }
-  };
 
 
   // "+ Add Filter" picker: bring a filter into the sidebar with an empty
@@ -319,28 +319,44 @@ function ScreenerInner() {
     setActive((a) => a.filter((af) => canonicalFilterId(af.id) !== id));
   };
 
-  const [saveName, setSaveName] = useState("");
+  const [saveModalOpen, setSaveModalOpen] = useState(false);
+  const [saveModalName, setSaveModalName] = useState("");
 
   // Track which saved screen is currently loaded so we can badge it on the
   // page (name + "modified" state) and update-in-place instead of always
   // inserting duplicates on Save.
-  const [activeSavedId, setActiveSavedId] = useState<string | null>(null);
+  const [activeSavedId, setActiveSavedId] = useState<string | null>(persisted?.savedId ?? null);
   const [activeSavedSig, setActiveSavedSig] = useState<string | null>(null);
-  const sigOf = (u: UniverseId, a: ActiveFilter[]) =>
-    JSON.stringify({ u, a: [...a].map((x) => ({ ...x, id: canonicalFilterId(x.id) })).sort((x, y) => x.id.localeCompare(y.id)) });
+  // Normalize before hashing so identical-looking states (e.g. "" vs undefined,
+  // "5" vs 5, unsorted enum values) don't get mis-flagged as "modified".
+  const sigOf = (u: UniverseId, a: ActiveFilter[]) => {
+    const norm = a
+      .map((x) => {
+        const id = canonicalFilterId(x.id);
+        const min = x.min === "" || x.min === undefined ? null : Number(x.min);
+        const max = x.max === "" || x.max === undefined ? null : Number(x.max);
+        const bool = x.bool === undefined ? null : Boolean(x.bool);
+        const values = Array.isArray(x.values) ? [...x.values].sort() : null;
+        return { id, min, max, bool, values };
+      })
+      .sort((x, y) => x.id.localeCompare(y.id));
+    return JSON.stringify({ u, a: norm });
+  };
   const currentSig = sigOf(universe, active);
   const activeSaved = activeSavedId ? saved.find((s) => s.id === activeSavedId) ?? null : null;
   const isModified = !!activeSaved && activeSavedSig !== null && currentSig !== activeSavedSig;
+  // Persist filters + attached saved-id so a page reload restores the badge too.
+  useEffect(() => { safeStorage.setJSON(STATE_STORE_KEY, { universe, active, savedId: activeSavedId }); }, [universe, active, activeSavedId]);
   const detachSaved = () => {
     setActiveSavedId(null);
     setActiveSavedSig(null);
     try { localStorage.removeItem(DEFAULT_SAVED_KEY); } catch { /* */ }
   };
 
-  const saveScreener = () => {
-    // If a saved screen is loaded and the user didn't type a new name, update
-    // it in place. Otherwise insert a new row under the typed name.
-    const trimmed = saveName.trim();
+  const saveScreener = (nameArg?: string) => {
+    // If a saved screen is loaded and no explicit name was given, update
+    // it in place. Otherwise insert a new row under the given name.
+    const trimmed = (nameArg ?? "").trim();
     if (activeSaved && !trimmed) {
       save.mutate(
         { id: activeSaved.id, name: activeSaved.name, filters: { v: 3, universe, active } as any },
@@ -360,10 +376,8 @@ function ScreenerInner() {
       {
         onSuccess: () => {
           push("Screener saved", "ok");
-          setSaveName("");
-          // The new row will appear in `saved` on next refetch; the picker
-          // can then be used to load it. We don't auto-attach here because
-          // we don't yet have the new row's id.
+          setSaveModalOpen(false);
+          setSaveModalName("");
         },
         onError: (e) => push(e.message, "err"),
       }
@@ -401,12 +415,31 @@ function ScreenerInner() {
 
   // Auto-apply the last-loaded saved screener on mount (unless a shared ?f= link
   // is present — URL state wins). Runs once, when `saved` first resolves.
+  // If persisted state already has a savedId, we re-attach it (no filter
+  // rewrite — persisted filters win, we just restore the badge + baseline sig).
   const didAutoLoadRef = useRef(false);
   useEffect(() => {
     if (didAutoLoadRef.current) return;
     if (saved.length === 0) return;
     try {
       if (new URLSearchParams(window.location.search).get("f")) { didAutoLoadRef.current = true; return; }
+      // Re-attach previously-loaded saved screen so the "★ Screen 2" badge
+      // survives reloads even when persisted filters win.
+      if (activeSavedId) {
+        const match = saved.find((s) => s.id === activeSavedId);
+        if (match) {
+          const f: any = match.filters;
+          const baseUniverse: UniverseId = (f && typeof f === "object" && !Array.isArray(f) && f.universe) ? f.universe as UniverseId : "all";
+          const baseActive: ActiveFilter[] = (f && typeof f === "object" && !Array.isArray(f) && Array.isArray(f.active))
+            ? normalizeActiveFilters(f.active) : [];
+          setActiveSavedSig(sigOf(baseUniverse, baseActive));
+          didAutoLoadRef.current = true;
+          return;
+        }
+      }
+      if (persisted && ((persisted.active && persisted.active.length > 0) || (persisted.universe && persisted.universe !== "all"))) {
+        didAutoLoadRef.current = true; return;
+      }
       const id = localStorage.getItem(DEFAULT_SAVED_KEY);
       if (!id) { didAutoLoadRef.current = true; return; }
       const match = saved.find((s) => s.id === id);
@@ -554,99 +587,115 @@ function ScreenerInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveCols, latestTradeDate]);
 
+  const [healthOpen, setHealthOpen] = useState(false);
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {/* Top bar */}
-      <HudPanel flow title="Screener" index="MK.SC0"
-        actions={
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-            {activeSaved && (
-              <span
-                title={isModified ? "Modified since load — Save to update" : "Loaded saved screen"}
-                style={{
-                  display: "inline-flex", alignItems: "center", gap: 6,
-                  padding: "4px 8px", borderRadius: 2,
-                  border: `1px solid ${isModified ? "var(--warn, #d29a2b)" : "var(--edge-strong)"}`,
-                  background: "rgba(53,214,237,0.06)",
-                  fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em",
-                  textTransform: "uppercase",
-                  color: isModified ? "var(--warn, #d29a2b)" : "var(--accent)",
-                }}
-              >
-                <span style={{ width: 6, height: 6, borderRadius: "50%", background: "currentColor" }} />
-                {activeSaved.name}{isModified ? " • modified" : ""}
-                <button
-                  type="button"
-                  aria-label="Detach saved screen"
-                  onClick={detachSaved}
-                  style={{
-                    display: "inline-flex", alignItems: "center", justifyContent: "center",
-                    width: 16, height: 16, marginLeft: 2, padding: 0,
-                    background: "transparent", color: "inherit",
-                    border: "1px solid currentColor", borderRadius: 2, cursor: "pointer",
-                  }}
-                >
-                  <X size={9} />
-                </button>
-              </span>
-            )}
-            <SavedPicker saved={saved} onLoad={loadSaved} onDelete={(id) => {
-              try {
-                if (localStorage.getItem(DEFAULT_SAVED_KEY) === id) localStorage.removeItem(DEFAULT_SAVED_KEY);
-              } catch { /* */ }
-              if (activeSavedId === id) { setActiveSavedId(null); setActiveSavedSig(null); }
-              remove.mutate(id, { onError: (e) => push(e.message, "err") });
-            }} />
-            <input value={saveName} onChange={(e) => setSaveName(e.target.value)}
-              placeholder={activeSaved && !saveName ? `update "${activeSaved.name}"` : "save as…"}
-              aria-label="Save screener as"
-              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveScreener(); } }}
-              style={{ ...inputStyle, padding: "6px 8px", fontSize: 11, width: 130 }} />
-            <Btn size="sm" onClick={saveScreener}>
-              <Save size={11} style={{ marginRight: 4 }} />
-              {activeSaved && !saveName.trim() ? "Update" : "Save"}
-            </Btn>
-            <Btn size="sm" onClick={shareLink} title="Copy shareable link">Share</Btn>
-            {active.length > 0 && (
-              <Btn size="sm" variant="danger" onClick={() => { setActive([]); detachSaved(); }}>
-                <RotateCcw size={11} style={{ marginRight: 4 }} />Reset
-              </Btn>
-            )}
-          </div>
-        }
-      >
-        <></>
-      </HudPanel>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, height: "100%", minHeight: 0 }}>
+      {/* Slim toolbar — no wasted vertical space, no duplicate name. */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+        padding: "6px 8px", border: "1px solid var(--edge)",
+        background: "rgba(53,214,237,0.03)",
+      }}>
+        <span className="hud-label" style={{ color: "var(--accent)", fontSize: 11, marginRight: 4 }}>Screener</span>
+        {activeSaved && (
+          <span
+            title={isModified ? "Modified since load — click Save to update" : "Loaded saved screen"}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              padding: "3px 8px", borderRadius: 2,
+              border: `1px solid ${isModified ? "var(--warn, #d29a2b)" : "var(--edge-strong)"}`,
+              background: "rgba(53,214,237,0.06)",
+              fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em",
+              textTransform: "uppercase",
+              color: isModified ? "var(--warn, #d29a2b)" : "var(--accent)",
+            }}
+          >
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "currentColor" }} />
+            {activeSaved.name}{isModified ? " • modified" : ""}
+            <button type="button" aria-label="Detach saved screen" onClick={detachSaved}
+              style={{
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                width: 16, height: 16, marginLeft: 2, padding: 0,
+                background: "transparent", color: "inherit",
+                border: "1px solid currentColor", borderRadius: 2, cursor: "pointer",
+              }}>
+              <X size={9} />
+            </button>
+          </span>
+        )}
+        <SavedPicker saved={saved} activeId={activeSavedId} onLoad={loadSaved} onDelete={(id) => {
+          try { if (localStorage.getItem(DEFAULT_SAVED_KEY) === id) localStorage.removeItem(DEFAULT_SAVED_KEY); } catch { /* */ }
+          if (activeSavedId === id) { setActiveSavedId(null); setActiveSavedSig(null); }
+          remove.mutate(id, { onError: (e) => push(e.message, "err") });
+        }} />
+        <Btn size="sm" onClick={() => {
+          if (activeSaved && isModified) { saveScreener(); return; }
+          setSaveModalName(activeSaved ? "" : "");
+          setSaveModalOpen(true);
+        }}>
+          <Save size={11} style={{ marginRight: 4 }} />
+          {activeSaved && isModified ? "Update" : "Save"}
+        </Btn>
+        {active.length > 0 && (
+          <Btn size="sm" variant="danger" onClick={() => { setActive([]); detachSaved(); }}>
+            <RotateCcw size={11} style={{ marginRight: 4 }} />Reset
+          </Btn>
+        )}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
+            {isFetching ? "loading…" : `${filtered.length} / ${rows.length}`}
+          </span>
+          <Btn size="sm" variant="ghost" onClick={() => setHealthOpen(true)} title="Pipeline health & resync">Health</Btn>
+        </div>
+      </div>
 
       {isDataStale && (
         <div style={{
-          display: "flex", alignItems: "center", gap: 8, padding: "8px 12px",
+          display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
           border: "1px solid var(--danger)", borderRadius: 2, background: "rgba(255,80,80,0.08)",
         }}>
           <AlertTriangle size={14} color="var(--danger)" style={{ flexShrink: 0 }} />
           <span style={{ fontSize: 12, color: "var(--danger)" }}>
-            Data is {dataStaleDays} day{dataStaleDays === 1 ? "" : "s"} behind — the EOD pipeline hasn't caught up to today.
-            Results may not reflect real recent moves. Trigger a manual sync from the ⋯ menu below, or wait for the next scheduled run.
+            Data is {dataStaleDays} day{dataStaleDays === 1 ? "" : "s"} behind — EOD pipeline hasn't caught up.
           </span>
         </div>
       )}
 
-      {/* Two-pane workspace: filters sidebar (universe + add/remove filters) + results */}
-      <div style={{ display: "grid", gridTemplateColumns: "370px 1fr", gap: 12, alignItems: "start" }}>
-        <FilterRail rows={rows} active={active} onAdd={addFilter} onChange={setFilterValue} onClear={removeFilter}
-          sectorList={sectorList} industryList={industryList}
-          universe={universe} onUniverseChange={setUniverse} />
+      {/* Save-as modal — replaces the always-visible inline input. */}
+      <HudModal open={saveModalOpen} onClose={() => setSaveModalOpen(false)}
+        title={activeSaved ? `Save a copy of "${activeSaved.name}"` : "Save screener"} width={380}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <label style={labelStyle}>Name</label>
+          <input autoFocus value={saveModalName} onChange={(e) => setSaveModalName(e.target.value)}
+            placeholder="e.g. High-volume breakouts"
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveScreener(saveModalName); } }}
+            style={{ ...inputStyle, padding: "8px 10px", fontSize: 12 }} />
+          <div style={{ display: "flex", gap: 6, justifyContent: "flex-end", marginTop: 4 }}>
+            <Btn size="sm" variant="ghost" onClick={() => setSaveModalOpen(false)}>Cancel</Btn>
+            <Btn size="sm" onClick={() => saveScreener(saveModalName)} disabled={!saveModalName.trim()}>Save</Btn>
+          </div>
+        </div>
+      </HudModal>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
-          <DataHealthStrip rows={rows} universe={universe} filteredCount={filtered.length} loading={isFetching} />
-          {/* Results */}
-          <HudPanel flow title={`Results · ${filtered.length}${filtered.length !== rows.length ? ` of ${rows.length}` : ""}${activeSaved ? `  ·  ${activeSaved.name}${isModified ? " (modified)" : ""}` : ""}`}
+      {/* Health drawer — chips no longer clutter the header. */}
+      <HudModal open={healthOpen} onClose={() => setHealthOpen(false)} title="Data health & pipeline" width={520}>
+        <DataHealthStrip rows={rows} universe={universe} filteredCount={filtered.length} loading={isFetching} />
+      </HudModal>
+
+      {/* Two-pane workspace — fills the remaining viewport, no wasted space. */}
+      <div style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: 8, alignItems: "stretch", flex: 1, minHeight: 0 }}>
+        <div style={{ minHeight: 0, overflow: "auto" }}>
+          <FilterRail rows={rows} active={active} onAdd={addFilter} onChange={setFilterValue} onClear={removeFilter}
+            sectorList={sectorList} industryList={industryList}
+            universe={universe} onUniverseChange={setUniverse} />
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0, minHeight: 0 }}>
+          <HudPanel flow title={`Results · ${filtered.length}${filtered.length !== rows.length ? ` of ${rows.length}` : ""}`}
             index="MK.SC2" live={isFetching ? "warn" : error ? "err" : "ok"}
             actions={
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                {/* Tickertape parity: when the user has active filters, the
-                    grid auto-reflects those columns; column picker only shows
-                    for exploratory (unfiltered) browsing. */}
                 {active.length === 0 && <ColumnPresetPicker onPick={setVisibleCols} />}
                 {active.length === 0 && <ColumnPicker value={visibleCols} onChange={setVisibleCols} />}
                 <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}
@@ -678,7 +727,6 @@ function ScreenerInner() {
                     <Chip tone="neutral">EOD</Chip>
                   </div>
                 )}
-                {/* Pagination */}
                 {filtered.length > pageSize && (
                   <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
                     <span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.14em" }}>
@@ -878,8 +926,8 @@ function InlineFilterEditor({ def, af, rows, sectorList, industryList, onChange,
 // ============================================================================
 // Saved picker
 // ============================================================================
-function SavedPicker({ saved, onLoad, onDelete }: {
-  saved: SavedScreener[]; onLoad: (s: SavedScreener) => void; onDelete: (id: string) => void;
+function SavedPicker({ saved, activeId, onLoad, onDelete }: {
+  saved: SavedScreener[]; activeId: string | null; onLoad: (s: SavedScreener) => void; onDelete: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -896,27 +944,35 @@ function SavedPicker({ saved, onLoad, onDelete }: {
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
+  const activeName = activeId ? saved.find((s) => s.id === activeId)?.name ?? null : null;
   return (
     <div ref={ref} style={{ position: "relative" }}>
-      <button ref={triggerRef} className="hud-btn" data-variant="ghost" data-size="sm"
-        onClick={() => setOpen((o) => !o)} disabled={saved.length === 0}>
-        My Screens · {saved.length}
+      <button ref={triggerRef} className="hud-btn" data-variant={activeName ? "solid" : "ghost"} data-size="sm"
+        onClick={() => setOpen((o) => !o)} disabled={saved.length === 0}
+        title={activeName ? `Loaded: ${activeName}` : "My Screens"}>
+        {activeName ? `★ ${activeName}` : `My Screens · ${saved.length}`}
       </button>
       {open && saved.length > 0 && pos && createPortal(
         <div ref={popRef} style={{ ...popoverStyle, ...pos, width: 240, maxHeight: 360, overflowY: "auto" }}>
-          {saved.map((s) => (
-            <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 6px", borderBottom: "1px solid var(--edge)" }}>
-              <button onClick={() => { onLoad(s); setOpen(false); }}
-                style={{ flex: 1, background: "none", border: "none", textAlign: "left", cursor: "pointer",
-                         color: "var(--accent)", fontFamily: "var(--font-hud)", fontSize: 11, letterSpacing: "0.1em" }}>
-                {s.name}
-              </button>
-              <button onClick={() => onDelete(s.id)} title="Delete"
-                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)" }}>
-                <X size={11} />
-              </button>
-            </div>
-          ))}
+          {saved.map((s) => {
+            const isActive = s.id === activeId;
+            return (
+              <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 6px", borderBottom: "1px solid var(--edge)",
+                                       background: isActive ? "rgba(53,214,237,0.12)" : "transparent" }}>
+                <button onClick={() => { onLoad(s); setOpen(false); }}
+                  style={{ flex: 1, background: "none", border: "none", textAlign: "left", cursor: "pointer",
+                           color: isActive ? "var(--text)" : "var(--accent)", fontFamily: "var(--font-hud)", fontSize: 11, letterSpacing: "0.1em",
+                           display: "flex", alignItems: "center", gap: 6 }}>
+                  {isActive && <Check size={10} style={{ color: "var(--accent)" }} />}
+                  <span>{s.name}</span>
+                </button>
+                <button onClick={() => onDelete(s.id)} title="Delete"
+                  style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)" }}>
+                  <X size={11} />
+                </button>
+              </div>
+            );
+          })}
         </div>,
         document.body,
       )}

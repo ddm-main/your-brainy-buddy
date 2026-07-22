@@ -1,154 +1,72 @@
-## Goal
-Bring the JARVIS screener as close as technically possible to Tickertape parity, with no silent fallbacks, no stale values presented as fresh, and audit visibility for every mismatch.
 
-## Confirmed from the current app/database
-- `market_screener_rows` currently calculates market cap from:
-  1. latest `market_shares_outstanding.total_shares × NSE close`,
-  2. else `market_stock_scores.close`,
-  3. else repriced provider market cap using `fundamentals market_cap × current close / fundamentals price`,
-  4. else raw fundamentals/stocks market cap.
-- For the screenshot symbols:
-  - `BBL` and `DPABHUSHAN` use `shares_x_nse_close` from Yahoo share counts.
-  - `TEGA`, `SHILCTECH`, and `ZOTA` have no row in `market_shares_outstanding`, so the view falls back to `fmp_repriced`.
-  - `market_value_audit` has no stored Tickertape comparison rows for these symbols, so parity is not being continuously validated for the reported mismatch set.
-- `market-data-validation` is pointed at legacy `market_data`, not the active `market_screener_rows` pipeline, so it is not validating the actual numbers shown in the screener.
+## Scope
+Edit only the Screener UI shell and its sub-components in `src/routes/market/Screener.tsx`. No changes to filter catalog, data pipeline, or saved-screener persistence contracts.
 
-## Required improvements
+## User-reported issues → fixes
 
-### 1. DB-first: add a provider observation + consensus layer
-Create durable tables for normalized provider values instead of overwriting one canonical field blindly:
+1. **Duplicate saved-screener name**
+ Cause: the loaded screen name is rendered twice — once as the header chip (`activeSaved.name • modified`) and again appended to the Results panel title (`Results · N · Screen 2 (modified)`).
+ Fix: keep it in **one** place — the header chip only. Strip the name from the Results title (`Results · 9 of 2732`).
 
-- `market_provider_observations`
-  - symbol, exchange, metric, provider, value, provider_as_of, fetched_at, confidence, raw_payload_hash, raw_payload
-  - Stores every observed value for market cap, shares outstanding, price, PE, PB, ROE, ROCE, debt/equity, EPS, book value, 52w high/low, volume, returns, etc.
-- `market_metric_consensus`
-  - symbol, exchange, metric, value, source_provider, source_method, confidence, ref_value, delta_pct, status, computed_at
-  - The single audited value the UI should use.
-- `market_reference_audit_runs`
-  - batch/run metadata for Tickertape parity checks.
-- Extend `market_value_audit`
-  - add run id, provider value source, status buckets, threshold, and remediation notes if missing.
+2. **Selected filter name still not visible ("Screen 2")**
+ Cause: `activeSavedId` lives in local state only. On reload we restore filters from `screener.state.v1`, but the `DEFAULT_SAVED_KEY` auto-load is skipped whenever persisted filters exist (line 417) so the "★ Screen 2" chip disappears even though the same filters are loaded.
+ Fix:
+ - Persist `activeSavedId` inside `STATE_STORE_KEY` (`{ universe, active, savedId }`).
+ - On mount, re-attach `activeSavedId` from persisted state and recompute `activeSavedSig` once `saved` resolves; only mark "modified" when signatures actually differ.
+ - Make the `SavedPicker` trigger always display the current name (`★ Screen 2`) whenever attached, even before the popover opens.
 
-Access rules:
-- Public/authenticated read only for final screener-safe values.
-- Provider raw payloads service-role only, because they may contain unneeded upstream metadata.
-- Edge functions write through service role only.
+3. **Header input + Save → single Save button with name prompt**
+ Remove the `saveName` inline `<input>`. Replace with:
+ - `Save` (updates in place when a saved screen is loaded; opens a **HudModal** "Save screen as…" when nothing is attached, or when user Alt-clicks / uses a new "Save as…" menu item).
+ - Modal validates: non-empty, unique-ish name (warn on duplicate), Enter-to-submit, Esc-to-cancel.
+ - Rename existing saved screen from the same modal (edit `activeSaved.name`).
 
-### 2. Fix market cap as the top-priority metric
-Market cap should not be guessed from stale or incomplete inputs.
+4. **Remove Share button**
+ Delete the Share button and the `shareLink` handler. Keep the `?f=` URL hydration (still useful for external links); just no UI trigger.
 
-New precedence:
-1. Tickertape reference market cap when available from the public info endpoint.
-2. If Tickertape is unavailable, compute `latest accepted shares outstanding × latest exchange close` only when both inputs are fresh and provider confidence passes validation.
-3. If share count is missing/stale, use the best provider-reported market cap, but mark it `estimated_provider` and expose lower confidence.
-4. Never silently reprice old fundamentals without recording the method and age.
+5. **Data-health chip strip (FUND / SECTOR / TECH / MCAP / lag ok / gaps / fail) looks bad**
+ Move that entire strip out of the Results header. Replace with:
+ - A single compact status pill next to the Results title: `● 9 / 2732 · EOD 22 Jul` (green/amber/red dot from the worst of the three coverage %s).
+ - Full detail (all the chips + gaps modal + resync menu) lives behind a small `Data health` popover triggered from a `⋯` icon in the top-right of the Results panel — hidden by default, always available.
 
-Specific fixes:
-- Backfill shares outstanding for symbols currently missing (`TEGA`, `SHILCTECH`, `ZOTA`, etc.).
-- Add validation that flags share-count drift causing market-cap deltas above tolerance.
-- Store both `reported_market_cap` and `computed_market_cap` so we can see why a number differs.
-- Update `market_screener_rows` to read from `market_metric_consensus` for market cap first, with transparent fallback metadata.
+6. **Full-screen usage — no wasted vertical space**
+ - Delete the empty top HudPanel wrapper (`<></>` body). Move the title + actions into a slim inline toolbar (`padding: 4px 0`, no panel chrome).
+ - Change the two-pane grid to a real full-height layout:
+ `display: grid; grid-template-columns: 320px 1fr; gap: 12px; flex: 1; min-height: 0; align-items: stretch;` (parent already has `flex-direction: column`).
+ - Both `FilterRail` and Results panel: `height: 100%; display: flex; flex-direction: column; min-height: 0;` with the inner scroll region taking `flex: 1`.
+ - Remove `maxHeight: calc(100vh - 340px)` hack from FilterRail scrollbox; use `flex: 1; min-height: 0; overflow: auto;` instead.
+ - Narrow left rail from 370 → 300–320 px so the results table gets more room.
+ - Results table container itself gets `flex: 1; overflow: auto;` so the empty area below the last row disappears.
 
-### 3. Add more free fallback sources
-Use a waterfall and record every attempt:
+## Additional bugs & improvements found in the audit (list only, will implement in this same pass unless flagged)
 
-- Tickertape public stock info endpoint as the reference comparator/source for parity fields.
-- Yahoo quoteSummary and chart APIs.
-- NSE bhavcopy / equity quote endpoints for close, volume, issued size where available.
-- BSE bhavcopy for combined volume where available.
-- Financial Modeling Prep if configured and still free within quota.
-- Screener.in-compatible public pages only if accessible without credentials and parsed conservatively.
+Bugs (fix now):
+- **Modified-flag false positives**: `sigOf` doesn't normalize `""` vs `undefined` bounds or numeric coercion — a re-typed identical value marks the screen "modified". Normalize before hashing.
+- **URL `?f=` never clears** on page unload when filters are cleared while a saved screen is attached (the effect deletes it only when both `active` is empty and `universe==="all"`). Add `savedId` to the URL contract or clear `?f=` whenever a saved screen is attached (its id is enough).
+- **Applied chip row duplicates the sidebar filters** below the table with a redundant `EOD` chip. Drop the row entirely (sidebar already shows every active filter with values).
+- **`didHydrateFromUrlRef` is set to true even when there was no `?f`** — harmless today, but means any future writer effect gated on it may fire before we intended. Only set it when we actually hydrated.
+- **Column picker disappears the moment a filter is added** (Tickertape parity), so users lose their custom column set on every filter. Fix: keep the picker visible; only auto-add the filtered column, don't replace the whole set.
+- **`Reset` currently clears filters *and* detaches saved screen in one click** — no way to just clear values. Split into `Clear values` (keeps saved attachment) and `Detach` (already exists on the chip).
+- **`EnumMultiSelect` sector/industry picker has no search** inside a >100-option list. Add a filter input.
+- **Number range editor allows `min > max`** and silently returns 0 rows. Show inline warning + swap-on-blur.
+- **`useAnchoredPos` doesn't re-run when trigger size changes** (e.g., saved-name grows on load). Add a `ResizeObserver` on the trigger.
+- **`ScreenerInner` re-runs the whole `filtered` chain on every keystroke** in a range input because `active` is a new array. Debounce sidebar edits by 120 ms.
+- **CSV export uses `filtered` (all rows)** — file name doesn't include universe or active-filter count; add for traceability.
 
-No source should overwrite canonical values directly; each writes observations, then consensus chooses the best accepted value.
+Improvements (quality-of-life, will implement):
+- Slim single-line toolbar: `Screener` title · attached chip · Save · Clear · `⋯`.
+- Keyboard: `/` focuses the "Add Filter" search, `Esc` closes popovers, `Ctrl+S` opens save-as modal, `⌘K` friendly.
+- Sort + pagination position persisted per saved screen.
+- Results panel becomes the only scroll surface on the right — sticky `thead`, no page scroll.
+- Empty state above table when 0 rows: "No matches — [Clear values] [Loosen top filter]".
+- Move the resync `⋯` menu to Config (as it already exists there) — Screener keeps only a read-only status dot and a "Go to Config" link.
 
-### 4. Rebuild fundamentals sync around metric-level freshness
-Update `market-fundamentals-global-sync` so it writes source/as-of fields for every metric, not just a few columns.
+## Out of scope
+- No changes to `screenerCatalog.ts`, `screenerRun.ts`, or DB.
+- No new saved-screener fields (rename/duplicate reuse existing `save.mutate` with `{id,name,filters}`).
+- No mobile-specific redesign (desktop-first fix; still degrades acceptably at narrow widths).
 
-Metrics to validate and sync:
-- Market cap
-- PE / EPS
-- PB / book value
-- ROE / ROCE
-- Debt/equity
-- Revenue, profit, sales growth, profit growth, EPS growth
-- Dividend yield
-- Promoter, FII, DII, institutional holding
-- 52w high/low
+## Files touched
+- `src/routes/market/Screener.tsx` — layout rewrite of `ScreenerInner`, header toolbar, `FilterRail` shell, Results panel shell, `DataHealthStrip` → collapsed pill + popover, remove Share, add Save-as modal, persist `activeSavedId`, sig-normalization, enum search, min>max guard.
 
-Rules:
-- No null-to-zero unless the metric explicitly supports it.
-- No Yahoo institutional value reused as DII.
-- No ROCE proxy from ROA shown as actual ROCE unless labeled as proxy or excluded from parity mode.
-- Every metric gets `source`, `as_of`, `confidence`, and `status`.
-
-### 5. Rebuild technical parity checks
-Keep EOD technicals deterministic and aligned to the same date as the screener reference.
-
-Actions:
-- Ensure close, previous close, 1D return, volume, and 52w values use the same trade date.
-- Validate NSE+BSE combined volume vs Tickertape where possible.
-- Keep RSI, ADX, MACD, EMA, ATR, Bollinger values from local candles, but add date/coverage warnings if candle data is stale.
-- Prevent stale rows from passing technical filters.
-
-### 6. Replace the current validation function
-Rewrite `market-data-validation` to validate the active pipeline, not legacy `market_data`.
-
-New validation output:
-- invalid market cap
-- stale price/fundamental/technical rows
-- market cap delta vs Tickertape
-- PE mismatch vs price/EPS
-- PB mismatch vs price/book value
-- missing shares outstanding
-- source coverage per provider
-- top mismatches by severity
-
-It should not auto-mutates values unless the fix is deterministic and source-backed.
-
-### 7. Add a “parity refresh” edge function
-Add an authenticated/manual + cron-safe function:
-
-- Input: symbols or full universe batch.
-- Fetch provider observations.
-- Compute consensus values.
-- Write audit rows.
-- Return mismatch summary.
-
-This lets us recheck a single stock or run full-universe validation without waiting for the daily pipeline.
-
-### 8. Update the screener UI for trust and debugging
-In the app:
-- Show parity/source status in the screener header.
-- Add a “Refresh parity” action for selected/current filters.
-- Add a compact per-row source indicator for market cap and key metrics.
-- Add a data-quality panel showing mismatched symbols and stale metrics.
-- Keep filters using the same values displayed in the table.
-
-### 9. Backfill and verify
-Execution order:
-1. Run DB migration.
-2. Deploy updated edge functions.
-3. Run backfill for the reported symbols first.
-4. Run backfill for the full active NSE universe in chunks.
-5. Run parity audit against Tickertape sample/full universe.
-6. Open the app, apply the same Market Cap + Price filters, and visually verify the result list and market-cap values.
-
-### 10. Acceptance criteria
-- Screenshot sample symbols show market cap matching Tickertape within display rounding where Tickertape data is available.
-- No row uses `fmp_repriced` or guessed market cap without visible lower-confidence metadata.
-- Missing source data is shown as missing/stale, not silently treated as accurate.
-- Fundamental and technical filters use the same values displayed in the screener table.
-- Audit tables show the mismatch rate and exact deltas for all checked symbols.
-
-## Files/functions to change
-- Database migration for observation/consensus/audit tables and updated `market_screener_rows` view.
-- `supabase/functions/market-value-audit/index.ts`
-- `supabase/functions/market-fundamentals-global-sync/index.ts`
-- `supabase/functions/market-shares-outstanding-sync/index.ts`
-- `supabase/functions/market-data-validation/index.ts`
-- New `supabase/functions/market-parity-refresh/index.ts`
-- `src/lib/market/screenerRun.ts`
-- `src/routes/market/Screener.tsx`
-
-## Important limitation
-Exact Tickertape parity is only guaranteed for fields Tickertape’s public endpoints expose reliably at fetch time. For metrics not exposed or blocked, JARVIS will use a documented consensus value and mark it as lower-confidence instead of pretending it is exact.
+Confirm and I'll implement.
