@@ -1,8 +1,9 @@
-// Symbol autocomplete — typeahead against market_data (the synced tradable
-// universe), matching on symbol prefix or company name. Drop-in replacement
-// for a plain <input>; the caller keeps its own label/flex wrapper and just
-// swaps the element.
-import { useEffect, useRef, useState } from "react";
+// Symbol autocomplete — typeahead against market_stocks (the synced tradable
+// universe), matching on symbol prefix or company name. Renders the dropdown
+// via a portal with fixed positioning so ancestor `overflow: hidden` on HUD
+// panels can't clip the suggestion list.
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { inputStyle as baseInputStyle } from "@/components/hud/HudControls";
 
@@ -15,8 +16,6 @@ export function SymbolSearchInput({
   value: string;
   onChange: (v: string) => void;
   onSelect?: (opt: SymbolOption) => void;
-  // Fired on Enter when no suggestion is highlighted — lets the caller fall
-  // back to its own "navigate/submit with raw typed text" behavior.
   onEnter?: () => void;
   exchange?: string;
   placeholder?: string;
@@ -29,11 +28,11 @@ export function SymbolSearchInput({
   const [options, setOptions] = useState<SymbolOption[]>([]);
   const [open, setOpen] = useState(false);
   const [highlighted, setHighlighted] = useState(-1);
+  const [rect, setRect] = useState<{ left: number; top: number; width: number } | null>(null);
   const reqSeq = useRef(0);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    // Strip anything that'd break PostgREST's .or() list syntax (commas,
-    // parens) — plain alnum/space is all a symbol or company name needs.
     const term = value.trim().toUpperCase().replace(/[^A-Z0-9 ]/g, "");
     if (!term) { setOptions([]); return; }
     const seq = ++reqSeq.current;
@@ -45,7 +44,7 @@ export function SymbolSearchInput({
         .limit(10);
       if (exchange) q = q.eq("exchange", exchange);
       const { data } = await q;
-      if (seq !== reqSeq.current) return; // stale response — a newer keystroke already fired
+      if (seq !== reqSeq.current) return;
       const rows = (data ?? []) as SymbolOption[];
       rows.sort((a, b) => {
         const aStarts = a.symbol.startsWith(term) ? 0 : 1;
@@ -57,6 +56,25 @@ export function SymbolSearchInput({
     }, 200);
     return () => clearTimeout(t);
   }, [value, exchange]);
+
+  const updateRect = () => {
+    const el = inputRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setRect({ left: r.left, top: r.bottom + 2, width: r.width });
+  };
+
+  useLayoutEffect(() => {
+    if (!open || options.length === 0) return;
+    updateRect();
+    const onScroll = () => updateRect();
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+    return () => {
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onScroll);
+    };
+  }, [open, options.length]);
 
   const selectOption = (opt: SymbolOption) => {
     onChange(opt.symbol);
@@ -83,6 +101,7 @@ export function SymbolSearchInput({
   return (
     <div style={{ position: "relative", ...containerStyle }}>
       <input
+        ref={inputRef}
         id={id}
         value={value}
         onChange={(e) => { onChange(e.target.value); setOpen(true); }}
@@ -95,13 +114,13 @@ export function SymbolSearchInput({
         disabled={disabled}
         style={{ ...baseInputStyle, width: "100%", opacity: disabled ? 0.6 : 1, ...inputStyleOverride }}
       />
-      {open && options.length > 0 && (
+      {open && options.length > 0 && rect && createPortal(
         <div
           onMouseDown={(e) => e.preventDefault()}
           style={{
-            position: "absolute", top: "calc(100% + 2px)", left: 0, right: 0, zIndex: 50,
+            position: "fixed", left: rect.left, top: rect.top, width: rect.width, zIndex: 1000,
             background: "var(--bg)", border: "1px solid var(--edge-strong)",
-            maxHeight: 220, overflowY: "auto",
+            maxHeight: 320, overflowY: "auto",
           }}
         >
           {options.map((o, i) => (
@@ -121,7 +140,8 @@ export function SymbolSearchInput({
               <span style={{ color: "var(--text-muted)", fontSize: 10 }}>{o.exchange}</span>
             </div>
           ))}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
