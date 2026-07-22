@@ -41,7 +41,7 @@ export function SymbolSearchInput({
         .select("symbol,exchange,company_name")
         .eq("is_active", true)
         .or(`symbol.ilike.${term}%,company_name.ilike.%${term}%`)
-        .limit(10);
+        .limit(50);
       if (exchange) q = q.eq("exchange", exchange);
       const { data } = await q;
       if (seq !== reqSeq.current) return;
@@ -117,6 +117,7 @@ export function SymbolSearchInput({
       {open && options.length > 0 && rect && createPortal(
         <div
           onMouseDown={(e) => e.preventDefault()}
+          className="hud-scroll"
           style={{
             position: "fixed", left: rect.left, top: rect.top, width: rect.width, zIndex: 1000,
             background: "var(--bg)", border: "1px solid var(--edge-strong)",
