@@ -1,6 +1,6 @@
 // market-fundamentals-sync — nightly cron. Pulls Yahoo quoteSummary for every
 // active in-universe stock (paged) and upserts typed columns into market_fundamentals.
-import { corsFor, preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
+import { preflight, jsonResponse, errorResponse, svcClient, SHARED_CACHE_USER_ID } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
 import { toYahooSymbol } from "../_shared/market/yahooClient.ts";
 import { safeFetch } from "../_shared/http.ts";
@@ -65,7 +65,7 @@ Deno.serve(async (req) => {
           const r = await fetchOne(yq);
           if (!r) { failed++; continue; }
           const row = {
-            user_id: "00000000-0000-0000-0000-000000000000", // shared cache
+            user_id: SHARED_CACHE_USER_ID, // shared cache
             symbol: s.symbol,
             exchange: s.exchange,
             pe: r.summaryDetail?.trailingPE?.raw ?? null,

@@ -2,7 +2,7 @@
 // score signature changed, ask Gemini for {entry, stop_loss, targets[],
 // holding_period_days, risk_level, recommendation, confidence, rationale}
 // and upsert into market_stock_ai keyed by score_hash to avoid re-billing.
-import { corsFor, preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
+import { preflight, jsonResponse, errorResponse, svcClient, SHARED_CACHE_USER_ID } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
 import { createLovableAiGatewayProvider } from "../_shared/ai-gateway.ts";
 import { generateText, NoObjectGeneratedError, Output } from "npm:ai";
@@ -90,7 +90,7 @@ Rules:
           if (!output) throw err;
         }
         await svc.from("market_stock_ai").insert({
-          user_id: "00000000-0000-0000-0000-000000000000",
+          user_id: SHARED_CACHE_USER_ID,
           symbol: s.symbol,
           exchange: s.exchange,
           recommendation: output.recommendation,

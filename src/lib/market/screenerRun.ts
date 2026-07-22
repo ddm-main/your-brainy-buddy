@@ -84,6 +84,11 @@ export interface ScreenerRow {
   breakout_score: number | null;
   prebreakout_score: number | null;
   score_components: { breakout?: Record<string, number>; prebreakout?: Record<string, number> } | null;
+  ret_5d: number | null;
+  ret_21d: number | null;
+  ret_ytd: number | null;
+  fno_enabled: boolean | null;
+  sme: boolean | null;
 }
 
 
@@ -93,6 +98,10 @@ const universeIndexKey: Record<UniverseId, string | null> = {
   nifty50:   "NIFTY50",
   banknifty: "BANKNIFTY",
   finnifty:  "FINNIFTY",
+  midcap150: "NIFTYMIDCAP150",
+  smallcap250: "NIFTYSMALLCAP250",
+  fno:       null,
+  sme:       null,
 };
 
 async function fetchIndexMemberSet(indexKey: string): Promise<Set<string>> {
@@ -116,6 +125,7 @@ const SCREENER_COLUMNS = [
   "roe","roce","debt_to_equity","current_ratio","quick_ratio","revenue_ttm_cr",
   "profit_ttm_cr","revenue_growth_yoy","profit_growth_yoy","eps_growth_yoy",
   "promoter_holding","fii_holding","dii_holding",
+  "ret_5d","ret_21d","ret_ytd","fno_enabled","sme",
 ].join(",");
 
 async function fetchScreenerRows(): Promise<any[]> {
@@ -141,15 +151,24 @@ async function fetchScreenerRows(): Promise<any[]> {
 // obtain the nifty500 symbol list (that flag is already on every row). For
 // the index-membership universes (nifty50 / banknifty / finnifty) the
 // filtering set still comes from market_index_members.
-function applyUniverseFilter(rows: any[], universeSet: Set<string> | "nifty500" | null): any[] {
+function applyUniverseFilter(
+  rows: any[],
+  universeSet: Set<string> | "nifty500" | "fno" | "sme" | null,
+): any[] {
   if (universeSet === null) return rows;
   if (universeSet === "nifty500") return rows.filter((r) => Boolean(r.is_nifty500));
+  if (universeSet === "fno")      return rows.filter((r) => Boolean(r.fno_enabled));
+  if (universeSet === "sme")      return rows.filter((r) => Boolean(r.sme));
   return rows.filter((r) => universeSet.has(r.symbol));
 }
 
-async function resolveUniverseFilter(universe: UniverseId): Promise<Set<string> | "nifty500" | null> {
+async function resolveUniverseFilter(
+  universe: UniverseId,
+): Promise<Set<string> | "nifty500" | "fno" | "sme" | null> {
   if (universe === "all") return null;
   if (universe === "nifty500") return "nifty500";
+  if (universe === "fno")      return "fno";
+  if (universe === "sme")      return "sme";
   const key = universeIndexKey[universe];
   if (!key) return null;
   return fetchIndexMemberSet(key);
@@ -238,6 +257,11 @@ export function useScreenerData(universe: UniverseId, enabled = true) {
         })(),
         high_52w:          num(s.high_52w),
         low_52w:           num(s.low_52w),
+        ret_5d:            num(s.ret_5d),
+        ret_21d:           num(s.ret_21d),
+        ret_ytd:           num(s.ret_ytd),
+        fno_enabled:       s.fno_enabled ?? null,
+        sme:               s.sme ?? null,
 
         // view uses `rsi14`, `adx14`, `atr14`, `ema20`..`ema200`
         volume:            num(s.volume),

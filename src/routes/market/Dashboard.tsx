@@ -9,6 +9,7 @@ import { Btn, Chip } from "@/components/hud/HudControls";
 import { DataTable, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { WatchlistPanel } from "@/components/market/WatchlistPanel";
+import { FundsCard } from "@/components/market/FundsCard";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "@/lib/market/api";
 import { useIndices, useIndexWatch, useIndexWatchMutations, useMarketSettings, useQuotes, useSavedScreeners, useStockScores } from "@/lib/market/hooks";
@@ -383,6 +384,7 @@ export default function MarketDashboard() {
             )}
           </HudPanel>
 
+          <FundsCard compact />
           <WatchlistPanel />
         </div>
       </div>

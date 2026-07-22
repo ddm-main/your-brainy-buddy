@@ -11,7 +11,7 @@ import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 import { relTime } from "@/lib/db";
 import { supabase } from "@/integrations/supabase/client";
 import { useQuery } from "@tanstack/react-query";
-import { useMarketSettings } from "@/lib/market/hooks";
+import { useMarketSettings, usePositions } from "@/lib/market/hooks";
 import { FILTER_BY_ID, type FilterDef } from "@/lib/market/screenerCatalog";
 import type { ScreenerCondition, ScreenerGroup } from "@/lib/market/types";
 import {
@@ -25,6 +25,7 @@ import {
   type AutoTradeOrder,
   type AutoTradeRule,
 } from "@/lib/market/autotradeHooks";
+import { FundsCard } from "@/components/market/FundsCard";
 import { Plus, Power, Trash2, X } from "lucide-react";
 
 const RULE_FILTER_IDS = [
@@ -60,6 +61,7 @@ export default function AutoTrade() {
   const { data: orders = [] } = useAutoTradeOrders();
   const { data: log = [] } = useAutoTradeLog();
   const { data: apiSettings = [] } = useMarketSettings();
+  const { data: brokerPositions = [] } = usePositions();
   const action = useAutoTradeAction();
 
   const [editing, setEditing] = useState<AutoTradeRule | "new" | null>(null);
@@ -208,6 +210,8 @@ export default function AutoTrade() {
         </div>
       </HudPanel>
 
+      <FundsCard compact />
+
       <HudPanel flow title="Rules" index="AT.02" actions={<Btn size="sm" variant="primary" onClick={() => setEditing("new")}><Plus size={11} style={{ marginRight: 4 }} />new rule</Btn>}>
         {rules.length === 0 ? (
           <EmptyState hint="Create a rule to define entry/exit conditions for AutoTrade">no rules yet</EmptyState>
@@ -230,6 +234,36 @@ export default function AutoTrade() {
           </div>
         </HudPanel>
       )}
+
+      {/* Broker's actual position book — shown next to the AutoTrade ledger so
+          any mismatch (broker rejected an order we recorded as placed, MIS
+          square-off, position opened outside AutoTrade) is visible at a glance.
+          The eval cron reconciles automatically each tick; this is the
+          diagnostic view. */}
+      <HudPanel flow title="Broker Positions (live)" index="AT.06">
+        {!kotakConnected ? (
+          <EmptyState hint="Connect in Market → Config">Kotak not connected — nothing to show</EmptyState>
+        ) : brokerPositions.filter((p) => !p.closed_at).length === 0 ? (
+          <EmptyState>no open positions on the broker</EmptyState>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {brokerPositions.filter((p) => !p.closed_at).map((p) => {
+              const inLedger = openPositions.some((op) => op.symbol === p.symbol && op.exchange === p.exchange);
+              return (
+                <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, padding: "4px 6px", borderBottom: "1px solid var(--edge)" }}>
+                  <span>
+                    <Chip tone={p.side === "long" ? "ok" : "warn"}>{p.side}</Chip>
+                    <span style={{ marginLeft: 6 }}>{p.symbol} × {fmtNum(p.quantity, 0)}</span>
+                    <span style={{ color: "var(--text-dim)", marginLeft: 6 }}>{p.exchange} @ {fmtNum(p.entry_price, 2)}</span>
+                  </span>
+                  <Chip tone={inLedger ? "neutral" : "warn"}>{inLedger ? "AutoTrade" : "manual/other"}</Chip>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </HudPanel>
+
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 10 }}>
         <HudPanel flow title="Recent Orders" index="AT.04">

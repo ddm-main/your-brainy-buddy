@@ -50,6 +50,13 @@ interface Rule {
   product: "MIS" | "CNC"; order_type: "MARKET" | "LIMIT"; limit_offset_pct: number | null;
   sizing_mode: "fixed_qty" | "fixed_capital"; sizing_value: number;
   is_armed: boolean;
+  // "MARKET" (default) keeps the soft in-app SL trigger — the eval cron
+  // notices the drop and sells at market. "SL" / "SL-M" places a real
+  // broker-side stop-loss at entry time so a stop still fires when the
+  // eval cron misses a tick (network/broker latency, a skipped cron run).
+  // Cancelled automatically on any other exit path so the SL doesn't
+  // linger and fire against a position that's already been closed.
+  exit_order_type: "MARKET" | "LIMIT" | "SL" | "SL-M";
 }
 interface OrderRow {
   id: string; rule_id: string | null; symbol: string; exchange: string;
@@ -269,7 +276,7 @@ Deno.serve(async (req) => {
             const quotes = await provider.getQuotes([`${pos.exchange}:${pos.symbol}`]);
             const ltp = quotes[0]?.price;
             if (ltp == null) continue;
-            const { data: scoreRow } = await svc.from("market_data").select("*")
+            const { data: scoreRow } = await svc.from("market_stock_scores").select("*")
               .eq("symbol", pos.symbol).eq("exchange", pos.exchange).maybeSingle();
             const changePct = ((ltp - pos.entryPrice) / pos.entryPrice) * 100;
             let exitReason: string | null = null;
@@ -290,6 +297,24 @@ Deno.serve(async (req) => {
               requested_price: orderInput.price ?? ltp, broker_order_id: result.orderId, status: "placed",
               reason: exitReason, placed_at: new Date().toISOString(),
             });
+            // Cancel any linked broker-side protective SL — otherwise it
+            // would still be resting on the book after this exit fills and
+            // could later fire a SELL against a position we no longer hold.
+            const { data: entryRow } = await svc.from("market_autotrade_orders")
+              .select("id,broker_sl_order_id")
+              .eq("user_id", userId).eq("rule_id", rule.id).eq("leg", "entry")
+              .not("broker_sl_order_id", "is", null)
+              .order("created_at", { ascending: false }).limit(1).maybeSingle();
+            if (entryRow?.broker_sl_order_id) {
+              try {
+                await provider.cancelOrder(entryRow.broker_sl_order_id);
+                await svc.from("market_autotrade_orders")
+                  .update({ broker_sl_order_id: null })
+                  .eq("id", entryRow.id);
+              } catch (e) {
+                await log(svc, userId, "error", `Failed to cancel linked broker SL ${entryRow.broker_sl_order_id} after ${pos.symbol} exit: ${e instanceof Error ? e.message : String(e)}`, rule.id);
+              }
+            }
             try {
               await mirrorAutotradeExit(svc, userId, rule.id, pos.symbol, pos.exchange, orderInput.price ?? ltp);
             } catch { /* best-effort mirror — the real exit already fired, don't let this look like a failure */ }
@@ -302,6 +327,15 @@ Deno.serve(async (req) => {
         }
 
         if (entriesBlocked) continue;
+
+        // Funds guardrail — fetch once per user, decrement locally as entries fire.
+        // A missing/zero snapshot is not fatal: the broker will reject any oversized
+        // order at place time. This just prevents obviously insufficient entries.
+        let remainingMargin: number | null = null;
+        try {
+          const fundsSnap = await provider.getFunds();
+          remainingMargin = fundsSnap.available_margin;
+        } catch { /* fall through — broker rejection is the backstop */ }
 
         // ---- Entries ----
         for (const rule of rules as Rule[]) {
@@ -323,7 +357,7 @@ Deno.serve(async (req) => {
             if (scopeSymbols.length === 0) continue;
 
             const symbols = [...new Set(scopeSymbols.map((s) => s.symbol))];
-            const { data: scoreRows } = await svc.from("market_data").select("*").in("symbol", symbols);
+            const { data: scoreRows } = await svc.from("market_stock_scores").select("*").in("symbol", symbols);
             const scoreByKey = new Map((scoreRows ?? []).map((s: any) => [`${s.symbol}:${s.exchange}`, s]));
 
             for (const scope of scopeSymbols) {
@@ -353,16 +387,47 @@ Deno.serve(async (req) => {
                 : Math.floor(capCeiling / ltp);
               if (qty < 1) { await log(svc, userId, "skip", `${scope.symbol}: position size rounds to 0 at ₹${ltp} under the capital cap`, rule.id); continue; }
 
+              const notional = qty * ltp;
+              if (remainingMargin != null && remainingMargin > 0 && notional > remainingMargin) {
+                await log(svc, userId, "skip", `${scope.symbol}: notional ₹${notional.toFixed(0)} exceeds remaining margin ₹${remainingMargin.toFixed(0)}`, rule.id);
+                continue;
+              }
+
               const orderInput: PlaceOrderInput = {
                 symbol: scope.symbol, exchange: scope.exchange, side: "BUY",
                 quantity: qty, orderType: rule.order_type, product: rule.product,
                 price: rule.order_type === "LIMIT" ? ltp * (1 + (rule.limit_offset_pct ?? 0) / 100) : undefined,
               };
               const result = await provider.placeOrder(orderInput);
+
+              // Optional broker-side protective SL — placed immediately
+              // after the entry so a stop still fires even if the eval cron
+              // misses a tick. Only when the rule opted in via
+              // exit_order_type and a stop_loss_pct is set.
+              let brokerSlOrderId: string | null = null;
+              if ((rule.exit_order_type === "SL" || rule.exit_order_type === "SL-M") && rule.stop_loss_pct) {
+                try {
+                  const stopPrice = +(ltp * (1 - Math.abs(rule.stop_loss_pct) / 100)).toFixed(2);
+                  const slInput: PlaceOrderInput = {
+                    symbol: scope.symbol, exchange: scope.exchange, side: "SELL",
+                    quantity: qty, orderType: rule.exit_order_type, product: rule.product,
+                    triggerPrice: stopPrice,
+                    // SL (limit variant) also needs a limit price — a hair below the trigger to make it marketable.
+                    ...(rule.exit_order_type === "SL" ? { price: +(stopPrice * 0.995).toFixed(2) } : {}),
+                  };
+                  const slResult = await provider.placeOrder(slInput);
+                  brokerSlOrderId = slResult.orderId;
+                  await log(svc, userId, "info", `Placed broker SL for ${scope.symbol} @ ₹${stopPrice} — order ${slResult.orderId}`, rule.id);
+                } catch (e) {
+                  await log(svc, userId, "error", `Failed to place broker SL for ${scope.symbol}: ${e instanceof Error ? e.message : String(e)} — soft in-app trigger still active`, rule.id);
+                }
+              }
+
               await svc.from("market_autotrade_orders").insert({
                 user_id: userId, rule_id: rule.id, symbol: scope.symbol, exchange: scope.exchange,
                 side: "BUY", leg: "entry", quantity: qty, order_type: rule.order_type, product: rule.product,
                 requested_price: orderInput.price ?? ltp, broker_order_id: result.orderId, status: "placed",
+                broker_sl_order_id: brokerSlOrderId,
                 reason: "entry conditions met", placed_at: new Date().toISOString(),
               });
               try {
@@ -371,6 +436,7 @@ Deno.serve(async (req) => {
               await log(svc, userId, "fired", `Entry fired for ${scope.symbol} qty ${qty} — order ${result.orderId}`, rule.id);
               totalFired++;
               openPositions.push({ ruleId: rule.id, symbol: scope.symbol, exchange: scope.exchange, qty, entryPrice: ltp });
+              if (remainingMargin != null) remainingMargin = Math.max(0, remainingMargin - qty * ltp);
               if (openPositions.length >= settings.max_open_positions) break;
             }
           } catch (e) {

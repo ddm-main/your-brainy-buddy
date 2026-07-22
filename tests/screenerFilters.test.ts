@@ -94,6 +94,16 @@ describe("latestTradeDateOf + stale-trade_date gating", () => {
     const af: ActiveFilter[] = [{ id: "change_pct", min: 5, max: 10 }];
     expect(excludedByMissingData(rows, af, latestTradeDateOf(rows))).toBe(1);
   });
+
+  it("a row lagging the latest by 1-3 days is still accepted — a symbol Yahoo skipped for a session, not a stale-forever row", () => {
+    const lag1 = { symbol: "LAG1", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-20", change_pct: 6, volume: 500000 };
+    const lag3 = { symbol: "LAG3", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-18", change_pct: 6, volume: 500000 };
+    const lag4 = { symbol: "LAG4", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-17", change_pct: 6, volume: 500000 };
+    const af: ActiveFilter = { id: "change_pct", min: 5, max: 10 };
+    expect(filterMatches(lag1, af, "2026-07-21")).toBe(true);
+    expect(filterMatches(lag3, af, "2026-07-21")).toBe(true);
+    expect(filterMatches(lag4, af, "2026-07-21")).toBe(false);
+  });
 });
 
 describe("coverageOf — denominator is the scoped set, numerator is fields actually present", () => {

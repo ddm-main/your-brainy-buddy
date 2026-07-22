@@ -8,12 +8,13 @@ import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn } from "@/components/hud/HudControls";
 import { supabase } from "@/integrations/supabase/client";
 import { useUi } from "@/store/uiStore";
-import { RefreshCw, Trash2 } from "lucide-react";
+import { RefreshCw, ShoppingCart, Trash2 } from "lucide-react";
 import { SymbolSearchInput, type SymbolOption } from "@/components/market/SymbolSearchInput";
 import { quoteKey } from "@/lib/market/pnl";
 import { useQuotes } from "@/lib/market/hooks";
 import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
 import type { Quote } from "@/lib/market/types";
+import { OrderTicket } from "@/components/market/OrderTicket";
 
 type Item = { id: string; watchlist_id: string; symbol: string; exchange: string };
 
@@ -24,6 +25,7 @@ export function WatchlistPanel() {
   const [newSym, setNewSym] = useState("");
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
+  const [ticket, setTicket] = useState<{ symbol: string; exchange: "NSE" | "BSE"; side: "BUY" | "SELL" } | null>(null);
 
   const load = async () => {
     const { data: wl, error: e1 } = await supabase.from("market_watchlists")
@@ -131,12 +133,17 @@ export function WatchlistPanel() {
                   </span>
 
                   {q?.stale && <span style={{ fontSize: 9, color: "var(--warn)" }}>stale</span>}
+                  <button onClick={() => setTicket({ symbol: i.symbol, exchange: i.exchange as "NSE" | "BSE", side: "BUY" })} className="hud-btn" data-variant="ghost" data-size="sm" title="Buy"><ShoppingCart size={11} /></button>
                   <button onClick={() => removeItem(i.id)} className="hud-btn" data-variant="ghost" data-size="sm"><Trash2 size={11} /></button>
                 </span>
               </div>
             );
           })}
         </div>
+      )}
+      {ticket && (
+        <OrderTicket open={ticket !== null} onClose={() => setTicket(null)}
+          symbol={ticket.symbol} exchange={ticket.exchange} side={ticket.side} />
       )}
     </HudPanel>
   );

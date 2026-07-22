@@ -1634,6 +1634,226 @@ export type Database = {
         }
         Relationships: []
       }
+      market_autotrade_log: {
+        Row: {
+          created_at: string
+          id: string
+          level: string
+          message: string
+          meta: Json | null
+          rule_id: string | null
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          level: string
+          message: string
+          meta?: Json | null
+          rule_id?: string | null
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          level?: string
+          message?: string
+          meta?: Json | null
+          rule_id?: string | null
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "market_autotrade_log_rule_id_fkey"
+            columns: ["rule_id"]
+            isOneToOne: false
+            referencedRelation: "market_autotrade_rules"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      market_autotrade_orders: {
+        Row: {
+          broker_order_id: string | null
+          broker_sl_order_id: string | null
+          created_at: string
+          exchange: string
+          filled_at: string | null
+          filled_price: number | null
+          id: string
+          last_broker_sync_at: string | null
+          leg: string
+          order_type: string
+          placed_at: string | null
+          product: string
+          quantity: number
+          reason: string | null
+          requested_price: number | null
+          rule_id: string | null
+          side: string
+          status: string
+          symbol: string
+          user_id: string
+        }
+        Insert: {
+          broker_order_id?: string | null
+          broker_sl_order_id?: string | null
+          created_at?: string
+          exchange?: string
+          filled_at?: string | null
+          filled_price?: number | null
+          id?: string
+          last_broker_sync_at?: string | null
+          leg: string
+          order_type?: string
+          placed_at?: string | null
+          product?: string
+          quantity: number
+          reason?: string | null
+          requested_price?: number | null
+          rule_id?: string | null
+          side: string
+          status?: string
+          symbol: string
+          user_id: string
+        }
+        Update: {
+          broker_order_id?: string | null
+          broker_sl_order_id?: string | null
+          created_at?: string
+          exchange?: string
+          filled_at?: string | null
+          filled_price?: number | null
+          id?: string
+          last_broker_sync_at?: string | null
+          leg?: string
+          order_type?: string
+          placed_at?: string | null
+          product?: string
+          quantity?: number
+          reason?: string | null
+          requested_price?: number | null
+          rule_id?: string | null
+          side?: string
+          status?: string
+          symbol?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "market_autotrade_orders_rule_id_fkey"
+            columns: ["rule_id"]
+            isOneToOne: false
+            referencedRelation: "market_autotrade_rules"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      market_autotrade_rules: {
+        Row: {
+          created_at: string
+          entry_conditions: Json
+          exchange: string
+          exit_conditions: Json
+          exit_order_type: string
+          id: string
+          is_armed: boolean
+          limit_offset_pct: number | null
+          name: string
+          order_type: string
+          product: string
+          sizing_mode: string
+          sizing_value: number
+          stop_loss_pct: number | null
+          symbol: string | null
+          target_pct: number | null
+          updated_at: string
+          user_id: string
+          watchlist_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          entry_conditions?: Json
+          exchange?: string
+          exit_conditions?: Json
+          exit_order_type?: string
+          id?: string
+          is_armed?: boolean
+          limit_offset_pct?: number | null
+          name: string
+          order_type?: string
+          product?: string
+          sizing_mode?: string
+          sizing_value?: number
+          stop_loss_pct?: number | null
+          symbol?: string | null
+          target_pct?: number | null
+          updated_at?: string
+          user_id: string
+          watchlist_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          entry_conditions?: Json
+          exchange?: string
+          exit_conditions?: Json
+          exit_order_type?: string
+          id?: string
+          is_armed?: boolean
+          limit_offset_pct?: number | null
+          name?: string
+          order_type?: string
+          product?: string
+          sizing_mode?: string
+          sizing_value?: number
+          stop_loss_pct?: number | null
+          symbol?: string | null
+          target_pct?: number | null
+          updated_at?: string
+          user_id?: string
+          watchlist_id?: string | null
+        }
+        Relationships: []
+      }
+      market_autotrade_settings: {
+        Row: {
+          created_at: string
+          daily_loss_limit: number
+          disabled_at: string | null
+          disabled_reason: string | null
+          enabled: boolean
+          eval_lock_at: string | null
+          max_capital_per_rule: number
+          max_open_positions: number
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          daily_loss_limit?: number
+          disabled_at?: string | null
+          disabled_reason?: string | null
+          enabled?: boolean
+          eval_lock_at?: string | null
+          max_capital_per_rule?: number
+          max_open_positions?: number
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          daily_loss_limit?: number
+          disabled_at?: string | null
+          disabled_reason?: string | null
+          enabled?: boolean
+          eval_lock_at?: string | null
+          max_capital_per_rule?: number
+          max_open_positions?: number
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       market_backtest_results: {
         Row: {
           created_at: string
@@ -1963,6 +2183,45 @@ export type Database = {
           sync_source?: string | null
           sync_status?: string | null
           updated_at?: string
+        }
+        Relationships: []
+      }
+      market_funds: {
+        Row: {
+          available_margin: number | null
+          collateral: number | null
+          created_at: string
+          net_cash: number | null
+          payin_amount: number | null
+          payload: Json | null
+          synced_at: string
+          updated_at: string
+          used_margin: number | null
+          user_id: string
+        }
+        Insert: {
+          available_margin?: number | null
+          collateral?: number | null
+          created_at?: string
+          net_cash?: number | null
+          payin_amount?: number | null
+          payload?: Json | null
+          synced_at?: string
+          updated_at?: string
+          used_margin?: number | null
+          user_id: string
+        }
+        Update: {
+          available_margin?: number | null
+          collateral?: number | null
+          created_at?: string
+          net_cash?: number | null
+          payin_amount?: number | null
+          payload?: Json | null
+          synced_at?: string
+          updated_at?: string
+          used_margin?: number | null
+          user_id?: string
         }
         Relationships: []
       }
@@ -2532,6 +2791,9 @@ export type Database = {
           rel_strength_nifty: number | null
           rel_volume: number | null
           resistance_level: number | null
+          ret_21d: number | null
+          ret_5d: number | null
+          ret_ytd: number | null
           revenue_growth: number | null
           roe: number | null
           rsi14: number | null
@@ -2587,6 +2849,9 @@ export type Database = {
           rel_strength_nifty?: number | null
           rel_volume?: number | null
           resistance_level?: number | null
+          ret_21d?: number | null
+          ret_5d?: number | null
+          ret_ytd?: number | null
           revenue_growth?: number | null
           roe?: number | null
           rsi14?: number | null
@@ -2642,6 +2907,9 @@ export type Database = {
           rel_strength_nifty?: number | null
           rel_volume?: number | null
           resistance_level?: number | null
+          ret_21d?: number | null
+          ret_5d?: number | null
+          ret_ytd?: number | null
           revenue_growth?: number | null
           roe?: number | null
           rsi14?: number | null
@@ -3900,6 +4168,7 @@ export type Database = {
           exchange: string | null
           face_value: number | null
           fii_holding: number | null
+          fno_enabled: boolean | null
           fundamental_high_52w: number | null
           fundamental_low_52w: number | null
           fundamental_price: number | null
@@ -3934,6 +4203,9 @@ export type Database = {
           rel_strength_nifty: number | null
           rel_volume: number | null
           resistance_level: number | null
+          ret_21d: number | null
+          ret_5d: number | null
+          ret_ytd: number | null
           revenue_growth_yoy: number | null
           revenue_ttm_cr: number | null
           roce: number | null
@@ -3943,6 +4215,7 @@ export type Database = {
           score_id: string | null
           sector: string | null
           sector_strength: number | null
+          sme: boolean | null
           support_level: number | null
           symbol: string | null
           sync_source: string | null

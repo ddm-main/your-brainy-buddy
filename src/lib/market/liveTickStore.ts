@@ -34,6 +34,11 @@ export function isFreshTick(tick: LiveTick | undefined, freshMs = TICK_FRESH_MS)
 // "EXCHANGE:SYMBOL") — the shared merge used by every list view (Holdings,
 // Positions, Watchlist, Screener, Dashboard) so each only needs one
 // `useLiveTickStore` subscription instead of a per-row hook.
+//
+// When a fresh tick has no REST base to enrich, we skip it rather than
+// fabricating a partial `T` — callers that need "ticks-only" rows should
+// key on the raw store instead. This preserves the invariant that every
+// value in the returned map is a full `T`.
 export function mergeLiveQuotes<T extends { ltp: number; change_pct?: number | null }>(
   restByKey: Record<string, T>,
   ticks: Record<string, LiveTick>,
@@ -42,9 +47,8 @@ export function mergeLiveQuotes<T extends { ltp: number; change_pct?: number | n
   for (const [key, tick] of Object.entries(ticks)) {
     if (!isFreshTick(tick)) continue;
     const base = out[key];
-    out[key] = base
-      ? { ...base, ltp: tick.ltp, change_pct: tick.change_pct }
-      : ({ ltp: tick.ltp, change_pct: tick.change_pct } as T);
+    if (!base) continue; // no REST row to enrich — don't synthesize a partial T
+    out[key] = { ...base, ltp: tick.ltp, change_pct: tick.change_pct };
   }
   return out;
 }

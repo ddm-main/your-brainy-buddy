@@ -1,6 +1,6 @@
 // Client-side delivery for market alerts — mirrors src/lib/reminders.ts's
-// startReminderPoller pattern exactly. market_alert_events only has owner-
-// scoped SELECT/INSERT grants (no UPDATE), so "already notified" is tracked
+// startReminderPoller pattern. market_alert_events only has owner-scoped
+// SELECT/INSERT grants (no UPDATE), so "already notified" is tracked
 // client-side via localStorage rather than a server-side flag.
 import { supabase } from "@/integrations/supabase/client";
 
@@ -51,16 +51,42 @@ export function formatAlertEvent(e: AlertEvent): string {
   return `${e.symbol}: ${label}${val}`;
 }
 
-export function startMarketAlertsPoller(onFire: (e: AlertEvent) => void) {
+// After DEGRADED_AFTER consecutive tick failures the poller surfaces a
+// degraded state through onStatus so the UI can show a small "alerts
+// degraded" banner. Failures were previously swallowed silently (matching
+// the reminders poller), which meant a Supabase outage or network issue
+// left alerts quietly dead until the tab was reloaded.
+const DEGRADED_AFTER = 3;
+
+export type AlertsPollerStatus = "ok" | "degraded";
+
+export function startMarketAlertsPoller(
+  onFire: (e: AlertEvent) => void,
+  onStatus?: (status: AlertsPollerStatus, lastError?: string) => void,
+) {
   let stopped = false;
+  let consecutiveFailures = 0;
+  let lastStatus: AlertsPollerStatus = "ok";
+  const setStatus = (next: AlertsPollerStatus, err?: string) => {
+    if (next === lastStatus) return;
+    lastStatus = next;
+    onStatus?.(next, err);
+  };
   const tick = async () => {
     if (stopped) return;
     try {
       const events = await fetchNewAlertEvents();
+      consecutiveFailures = 0;
+      setStatus("ok");
       if (events.length === 0) return;
       for (const e of events) onFire(e);
       setLastSeen(events[events.length - 1].triggered_at);
-    } catch { /* silent — same as reminders poller */ }
+    } catch (e) {
+      consecutiveFailures++;
+      if (consecutiveFailures >= DEGRADED_AFTER) {
+        setStatus("degraded", e instanceof Error ? e.message : String(e));
+      }
+    }
   };
   const iv = window.setInterval(tick, 30_000);
   tick();

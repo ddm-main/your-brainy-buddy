@@ -50,7 +50,19 @@ export function rowIsApplicable(row: Record<string, any>, scope: ApplicabilitySc
     case "eq_owner":  return isEq && (row.promoter_holding != null || row.fii_holding != null || row.dii_holding != null);
     case "tech":
       if (row.trade_date == null) return false;
-      if (latestTradeDate != null && row.trade_date !== latestTradeDate) return false;
+      // Accept rows within a small lag window of the freshest trade_date. The
+      // strict "must equal latest" check was silently dropping legitimate EOD
+      // rows one trading-day behind (a symbol that Yahoo skipped for a session
+      // but reported the day before), causing parity mismatches vs
+      // Tickertape/Screener.in. 3 calendar days covers a normal Fri→Mon gap
+      // while still excluding stale-forever rows the pipeline never re-fetches.
+      if (latestTradeDate != null) {
+        const latestMs = Date.parse(`${latestTradeDate}T00:00:00Z`);
+        const rowMs = Date.parse(`${row.trade_date}T00:00:00Z`);
+        if (!Number.isFinite(latestMs) || !Number.isFinite(rowMs)) return false;
+        const lagDays = Math.round((latestMs - rowMs) / 86_400_000);
+        if (lagDays < 0 || lagDays > 3) return false;
+      }
       return true;
   }
 }
@@ -118,6 +130,8 @@ export const FILTERS: FilterDef[] = [
   { id: "net_profit",         label: "Net Profit (TTM ₹Cr)", category: "valuation", kind: "number", unit: "Cr", min: -50000, max: 100000, step: 100, fundamental: true, scope: "eq" },
   { id: "high_52w",           label: "52w High",          category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "tech" },
   { id: "low_52w",            label: "52w Low",           category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "tech" },
+  { id: "fno_enabled",        label: "F&O Available",     category: "basics",     kind: "boolean", scope: "all" },
+  { id: "sme",                label: "SME Listed",        category: "basics",     kind: "boolean", scope: "all" },
 
   // Profitability
   { id: "roe",                label: "ROE",               category: "profitability", kind: "number", unit: "%", min: -50, max: 100, step: 1, fundamental: true, scope: "eq" },
@@ -153,6 +167,9 @@ export const FILTERS: FilterDef[] = [
   { id: "rel_volume",         label: "Rel Volume",        category: "momentum",   kind: "number", unit: "x", min: 0, max: 20, step: 0.1, scope: "tech" },
   { id: "rel_strength_nifty", label: "RS vs NIFTY",       category: "momentum",   kind: "number", unit: "%", min: -50, max: 50, step: 1, scope: "tech" },
   { id: "sector_strength",    label: "Sector Strength",   category: "momentum",   kind: "number", min: 0, max: 1, step: 0.05, scope: "tech" },
+  { id: "ret_5d",             label: "5D Return",         category: "momentum",   kind: "number", unit: "%", min: -50, max: 50, step: 0.5, scope: "tech" },
+  { id: "ret_21d",            label: "1M Return",         category: "momentum",   kind: "number", unit: "%", min: -80, max: 100, step: 1, scope: "tech" },
+  { id: "ret_ytd",            label: "YTD Return",        category: "momentum",   kind: "number", unit: "%", min: -90, max: 300, step: 1, scope: "tech" },
 
   // Signals
   { id: "breakout_score",     label: "Breakout Score",    category: "signals",    kind: "number", min: 0, max: 100, step: 5, scope: "tech" },
@@ -295,13 +312,20 @@ export function excludedByMissingData(rows: Array<Record<string, any>>, active: 
 
 
 // ----- Universes -----
-export type UniverseId = "all" | "nifty500" | "nifty50" | "banknifty" | "finnifty";
+export type UniverseId =
+  | "all"
+  | "nifty500"
+  | "nifty50"
+  | "banknifty"
+  | "finnifty"
+  | "fno"
+  | "sme"
+  | "midcap150"
+  | "smallcap250";
 export const UNIVERSES: Array<{ id: UniverseId; label: string }> = [
-  { id: "all",       label: "All Stocks" },
-  { id: "nifty500",  label: "Nifty 500" },
-  { id: "nifty50",   label: "Nifty 50" },
-  { id: "banknifty", label: "Bank Nifty" },
-  { id: "finnifty",  label: "Fin Nifty" },
+  { id: "all",         label: "All Stocks" },
+  { id: "nifty500",    label: "Nifty 500" },
+  { id: "nifty50",     label: "Nifty 50" },
 ];
 
 // ----- Curated presets — Tickertape / Screener.in inspired -----

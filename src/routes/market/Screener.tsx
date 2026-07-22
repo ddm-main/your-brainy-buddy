@@ -70,6 +70,9 @@ const COLUMNS: ColSpec[] = [
   { id: "rsi",                label: "RSI",           align: "right" },
   { id: "adx",                label: "ADX",           align: "right" },
   { id: "pct_from_52w_high",  label: "52w Δ",         align: "right", default: true },
+  { id: "ret_5d",             label: "5D %",          align: "right" },
+  { id: "ret_21d",            label: "1M %",          align: "right" },
+  { id: "ret_ytd",            label: "YTD %",         align: "right" },
   { id: "breakout_score",     label: "Breakout",      align: "right", default: true },
   { id: "prebreakout_score",  label: "Pre-BO",        align: "right" },
   { id: "setup",              label: "Setup" },
@@ -87,11 +90,17 @@ const LIVE_SENSITIVE_FILTER_IDS = new Set(["change_pct", "ltp"]);
 
 function normalizeActiveFilters(filters: ActiveFilter[]): ActiveFilter[] {
   const byId = new Map<string, ActiveFilter>();
+  const dropped: string[] = [];
   for (const raw of filters) {
     if (!raw?.id) continue;
     const id = canonicalFilterId(raw.id);
-    if (!FILTER_BY_ID[id]) continue;
+    if (!FILTER_BY_ID[id]) { dropped.push(raw.id); continue; }
     byId.set(id, { ...byId.get(id), ...raw, id });
+  }
+  if (dropped.length > 0 && typeof window !== "undefined") {
+    // Non-fatal — a newer save format referenced a filter this build no longer
+    // knows about. Warn once so shared links don't silently drop filters.
+    console.warn("[screener] dropped unknown filters on load:", dropped);
   }
   return Array.from(byId.values());
 }
@@ -522,6 +531,9 @@ function ScreenerInner() {
       rsi: { header: "RSI", accessorKey: "rsi", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 0) },
       adx: { header: "ADX", accessorKey: "adx", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 0) },
       pct_from_52w_high: { header: "52w Δ", accessorKey: "pct_from_52w_high", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
+      ret_5d:  { header: "5D %",  accessorKey: "ret_5d",  meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
+      ret_21d: { header: "1M %",  accessorKey: "ret_21d", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
+      ret_ytd: { header: "YTD %", accessorKey: "ret_ytd", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
       breakout_score: {
         header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },
         cell: ({ row }) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" />,

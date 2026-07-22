@@ -11,10 +11,11 @@ import { useMarketSettings, usePositions, useQuotes, useSyncPositions } from "@/
 import { useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { Download, Plus, Trash2, X } from "lucide-react";
+import { Download, Plus, ShoppingCart, Trash2, X } from "lucide-react";
 import type { Position, Quote } from "@/lib/market/types";
 import { positionPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { OrderTicket } from "@/components/market/OrderTicket";
 
 const emptyForm = { symbol: "", exchange: "NSE", side: "long", quantity: "", entry_price: "", stop_loss: "", target: "", journal_notes: "" };
 
@@ -25,6 +26,7 @@ export default function Positions() {
   const { data: settings = [] } = useMarketSettings();
   const syncMut = useSyncPositions();
   const [showForm, setShowForm] = useState(false);
+  const [ticket, setTicket] = useState<{ symbol: string; exchange: "NSE" | "BSE"; side: "BUY" | "SELL"; qty?: number } | null>(null);
   const [form, setForm] = useState({ ...emptyForm });
 
   const open = useMemo(() => positions.filter((p) => !p.closed_at), [positions]);
@@ -184,7 +186,13 @@ export default function Positions() {
       header: "", id: "actions", enableSorting: false,
       cell: ({ row }) => (
         <span style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
-          <button onClick={(e) => { e.stopPropagation(); closePosition(row.original); }} className="hud-btn" data-variant="ghost" data-size="sm" title="Close position"><X size={11} /></button>
+          {connected && (
+            <>
+              <button onClick={(e) => { e.stopPropagation(); setTicket({ symbol: row.original.symbol, exchange: row.original.exchange as "NSE" | "BSE", side: row.original.side === "long" ? "BUY" : "SELL", qty: row.original.quantity }); }} className="hud-btn" data-variant="ghost" data-size="sm" title="Add to position"><ShoppingCart size={11} /></button>
+              <button onClick={(e) => { e.stopPropagation(); setTicket({ symbol: row.original.symbol, exchange: row.original.exchange as "NSE" | "BSE", side: row.original.side === "long" ? "SELL" : "BUY", qty: row.original.quantity }); }} className="hud-btn" data-variant="ghost" data-size="sm" title="Exit via broker" style={{ color: "var(--danger)" }}>E</button>
+            </>
+          )}
+          <button onClick={(e) => { e.stopPropagation(); closePosition(row.original); }} className="hud-btn" data-variant="ghost" data-size="sm" title="Close (journal only)"><X size={11} /></button>
           <button onClick={(e) => { e.stopPropagation(); remove(row.original); }} className="hud-btn" data-variant="ghost" data-size="sm" title="Delete"><Trash2 size={11} /></button>
         </span>
       ),
@@ -273,6 +281,10 @@ export default function Positions() {
             </table>
           </div>
         </HudPanel>
+      )}
+      {ticket && (
+        <OrderTicket open={ticket !== null} onClose={() => setTicket(null)}
+          symbol={ticket.symbol} exchange={ticket.exchange} side={ticket.side} defaultQty={ticket.qty} />
       )}
     </div>
   );

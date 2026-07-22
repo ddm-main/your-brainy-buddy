@@ -8,13 +8,14 @@ import { SAFE_SUPABASE_URL } from "@/lib/supabaseSafe";
 import { authFetch } from "@/lib/authFetch";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { Plus, RefreshCw, Trash2, Download } from "lucide-react";
+import { Plus, RefreshCw, Trash2, Download, ShoppingCart } from "lucide-react";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 import { approxAnnualizedReturnPct, holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 import { useQuotes } from "@/lib/market/hooks";
 import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
 import { PortfolioAllocation } from "@/components/market/PortfolioAllocation";
+import { OrderTicket } from "@/components/market/OrderTicket";
 
 type Holding = {
   id: string; symbol: string; exchange: string; quantity: number; avg_price: number;
@@ -33,6 +34,7 @@ export default function Holdings() {
   const [form, setForm] = useState({ ...empty });
   const [showForm, setShowForm] = useState(false);
   const [connected, setConnected] = useState<string | null>(null);
+  const [ticket, setTicket] = useState<{ symbol: string; exchange: "NSE" | "BSE"; side: "BUY" | "SELL"; qty?: number } | null>(null);
 
   const callFn = async (name: string, body: Record<string, unknown> = {}) => {
     const url = `${SAFE_SUPABASE_URL}/functions/v1/${name}`;
@@ -270,9 +272,17 @@ export default function Holdings() {
                     </td>
                     <td style={td}><Chip tone={q?.stale ? "warn" : h.source === "manual" ? "neutral" : "accent"}>{q?.stale ? "stale" : h.source}</Chip></td>
                     <td style={td}>
-                      <button onClick={() => remove(h.id)} className="hud-btn" data-variant="ghost" data-size="sm" title="Delete">
-                        <Trash2 size={11} />
-                      </button>
+                      <span style={{ display: "inline-flex", gap: 4 }}>
+                        {connected === "kotak_neo" && (
+                          <>
+                            <button onClick={() => setTicket({ symbol: h.symbol, exchange: h.exchange as "NSE" | "BSE", side: "BUY" })} className="hud-btn" data-variant="ghost" data-size="sm" title="Buy more"><ShoppingCart size={11} /></button>
+                            <button onClick={() => setTicket({ symbol: h.symbol, exchange: h.exchange as "NSE" | "BSE", side: "SELL", qty: h.quantity })} className="hud-btn" data-variant="ghost" data-size="sm" title="Sell" style={{ color: "var(--danger)" }}>S</button>
+                          </>
+                        )}
+                        <button onClick={() => remove(h.id)} className="hud-btn" data-variant="ghost" data-size="sm" title="Delete">
+                          <Trash2 size={11} />
+                        </button>
+                      </span>
                     </td>
                   </tr>
                 );
@@ -289,6 +299,10 @@ export default function Holdings() {
           </div>
         )}
       </HudPanel>
+      {ticket && (
+        <OrderTicket open={ticket !== null} onClose={() => setTicket(null)}
+          symbol={ticket.symbol} exchange={ticket.exchange} side={ticket.side} defaultQty={ticket.qty} />
+      )}
     </div>
   );
 }

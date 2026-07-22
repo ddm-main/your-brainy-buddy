@@ -5,6 +5,13 @@ import { requireUserId } from "../auth.ts";
 
 export { corsFor, preflight, requireUserId };
 
+// Sentinel user_id for rows in per-user tables that are actually shared caches
+// (e.g. Yahoo fundamentals, nightly AI recommendations). Not a real user;
+// the RLS policies scope these tables to auth.uid() so authenticated users
+// never see this sentinel row directly — edge functions read/write it via
+// the service role.
+export const SHARED_CACHE_USER_ID = "00000000-0000-0000-0000-000000000000";
+
 export function svcClient(): SupabaseClient {
   return createClient(
     Deno.env.get("SUPABASE_URL")!,

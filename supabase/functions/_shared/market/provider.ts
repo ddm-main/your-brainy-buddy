@@ -6,13 +6,17 @@ import { encryptStatementPassword } from "../crypto.ts";
 import {
   KOTAK_SETTINGS_COLS,
   type KotakSettings,
+  kotakCancelOrder,
   kotakCandles,
   kotakDepth,
   kotakHoldings,
   kotakLimits,
+  kotakModifyOrder,
   kotakPlaceOrder,
   kotakPositions,
   kotakQuotes,
+  parseKotakLimits,
+  type KotakFundsSnapshot,
   withKotakSession,
 } from "./kotakClient.ts";
 import { toYahooSymbol, yahooChartRetry, yahooQuote } from "./yahooClient.ts";
@@ -57,11 +61,25 @@ export interface PlaceOrderInput {
   exchange: string;
   side: "BUY" | "SELL";
   quantity: number;
-  orderType: "MARKET" | "LIMIT";
-  product: "MIS" | "CNC";
+  orderType: "MARKET" | "LIMIT" | "SL" | "SL-M";
+  product: "MIS" | "CNC" | "NRML";
   price?: number;
+  triggerPrice?: number;
+  validity?: "DAY" | "IOC";
+  disclosedQuantity?: number;
+  amo?: boolean;
 }
 export interface PlaceOrderResult { orderId: string; status: string }
+
+export interface FundsSnapshot {
+  net_cash: number | null;
+  available_margin: number | null;
+  used_margin: number | null;
+  collateral: number | null;
+  payin_amount: number | null;
+  source: "kotak" | "unavailable";
+  raw?: unknown;
+}
 
 export interface MarketProvider {
   name: string;
@@ -71,6 +89,9 @@ export interface MarketProvider {
   getHoldings(): Promise<HoldingRow[]>;
   getPositions(): Promise<PositionRow[]>;
   placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResult>;
+  modifyOrder(orderId: string, changes: Partial<Pick<PlaceOrderInput, "quantity" | "price" | "orderType" | "triggerPrice" | "validity">>): Promise<PlaceOrderResult>;
+  cancelOrder(orderId: string): Promise<PlaceOrderResult>;
+  getFunds(): Promise<FundsSnapshot>;
   testAuth(): Promise<{ ok: boolean; detail?: string }>;
 }
 
@@ -190,6 +211,15 @@ function yahooProvider(svc: SupabaseClient): MarketProvider {
     },
     placeOrder() {
       return Promise.reject(new Error("Order placement requires a broker provider (Kotak Neo)."));
+    },
+    modifyOrder() {
+      return Promise.reject(new Error("Order modification requires a broker provider (Kotak Neo)."));
+    },
+    cancelOrder() {
+      return Promise.reject(new Error("Order cancellation requires a broker provider (Kotak Neo)."));
+    },
+    async getFunds(): Promise<FundsSnapshot> {
+      return { net_cash: null, available_margin: null, used_margin: null, collateral: null, payin_amount: null, source: "unavailable" };
     },
     async testAuth() {
       const rows = await yahooQuote(["^NSEI"]);
@@ -378,8 +408,32 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
         product: input.product,
         quantity: input.quantity,
         price: input.price,
+        triggerPrice: input.triggerPrice,
+        validity: input.validity,
+        disclosedQuantity: input.disclosedQuantity,
+        amo: input.amo,
       }));
       return { orderId: result.orderId, status: result.status };
+    },
+    async modifyOrder(orderId, changes) {
+      const r = await withKotakSession(svc, s, encryptValue, (ss) => kotakModifyOrder(ss, orderId, changes));
+      return { orderId: r.orderId, status: r.status };
+    },
+    async cancelOrder(orderId) {
+      const r = await withKotakSession(svc, s, encryptValue, (ss) => kotakCancelOrder(ss, orderId));
+      return { orderId: r.orderId, status: r.status };
+    },
+    async getFunds(): Promise<FundsSnapshot> {
+      const t0 = Date.now();
+      try {
+        const j = await withKotakSession(svc, s, encryptValue, (ss) => kotakLimits(ss));
+        logProviderHealth(svc, "kotak_neo", "getFunds", true, Date.now() - t0);
+        const parsed = parseKotakLimits(j);
+        return { ...parsed, source: "kotak" };
+      } catch (e) {
+        logProviderHealth(svc, "kotak_neo", "getFunds", false, Date.now() - t0, e instanceof Error ? e.message : String(e));
+        throw e;
+      }
     },
     async testAuth() {
       const j = await withKotakSession(svc, s, encryptValue, (ss) => kotakLimits(ss));

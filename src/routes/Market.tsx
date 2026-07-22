@@ -18,6 +18,8 @@ const Planner = lazy(() => import("@/routes/market/Planner"));
 const AIEngine = lazy(() => import("@/routes/market/AIEngine"));
 const IndexDetail = lazy(() => import("@/routes/market/IndexDetail"));
 const AutoTrade = lazy(() => import("@/routes/market/AutoTrade"));
+const PortfolioOverview = lazy(() => import("@/routes/market/PortfolioOverview"));
+const Orders = lazy(() => import("@/routes/market/Orders"));
 
 
 type Sub = { to: string; label: string };
@@ -32,11 +34,13 @@ const GROUPS: Group[] = [
     match: (p) => p === "/market" || p === "/market/" || /^\/market\/index\//.test(p), subs: [] },
   { key: "screener", label: "Screener", to: "/market/screener",
     match: (p) => /^\/market\/screener/.test(p), subs: [] },
-  { key: "portfolio", label: "Portfolio", to: "/market/holdings",
-    match: (p) => /^\/market\/(holdings|positions)/.test(p),
+  { key: "portfolio", label: "Portfolio", to: "/market/portfolio",
+    match: (p) => /^\/market\/(portfolio|holdings|positions|orders)/.test(p),
     subs: [
+      { to: "/market/portfolio", label: "Overview" },
       { to: "/market/holdings", label: "Holdings" },
       { to: "/market/positions", label: "Positions" },
+      { to: "/market/orders", label: "Orders" },
     ] },
   { key: "autotrade", label: "AutoTrade", to: "/market/autotrade",
     match: (p) => /^\/market\/autotrade/.test(p), subs: [] },
@@ -125,8 +129,10 @@ export default function Market() {
           <Suspense fallback={<div className="hud-label">loading…</div>}>
             <Routes>
               <Route index element={<Dashboard />} />
+              <Route path="portfolio" element={<PortfolioOverview />} />
               <Route path="holdings" element={<Holdings />} />
               <Route path="positions" element={<Positions />} />
+              <Route path="orders" element={<Orders />} />
               <Route path="screener" element={<Screener />} />
               <Route path="analysis" element={<Navigate to="/market/screener" replace />} />
               <Route path="analysis/:symbol" element={<Analysis />} />

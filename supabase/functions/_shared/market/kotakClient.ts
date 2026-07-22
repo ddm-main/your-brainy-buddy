@@ -325,29 +325,78 @@ export interface PlaceOrderInput {
   tradingSymbol: string; // e.g. "RELIANCE-EQ"
   instrumentToken?: string;
   transactionType: "BUY" | "SELL";
-  orderType: "MARKET" | "LIMIT";
-  product: "MIS" | "CNC";
+  // MARKET / LIMIT / SL (stop-loss limit) / SL-M (stop-loss market)
+  orderType: "MARKET" | "LIMIT" | "SL" | "SL-M";
+  product: "MIS" | "CNC" | "NRML";
   quantity: number;
-  price?: number; // required for LIMIT
+  price?: number; // required for LIMIT / SL
+  triggerPrice?: number; // required for SL / SL-M
+  validity?: "DAY" | "IOC";
+  disclosedQuantity?: number;
+  amo?: boolean;
 }
 export interface KotakOrderResult { orderId: string; status: string; raw: any }
 
+function kotakOrderTypeCode(t: PlaceOrderInput["orderType"]): string {
+  switch (t) {
+    case "MARKET": return "MKT";
+    case "LIMIT": return "L";
+    case "SL": return "SL";
+    case "SL-M": return "SL-M";
+    default: throw new KotakError(`Unsupported order type: ${t as string}`, 400);
+  }
+}
+
 function orderBody(input: PlaceOrderInput) {
+  const needsTrigger = input.orderType === "SL" || input.orderType === "SL-M";
+  const needsPrice = input.orderType === "LIMIT" || input.orderType === "SL";
   return {
     exchange_segment: input.exchangeSegment,
     product: input.product,
-    order_type: input.orderType === "MARKET" ? "MKT" : "L",
-    price: input.orderType === "LIMIT" ? String(input.price ?? 0) : "0",
+    order_type: kotakOrderTypeCode(input.orderType),
+    price: needsPrice ? String(input.price ?? 0) : "0",
     quantity: String(input.quantity),
-    validity: "DAY",
+    validity: input.validity ?? "DAY",
     trading_symbol: input.tradingSymbol,
     transaction_type: input.transactionType === "BUY" ? "B" : "S",
-    amo: "NO",
-    disclosed_quantity: "0",
+    amo: input.amo ? "YES" : "NO",
+    disclosed_quantity: String(input.disclosedQuantity ?? 0),
     market_protection: "0",
     pf: "N",
-    trigger_price: "0",
+    trigger_price: needsTrigger ? String(input.triggerPrice ?? 0) : "0",
     ...(input.instrumentToken ? { scrip_token: input.instrumentToken } : {}),
+  };
+}
+
+// Parse the /quick/user/limits payload into a normalized funds snapshot.
+// Kotak returns wildly inconsistent field casing across account types
+// (CashAvailable / cashAvailable / Net / MarginUsed / collateral) — try
+// every documented spelling and take the first positive match.
+export interface KotakFundsSnapshot {
+  net_cash: number | null;
+  available_margin: number | null;
+  used_margin: number | null;
+  collateral: number | null;
+  payin_amount: number | null;
+  raw: unknown;
+}
+export function parseKotakLimits(j: any): KotakFundsSnapshot {
+  const d = j?.data ?? j ?? {};
+  const pickNum = (paths: string[]): number | null => {
+    for (const p of paths) {
+      const v = p.split(".").reduce((acc: any, k) => acc?.[k], d);
+      const n = typeof v === "string" ? parseFloat(v) : typeof v === "number" ? v : NaN;
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  };
+  return {
+    net_cash: pickNum(["Net", "net", "netCash", "NetCash"]),
+    available_margin: pickNum(["CashAvailable", "cashAvailable", "AvailableMargin", "availableMargin", "MarginAvailable", "marginAvailable"]),
+    used_margin: pickNum(["MarginUsed", "marginUsed", "MarginUtilized", "marginUtilized", "Utilised", "utilised"]),
+    collateral: pickNum(["Collateral", "collateral", "CollateralAmount", "collateralAmount"]),
+    payin_amount: pickNum(["Payin", "payin", "PayIn", "payIn", "PayinAmount", "payinAmount"]),
+    raw: d,
   };
 }
 
@@ -377,13 +426,15 @@ export async function kotakCancelOrder(s: KotakSettings, orderId: string): Promi
 export async function kotakModifyOrder(
   s: KotakSettings,
   orderId: string,
-  changes: Partial<Pick<PlaceOrderInput, "quantity" | "price" | "orderType">>,
+  changes: Partial<Pick<PlaceOrderInput, "quantity" | "price" | "orderType" | "triggerPrice" | "validity">>,
 ): Promise<KotakOrderResult> {
   const h = await sessionHeaders(s);
   const body: Record<string, string> = { order_id: orderId };
   if (changes.quantity != null) body.quantity = String(changes.quantity);
   if (changes.price != null) body.price = String(changes.price);
-  if (changes.orderType) body.order_type = changes.orderType === "MARKET" ? "MKT" : "L";
+  if (changes.triggerPrice != null) body.trigger_price = String(changes.triggerPrice);
+  if (changes.validity) body.validity = changes.validity;
+  if (changes.orderType) body.order_type = kotakOrderTypeCode(changes.orderType);
   const j = await kotakFetch(`${apiBase(s)}/quick/order/rule/ms/modify`, {
     method: "POST",
     headers: { ...h, "Content-Type": "application/json" },
