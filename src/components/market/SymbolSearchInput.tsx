@@ -38,7 +38,7 @@ export function SymbolSearchInput({
     if (!term) { setOptions([]); return; }
     const seq = ++reqSeq.current;
     const t = setTimeout(async () => {
-      let q = supabase.from("market_data")
+      let q = supabase.from("market_stocks")
         .select("symbol,exchange,company_name")
         .eq("is_active", true)
         .or(`symbol.ilike.${term}%,company_name.ilike.%${term}%`)
