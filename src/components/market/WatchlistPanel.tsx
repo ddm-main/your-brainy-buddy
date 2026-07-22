@@ -121,9 +121,15 @@ export function WatchlistPanel() {
                 </Link>
                 <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <span style={{ fontVariantNumeric: "tabular-nums" }}>{q ? q.ltp.toFixed(2) : "—"}</span>
-                  <span style={{ minWidth: 56, textAlign: "right", color: (q?.change_pct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
+                  <span
+                    style={{ minWidth: 56, textAlign: "right", color: (q?.change_pct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}
+                    title={q?.previous_close != null
+                      ? `prev close ₹${q.previous_close.toFixed(2)}${q.previous_close_as_of ? ` (as of ${q.previous_close_as_of})` : ""}`
+                      : "no prior close available"}
+                  >
                     {q?.change_pct == null ? "—" : `${q.change_pct >= 0 ? "+" : ""}${q.change_pct.toFixed(2)}%`}
                   </span>
+
                   {q?.stale && <span style={{ fontSize: 9, color: "var(--warn)" }}>stale</span>}
                   <button onClick={() => removeItem(i.id)} className="hud-btn" data-variant="ghost" data-size="sm"><Trash2 size={11} /></button>
                 </span>

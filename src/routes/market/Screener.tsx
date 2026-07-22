@@ -25,7 +25,6 @@ import {
   CATEGORIES,
   FILTERS,
   FILTER_BY_ID,
-  PRESETS,
   UNIVERSES,
   filterMatches,
   coverageOf,
@@ -36,7 +35,9 @@ import {
   type FilterDef,
   type UniverseId,
 } from "@/lib/market/screenerCatalog";
-import { AlertTriangle, Check, Database, Download, Plus, RotateCcw, Save, Search, Sparkles, X } from "lucide-react";
+import { AlertTriangle, Check, Database, Download, Plus, RotateCcw, Save, Search, X } from "lucide-react";
+import ErrorBoundary from "@/components/hud/ErrorBoundary";
+import { safeStorage } from "@/lib/safeStorage";
 
 // ---- Columns ----
 interface ColSpec { id: string; label: string; align?: "right" | "left"; default?: boolean }
@@ -62,7 +63,10 @@ const COLUMNS: ColSpec[] = [
   { id: "eps_growth",         label: "EPS Grw",       align: "right" },
   { id: "dividend_yield",     label: "Div Yld",       align: "right" },
   { id: "promoter_holding",   label: "Promoter %",    align: "right" },
-  { id: "dii_holding",        label: "Instl %",       align: "right" },
+  { id: "dii_holding",        label: "DII %",         align: "right" },
+  { id: "fii_holding",        label: "FII %",         align: "right" },
+  { id: "institutional_holding", label: "Instl % (D+F)", align: "right" },
+
   { id: "rsi",                label: "RSI",           align: "right" },
   { id: "adx",                label: "ADX",           align: "right" },
   { id: "pct_from_52w_high",  label: "52w Δ",         align: "right", default: true },
@@ -73,6 +77,7 @@ const COLUMNS: ColSpec[] = [
 const DEFAULT_COLS = COLUMNS.filter((c) => c.default).map((c) => c.id);
 const COLS_STORE_KEY = "screener.visibleCols.v3";
 const PAGE_SIZE_KEY  = "screener.pageSize.v2";
+const DEFAULT_SAVED_KEY = "market.screener.defaultSavedId";
 const AUTO_SYNC_STORE_KEY = "screener.autoFundamentalsSyncAt.v1";
 // Change%/Price filters run against a live-quote overlay (matching what the
 // results table displays) whenever the market's open — batched via
@@ -129,23 +134,24 @@ function toCsv(rows: ScreenerRow[], cols: string[]): string {
   return [header, ...body].map((row) => row.join(",")).join("\n");
 }
 
-export default function Screener() {
+function ScreenerInner() {
   const push = useUi((s) => s.push);
   const nav = useNavigate();
 
   const [universe, setUniverse] = useState<UniverseId>("all");
   const [active, setActive] = useState<ActiveFilter[]>([]);
   const [visibleCols, setVisibleCols] = useState<string[]>(() => {
-    try { const raw = localStorage.getItem(COLS_STORE_KEY); if (raw) { const p = JSON.parse(raw); if (Array.isArray(p)) return p; } } catch { /* */ }
-    return DEFAULT_COLS;
+    const parsed = safeStorage.getJSON<string[] | null>(COLS_STORE_KEY, null);
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : DEFAULT_COLS;
   });
-  useEffect(() => { try { localStorage.setItem(COLS_STORE_KEY, JSON.stringify(visibleCols)); } catch { /* */ } }, [visibleCols]);
+  useEffect(() => { safeStorage.setJSON(COLS_STORE_KEY, visibleCols); }, [visibleCols]);
 
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<number>(() => {
-    try { return Number(localStorage.getItem(PAGE_SIZE_KEY)) || 50; } catch { return 50; }
+    const raw = safeStorage.get(PAGE_SIZE_KEY);
+    return raw ? Number(raw) || 50 : 50;
   });
-  useEffect(() => { try { localStorage.setItem(PAGE_SIZE_KEY, String(pageSize)); } catch { /* */ } }, [pageSize]);
+  useEffect(() => { safeStorage.set(PAGE_SIZE_KEY, String(pageSize)); }, [pageSize]);
 
   const { data: rows = [], isFetching, error } = useScreenerData(universe);
   const sectorList = useScreenerSectors(rows);
@@ -227,6 +233,11 @@ export default function Screener() {
         ...r,
         ltp: live?.ltp ?? r.ltp,
         change_pct: live?.change_pct ?? r.change_pct,
+        // When a live quote replaces the stored EOD value, treat the row as
+        // technically fresh for that filter's freshness gate — otherwise a
+        // symbol with stale trade_date but valid live quote would still be
+        // dropped by scope='tech' as "old data."
+        trade_date: live ? latestTradeDate ?? r.trade_date : r.trade_date,
       };
       for (const af of liveSensitiveActive) {
         if (!filterMatches(overlaid as any, af, latestTradeDate)) return false;
@@ -234,6 +245,7 @@ export default function Screener() {
       return true;
     });
   }, [preLiveFiltered, deferLiveFilters, liveFilterQuoteByKey, liveSensitiveActive, latestTradeDate]);
+
 
   useEffect(() => { setPage(0); }, [active, universe, pageSize]);
 
@@ -308,26 +320,63 @@ export default function Screener() {
     setActive((a) => a.filter((af) => canonicalFilterId(af.id) !== id));
   };
 
-  const applyPreset = (id: string) => {
-    const p = PRESETS.find((x) => x.id === id); if (!p) return;
-    setActive(normalizeActiveFilters(p.filters));
-    if (p.universe) setUniverse(p.universe);
-    push(`Loaded preset: ${p.name}`, "ok");
+  const [saveName, setSaveName] = useState("");
+
+  // Track which saved screen is currently loaded so we can badge it on the
+  // page (name + "modified" state) and update-in-place instead of always
+  // inserting duplicates on Save.
+  const [activeSavedId, setActiveSavedId] = useState<string | null>(null);
+  const [activeSavedSig, setActiveSavedSig] = useState<string | null>(null);
+  const sigOf = (u: UniverseId, a: ActiveFilter[]) =>
+    JSON.stringify({ u, a: [...a].map((x) => ({ ...x, id: canonicalFilterId(x.id) })).sort((x, y) => x.id.localeCompare(y.id)) });
+  const currentSig = sigOf(universe, active);
+  const activeSaved = activeSavedId ? saved.find((s) => s.id === activeSavedId) ?? null : null;
+  const isModified = !!activeSaved && activeSavedSig !== null && currentSig !== activeSavedSig;
+  const detachSaved = () => {
+    setActiveSavedId(null);
+    setActiveSavedSig(null);
+    try { localStorage.removeItem(DEFAULT_SAVED_KEY); } catch { /* */ }
   };
 
-  const [saveName, setSaveName] = useState("");
   const saveScreener = () => {
-    if (!saveName.trim()) { push("Name the screener first", "warn"); return; }
+    // If a saved screen is loaded and the user didn't type a new name, update
+    // it in place. Otherwise insert a new row under the typed name.
+    const trimmed = saveName.trim();
+    if (activeSaved && !trimmed) {
+      save.mutate(
+        { id: activeSaved.id, name: activeSaved.name, filters: { v: 3, universe, active } as any },
+        {
+          onSuccess: () => {
+            push(`Updated: ${activeSaved.name}`, "ok");
+            setActiveSavedSig(currentSig);
+          },
+          onError: (e) => push(e.message, "err"),
+        }
+      );
+      return;
+    }
+    if (!trimmed) { push("Name the screener first", "warn"); return; }
     save.mutate(
-      { name: saveName.trim(), filters: { v: 3, universe, active } as any },
-      { onSuccess: () => { push("Screener saved", "ok"); setSaveName(""); }, onError: (e) => push(e.message, "err") }
+      { name: trimmed, filters: { v: 3, universe, active } as any },
+      {
+        onSuccess: () => {
+          push("Screener saved", "ok");
+          setSaveName("");
+          // The new row will appear in `saved` on next refetch; the picker
+          // can then be used to load it. We don't auto-attach here because
+          // we don't yet have the new row's id.
+        },
+        onError: (e) => push(e.message, "err"),
+      }
     );
   };
   const loadSaved = (s: SavedScreener) => {
     const f: any = s.filters;
+    let nextUniverse: UniverseId = "all";
+    let nextActive: ActiveFilter[] = [];
     if (f && typeof f === "object" && !Array.isArray(f) && (f.v === 2 || f.v === 3)) {
-      setUniverse((f.universe as UniverseId) ?? "all");
-      setActive(Array.isArray(f.active) ? normalizeActiveFilters(f.active) : []);
+      nextUniverse = (f.universe as UniverseId) ?? "all";
+      nextActive = Array.isArray(f.active) ? normalizeActiveFilters(f.active) : [];
     } else if (Array.isArray(f)) {
       const conds = f[0]?.conditions ?? [];
       const mapped: ActiveFilter[] = [];
@@ -340,10 +389,33 @@ export default function Screener() {
         else if (c.op === "lte" || c.op === "lt") mapped.push({ id, max: Number(c.value) });
         else if (c.op === "eq") mapped.push({ id, min: Number(c.value), max: Number(c.value) });
       }
-      setActive(normalizeActiveFilters(mapped)); setUniverse("all");
+      nextActive = normalizeActiveFilters(mapped);
+      nextUniverse = "all";
     }
+    setUniverse(nextUniverse);
+    setActive(nextActive);
+    setActiveSavedId(s.id);
+    setActiveSavedSig(sigOf(nextUniverse, nextActive));
+    try { localStorage.setItem(DEFAULT_SAVED_KEY, s.id); } catch { /* */ }
     push(`Loaded: ${s.name}`, "ok");
   };
+
+  // Auto-apply the last-loaded saved screener on mount (unless a shared ?f= link
+  // is present — URL state wins). Runs once, when `saved` first resolves.
+  const didAutoLoadRef = useRef(false);
+  useEffect(() => {
+    if (didAutoLoadRef.current) return;
+    if (saved.length === 0) return;
+    try {
+      if (new URLSearchParams(window.location.search).get("f")) { didAutoLoadRef.current = true; return; }
+      const id = localStorage.getItem(DEFAULT_SAVED_KEY);
+      if (!id) { didAutoLoadRef.current = true; return; }
+      const match = saved.find((s) => s.id === id);
+      if (match) loadSaved(match);
+    } catch { /* */ }
+    didAutoLoadRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saved]);
 
   const exportCsv = () => {
     const csv = toCsv(filtered, visibleCols);
@@ -437,9 +509,16 @@ export default function Screener() {
       promoter_holding: { header: "Promoter %", accessorKey: "promoter_holding", meta: { align: "right" }, cell: ({ getValue }) => {
         const v = getValue() as number | null; return v == null ? "—" : `${v.toFixed(1)}%`;
       }},
-      dii_holding: { header: "Instl %", accessorKey: "dii_holding", meta: { align: "right" }, cell: ({ getValue }) => {
+      dii_holding: { header: "DII %", accessorKey: "dii_holding", meta: { align: "right" }, cell: ({ getValue }) => {
         const v = getValue() as number | null; return v == null ? "—" : `${v.toFixed(1)}%`;
       }},
+      fii_holding: { header: "FII %", accessorKey: "fii_holding", meta: { align: "right" }, cell: ({ getValue }) => {
+        const v = getValue() as number | null; return v == null ? "—" : `${v.toFixed(1)}%`;
+      }},
+      institutional_holding: { header: "Instl % (D+F)", accessorKey: "institutional_holding", meta: { align: "right" }, cell: ({ getValue }) => {
+        const v = getValue() as number | null; return v == null ? "—" : `${v.toFixed(1)}%`;
+      }},
+
       rsi: { header: "RSI", accessorKey: "rsi", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 0) },
       adx: { header: "ADX", accessorKey: "adx", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 0) },
       pct_from_52w_high: { header: "52w Δ", accessorKey: "pct_from_52w_high", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
@@ -472,14 +551,55 @@ export default function Screener() {
       <HudPanel flow title="Screener" index="MK.SC0"
         actions={
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-            <PresetPicker onPick={applyPreset} rows={rows} />
-            <SavedPicker saved={saved} onLoad={loadSaved} onDelete={(id) => remove.mutate(id, { onError: (e) => push(e.message, "err") })} />
-            <input value={saveName} onChange={(e) => setSaveName(e.target.value)} placeholder="save as…"
+            {activeSaved && (
+              <span
+                title={isModified ? "Modified since load — Save to update" : "Loaded saved screen"}
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 6,
+                  padding: "4px 8px", borderRadius: 2,
+                  border: `1px solid ${isModified ? "var(--warn, #d29a2b)" : "var(--edge-strong)"}`,
+                  background: "rgba(53,214,237,0.06)",
+                  fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em",
+                  textTransform: "uppercase",
+                  color: isModified ? "var(--warn, #d29a2b)" : "var(--accent)",
+                }}
+              >
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: "currentColor" }} />
+                {activeSaved.name}{isModified ? " • modified" : ""}
+                <button
+                  type="button"
+                  aria-label="Detach saved screen"
+                  onClick={detachSaved}
+                  style={{
+                    display: "inline-flex", alignItems: "center", justifyContent: "center",
+                    width: 16, height: 16, marginLeft: 2, padding: 0,
+                    background: "transparent", color: "inherit",
+                    border: "1px solid currentColor", borderRadius: 2, cursor: "pointer",
+                  }}
+                >
+                  <X size={9} />
+                </button>
+              </span>
+            )}
+            <SavedPicker saved={saved} onLoad={loadSaved} onDelete={(id) => {
+              try {
+                if (localStorage.getItem(DEFAULT_SAVED_KEY) === id) localStorage.removeItem(DEFAULT_SAVED_KEY);
+              } catch { /* */ }
+              if (activeSavedId === id) { setActiveSavedId(null); setActiveSavedSig(null); }
+              remove.mutate(id, { onError: (e) => push(e.message, "err") });
+            }} />
+            <input value={saveName} onChange={(e) => setSaveName(e.target.value)}
+              placeholder={activeSaved && !saveName ? `update "${activeSaved.name}"` : "save as…"}
+              aria-label="Save screener as"
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveScreener(); } }}
               style={{ ...inputStyle, padding: "6px 8px", fontSize: 11, width: 130 }} />
-            <Btn size="sm" onClick={saveScreener}><Save size={11} style={{ marginRight: 4 }} />Save</Btn>
+            <Btn size="sm" onClick={saveScreener}>
+              <Save size={11} style={{ marginRight: 4 }} />
+              {activeSaved && !saveName.trim() ? "Update" : "Save"}
+            </Btn>
             <Btn size="sm" onClick={shareLink} title="Copy shareable link">Share</Btn>
             {active.length > 0 && (
-              <Btn size="sm" variant="danger" onClick={() => setActive([])}>
+              <Btn size="sm" variant="danger" onClick={() => { setActive([]); detachSaved(); }}>
                 <RotateCcw size={11} style={{ marginRight: 4 }} />Reset
               </Btn>
             )}
@@ -510,7 +630,7 @@ export default function Screener() {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
           {/* Results */}
-          <HudPanel flow title={`Results · ${filtered.length}${filtered.length !== rows.length ? ` of ${rows.length}` : ""}`}
+          <HudPanel flow title={`Results · ${filtered.length}${filtered.length !== rows.length ? ` of ${rows.length}` : ""}${activeSaved ? `  ·  ${activeSaved.name}${isModified ? " (modified)" : ""}` : ""}`}
             index="MK.SC2" live={isFetching ? "warn" : error ? "err" : "ok"}
             actions={
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
@@ -751,63 +871,8 @@ function InlineFilterEditor({ def, af, rows, sectorList, industryList, onChange,
 }
 
 // ============================================================================
-// Preset / Saved pickers
+// Saved picker
 // ============================================================================
-function PresetPicker({ onPick, rows }: { onPick: (id: string) => void; rows: ScreenerRow[] }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
-  const pos = useAnchoredPos(triggerRef, open, "right", 480);
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      const t = e.target as Node;
-      if (triggerRef.current?.contains(t) || popRef.current?.contains(t)) return;
-      setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
-  const groups = ["Fundamental", "Technical", "Hybrid"] as const;
-  return (
-    <div ref={ref} style={{ position: "relative" }}>
-      <button ref={triggerRef} className="hud-btn" data-variant="ghost" data-size="sm" onClick={() => setOpen((o) => !o)}>
-        <Sparkles size={11} style={{ marginRight: 4 }} />Presets
-      </button>
-      {open && pos && createPortal(
-        <div ref={popRef} style={{ ...popoverStyle, ...pos, width: 320, maxHeight: 480, overflowY: "auto" }}>
-          {groups.map((g) => (
-            <div key={g}>
-              <div style={{ padding: "4px 8px", fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.2em", textTransform: "uppercase", borderBottom: "1px solid var(--edge)" }}>{g}</div>
-              {PRESETS.filter((p) => p.group === g).map((p) => {
-                // Coverage warning if any required col has <50% coverage.
-                const missing = (p.requires ?? []).filter((rid) => {
-                  const c = coverageOf(rows as any[], rid, latestTradeDateOf(rows));
-                  return c.total > 0 && c.has / c.total < 0.5;
-                });
-                return (
-                  <button key={p.id} onClick={() => { onPick(p.id); setOpen(false); }}
-                    style={{ ...popoverItem, padding: "6px 8px" }}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(53,214,237,0.08)")}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
-                      <div style={{ color: "var(--accent)", fontFamily: "var(--font-hud)", fontSize: 11, letterSpacing: "0.1em" }}>{p.name}</div>
-                      {missing.length > 0 && <Chip tone="warn">low data</Chip>}
-                    </div>
-                    <div style={{ color: "var(--text-muted)", fontSize: 10, marginTop: 2 }}>{p.desc}</div>
-                  </button>
-                );
-              })}
-            </div>
-          ))}
-        </div>,
-        document.body,
-      )}
-    </div>
-  );
-}
-
 function SavedPicker({ saved, onLoad, onDelete }: {
   saved: SavedScreener[]; onLoad: (s: SavedScreener) => void; onDelete: (id: string) => void;
 }) {
@@ -1223,3 +1288,14 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
   );
 }
 
+
+// A bad row in filterMatches or a malformed saved screener used to white-screen
+// the whole page. Wrap in ErrorBoundary so the module renders a "reboot" tile
+// instead — the rest of the app (nav, other market routes) stays usable.
+export default function Screener() {
+  return (
+    <ErrorBoundary>
+      <ScreenerInner />
+    </ErrorBoundary>
+  );
+}

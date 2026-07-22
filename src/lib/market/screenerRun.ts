@@ -1,5 +1,6 @@
 // Screener runner: reads the unified market_data table.
 // All provider-specific fields normalized into this single table.
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import type { UniverseId } from "./screenerCatalog";
@@ -48,6 +49,9 @@ export interface ScreenerRow {
   eps_growth: number | null;
   promoter_holding: number | null;
   dii_holding: number | null;
+  fii_holding: number | null;
+  institutional_holding: number | null;
+
   high_52w: number | null;
   low_52w: number | null;
 
@@ -91,35 +95,35 @@ const universeIndexKey: Record<UniverseId, string | null> = {
   finnifty:  "FINNIFTY",
 };
 
-async function fetchUniverseSymbols(universe: UniverseId): Promise<Set<string> | null> {
-  if (universe === "all") return null;
-  if (universe === "nifty500") {
-    const rows: any[] = [];
-    for (let from = 0; ; from += 1000) {
-      const { data, error } = await (supabase as any)
-        .from("market_screener_rows").select("symbol").eq("is_nifty500", true).eq("is_active", true)
-        .range(from, from + 999);
-      if (error) throw error;
-      const chunk = data ?? [];
-      rows.push(...chunk);
-      if (chunk.length < 1000) break;
-    }
-    return new Set(rows.map((r) => r.symbol));
-  }
-  const key = universeIndexKey[universe];
-  if (!key) return null;
+async function fetchIndexMemberSet(indexKey: string): Promise<Set<string>> {
   const { data, error } = await supabase
-    .from("market_index_members").select("symbol").eq("index_key", key);
+    .from("market_index_members").select("symbol").eq("index_key", indexKey);
   if (error) throw error;
   return new Set((data ?? []).map((r: any) => r.symbol));
 }
+
+// Explicit projection — drops ~15 unused fundamental_* duplicates and metadata
+// columns from the wire, ~30% smaller responses than the previous `select("*")`.
+const SCREENER_COLUMNS = [
+  "symbol","exchange","company_name","sector","industry","market_cap",
+  "is_nifty500","instrument_type","trade_date","close","change_pct","volume",
+  "rel_volume","ema20","ema50","ema100","ema200","rsi14","macd","macd_signal",
+  "macd_hist","adx14","atr14","atr_pct","bb_upper","bb_lower","bb_width",
+  "bb_squeeze","high_52w","low_52w","pct_from_52w_high","above_ema200",
+  "higher_lows","near_resistance","resistance_level","support_level",
+  "sector_strength","rel_strength_nifty","breakout_score","prebreakout_score",
+  "score_components","pe_ttm","pb","peg","eps_ttm","book_value","dividend_yield",
+  "roe","roce","debt_to_equity","current_ratio","quick_ratio","revenue_ttm_cr",
+  "profit_ttm_cr","revenue_growth_yoy","profit_growth_yoy","eps_growth_yoy",
+  "promoter_holding","fii_holding","dii_holding",
+].join(",");
 
 async function fetchScreenerRows(): Promise<any[]> {
   const rows: any[] = [];
   for (let from = 0; ; from += 1000) {
     const { data, error } = await (supabase as any)
       .from("market_screener_rows")
-      .select("*")
+      .select(SCREENER_COLUMNS)
       .eq("is_active", true)
       .order("breakout_score", { ascending: false, nullsFirst: false })
       .order("symbol", { ascending: true })
@@ -132,13 +136,34 @@ async function fetchScreenerRows(): Promise<any[]> {
   return rows;
 }
 
-export function useScreenerData(universe: UniverseId) {
+// Universe filtering is done client-side against the single "all rows" fetch —
+// this avoids a second full paginated scan of market_screener_rows just to
+// obtain the nifty500 symbol list (that flag is already on every row). For
+// the index-membership universes (nifty50 / banknifty / finnifty) the
+// filtering set still comes from market_index_members.
+function applyUniverseFilter(rows: any[], universeSet: Set<string> | "nifty500" | null): any[] {
+  if (universeSet === null) return rows;
+  if (universeSet === "nifty500") return rows.filter((r) => Boolean(r.is_nifty500));
+  return rows.filter((r) => universeSet.has(r.symbol));
+}
+
+async function resolveUniverseFilter(universe: UniverseId): Promise<Set<string> | "nifty500" | null> {
+  if (universe === "all") return null;
+  if (universe === "nifty500") return "nifty500";
+  const key = universeIndexKey[universe];
+  if (!key) return null;
+  return fetchIndexMemberSet(key);
+}
+
+export function useScreenerData(universe: UniverseId, enabled = true) {
   return useQuery({
     queryKey: ["market", "screener-rows-v3", universe],
     queryFn: async (): Promise<ScreenerRow[]> => {
-      const universeSet = await fetchUniverseSymbols(universe);
-      const allRows = await fetchScreenerRows();
-      const filtered = universeSet ? allRows.filter((r) => universeSet.has(r.symbol)) : allRows;
+      const [universeSet, allRows] = await Promise.all([
+        resolveUniverseFilter(universe),
+        fetchScreenerRows(),
+      ]);
+      const filtered = applyUniverseFilter(allRows, universeSet);
       if (filtered.length === 0) return [];
       const symbols = filtered.map((r) => r.symbol);
 
@@ -172,7 +197,9 @@ export function useScreenerData(universe: UniverseId) {
         in_nifty50:   idxSets.NIFTY50.has(s.symbol),
         in_banknifty: idxSets.BANKNIFTY.has(s.symbol),
         in_finnifty:  idxSets.FINNIFTY.has(s.symbol),
-        instrument_type:   s.instrument_type ?? "EQ",
+        // Preserve NULL so unknown-type rows are scoped as "all" only,
+        // never silently pulled into equity-only coverage denominators.
+        instrument_type:   s.instrument_type ?? null,
 
         // view uses `close`; client model uses `ltp`
         ltp:               num(s.close ?? s.ltp),
@@ -198,7 +225,17 @@ export function useScreenerData(universe: UniverseId) {
         profit_growth:     num(s.profit_growth_yoy ?? s.profit_growth),
         eps_growth:        num(s.eps_growth_yoy ?? s.eps_growth),
         promoter_holding:  num(s.promoter_holding),
-        dii_holding:       num(s.dii_holding ?? s.fii_holding),
+        // Keep DII and FII strictly separate — silently substituting FII when
+        // DII is null misrepresents the column. Callers wanting a combined
+        // figure should sum explicitly (see `institutional_holding` below).
+        dii_holding:       num(s.dii_holding),
+        fii_holding:       num(s.fii_holding),
+        institutional_holding: (() => {
+          const d = num(s.dii_holding);
+          const f = num(s.fii_holding);
+          if (d == null && f == null) return null;
+          return (d ?? 0) + (f ?? 0);
+        })(),
         high_52w:          num(s.high_52w),
         low_52w:           num(s.low_52w),
 
@@ -232,21 +269,31 @@ export function useScreenerData(universe: UniverseId) {
         prebreakout_score: s.prebreakout_score ?? null,
         score_components:  s.score_components ?? null,
       }));
+
     },
     staleTime: 60_000,
+    enabled,
   });
 }
 
-/** Distinct sector list from the loaded rows — dynamic to whatever's actually present. */
+/** Distinct sector list from the loaded rows — memoised on rows identity so
+ *  the sidebar's enum picker doesn't rebuild the Set on every render. */
 export function useScreenerSectors(rows: ScreenerRow[]): string[] {
-  const set = new Set<string>();
-  rows.forEach((r) => r.sector && set.add(r.sector));
-  return Array.from(set).sort();
+  return useMemo(() => {
+    const set = new Set<string>();
+    rows.forEach((r) => r.sector && set.add(r.sector));
+    return Array.from(set).sort();
+  }, [rows]);
 }
 
-/** Distinct industry list. */
+/** Distinct industry list. Memoised for the same reason as sectors — the
+ *  industry universe is 100+ strings and rebuilding it per keystroke was
+ *  showing up in the profiler. */
 export function useScreenerIndustries(rows: ScreenerRow[]): string[] {
-  const set = new Set<string>();
-  rows.forEach((r) => r.industry && set.add(r.industry));
-  return Array.from(set).sort();
+  return useMemo(() => {
+    const set = new Set<string>();
+    rows.forEach((r) => r.industry && set.add(r.industry));
+    return Array.from(set).sort();
+  }, [rows]);
 }
+

@@ -37,19 +37,24 @@ export type ApplicabilityScope = "all" | "eq" | "eq_profit" | "eq_profit_pe" | "
 // (change_pct, volume, breakout_score, …) need to know the freshest
 // trade_date actually present to tell "no data" apart from "old data."
 export function rowIsApplicable(row: Record<string, any>, scope: ApplicabilityScope, latestTradeDate?: string | null): boolean {
-  const type = row.instrument_type ?? "EQ";
+  // Unknown instrument_type is treated as "not an equity" — safer than assuming EQ.
+  // Only the `all` scope keeps such rows; every equity-scoped filter/coverage check
+  // excludes them until the pipeline classifies them.
+  const type = row.instrument_type;
+  const isEq = type === "EQ";
   switch (scope) {
     case "all":       return true;
-    case "eq":        return type === "EQ";
-    case "eq_profit": return type === "EQ" && row.eps != null && Number(row.eps) > 0;
-    case "eq_profit_pe": return type === "EQ" && row.eps != null && Number(row.eps) > 0 && row.pe != null;
-    case "eq_owner":  return type === "EQ" && (row.promoter_holding != null || row.fii_holding != null || row.dii_holding != null);
+    case "eq":        return isEq;
+    case "eq_profit": return isEq && row.eps != null && Number(row.eps) > 0;
+    case "eq_profit_pe": return isEq && row.eps != null && Number(row.eps) > 0 && row.pe != null;
+    case "eq_owner":  return isEq && (row.promoter_holding != null || row.fii_holding != null || row.dii_holding != null);
     case "tech":
       if (row.trade_date == null) return false;
       if (latestTradeDate != null && row.trade_date !== latestTradeDate) return false;
       return true;
   }
 }
+
 
 export interface FilterDef {
   id: string;
@@ -109,6 +114,10 @@ export const FILTERS: FilterDef[] = [
   { id: "dividend_yield",     label: "Dividend Yield",    category: "valuation",  kind: "number", unit: "%", min: 0, max: 15, step: 0.1, fundamental: true, scope: "eq", nullMeansZero: true },
   { id: "eps",                label: "EPS (TTM)",         category: "valuation",  kind: "number", unit: "₹", min: -500, max: 5000, step: 1, fundamental: true, scope: "eq" },
   { id: "book_value",         label: "Book Value",        category: "valuation",  kind: "number", unit: "₹", min: 0, max: 20000, step: 1, fundamental: true, scope: "eq" },
+  { id: "sales",              label: "Sales (TTM ₹Cr)",   category: "valuation",  kind: "number", unit: "Cr", min: 0, max: 500000, step: 100, fundamental: true, scope: "eq" },
+  { id: "net_profit",         label: "Net Profit (TTM ₹Cr)", category: "valuation", kind: "number", unit: "Cr", min: -50000, max: 100000, step: 100, fundamental: true, scope: "eq" },
+  { id: "high_52w",           label: "52w High",          category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "tech" },
+  { id: "low_52w",            label: "52w Low",           category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "tech" },
 
   // Profitability
   { id: "roe",                label: "ROE",               category: "profitability", kind: "number", unit: "%", min: -50, max: 100, step: 1, fundamental: true, scope: "eq" },
@@ -126,7 +135,10 @@ export const FILTERS: FilterDef[] = [
 
   // Ownership — only meaningful where any ownership number is reported.
   { id: "promoter_holding",   label: "Promoter Holding",  category: "ownership",  kind: "number", unit: "%", min: 0, max: 100, step: 1, fundamental: true, scope: "eq_owner" },
-  { id: "dii_holding",        label: "Institutional Hold", category: "ownership", kind: "number", unit: "%", min: 0, max: 100, step: 1, fundamental: true, scope: "eq_owner" },
+  { id: "dii_holding",        label: "DII Holding",       category: "ownership",  kind: "number", unit: "%", min: 0, max: 100, step: 1, fundamental: true, scope: "eq_owner" },
+  { id: "fii_holding",        label: "FII Holding",       category: "ownership",  kind: "number", unit: "%", min: 0, max: 100, step: 1, fundamental: true, scope: "eq_owner" },
+  { id: "institutional_holding", label: "Institutional (DII+FII)", category: "ownership", kind: "number", unit: "%", min: 0, max: 100, step: 1, fundamental: true, scope: "eq_owner" },
+
 
   // Technicals — depend on an EOD score row.
   { id: "rsi",                label: "RSI (14)",          category: "technicals", kind: "number", min: 0, max: 100, step: 1, scope: "tech" },
@@ -170,16 +182,18 @@ export function canonicalFilterId(id: string): string {
   return FILTER_ID_ALIASES[id] ?? id;
 }
 
-// The freshest trade_date actually present in the loaded set — rows stuck on
-// an older date (sync kept failing for that symbol) are not "today's data."
-// ISO "YYYY-MM-DD" strings compare correctly lexicographically.
-export function latestTradeDateOf(rows: Array<{ trade_date?: string | null }>): string | null {
+// The freshest trade_date across the equity subset — an ETF/debt row will never
+// have an EOD score of its own, so including them can drag `latest` backwards
+// on partial-sync days. Restrict to instrument_type == "EQ".
+export function latestTradeDateOf(rows: Array<{ trade_date?: string | null; instrument_type?: string | null }>): string | null {
   let latest: string | null = null;
   for (const r of rows) {
+    if (r.instrument_type !== "EQ") continue;
     if (r.trade_date && (!latest || r.trade_date > latest)) latest = r.trade_date;
   }
   return latest;
 }
+
 
 export const FILTER_BY_ID: Record<string, FilterDef> = Object.fromEntries(FILTERS.map((f) => [f.id, f]));
 

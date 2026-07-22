@@ -105,8 +105,61 @@ Deno.serve(async (req) => {
       }
     }
 
-    const expected = expectedTradingDate();
+    // Anchor previous_close to our EOD cache. Providers (Yahoo especially)
+    // occasionally return a prev_close from N-2 when their daily series lags
+    // by a day — corrupting today's change% for every downstream P&L number.
+    // Our market_daily_prices is the canonical prior-session record; if it
+    // has a close strictly before today (IST) that disagrees with the
+    // provider, cache wins. Only for symbols we have a live provider price
+    // for; the cache-fallback branch above already handled the rest.
     const today = currentIstDate();
+    const resolvedKeys = symbols.filter((k) => {
+      const q = byKey.get(k);
+      return q && q.price && (q as any).source !== "cache";
+    });
+    if (resolvedKeys.length > 0) {
+      const parsed = resolvedKeys.map((k) => {
+        const [ex, sym] = k.includes(":") ? k.split(":") : ["NSE", k];
+        return { key: k, exchange: ex, symbol: sym };
+      });
+      const uniqSymbols = [...new Set(parsed.map((p) => p.symbol))];
+      const { data: cache } = await svc
+        .from("market_daily_prices")
+        .select("symbol,exchange,close,trade_date")
+        .in("symbol", uniqSymbols)
+        .lt("trade_date", today)
+        .order("trade_date", { ascending: false })
+        .limit(2000);
+      const priorByKey = new Map<string, { close: number; trade_date: string }>();
+      for (const r of (cache ?? []) as any[]) {
+        const key = `${r.exchange}:${r.symbol}`;
+        if (!priorByKey.has(key)) priorByKey.set(key, { close: Number(r.close), trade_date: r.trade_date });
+      }
+      for (const p of parsed) {
+        const cached = priorByKey.get(p.key);
+        if (!cached || !cached.close) continue;
+        const q = byKey.get(p.key)!;
+        // Prefer cache when the provider's prev_close is missing, or when
+        // the cache's row is newer than the provider's prev_close_as_of, or
+        // when they disagree by more than 0.5% (a real different-day mismatch,
+        // not a rounding difference).
+        const providerPrev = (q as any).previous_close as number | null | undefined;
+        const providerAsOf = (q as any).previous_close_as_of as string | null | undefined;
+        const disagrees =
+          providerPrev == null ||
+          (providerAsOf && providerAsOf < cached.trade_date) ||
+          Math.abs((providerPrev - cached.close) / cached.close) > 0.005;
+        if (!disagrees) continue;
+        const changeAbs = q.price - cached.close;
+        (q as any).previous_close = cached.close;
+        (q as any).previous_close_as_of = cached.trade_date;
+        (q as any).change_abs = changeAbs;
+        (q as any).change_pct = (changeAbs / cached.close) * 100;
+        byKey.set(p.key, q);
+      }
+    }
+
+    const expected = expectedTradingDate();
     const allowDayMove = isCurrentIstTradingDay();
 
     const out = symbols.flatMap((key) => {
@@ -128,6 +181,7 @@ Deno.serve(async (req) => {
         stale,
       }];
     });
+
     return jsonResponse(req, { quotes: out, source: provider.name });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
