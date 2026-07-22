@@ -80,6 +80,40 @@ const COLS_STORE_KEY = "screener.visibleCols.v3";
 const PAGE_SIZE_KEY  = "screener.pageSize.v2";
 const DEFAULT_SAVED_KEY = "market.screener.defaultSavedId";
 
+// Filter-id → column-id map used when the user has active filters. The
+// results grid then renders ONLY the columns matching what they filtered on
+// (plus Symbol as the row identity), matching Tickertape-style behaviour.
+const FILTER_TO_COL: Record<string, string> = {
+  market_cap: "market_cap",
+  ltp: "close",
+  volume: "volume",
+  change_pct: "change_pct",
+  pct_from_52w_high: "pct_from_52w_high",
+  rel_volume: "rel_volume",
+  pe: "pe", pb: "pb", peg: "peg", eps: "eps", book_value: "book_value",
+  dividend_yield: "dividend_yield",
+  roe: "roe", roce: "roce",
+  debt_equity: "debt_equity",
+  sales_growth: "sales_growth", profit_growth: "profit_growth", eps_growth: "eps_growth",
+  promoter_holding: "promoter_holding", dii_holding: "dii_holding",
+  fii_holding: "fii_holding", institutional_holding: "institutional_holding",
+  rsi: "rsi", adx: "adx",
+  ret_5d: "ret_5d", ret_21d: "ret_21d", ret_ytd: "ret_ytd",
+  breakout_score: "breakout_score", prebreakout_score: "prebreakout_score",
+  sector: "sector", industry: "industry",
+};
+const COL_IDS = new Set(COLUMNS.map((c) => c.id));
+function colsFromActiveFilters(active: ActiveFilter[]): string[] {
+  const out: string[] = ["symbol"];
+  const seen = new Set(out);
+  for (const f of active) {
+    const id = canonicalFilterId(f.id);
+    const col = FILTER_TO_COL[id];
+    if (col && COL_IDS.has(col) && !seen.has(col)) { out.push(col); seen.add(col); }
+  }
+  return out;
+}
+
 function normalizeActiveFilters(filters: ActiveFilter[]): ActiveFilter[] {
   const byId = new Map<string, ActiveFilter>();
   const dropped: string[] = [];
@@ -101,7 +135,8 @@ function fmtBound(def: FilterDef, v: number | "" | undefined): string {
   if (v === undefined || v === "") return "*";
   const digits = def.step && def.step < 1 ? 2 : 0;
   const num = Number(v).toLocaleString("en-IN", { maximumFractionDigits: digits });
-  return def.unit ? (def.unit === "₹" ? `₹${num}` : `${num}${def.unit === "%" || def.unit === "x" ? def.unit : " " + def.unit}`) : num;
+  const suffix = def.maxIsOpenEnded && def.max !== undefined && Number(v) >= def.max ? "+" : "";
+  return def.unit ? (def.unit === "₹" ? `₹${num}${suffix}` : `${num}${suffix}${def.unit === "%" || def.unit === "x" ? def.unit : " " + def.unit}`) : `${num}${suffix}`;
 }
 
 function chipDesc(af: ActiveFilter): string {
@@ -381,8 +416,17 @@ function ScreenerInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saved]);
 
+  // When the user has active filters, the results grid renders ONLY the
+  // columns matching those filters (plus Symbol). With no filters we fall
+  // back to the user's saved column preset. This mirrors Tickertape's
+  // "columns follow filters" behaviour.
+  const effectiveCols = useMemo(
+    () => (active.length > 0 ? colsFromActiveFilters(active) : visibleCols),
+    [active, visibleCols],
+  );
+
   const exportCsv = () => {
-    const csv = toCsv(filtered, visibleCols);
+    const csv = toCsv(filtered, effectiveCols);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -415,9 +459,29 @@ function ScreenerInner() {
           );
         },
       },
-      sector:  { header: "Sector",  accessorKey: "sector",  cell: ({ getValue }) => <span style={{ fontSize: 11 }}>{getValue() as string ?? "—"}</span> },
+      sector:  {
+        header: "Sector",  accessorKey: "sector",
+        cell: ({ row }) => (
+          <span style={{ fontSize: 11 }} title={row.original.sub_sector ?? row.original.industry ?? undefined}>
+            {row.original.sector ?? "—"}
+            {row.original.sub_sector && row.original.sub_sector !== row.original.sector && (
+              <span style={{ color: "var(--text-muted)", marginLeft: 4, fontSize: 10 }}>· {row.original.sub_sector}</span>
+            )}
+          </span>
+        ),
+      },
       industry:{ header: "Industry",accessorKey: "industry",cell: ({ getValue }) => <span style={{ fontSize: 11 }}>{getValue() as string ?? "—"}</span> },
-      market_cap: { header: "Mcap (Cr)", accessorKey: "market_cap", meta: { align: "right" }, cell: ({ getValue }) => fmtInt(getValue() as number | null) },
+      market_cap: {
+        header: "Mcap (Cr)", accessorKey: "market_cap", meta: { align: "right" },
+        cell: ({ row, getValue }) => {
+          const v = getValue() as number | null;
+          const prov = row.original.data_provenance as Record<string, any> | null | undefined;
+          const src = prov?.market_cap_source ?? prov?.mcap_source ?? prov?.source;
+          const asOf = prov?.market_cap_as_of ?? prov?.mcap_as_of;
+          const tip = src ? `source: ${src}${asOf ? ` · ${new Date(asOf).toLocaleDateString("en-IN")}` : ""}` : undefined;
+          return <span title={tip}>{fmtInt(v)}</span>;
+        },
+      },
       close: {
         header: "Price", id: "livePrice", meta: { align: "right" },
         accessorFn: (r) => r.ltp,
@@ -486,9 +550,9 @@ function ScreenerInner() {
         ),
       },
     };
-    return visibleCols.map((id) => all[id]).filter(Boolean);
+    return effectiveCols.map((id) => all[id]).filter(Boolean);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleCols, latestTradeDate]);
+  }, [effectiveCols, latestTradeDate]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -580,8 +644,11 @@ function ScreenerInner() {
             index="MK.SC2" live={isFetching ? "warn" : error ? "err" : "ok"}
             actions={
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                <ColumnPresetPicker onPick={setVisibleCols} />
-                <ColumnPicker value={visibleCols} onChange={setVisibleCols} />
+                {/* Tickertape parity: when the user has active filters, the
+                    grid auto-reflects those columns; column picker only shows
+                    for exploratory (unfiltered) browsing. */}
+                {active.length === 0 && <ColumnPresetPicker onPick={setVisibleCols} />}
+                {active.length === 0 && <ColumnPicker value={visibleCols} onChange={setVisibleCols} />}
                 <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}
                   style={{ ...inputStyle, padding: "4px 6px", fontSize: 11 }}>
                   {[25, 50, 100, 200].map((n) => <option key={n} value={n}>{n}/page</option>)}
@@ -1040,7 +1107,7 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
   const push = useUi((s) => s.push);
   const [gapsOpen, setGapsOpen] = useState(false);
   const qc = useQueryClient();
-  const [busy, setBusy] = useState<null | "fund" | "eod" | "agg">(null);
+  const [busy, setBusy] = useState<null | "fund" | "eod" | "agg" | "parity">(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1103,6 +1170,18 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
     }).length;
     const withSector = equities.filter((r) => r.sector != null).length;
     const withTech = withScore.filter((r) => r.rsi != null || r.adx != null).length;
+    // Market-cap source breakdown (shares × close vs. FMP repriced vs. reported).
+    // Sourced from the view's data_provenance blob so drift is visible per row.
+    let mcapNse = 0, mcapRepriced = 0, mcapReported = 0, mcapNone = 0;
+    for (const r of equities) {
+      const prov = (r as any).data_provenance as Record<string, any> | null | undefined;
+      const src = prov?.market_cap_source ?? prov?.mcap_source ?? prov?.mcap;
+      if (src === "shares_x_nse_close" || src === "shares_x_scores_close" || src === "nse_shares") mcapNse++;
+      else if (src === "fmp_repriced") mcapRepriced++;
+      else if (src === "fmp_reported" || src === "reported") mcapReported++;
+      else if (r.market_cap == null) mcapNone++;
+      else mcapReported++;
+    }
     return {
       total: pipeline?.active_stocks ?? equities.length,
       fundOk: pipeline?.fundamentals_covered ?? equities.filter((r) => r.pe != null || r.roe != null || r.market_cap != null).length,
@@ -1112,6 +1191,8 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
       techTotal: withScore.length,
       lagOk,
       nonEquity: rows.length - equities.length,
+      mcapNse, mcapRepriced, mcapReported, mcapNone,
+      mcapDenom: equities.length,
     };
   }, [rows, pipeline, latestTradeDate]);
 
@@ -1140,14 +1221,14 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
   }, [rows, latestTradeDate]);
 
   const trigger = async (
-    fn: "market-fundamentals-global-sync" | "market-pipeline-eod" | "market-pipeline-aggregates",
+    fn: "market-fundamentals-global-sync" | "market-pipeline-eod" | "market-pipeline-aggregates" | "market-shares-outstanding-sync" | "market-parity-refresh",
     label: string,
-    key: "fund" | "eod" | "agg",
+    key: "fund" | "eod" | "agg" | "parity",
   ) => {
     if (busy) return;
     setBusy(key);
     setMenuOpen(false);
-    const isChunked = fn === "market-fundamentals-global-sync" || fn === "market-pipeline-eod";
+    const isChunked = fn === "market-fundamentals-global-sync" || fn === "market-pipeline-eod" || fn === "market-shares-outstanding-sync";
     try {
       if (!isChunked) {
         const { error } = await supabase.functions.invoke(fn, { body: {} });
@@ -1195,6 +1276,12 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
       <Chip tone={fundPct >= 95 ? "ok" : fundPct >= 80 ? "warn" : "err"}>Fund {fundPct}%</Chip>
       <Chip tone={sectorPct >= 95 ? "ok" : sectorPct >= 80 ? "warn" : "err"}>Sector {sectorPct}%</Chip>
       <Chip tone={techPct >= 95 ? "ok" : techPct >= 80 ? "warn" : "err"}>Tech {techPct}%</Chip>
+      {stats.mcapDenom > 0 && (() => {
+        const nsePct = pctOf(stats.mcapNse, stats.mcapDenom);
+        const tone = nsePct >= 90 ? "ok" : nsePct >= 60 ? "warn" : "err";
+        const title = `Market-cap sources: ${stats.mcapNse} shares×close · ${stats.mcapRepriced} FMP repriced · ${stats.mcapReported} FMP reported${stats.mcapNone ? ` · ${stats.mcapNone} missing` : ""}`;
+        return <span title={title} style={{ display: "inline-flex" }}><Chip tone={tone}>MCap {nsePct}% NSE</Chip></span>;
+      })()}
       {stats.lagOk > 0 && <Chip tone="neutral">{stats.lagOk} lag ok</Chip>}
       {gaps.length > 0 && (
         <button onClick={() => setGapsOpen(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }} title="Symbols missing price/change/volume — click to list">
@@ -1235,6 +1322,12 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
             </button>
             <button style={popoverItem} onClick={() => trigger("market-pipeline-aggregates", "Aggregates", "agg")}>
               Recompute breadth
+            </button>
+            <button style={popoverItem} onClick={() => trigger("market-shares-outstanding-sync", "Market caps (shares×close)", "fund")}>
+              Resync market caps
+            </button>
+            <button style={popoverItem} onClick={() => trigger("market-parity-refresh", "Tickertape parity", "parity")}>
+              Match Tickertape values
             </button>
           </div>,
           document.body,

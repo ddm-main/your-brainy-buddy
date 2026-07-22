@@ -1,0 +1,2 @@
+ALTER TABLE public.market_stocks ADD COLUMN IF NOT EXISTS fno_enabled boolean NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS market_stocks_fno_enabled_idx ON public.market_stocks(fno_enabled) WHERE fno_enabled = true;

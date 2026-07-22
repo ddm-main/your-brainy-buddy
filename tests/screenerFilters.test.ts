@@ -112,6 +112,46 @@ describe("latestTradeDateOf + stale-trade_date gating", () => {
     expect(filterMatches(freshEnough, af, "2026-07-22")).toBe(true);
     expect(filterMatches(stale, af, "2026-07-22")).toBe(false);
   });
+
+  it("treats the catalogue Volume max as open-ended, matching Tickertape's 1M+ cap", () => {
+    const highVolume = { symbol: "MARKSANS", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", volume: 4_278_354 };
+    const af: ActiveFilter = { id: "volume", min: 100_000, max: 1_000_000 };
+    expect(filterMatches(highVolume, af, "2026-07-22")).toBe(true);
+  });
+
+  it("uses raw 1D return for boundary comparisons while display can remain rounded", () => {
+    const roundedBoundary = {
+      symbol: "GENESYS", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22",
+      change_pct: -7.00,
+      change_pct_raw: -6.999382,
+    };
+    const af: ActiveFilter = { id: "change_pct", min: -15, max: -7 };
+    expect(filterMatches(roundedBoundary, af, "2026-07-22")).toBe(false);
+  });
+
+  it("matches the Tickertape-like 10-stock negative-return fixture", () => {
+    const rows = [
+      { symbol: "MARKSANS", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", market_cap: 11118.37, ltp: 241.10, change_pct_raw: -7.38, volume: 4_278_354 },
+      { symbol: "MEDPLUS", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", market_cap: 8309.34, ltp: 691.95, change_pct_raw: -12.80, volume: 2_431_192 },
+      { symbol: "TIPSMUSIC", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", market_cap: 7961.99, ltp: 622.85, change_pct_raw: -12.55, volume: 2_886_455 },
+      { symbol: "MHRIL", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", market_cap: 4547.61, ltp: 211.70, change_pct_raw: -7.136904, volume: 1_012_352 },
+      { symbol: "SUNTECK", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", market_cap: 4370.02, ltp: 290.70, change_pct_raw: -7.714286, volume: 908_279 },
+      { symbol: "OSWALPUMPS", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", market_cap: 4062.56, ltp: 356.35, change_pct_raw: -8.80, volume: 1_927_456 },
+      { symbol: "UNICHEMLAB", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", market_cap: 3813.88, ltp: 528.55, change_pct_raw: -9.96, volume: 314_223 },
+      { symbol: "ORIENTHOT", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", market_cap: 2473.96, ltp: 135.49, change_pct_raw: -7.54, volume: 1_451_024 },
+      { symbol: "INDOBORAX", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", market_cap: 1273.01, ltp: 396.70, change_pct_raw: -7.77, volume: 312_868 },
+      { symbol: "BAJAJHCARE", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", market_cap: 1098.75, ltp: 323.30, change_pct_raw: -12.47, volume: 1_661_439 },
+      { symbol: "GENESYS", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", market_cap: 1257.68, ltp: 300.95, change_pct: -7.00, change_pct_raw: -6.999382, volume: 449_744 },
+    ];
+    const filters: ActiveFilter[] = [
+      { id: "market_cap", min: 1000, max: 100000 },
+      { id: "ltp", min: 100, max: 1000 },
+      { id: "volume", min: 100000, max: 1000000 },
+      { id: "change_pct", min: -15, max: -7 },
+    ];
+    const matches = rows.filter((row) => filters.every((af) => filterMatches(row, af, "2026-07-22"))).map((row) => row.symbol);
+    expect(matches).toEqual(["MARKSANS", "MEDPLUS", "TIPSMUSIC", "MHRIL", "SUNTECK", "OSWALPUMPS", "UNICHEMLAB", "ORIENTHOT", "INDOBORAX", "BAJAJHCARE"]);
+  });
 });
 
 describe("coverageOf — denominator is the scoped set, numerator is fields actually present", () => {

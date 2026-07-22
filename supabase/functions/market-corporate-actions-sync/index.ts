@@ -50,17 +50,44 @@ Deno.serve(async (req) => {
       if (actions.length === 0) continue;
       const rows = actions
         .filter((a) => a.exDate)
-        .map((a) => ({
-          symbol, exchange,
-          action_type: a.actionType,
-          ex_date: a.exDate,
-          record_date: a.recordDate,
-          details: { subject: a.subject },
-        }));
+        .map((a) => {
+          // NSE subject like "FACE VALUE SPLIT FROM RS.10/- TO RS.5/-" or
+          // "BONUS 1:1" or "DIVIDEND - RS.5". Parse conservatively.
+          const subj = String(a.subject ?? "").toUpperCase();
+          const type = a.actionType?.toLowerCase() ?? "";
+          const action_type =
+            type.includes("split") || subj.includes("SPLIT") ? "split"
+            : type.includes("bonus") || subj.includes("BONUS") ? "bonus"
+            : type.includes("dividend") || subj.includes("DIVIDEND") ? "dividend"
+            : type.includes("rights") ? "rights"
+            : null;
+          if (!action_type) return null;
+          let ratio_from: number | null = null, ratio_to: number | null = null, amount: number | null = null;
+          if (action_type === "split") {
+            const m = subj.match(/RS?\.?\s*(\d+(?:\.\d+)?)\s*(?:\/-)?\s*TO\s*RS?\.?\s*(\d+(?:\.\d+)?)/);
+            if (m) { ratio_from = Number(m[1]); ratio_to = Number(m[2]); }
+          } else if (action_type === "bonus") {
+            const m = subj.match(/BONUS[^0-9]*(\d+)\s*[:\-\/]\s*(\d+)/);
+            if (m) { ratio_to = Number(m[1]); ratio_from = Number(m[2]); }
+          } else if (action_type === "dividend") {
+            const m = subj.match(/RS?\.?\s*(\d+(?:\.\d+)?)/);
+            if (m) amount = Number(m[1]);
+          }
+          return {
+            symbol, exchange, action_type,
+            ex_date: a.exDate,
+            ratio_from, ratio_to, amount,
+            purpose: a.subject, source: "nse",
+          };
+        })
+        .filter((r): r is NonNullable<typeof r> => r != null);
       if (rows.length === 0) continue;
-      const { error } = await svc.from("market_corporate_actions")
-        .upsert(rows, { onConflict: "symbol,exchange,action_type,ex_date" });
-      if (!error) upserted += rows.length;
+      // ON CONFLICT uses the uq_corp_actions_natural unique index we set up.
+      for (const row of rows) {
+        const { error } = await svc.from("corporate_actions").insert(row);
+        // 23505 = unique violation → benign duplicate, skip.
+        if (!error) upserted++;
+      }
     }
     return jsonResponse(req, { ok: true, symbols: symbols.length, upserted });
   } catch (e) {

@@ -61,19 +61,31 @@ Deno.serve(async (req) => {
 
     const today = istTradeDate();
 
-    // Pull all scored rows joined with their stock metadata (paged).
-    // Replaces the removed `market_data` monolith — reads live in
-    // `market_stock_scores`, sector/is_active live in `market_stocks`.
-    const rows: any[] = [];
+    // Pull all scored rows, then join sector/is_active from market_stocks
+    // in-memory (no FK between the two tables, so PostgREST embeds fail).
+    const stockMeta = new Map<string, { sector: string | null; is_active: boolean }>();
     for (let from = 0; ; from += 1000) {
-      const { data, error } = await svc.from("market_stock_scores")
-        .select("*, market_stocks!inner(sector,is_active)")
-        .not("trade_date", "is", null)
-        .eq("market_stocks.is_active", true)
+      const { data, error } = await svc.from("market_stocks")
+        .select("symbol,exchange,sector,is_active")
         .range(from, from + 999);
       if (error) return errorResponse(req, error.message, 500);
       for (const d of data ?? []) {
-        rows.push({ ...d, sector: d.sector ?? d.market_stocks?.sector ?? null });
+        stockMeta.set(`${d.symbol}|${d.exchange}`, { sector: d.sector ?? null, is_active: !!d.is_active });
+      }
+      if (!data || data.length < 1000) break;
+    }
+
+    const rows: any[] = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await svc.from("market_stock_scores")
+        .select("*")
+        .not("trade_date", "is", null)
+        .range(from, from + 999);
+      if (error) return errorResponse(req, error.message, 500);
+      for (const d of data ?? []) {
+        const meta = stockMeta.get(`${d.symbol}|${d.exchange}`);
+        if (!meta || !meta.is_active) continue;
+        rows.push({ ...d, sector: d.sector ?? meta.sector ?? null });
       }
       if (!data || data.length < 1000) break;
     }

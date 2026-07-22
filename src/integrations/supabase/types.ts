@@ -137,6 +137,57 @@ export type Database = {
         }
         Relationships: []
       }
+      corporate_actions: {
+        Row: {
+          action_type: string
+          amount: number | null
+          applied_at: string | null
+          created_at: string
+          ex_date: string
+          exchange: string
+          id: string
+          purpose: string | null
+          ratio_from: number | null
+          ratio_to: number | null
+          source: string | null
+          source_hash: string | null
+          symbol: string
+          updated_at: string
+        }
+        Insert: {
+          action_type: string
+          amount?: number | null
+          applied_at?: string | null
+          created_at?: string
+          ex_date: string
+          exchange?: string
+          id?: string
+          purpose?: string | null
+          ratio_from?: number | null
+          ratio_to?: number | null
+          source?: string | null
+          source_hash?: string | null
+          symbol: string
+          updated_at?: string
+        }
+        Update: {
+          action_type?: string
+          amount?: number | null
+          applied_at?: string | null
+          created_at?: string
+          ex_date?: string
+          exchange?: string
+          id?: string
+          purpose?: string | null
+          ratio_from?: number | null
+          ratio_to?: number | null
+          source?: string | null
+          source_hash?: string | null
+          symbol?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       credit_cards: {
         Row: {
           autopay: boolean
@@ -1966,43 +2017,61 @@ export type Database = {
       }
       market_daily_prices: {
         Row: {
+          adj_applied_at: string | null
+          adj_factor: number | null
           close: number | null
+          close_adjusted: number | null
           created_at: string
           delivery_pct: number | null
           delivery_qty: number | null
           exchange: string
           high: number | null
+          high_adjusted: number | null
           id: string
           low: number | null
+          low_adjusted: number | null
           open: number | null
+          open_adjusted: number | null
           symbol: string
           trade_date: string
           volume: number | null
         }
         Insert: {
+          adj_applied_at?: string | null
+          adj_factor?: number | null
           close?: number | null
+          close_adjusted?: number | null
           created_at?: string
           delivery_pct?: number | null
           delivery_qty?: number | null
           exchange: string
           high?: number | null
+          high_adjusted?: number | null
           id?: string
           low?: number | null
+          low_adjusted?: number | null
           open?: number | null
+          open_adjusted?: number | null
           symbol: string
           trade_date: string
           volume?: number | null
         }
         Update: {
+          adj_applied_at?: string | null
+          adj_factor?: number | null
           close?: number | null
+          close_adjusted?: number | null
           created_at?: string
           delivery_pct?: number | null
           delivery_qty?: number | null
           exchange?: string
           high?: number | null
+          high_adjusted?: number | null
           id?: string
           low?: number | null
+          low_adjusted?: number | null
           open?: number | null
+          open_adjusted?: number | null
           symbol?: string
           trade_date?: string
           volume?: number | null
@@ -2132,13 +2201,19 @@ export type Database = {
       market_fundamentals_global: {
         Row: {
           book_value: number | null
+          book_value_as_of: string | null
+          book_value_source: string | null
           company_name: string | null
           current_ratio: number | null
           data_as_of: string | null
+          de_as_of: string | null
+          de_source: string | null
           debt_to_equity: number | null
           dii_holding: number | null
           dividend_yield: number | null
+          eps_as_of: string | null
           eps_growth_yoy: number | null
+          eps_source: string | null
           eps_ttm: number | null
           exchange: string
           face_value: number | null
@@ -2149,7 +2224,11 @@ export type Database = {
           last_error: string | null
           low_52w: number | null
           market_cap_cr: number | null
+          market_cap_cr_as_of: string | null
+          market_cap_cr_source: string | null
           pb: number | null
+          pe_as_of: string | null
+          pe_source: string | null
           pe_ttm: number | null
           peg: number | null
           price: number | null
@@ -2162,6 +2241,8 @@ export type Database = {
           revenue_ttm_cr: number | null
           roce: number | null
           roe: number | null
+          roe_as_of: string | null
+          roe_source: string | null
           sector: string | null
           symbol: string
           sync_source: string | null
@@ -2170,13 +2251,19 @@ export type Database = {
         }
         Insert: {
           book_value?: number | null
+          book_value_as_of?: string | null
+          book_value_source?: string | null
           company_name?: string | null
           current_ratio?: number | null
           data_as_of?: string | null
+          de_as_of?: string | null
+          de_source?: string | null
           debt_to_equity?: number | null
           dii_holding?: number | null
           dividend_yield?: number | null
+          eps_as_of?: string | null
           eps_growth_yoy?: number | null
+          eps_source?: string | null
           eps_ttm?: number | null
           exchange?: string
           face_value?: number | null
@@ -2187,7 +2274,11 @@ export type Database = {
           last_error?: string | null
           low_52w?: number | null
           market_cap_cr?: number | null
+          market_cap_cr_as_of?: string | null
+          market_cap_cr_source?: string | null
           pb?: number | null
+          pe_as_of?: string | null
+          pe_source?: string | null
           pe_ttm?: number | null
           peg?: number | null
           price?: number | null
@@ -2200,6 +2291,8 @@ export type Database = {
           revenue_ttm_cr?: number | null
           roce?: number | null
           roe?: number | null
+          roe_as_of?: string | null
+          roe_source?: string | null
           sector?: string | null
           symbol: string
           sync_source?: string | null
@@ -2208,13 +2301,19 @@ export type Database = {
         }
         Update: {
           book_value?: number | null
+          book_value_as_of?: string | null
+          book_value_source?: string | null
           company_name?: string | null
           current_ratio?: number | null
           data_as_of?: string | null
+          de_as_of?: string | null
+          de_source?: string | null
           debt_to_equity?: number | null
           dii_holding?: number | null
           dividend_yield?: number | null
+          eps_as_of?: string | null
           eps_growth_yoy?: number | null
+          eps_source?: string | null
           eps_ttm?: number | null
           exchange?: string
           face_value?: number | null
@@ -2225,7 +2324,11 @@ export type Database = {
           last_error?: string | null
           low_52w?: number | null
           market_cap_cr?: number | null
+          market_cap_cr_as_of?: string | null
+          market_cap_cr_source?: string | null
           pb?: number | null
+          pe_as_of?: string | null
+          pe_source?: string | null
           pe_ttm?: number | null
           peg?: number | null
           price?: number | null
@@ -2238,11 +2341,55 @@ export type Database = {
           revenue_ttm_cr?: number | null
           roce?: number | null
           roe?: number | null
+          roe_as_of?: string | null
+          roe_source?: string | null
           sector?: string | null
           symbol?: string
           sync_source?: string | null
           sync_status?: string | null
           updated_at?: string
+        }
+        Relationships: []
+      }
+      market_fundamentals_provenance: {
+        Row: {
+          created_at: string
+          data_as_of: string | null
+          exchange: string
+          fetched_at: string
+          field_name: string
+          id: string
+          source: string
+          source_url: string | null
+          symbol: string
+          updated_at: string
+          value: number | null
+        }
+        Insert: {
+          created_at?: string
+          data_as_of?: string | null
+          exchange?: string
+          fetched_at?: string
+          field_name: string
+          id?: string
+          source: string
+          source_url?: string | null
+          symbol: string
+          updated_at?: string
+          value?: number | null
+        }
+        Update: {
+          created_at?: string
+          data_as_of?: string | null
+          exchange?: string
+          fetched_at?: string
+          field_name?: string
+          id?: string
+          source?: string
+          source_url?: string | null
+          symbol?: string
+          updated_at?: string
+          value?: number | null
         }
         Relationships: []
       }
@@ -2513,6 +2660,63 @@ export type Database = {
         }
         Relationships: []
       }
+      market_metric_consensus: {
+        Row: {
+          computed_at: string
+          confidence: number
+          created_at: string
+          delta_pct: number | null
+          exchange: string
+          metric: string
+          notes: string | null
+          provider_as_of: string | null
+          ref_value: number | null
+          source_method: string
+          source_provider: string
+          status: string
+          symbol: string
+          unit: string | null
+          updated_at: string
+          value: number | null
+        }
+        Insert: {
+          computed_at?: string
+          confidence?: number
+          created_at?: string
+          delta_pct?: number | null
+          exchange?: string
+          metric: string
+          notes?: string | null
+          provider_as_of?: string | null
+          ref_value?: number | null
+          source_method: string
+          source_provider: string
+          status?: string
+          symbol: string
+          unit?: string | null
+          updated_at?: string
+          value?: number | null
+        }
+        Update: {
+          computed_at?: string
+          confidence?: number
+          created_at?: string
+          delta_pct?: number | null
+          exchange?: string
+          metric?: string
+          notes?: string | null
+          provider_as_of?: string | null
+          ref_value?: number | null
+          source_method?: string
+          source_provider?: string
+          status?: string
+          symbol?: string
+          unit?: string | null
+          updated_at?: string
+          value?: number | null
+        }
+        Relationships: []
+      }
       market_news: {
         Row: {
           created_at: string
@@ -2696,6 +2900,66 @@ export type Database = {
         }
         Relationships: []
       }
+      market_provider_observations: {
+        Row: {
+          confidence: number
+          created_at: string
+          exchange: string
+          fetched_at: string
+          id: string
+          metric: string
+          notes: string | null
+          provider: string
+          provider_as_of: string | null
+          raw_payload: Json | null
+          raw_payload_hash: string | null
+          source_method: string | null
+          status: string
+          symbol: string
+          unit: string | null
+          updated_at: string
+          value: number | null
+        }
+        Insert: {
+          confidence?: number
+          created_at?: string
+          exchange?: string
+          fetched_at?: string
+          id?: string
+          metric: string
+          notes?: string | null
+          provider: string
+          provider_as_of?: string | null
+          raw_payload?: Json | null
+          raw_payload_hash?: string | null
+          source_method?: string | null
+          status?: string
+          symbol: string
+          unit?: string | null
+          updated_at?: string
+          value?: number | null
+        }
+        Update: {
+          confidence?: number
+          created_at?: string
+          exchange?: string
+          fetched_at?: string
+          id?: string
+          metric?: string
+          notes?: string | null
+          provider?: string
+          provider_as_of?: string | null
+          raw_payload?: Json | null
+          raw_payload_hash?: string | null
+          source_method?: string | null
+          status?: string
+          symbol?: string
+          unit?: string | null
+          updated_at?: string
+          value?: number | null
+        }
+        Relationships: []
+      }
       market_quotes: {
         Row: {
           change_abs: number | null
@@ -2731,6 +2995,51 @@ export type Database = {
           price?: number
           source?: string
           symbol?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      market_reference_audit_runs: {
+        Row: {
+          created_at: string
+          finished_at: string | null
+          id: string
+          metadata: Json
+          mismatches: number
+          mode: string
+          source: string
+          started_at: string
+          status: string
+          symbols_checked: number
+          symbols_requested: number
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          finished_at?: string | null
+          id?: string
+          metadata?: Json
+          mismatches?: number
+          mode?: string
+          source?: string
+          started_at?: string
+          status?: string
+          symbols_checked?: number
+          symbols_requested?: number
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          finished_at?: string | null
+          id?: string
+          metadata?: Json
+          mismatches?: number
+          mode?: string
+          source?: string
+          started_at?: string
+          status?: string
+          symbols_checked?: number
+          symbols_requested?: number
           updated_at?: string
         }
         Relationships: []
@@ -2795,6 +3104,30 @@ export type Database = {
           strategy?: Json
           updated_at?: string
           user_id?: string
+        }
+        Relationships: []
+      }
+      market_sector_map: {
+        Row: {
+          industry: string
+          nse_sector: string
+          source: string
+          sub_sector: string
+          updated_at: string
+        }
+        Insert: {
+          industry?: string
+          nse_sector: string
+          source?: string
+          sub_sector: string
+          updated_at?: string
+        }
+        Update: {
+          industry?: string
+          nse_sector?: string
+          source?: string
+          sub_sector?: string
+          updated_at?: string
         }
         Relationships: []
       }
@@ -2940,7 +3273,9 @@ export type Database = {
           bb_width: number | null
           breakout_score: number | null
           change_pct: number | null
+          change_pct_adjusted: number | null
           close: number | null
+          close_adjusted: number | null
           computed_at: string
           delivery_pct: number | null
           depth_imbalance: number | null
@@ -2965,6 +3300,7 @@ export type Database = {
           pct_from_52w_high: number | null
           pe_ttm: number | null
           prebreakout_score: number | null
+          prev_close_adjusted: number | null
           rel_strength_nifty: number | null
           rel_volume: number | null
           resistance_level: number | null
@@ -3000,7 +3336,9 @@ export type Database = {
           bb_width?: number | null
           breakout_score?: number | null
           change_pct?: number | null
+          change_pct_adjusted?: number | null
           close?: number | null
+          close_adjusted?: number | null
           computed_at?: string
           delivery_pct?: number | null
           depth_imbalance?: number | null
@@ -3025,6 +3363,7 @@ export type Database = {
           pct_from_52w_high?: number | null
           pe_ttm?: number | null
           prebreakout_score?: number | null
+          prev_close_adjusted?: number | null
           rel_strength_nifty?: number | null
           rel_volume?: number | null
           resistance_level?: number | null
@@ -3060,7 +3399,9 @@ export type Database = {
           bb_width?: number | null
           breakout_score?: number | null
           change_pct?: number | null
+          change_pct_adjusted?: number | null
           close?: number | null
+          close_adjusted?: number | null
           computed_at?: string
           delivery_pct?: number | null
           depth_imbalance?: number | null
@@ -3085,6 +3426,7 @@ export type Database = {
           pct_from_52w_high?: number | null
           pe_ttm?: number | null
           prebreakout_score?: number | null
+          prev_close_adjusted?: number | null
           rel_strength_nifty?: number | null
           rel_volume?: number | null
           resistance_level?: number | null
@@ -3116,6 +3458,8 @@ export type Database = {
           created_at: string
           exchange: string
           face_value: number | null
+          fno_enabled: boolean
+          free_float_cr: number | null
           id: string
           in_universe: boolean
           industry: string | null
@@ -3127,6 +3471,9 @@ export type Database = {
           last_price_sync_at: string | null
           lot_size: number | null
           market_cap: number | null
+          market_cap_as_of: string | null
+          market_cap_calc_at: string | null
+          market_cap_source: string | null
           next_earnings_at: string | null
           pe_ttm: number | null
           price_sync_attempts: number
@@ -3134,9 +3481,16 @@ export type Database = {
           roe: number | null
           sector: string | null
           series: string | null
+          shares_as_of: string | null
+          shares_source: string | null
+          sub_sector: string | null
+          sub_sector_source: string | null
           symbol: string
           tick_size: number | null
+          tickertape_sid: string | null
+          tickertape_sid_as_of: string | null
           token: string | null
+          total_shares_cr: number | null
           updated_at: string
           yahoo_symbol: string | null
         }
@@ -3145,6 +3499,8 @@ export type Database = {
           created_at?: string
           exchange: string
           face_value?: number | null
+          fno_enabled?: boolean
+          free_float_cr?: number | null
           id?: string
           in_universe?: boolean
           industry?: string | null
@@ -3156,6 +3512,9 @@ export type Database = {
           last_price_sync_at?: string | null
           lot_size?: number | null
           market_cap?: number | null
+          market_cap_as_of?: string | null
+          market_cap_calc_at?: string | null
+          market_cap_source?: string | null
           next_earnings_at?: string | null
           pe_ttm?: number | null
           price_sync_attempts?: number
@@ -3163,9 +3522,16 @@ export type Database = {
           roe?: number | null
           sector?: string | null
           series?: string | null
+          shares_as_of?: string | null
+          shares_source?: string | null
+          sub_sector?: string | null
+          sub_sector_source?: string | null
           symbol: string
           tick_size?: number | null
+          tickertape_sid?: string | null
+          tickertape_sid_as_of?: string | null
           token?: string | null
+          total_shares_cr?: number | null
           updated_at?: string
           yahoo_symbol?: string | null
         }
@@ -3174,6 +3540,8 @@ export type Database = {
           created_at?: string
           exchange?: string
           face_value?: number | null
+          fno_enabled?: boolean
+          free_float_cr?: number | null
           id?: string
           in_universe?: boolean
           industry?: string | null
@@ -3185,6 +3553,9 @@ export type Database = {
           last_price_sync_at?: string | null
           lot_size?: number | null
           market_cap?: number | null
+          market_cap_as_of?: string | null
+          market_cap_calc_at?: string | null
+          market_cap_source?: string | null
           next_earnings_at?: string | null
           pe_ttm?: number | null
           price_sync_attempts?: number
@@ -3192,9 +3563,16 @@ export type Database = {
           roe?: number | null
           sector?: string | null
           series?: string | null
+          shares_as_of?: string | null
+          shares_source?: string | null
+          sub_sector?: string | null
+          sub_sector_source?: string | null
           symbol?: string
           tick_size?: number | null
+          tickertape_sid?: string | null
+          tickertape_sid_as_of?: string | null
           token?: string | null
+          total_shares_cr?: number | null
           updated_at?: string
           yahoo_symbol?: string | null
         }
@@ -3292,6 +3670,71 @@ export type Database = {
           user_id?: string
         }
         Relationships: []
+      }
+      market_value_audit: {
+        Row: {
+          checked_at: string
+          delta_pct: number | null
+          exchange: string
+          field: string
+          id: number
+          metadata: Json
+          our_value: number | null
+          ref_source: string
+          ref_value: number | null
+          remediation: string | null
+          run_id: string | null
+          source_method: string | null
+          source_provider: string | null
+          status: string | null
+          symbol: string
+          threshold_pct: number | null
+        }
+        Insert: {
+          checked_at?: string
+          delta_pct?: number | null
+          exchange?: string
+          field: string
+          id?: number
+          metadata?: Json
+          our_value?: number | null
+          ref_source: string
+          ref_value?: number | null
+          remediation?: string | null
+          run_id?: string | null
+          source_method?: string | null
+          source_provider?: string | null
+          status?: string | null
+          symbol: string
+          threshold_pct?: number | null
+        }
+        Update: {
+          checked_at?: string
+          delta_pct?: number | null
+          exchange?: string
+          field?: string
+          id?: number
+          metadata?: Json
+          our_value?: number | null
+          ref_source?: string
+          ref_value?: number | null
+          remediation?: string | null
+          run_id?: string | null
+          source_method?: string | null
+          source_provider?: string | null
+          status?: string | null
+          symbol?: string
+          threshold_pct?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "market_value_audit_run_id_fkey"
+            columns: ["run_id"]
+            isOneToOne: false
+            referencedRelation: "market_reference_audit_runs"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       market_watchlist_items: {
         Row: {
@@ -4380,6 +4823,7 @@ export type Database = {
           breakout_score: number | null
           change_pct: number | null
           close: number | null
+          close_adjusted: number | null
           company_name: string | null
           computed_at: string | null
           current_ratio: number | null
@@ -4448,6 +4892,7 @@ export type Database = {
           sector_strength: number | null
           sme: boolean | null
           strict_ok: boolean | null
+          sub_sector: string | null
           support_level: number | null
           symbol: string | null
           sync_source: string | null

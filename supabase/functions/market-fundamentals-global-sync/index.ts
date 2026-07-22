@@ -264,51 +264,6 @@ Deno.serve(async (req) => {
               .eq("symbol", s.symbol).eq("exchange", s.exchange);
           }
 
-          // Dual-write into the unified market_data table (screener/alerts/
-          // autotrade read this). FMP fields (roce, roa, margins, cash flow,
-          // enterprise value) aren't touched here — a separate nightly
-          // market-fmp-sync fills those within FMP's free-tier quota.
-          const srcTag = r && nse ? "yahoo+nse" : r ? "yahoo" : nse ? "nse" : null;
-          await svc.from("market_data").upsert({
-            symbol: s.symbol,
-            exchange: s.exchange,
-            company_name: row.company_name,
-            sector: row.sector,
-            industry: row.industry,
-            is_active: true,
-            yahoo_symbol: resolvedYahoo ?? s.yahoo_symbol ?? null,
-            ltp: price,
-            market_cap: marketCapCr,
-            pe: pe,
-            pb: pb,
-            peg: peg,
-            eps: eps,
-            book_value: bookValue,
-            dividend_yield: dy,
-            roe: roeMaybePct,
-            roce: roce,
-            sales: revenueCr,
-            net_profit: profitCr,
-            sales_growth: revGrowth,
-            profit_growth: earnGrowth,
-            eps_growth: epsGrowth,
-            debt_equity: row.debt_to_equity,
-            current_ratio: row.current_ratio,
-            quick_ratio: row.quick_ratio,
-            promoter_holding: row.promoter_holding,
-            dii_holding: row.dii_holding,
-            high_52w: row.high_52w,
-            low_52w: row.low_52w,
-            data_source: srcTag ? {
-              pe: pe != null ? srcTag : null,
-              pb: pb != null ? srcTag : null,
-              roe: roeMaybePct != null ? srcTag : null,
-              sector: row.sector ? srcTag : null,
-              market_cap: marketCapCr != null ? srcTag : null,
-            } : null,
-            last_updated: now,
-          }, { onConflict: "symbol,exchange" });
-
           if (status === "ok") synced++; else partial++;
         } catch (err) {
           failed++;

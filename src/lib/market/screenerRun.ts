@@ -17,9 +17,11 @@ export interface ScreenerRow {
   trade_date: string | null;
   company_name: string | null;
   sector: string | null;
+  sub_sector: string | null;
   industry: string | null;
   instrument_type?: string | null;
   market_cap: number | null; // ₹ Cr
+  data_provenance?: Record<string, unknown> | null;
   is_nifty500: boolean;
   in_nifty50: boolean;
   in_banknifty: boolean;
@@ -29,6 +31,7 @@ export interface ScreenerRow {
   previous_close: number | null;
   change_abs: number | null;
   change_pct: number | null;
+  change_pct_raw: number | null;
 
   // fundamentals (unified schema)
   pe: number | null;
@@ -114,8 +117,8 @@ async function fetchIndexMemberSet(indexKey: string): Promise<Set<string>> {
 // Explicit projection — drops ~15 unused fundamental_* duplicates and metadata
 // columns from the wire, ~30% smaller responses than the previous `select("*")`.
 const SCREENER_COLUMNS = [
-  "symbol","exchange","company_name","sector","industry","market_cap",
-  "is_nifty500","instrument_type","trade_date","close","change_pct","volume",
+  "symbol","exchange","company_name","sector","sub_sector","industry","market_cap",
+  "is_nifty500","instrument_type","trade_date","close","previous_close","change_pct","volume",
   "rel_volume","ema20","ema50","ema100","ema200","rsi14","macd","macd_signal",
   "macd_hist","adx14","atr14","atr_pct","bb_upper","bb_lower","bb_width",
   "bb_squeeze","high_52w","low_52w","pct_from_52w_high","above_ema200",
@@ -125,7 +128,7 @@ const SCREENER_COLUMNS = [
   "roe","roce","debt_to_equity","current_ratio","quick_ratio","revenue_ttm_cr",
   "profit_ttm_cr","revenue_growth_yoy","profit_growth_yoy","eps_growth_yoy",
   "promoter_holding","fii_holding","dii_holding",
-  "ret_5d","ret_21d","ret_ytd","fno_enabled","sme",
+  "ret_5d","ret_21d","ret_ytd","fno_enabled","sme","data_provenance",
 ].join(",");
 
 async function fetchScreenerRows(): Promise<any[]> {
@@ -209,10 +212,12 @@ export function useScreenerData(universe: UniverseId, enabled = true) {
         exchange: s.exchange,
         trade_date: s.trade_date ?? null,
         sector:       s.sector ?? null,
+        sub_sector:   s.sub_sector ?? s.industry ?? s.sector ?? null,
         company_name: s.company_name ?? null,
         market_cap:   num(s.market_cap),
         is_nifty500:  Boolean(s.is_nifty500),
         industry:     s.industry ?? null,
+        data_provenance: s.data_provenance ?? null,
         in_nifty50:   idxSets.NIFTY50.has(s.symbol),
         in_banknifty: idxSets.BANKNIFTY.has(s.symbol),
         in_finnifty:  idxSets.FINNIFTY.has(s.symbol),
@@ -225,6 +230,12 @@ export function useScreenerData(universe: UniverseId, enabled = true) {
         previous_close:    num(s.previous_close),
         change_abs:        num(s.change_abs),
         change_pct:        num(s.change_pct),
+        change_pct_raw:    (() => {
+          const close = num(s.close ?? s.ltp);
+          const prev = num(s.previous_close);
+          if (close == null || prev == null || prev <= 0) return num(s.change_pct);
+          return ((close - prev) / prev) * 100;
+        })(),
 
         // view uses `pe_ttm`, `eps_ttm`, `debt_to_equity`, `*_growth_yoy`
         pe:                num(s.pe_ttm ?? s.pe),
