@@ -177,7 +177,13 @@ function ScreenerInner() {
 
   // Persisted across visits — the Screener page should resume where the user left it,
   // not reset to All Stocks / no filters every time they navigate away and back.
-  const persisted = useMemo(() => safeStorage.getJSON<{ universe?: UniverseId; active?: ActiveFilter[]; savedId?: string | null } | null>(STATE_STORE_KEY, null), []);
+  const persisted = useMemo(() => {
+    const v2 = safeStorage.getJSON<{ universe?: UniverseId; active?: ActiveFilter[]; savedId?: string | null } | null>(STATE_STORE_KEY, null);
+    if (v2) return v2;
+    // One-shot migration off the old v1 key so returning users keep their setup.
+    const v1 = safeStorage.getJSON<{ universe?: UniverseId; active?: ActiveFilter[] } | null>("screener.state.v1", null);
+    return v1 ? { ...v1, savedId: null } : null;
+  }, []);
   const [universe, setUniverse] = useState<UniverseId>(persisted?.universe ?? "all");
   const [active, setActive] = useState<ActiveFilter[]>(() => normalizeActiveFilters(persisted?.active ?? []));
   const [visibleCols, setVisibleCols] = useState<string[]>(() => {
@@ -224,6 +230,23 @@ function ScreenerInner() {
   const istDow = new Date(Date.now() + 5.5 * 3600_000).getUTCDay(); // 0=Sun..6=Sat, IST-shifted
   const staleThresholdDays = istDow === 1 ? 3 : 1; // Monday: Fri/Sat/Sun gap is normal
   const isDataStale = dataStaleDays != null && dataStaleDays > staleThresholdDays;
+
+  // Worst-of-3 coverage summary for the compact status pill in the Results
+  // header. Full breakdown still lives behind the Health modal.
+  const healthSummary = useMemo(() => {
+    const eq = rows.filter((r) => (r.instrument_type ?? "EQ") === "EQ");
+    if (eq.length === 0) return null;
+    const fundOk = eq.filter((r) => r.pe != null || r.roe != null || r.market_cap != null).length;
+    const sectorOk = eq.filter((r) => r.sector != null).length;
+    const withScore = eq.filter((r) => r.trade_date != null);
+    const techOk = withScore.filter((r) => r.rsi != null || r.adx != null).length;
+    const fundPct = Math.round((fundOk / eq.length) * 100);
+    const sectorPct = Math.round((sectorOk / eq.length) * 100);
+    const techPct = withScore.length ? Math.round((techOk / withScore.length) * 100) : 0;
+    const worst = Math.min(fundPct, sectorPct, techPct);
+    const tone: "ok" | "warn" | "err" = worst >= 95 ? "ok" : worst >= 80 ? "warn" : "err";
+    return { fundPct, sectorPct, techPct, tone, eod: latestTradeDate };
+  }, [rows, latestTradeDate]);
 
   // Change %/Price come from the once-daily EOD pipeline (market_stock_scores),
   // while the results table's Chg%/Price columns overlay a live quote for
@@ -321,6 +344,17 @@ function ScreenerInner() {
 
   const [saveModalOpen, setSaveModalOpen] = useState(false);
   const [saveModalName, setSaveModalName] = useState("");
+  // Ctrl/Cmd+S opens the Save-as modal (or Save-in-place when attached).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        setSaveModalOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Track which saved screen is currently loaded so we can badge it on the
   // page (name + "modified" state) and update-in-place instead of always
@@ -347,6 +381,18 @@ function ScreenerInner() {
   const isModified = !!activeSaved && activeSavedSig !== null && currentSig !== activeSavedSig;
   // Persist filters + attached saved-id so a page reload restores the badge too.
   useEffect(() => { safeStorage.setJSON(STATE_STORE_KEY, { universe, active, savedId: activeSavedId }); }, [universe, active, activeSavedId]);
+  // Clear ?f= as soon as a saved screen is attached — the savedId in
+  // localStorage is enough, and a stale ?f= would otherwise override on reload.
+  useEffect(() => {
+    if (!activeSavedId) return;
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has("f")) {
+        url.searchParams.delete("f");
+        window.history.replaceState(null, "", url.toString());
+      }
+    } catch { /* */ }
+  }, [activeSavedId]);
   const detachSaved = () => {
     setActiveSavedId(null);
     setActiveSavedSig(null);
@@ -454,7 +500,14 @@ function ScreenerInner() {
   // back to the user's saved column preset. This mirrors Tickertape's
   // "columns follow filters" behaviour.
   const effectiveCols = useMemo(
-    () => (active.length > 0 ? colsFromActiveFilters(active) : visibleCols),
+    () => {
+      if (active.length === 0) return visibleCols;
+      // Keep the user's chosen columns visible; only *add* the filtered
+      // column so the column set doesn't disappear the moment a filter is added.
+      const seen = new Set(visibleCols);
+      const extras = colsFromActiveFilters(active).filter((id) => !seen.has(id));
+      return [...visibleCols, ...extras];
+    },
     [active, visibleCols],
   );
 
@@ -463,7 +516,9 @@ function ScreenerInner() {
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `screener_${new Date().toISOString().slice(0, 10)}.csv`;
+    const stamp = new Date().toISOString().slice(0, 10);
+    // Universe + filter count + row count baked into the filename for traceability.
+    a.href = url; a.download = `screener_${universe}_${active.length}f_${filtered.length}rows_${stamp}.csv`;
     a.click(); URL.revokeObjectURL(url);
   };
 
@@ -638,15 +693,14 @@ function ScreenerInner() {
           {activeSaved && isModified ? "Update" : "Save"}
         </Btn>
         {active.length > 0 && (
-          <Btn size="sm" variant="danger" onClick={() => { setActive([]); detachSaved(); }}>
-            <RotateCcw size={11} style={{ marginRight: 4 }} />Reset
+          <Btn size="sm" variant="ghost" onClick={() => setActive([])} title="Clear all filter values (keeps saved screen attached)">
+            <RotateCcw size={11} style={{ marginRight: 4 }} />Clear values
           </Btn>
         )}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
           <span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
             {isFetching ? "loading…" : `${filtered.length} / ${rows.length}`}
           </span>
-          <Btn size="sm" variant="ghost" onClick={() => setHealthOpen(true)} title="Pipeline health & resync">Health</Btn>
         </div>
       </div>
 
@@ -671,6 +725,11 @@ function ScreenerInner() {
             placeholder="e.g. High-volume breakouts"
             onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveScreener(saveModalName); } }}
             style={{ ...inputStyle, padding: "8px 10px", fontSize: 12 }} />
+          {saveModalName.trim() && saved.some((s) => s.name.trim().toLowerCase() === saveModalName.trim().toLowerCase() && s.id !== activeSaved?.id) && (
+            <span style={{ fontSize: 11, color: "var(--warn, #d29a2b)" }}>
+              A screen named "{saveModalName.trim()}" already exists — this will create a duplicate.
+            </span>
+          )}
           <div style={{ display: "flex", gap: 6, justifyContent: "flex-end", marginTop: 4 }}>
             <Btn size="sm" variant="ghost" onClick={() => setSaveModalOpen(false)}>Cancel</Btn>
             <Btn size="sm" onClick={() => saveScreener(saveModalName)} disabled={!saveModalName.trim()}>Save</Btn>
@@ -684,7 +743,7 @@ function ScreenerInner() {
       </HudModal>
 
       {/* Two-pane workspace — fills the remaining viewport, no wasted space. */}
-      <div style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: 8, alignItems: "stretch", flex: 1, minHeight: 0 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 8, alignItems: "stretch", flex: 1, minHeight: 0 }}>
         <div style={{ minHeight: 0, overflow: "auto" }}>
           <FilterRail rows={rows} active={active} onAdd={addFilter} onChange={setFilterValue} onClear={removeFilter}
             sectorList={sectorList} industryList={industryList}
@@ -696,8 +755,28 @@ function ScreenerInner() {
             index="MK.SC2" live={isFetching ? "warn" : error ? "err" : "ok"}
             actions={
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                {active.length === 0 && <ColumnPresetPicker onPick={setVisibleCols} />}
-                {active.length === 0 && <ColumnPicker value={visibleCols} onChange={setVisibleCols} />}
+                {healthSummary && (
+                  <button type="button" onClick={() => setHealthOpen(true)}
+                    title={`Pipeline: Fund ${healthSummary.fundPct}% · Sector ${healthSummary.sectorPct}% · Tech ${healthSummary.techPct}% — click for details`}
+                    aria-label="Data health details"
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: 6,
+                      padding: "3px 8px", border: "1px solid var(--edge)", background: "transparent",
+                      color: "var(--text-muted)", cursor: "pointer",
+                      fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
+                      borderRadius: 2,
+                    }}>
+                    <span style={{
+                      width: 6, height: 6, borderRadius: "50%",
+                      background: healthSummary.tone === "ok" ? "var(--ok, #4ade80)"
+                        : healthSummary.tone === "warn" ? "var(--warn, #d29a2b)"
+                        : "var(--danger, #ff6a6a)",
+                    }} />
+                    EOD {healthSummary.eod ?? "—"}
+                  </button>
+                )}
+                <ColumnPresetPicker onPick={setVisibleCols} />
+                <ColumnPicker value={visibleCols} onChange={setVisibleCols} />
                 <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}
                   style={{ ...inputStyle, padding: "4px 6px", fontSize: 11 }}>
                   {[25, 50, 100, 200].map((n) => <option key={n} value={n}>{n}/page</option>)}
@@ -720,11 +799,10 @@ function ScreenerInner() {
                   emptyLabel={rows.length === 0 && !isFetching ? "market pipeline is warming up" : "no matches"}
                   emptyHint={rows.length === 0 && !isFetching ? "automatic sync is enabled; refresh shortly" : "loosen the filters or change the universe"}
                 />
-                {active.length > 0 && rows.length > 0 && (
-                  <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-                    <span style={{ fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.16em", textTransform: "uppercase" }}>Applied</span>
-                    {active.map((af) => <Chip key={af.id} tone="neutral">{chipDesc(af)}</Chip>)}
-                    <Chip tone="neutral">EOD</Chip>
+                {active.length > 0 && filtered.length === 0 && rows.length > 0 && (
+                  <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", padding: "8px 10px", border: "1px dashed var(--edge)" }}>
+                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>No matches for the current filters.</span>
+                    <Btn size="sm" variant="ghost" onClick={() => setActive([])}>Clear values</Btn>
                   </div>
                 )}
                 {filtered.length > pageSize && (
@@ -779,7 +857,7 @@ function FilterRail({ rows, active, onAdd, onChange, onClear, sectorList, indust
         </div>
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 14, maxHeight: "calc(100vh - 340px)", overflowY: "auto", paddingRight: 4 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingRight: 4 }}>
         {active.length === 0 ? (
           <div className="hud-label" style={{ color: "var(--text-dim)" }}>no filters added yet</div>
         ) : (
@@ -869,6 +947,67 @@ function AddFilterPicker({ activeIds, onPick, rows }: {
   );
 }
 
+// Number-range editor with 120ms debounce + swap-on-blur when min > max.
+// Local state means every keystroke doesn't recompute `filtered` (which is
+// O(rows × filters) on ~3k stocks).
+function NumberRange({ def, af, inpS, onChange }: {
+  def: FilterDef; af: ActiveFilter | undefined;
+  inpS: React.CSSProperties; onChange: (patch: Partial<ActiveFilter>) => void;
+}) {
+  const initMin = af?.min == null || af.min === "" ? "" : String(af.min);
+  const initMax = af?.max == null || af.max === "" ? "" : String(af.max);
+  const [minStr, setMinStr] = useState<string>(initMin);
+  const [maxStr, setMaxStr] = useState<string>(initMax);
+  // Re-sync from parent (e.g. saved screen loaded) without breaking local typing.
+  useEffect(() => { setMinStr(af?.min == null || af.min === "" ? "" : String(af.min)); }, [af?.min]);
+  useEffect(() => { setMaxStr(af?.max == null || af.max === "" ? "" : String(af.max)); }, [af?.max]);
+  const firstMin = useRef(true);
+  const firstMax = useRef(true);
+  useEffect(() => {
+    if (firstMin.current) { firstMin.current = false; return; }
+    const t = setTimeout(() => onChange({ min: minStr === "" ? "" : Number(minStr) }), 120);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [minStr]);
+  useEffect(() => {
+    if (firstMax.current) { firstMax.current = false; return; }
+    const t = setTimeout(() => onChange({ max: maxStr === "" ? "" : Number(maxStr) }), 120);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [maxStr]);
+  const swapIfInverted = () => {
+    if (minStr === "" || maxStr === "") return;
+    const lo = Number(minStr), hi = Number(maxStr);
+    if (Number.isFinite(lo) && Number.isFinite(hi) && lo > hi) {
+      setMinStr(String(hi));
+      setMaxStr(String(lo));
+    }
+  };
+  const inverted = minStr !== "" && maxStr !== "" && Number(minStr) > Number(maxStr);
+  const warnBorder = inverted ? "var(--warn, #d29a2b)" : undefined;
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <input type="number" value={minStr} step={def.step}
+          placeholder={def.min !== undefined ? String(def.min) : "min"}
+          onChange={(e) => setMinStr(e.target.value)} onBlur={swapIfInverted}
+          style={{ ...inpS, ...(warnBorder ? { borderColor: warnBorder } : null) }} />
+        <span style={{ fontSize: 9, color: "var(--text-muted)" }}>–</span>
+        <input type="number" value={maxStr} step={def.step}
+          placeholder={def.max !== undefined ? String(def.max) : "max"}
+          onChange={(e) => setMaxStr(e.target.value)} onBlur={swapIfInverted}
+          style={{ ...inpS, ...(warnBorder ? { borderColor: warnBorder } : null) }} />
+        {def.unit && <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{def.unit}</span>}
+      </div>
+      {inverted && (
+        <div style={{ fontSize: 10, color: "var(--warn, #d29a2b)", marginTop: 3 }}>
+          min &gt; max — values will be swapped on blur.
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Compact per-filter editor rendered inline in the sidebar — value changes
 // go straight to `active` (see setFilterValue), no add/remove step.
 function InlineFilterEditor({ def, af, rows, sectorList, industryList, onChange, onClear }: {
@@ -908,16 +1047,7 @@ function InlineFilterEditor({ def, af, rows, sectorList, industryList, onChange,
           onChange={(values) => (values.length === 0 ? onClear() : onChange({ values }))}
         />
       ) : (
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <input type="number" value={af?.min ?? ""} step={def.step}
-            placeholder={def.min !== undefined ? String(def.min) : "min"}
-            onChange={(e) => onChange({ min: e.target.value === "" ? "" : Number(e.target.value) })} style={inpS} />
-          <span style={{ fontSize: 9, color: "var(--text-muted)" }}>–</span>
-          <input type="number" value={af?.max ?? ""} step={def.step}
-            placeholder={def.max !== undefined ? String(def.max) : "max"}
-            onChange={(e) => onChange({ max: e.target.value === "" ? "" : Number(e.target.value) })} style={inpS} />
-          {def.unit && <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{def.unit}</span>}
-        </div>
+        <NumberRange def={def} af={af} inpS={inpS} onChange={onChange} />
       )}
     </div>
   );
@@ -982,10 +1112,11 @@ function SavedPicker({ saved, activeId, onLoad, onDelete }: {
 
 function EnumMultiSelect({ options, values, onChange }: { options: string[]; values: string[]; onChange: (v: string[]) => void }) {
   const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
   const ref = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
-  const pos = useAnchoredPos(triggerRef, open, "left", 320);
+  const pos = useAnchoredPos(triggerRef, open, "left", 360);
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
@@ -998,26 +1129,35 @@ function EnumMultiSelect({ options, values, onChange }: { options: string[]; val
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
   const toggle = (v: string) => values.includes(v) ? onChange(values.filter((x) => x !== v)) : onChange([...values, v]);
+  const term = q.trim().toLowerCase();
+  const shown = term ? options.filter((o) => o.toLowerCase().includes(term)) : options;
   return (
     <div ref={ref} style={{ position: "relative" }}>
       <button ref={triggerRef} className="hud-btn" data-variant="ghost" data-size="sm" onClick={() => setOpen((o) => !o)}>
         {values.length ? `${values.length} selected` : "select…"}
       </button>
       {open && pos && createPortal(
-        <div ref={popRef} style={{ ...popoverStyle, ...pos, maxHeight: 320, overflowY: "auto", width: 240 }}>
-          {options.length === 0
-            ? <span style={{ fontSize: 11, color: "var(--text-muted)", padding: 6 }}>no options yet</span>
-            : options.map((o) => (
-              <button key={o} onClick={() => toggle(o)}
-                style={{ ...popoverItem, padding: "4px 8px", display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}
-                onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(53,214,237,0.08)")}
-                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-                <span style={{ width: 11, height: 11, border: "1px solid var(--edge-strong)", display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
-                  {values.includes(o) && <Check size={9} style={{ color: "var(--accent)" }} />}
-                </span>
-                <span>{o}</span>
-              </button>
-            ))}
+        <div ref={popRef} style={{ ...popoverStyle, ...pos, width: 260, maxHeight: 380, padding: 0 }}>
+          <div style={{ position: "relative", padding: 6, borderBottom: "1px solid var(--edge)" }}>
+            <Search size={11} style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="search…" autoFocus
+              style={{ ...inputStyle, padding: "6px 8px 6px 24px", fontSize: 12, width: "100%" }} />
+          </div>
+          <div style={{ maxHeight: 320, overflowY: "auto", display: "flex", flexDirection: "column", gap: 2, padding: 6 }}>
+            {shown.length === 0
+              ? <span style={{ fontSize: 11, color: "var(--text-muted)", padding: 6 }}>{options.length === 0 ? "no options yet" : "no matches"}</span>
+              : shown.map((o) => (
+                <button key={o} onClick={() => toggle(o)}
+                  style={{ ...popoverItem, padding: "4px 8px", display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(53,214,237,0.08)")}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+                  <span style={{ width: 11, height: 11, border: "1px solid var(--edge-strong)", display: "inline-flex", alignItems: "center", justifyContent: "center" }}>
+                    {values.includes(o) && <Check size={9} style={{ color: "var(--accent)" }} />}
+                  </span>
+                  <span>{o}</span>
+                </button>
+              ))}
+          </div>
         </div>,
         document.body,
       )}
@@ -1100,8 +1240,9 @@ function useAnchoredPos(
   const [pos, setPos] = useState<{ top: number; left?: number; right?: number } | null>(null);
   useEffect(() => {
     if (!open || !triggerRef.current) return;
+    const el = triggerRef.current;
     const compute = () => {
-      const el = triggerRef.current; if (!el) return;
+      if (!el) return;
       const r = el.getBoundingClientRect();
       const spaceBelow = window.innerHeight - r.bottom;
       const openUp = spaceBelow < estHeight && r.top > spaceBelow;
@@ -1112,9 +1253,13 @@ function useAnchoredPos(
     compute();
     window.addEventListener("scroll", compute, true);
     window.addEventListener("resize", compute);
+    // Trigger size changes too (e.g. attached saved-name grows on load) — track them.
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(compute) : null;
+    if (ro && el) ro.observe(el);
     return () => {
       window.removeEventListener("scroll", compute, true);
       window.removeEventListener("resize", compute);
+      ro?.disconnect();
     };
   }, [open, triggerRef, align, estHeight]);
   return pos;
