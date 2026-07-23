@@ -20,7 +20,9 @@ type Item = { id: string; watchlist_id: string; symbol: string; exchange: string
 type List = { id: string; name: string };
 
 const ACTIVE_KEY = "market.watchlist.activeId";
-const MIN_LISTS = 4;
+// Seed a single "Default" list on first use. Users can add more via "+ new".
+// (Previous behavior of pre-creating 4 empty tabs cluttered the panel.)
+const MIN_LISTS = 1;
 
 export function WatchlistPanel({
   readyCount, nearCount, weakCount, onSettings,
@@ -48,10 +50,9 @@ export function WatchlistPanel({
     let rows = (wl ?? []) as List[];
     // Seed default lists so the user always has ≥4 slots to work with.
     if (rows.length < MIN_LISTS) {
-      const toCreate: Array<{ user_id: string; name: string }> = [];
-      for (let i = rows.length; i < MIN_LISTS; i++) {
-        toCreate.push({ user_id: u.user.id, name: `Watchlist ${i + 1}` });
-      }
+      const toCreate: Array<{ user_id: string; name: string }> = [
+        { user_id: u.user.id, name: "Default" },
+      ];
       const { data: inserted, error: e2 } = await supabase.from("market_watchlists")
         .insert(toCreate as any).select("id,name");
       if (e2) { push(e2.message, "err"); }

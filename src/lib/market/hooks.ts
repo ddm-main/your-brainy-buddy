@@ -1,4 +1,5 @@
 // React Query hooks for the Market section. Query keys live under ["market", ...].
+import { useEffect, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "./api";
@@ -15,6 +16,7 @@ import type {
   ScreenerGroup,
   SectorStrength,
   StockScore,
+  TopMoverRow,
 } from "./types";
 
 // NSE market hours (IST 09:15–15:30) ≈ UTC 03:45–10:00 — poll faster during them.
@@ -51,7 +53,63 @@ export function useIndices() {
     queryFn: () =>
       callMarketFn<{ quotes: IndexQuote[]; breadth: BreadthDaily | null }>("market-indices"),
     refetchInterval: marketOpen() ? 2_000 : 120_000,
+    refetchIntervalInBackground: false,
   });
+}
+
+export function useTopMovers() {
+  return useQuery({
+    queryKey: ["market", "top-movers"],
+    queryFn: async (): Promise<TopMoverRow[]> => {
+      const { data, error } = await supabase
+        .from("market_top_movers" as any).select("*").order("rn", { ascending: true });
+      if (error) throw error;
+      return (data ?? []) as unknown as TopMoverRow[];
+    },
+    staleTime: 60_000,
+    refetchInterval: marketOpen() ? 60_000 : false,
+    refetchIntervalInBackground: false,
+  });
+}
+
+// Shared IST market status ticker. Recomputes every second when the market is
+// open and every 30 s when closed, so the strip / dashboard header don't
+// re-render 24/7 for a status that only flips at 09:15 / 15:30.
+export function useMarketStatus() {
+  const compute = () => {
+    const now = new Date();
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata",
+      weekday: "short", hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hour12: false,
+    }).formatToParts(now);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+    const day = get("weekday");
+    const hh = Number(get("hour")); const mm = Number(get("minute")); const ss = Number(get("second"));
+    const secs = hh * 3600 + mm * 60 + ss;
+    const openSecs = 9 * 3600 + 15 * 60;
+    const closeSecs = 15 * 3600 + 30 * 60;
+    const istClock = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")} IST`;
+    if (day === "Sat" || day === "Sun") return { open: false, label: "closed · weekend", istClock };
+    if (secs < openSecs) {
+      const d = openSecs - secs;
+      const h = Math.floor(d / 3600); const m = Math.floor((d % 3600) / 60); const s = d % 60;
+      return { open: false, label: `opens in ${h ? h + "h " : ""}${m}m ${String(s).padStart(2, "0")}s`, istClock };
+    }
+    if (secs > closeSecs) return { open: false, label: "closed", istClock };
+    const d = closeSecs - secs;
+    const h = Math.floor(d / 3600); const m = Math.floor((d % 3600) / 60); const s = d % 60;
+    return { open: true, label: `open · closes in ${h ? h + "h " : ""}${m}m ${String(s).padStart(2, "0")}s`, istClock };
+  };
+  const [status, setStatus] = useState(compute);
+  useEffect(() => {
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+    const tick = () => setStatus(compute());
+    const interval = status.open ? 1_000 : 30_000;
+    const t = setInterval(tick, interval);
+    return () => clearInterval(t);
+  }, [status.open]);
+  return status;
 }
 
 export function useQuotes(keys: string[]) {
@@ -177,11 +235,13 @@ export function useBreadth() {
     queryKey: ["market", "breadth"],
     queryFn: async (): Promise<BreadthDaily | null> => {
       const { data, error } = await supabase
-        .from("market_breadth_daily").select("*")
-        .order("trade_date", { ascending: false }).limit(1).maybeSingle();
+        .from("market_breadth_latest" as any).select("*").maybeSingle();
       if (error) throw error;
       return data as BreadthDaily | null;
     },
+    staleTime: 60_000,
+    refetchInterval: marketOpen() ? 60_000 : false,
+    refetchIntervalInBackground: false,
   });
 }
 

@@ -81,6 +81,28 @@ export interface BreadthDaily {
   nifty_close: number | null;
   nifty_change_pct: number | null;
   regime: string | null;
+  india_vix: number | null;
+  fii_net_cr: number | null;
+  dii_net_cr: number | null;
+  new_highs: number | null;
+  new_lows: number | null;
+  market_score: number | null;
+  computed_at?: string | null;
+}
+
+export interface TopMoverRow {
+  symbol: string;
+  exchange: string;
+  sector: string | null;
+  close: number | null;
+  change_pct: number | null;
+  volume: number | null;
+  rel_volume: number | null;
+  rsi14: number | null;
+  breakout_score: number | null;
+  trade_date: string | null;
+  direction: "gain" | "lose";
+  rn: number;
 }
 
 export interface SectorStrength {

@@ -1769,3 +1769,33 @@ body.is-fs-chart .hud-voicebar { display: none !important; }
   }
   .quick-add-form > *:first-child { grid-column: 1 / -1; }
 }
+
+/* Market dashboard — index tiles: hover + keyboard focus without inline handlers. */
+.mk-idx-tile {
+  padding: 5px 7px;
+  border: 1px solid var(--edge);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: border-color 120ms, background 120ms;
+}
+.mk-idx-tile:hover {
+  border-color: var(--edge-strong);
+  background: rgba(53, 214, 237, 0.05);
+}
+.mk-idx-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Market dashboard Row 2 — collapse to single column on narrow viewports and
+   reorder so the most-used panel (Portfolio) appears first. */
+@media (max-width: 1023px) {
+  .mk-dash-row2 {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  
+  
+  
+}

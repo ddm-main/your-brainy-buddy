@@ -23,9 +23,30 @@ import { RefreshCw, Settings2, Sparkles, Trash2, X } from "lucide-react";
 import type { Quote, StockScore } from "@/lib/market/types";
 import { holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { useEscapeClose } from "@/lib/useEscapeClose";
+import { MarketStrip } from "@/components/market/MarketStrip";
 
 
 const BREAKOUT_ROWS = 16;
+
+// IST market hours check (Mon–Fri 09:15–15:30). Used to differentiate
+// "cached close" (intraday stale data — actionable) from "closed" (after
+// hours — expected). Uses Intl to avoid TZ drift on non-IST clients.
+function isNseOpen(now: Date = new Date()): boolean {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(now);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  const day = get("weekday");
+  if (day === "Sat" || day === "Sun") return false;
+  const hh = Number(get("hour")); const mm = Number(get("minute"));
+  const mins = hh * 60 + mm;
+  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+}
+
+const DEFAULT_BREAKOUT_KEY = "market.dash.breakoutScreen";
+const EXPLICIT_CLEAR = "__cleared__";
 
 type BreakoutDisplayRow = StockScore | ScreenerRow;
 
@@ -67,20 +88,33 @@ export default function MarketDashboard() {
   const [manageOpen, setManageOpen] = useState(false);
   const [breakoutScreenId, setBreakoutScreenId] = useState<string>(
     () => {
-      const v = localStorage.getItem("market.dash.breakoutScreen");
+      const v = localStorage.getItem(DEFAULT_BREAKOUT_KEY);
+      if (v === EXPLICIT_CLEAR) return "";
       return v && v !== "default" ? v : "";
     },
   );
   useEffect(() => {
-    if (breakoutScreenId) localStorage.setItem("market.dash.breakoutScreen", breakoutScreenId);
+    if (breakoutScreenId) localStorage.setItem(DEFAULT_BREAKOUT_KEY, breakoutScreenId);
   }, [breakoutScreenId]);
   const { data: savedScreens = [] } = useSavedScreeners();
-  // If nothing is chosen yet (or the stored id no longer exists), fall back to
-  // the first saved screener — but never overwrite a valid user choice.
+  // If nothing is chosen yet, fall back to the first saved screener.
+  // Distinguish "never chosen" (empty stored value) from "explicitly cleared"
+  // (EXPLICIT_CLEAR marker) — the latter must not auto-jump. If the current
+  // id no longer exists (screener deleted elsewhere), clear the stored key
+  // rather than silently switch to another screener.
   useEffect(() => {
     if (savedScreens.length === 0) return;
-    const stillValid = breakoutScreenId && savedScreens.some((s) => s.id === breakoutScreenId);
-    if (!stillValid) setBreakoutScreenId(savedScreens[0].id);
+    if (breakoutScreenId) {
+      const stillValid = savedScreens.some((s) => s.id === breakoutScreenId);
+      if (!stillValid) {
+        try { localStorage.removeItem(DEFAULT_BREAKOUT_KEY); } catch { /* noop */ }
+        setBreakoutScreenId("");
+      }
+      return;
+    }
+    const stored = (() => { try { return localStorage.getItem(DEFAULT_BREAKOUT_KEY); } catch { return null; } })();
+    if (stored === EXPLICIT_CLEAR) return; // user asked for "no filter"
+    setBreakoutScreenId(savedScreens[0].id);
   }, [savedScreens, breakoutScreenId]);
   const selectedScreen = savedScreens.find((s) => s.id === breakoutScreenId);
   const selectedScreenState = useMemo(() => savedScreenerState(selectedScreen), [selectedScreen]);
@@ -112,14 +146,14 @@ export default function MarketDashboard() {
 
   const filteredBreakouts = useMemo(() => matchingBreakouts.slice(0, BREAKOUT_ROWS), [matchingBreakouts]);
 
-  const breakoutStatusLabel = !usingSavedScreen
+  // One chip only — the screener name is already visible in the <select>.
+  // Show the count when a screener with filters is active, otherwise a
+  // minimal hint about what's needed.
+  const breakoutCountLabel = !usingSavedScreen
     ? (savedScreens.length === 0 ? "no screeners saved" : "select a screener")
     : !hasActiveFilters
     ? "screener has no filters"
-    : `filtered · ${selectedScreen?.name ?? "screener"}`;
-  const breakoutCountLabel = !usingSavedScreen || !hasActiveFilters
-    ? "0 matches"
-    : (savedScreenerFetching ? "loading" : `${matchingBreakouts.length} matches`);
+    : (savedScreenerFetching ? "loading…" : `${matchingBreakouts.length} matches`);
 
 
 
@@ -127,10 +161,13 @@ export default function MarketDashboard() {
   // RSI/EMA/breakout scoring is inherently a daily-bar concept, same as any
   // trading platform). But the displayed price/change% shouldn't sit frozen at
   // yesterday's close all session — overlay live quotes on top of them.
-  const scoreKeys = useMemo(
-    () => Array.from(new Set([...topBreakouts, ...preBreakouts, ...filteredBreakouts].map(rowKey))),
+  // Union key set for on-screen scored rows. Memoize by joined string so
+  // toggling filters that don't add new symbols doesn't refire useQuotes.
+  const scoreKeysJoined = useMemo(
+    () => Array.from(new Set([...topBreakouts, ...preBreakouts, ...filteredBreakouts].map(rowKey))).sort().join(","),
     [topBreakouts, preBreakouts, filteredBreakouts],
   );
+  const scoreKeys = useMemo(() => (scoreKeysJoined ? scoreKeysJoined.split(",") : []), [scoreKeysJoined]);
   const { data: scoreQuotes } = useQuotes(scoreKeys);
   const pushTicks = useLiveTickStore((s) => s.ticks);
   const liveByKey = useMemo(() => {
@@ -144,12 +181,15 @@ export default function MarketDashboard() {
   }, [scoreQuotes, pushTicks]);
   const liveFor = (s: BreakoutDisplayRow) => liveByKey.get(rowKey(s));
   const anyPush = useMemo(() => scoreKeys.some((k) => isFreshTick(pushTicks[k])), [scoreKeys, pushTicks]);
-  const liveQuoteState = useMemo<"push" | "live" | "stale" | "none">(() => {
+  const liveQuoteState = useMemo<"push" | "live" | "stale" | "closed" | "none">(() => {
     if (anyPush) return "push";
     const quotes = scoreQuotes?.quotes ?? [];
     if (quotes.length === 0) return "none";
-    return quotes.some((q) => q.stale) ? "stale" : "live";
-  }, [scoreQuotes, anyPush]);
+    const hasStale = quotes.some((q) => q.stale);
+    if (!hasStale) return "live";
+    // Stale outside market hours = expected end-of-day snapshot, not a problem.
+    return isNseOpen() ? "stale" : "closed";
+  }, [scoreQuotes, anyPush, scoreKeys]);
 
   const { data: counts } = useQuery({
     queryKey: ["market", "dash-counts"],
@@ -184,10 +224,14 @@ export default function MarketDashboard() {
     const byKey = new Map((pfQuotes?.quotes ?? []).map((q) => [quoteKey(q.exchange, q.symbol), q]));
     // Rows with no resolvable live price are excluded from current/pnl
     // (unknown, not zero) — see holdingPnl's contract in lib/market/pnl.ts.
+    // Today % must use the SAME resolved-symbol set for numerator (day P&L)
+    // and denominator (prev value), otherwise the ratio is nonsense when even
+    // one symbol lacks a previous_close.
     let invested = 0, current = 0, knownInvested = 0, unresolved = 0;
-    const dayPnls: Array<number | null> = [];
+    let dayPnlWithPrev = 0;   // day P&L only for rows that also have prev_close
     let prevValue = 0;
     let prevValueKnown = false;
+    const dayPnlsAll: Array<number | null> = [];
     for (const h of rows) {
       const q = byKey.get(quoteKey(h.exchange, h.symbol));
       const calc = holdingPnl({ quantity: h.quantity, avgPrice: h.avg_price, quote: q });
@@ -195,16 +239,23 @@ export default function MarketDashboard() {
       if (calc.current == null) { unresolved++; continue; }
       knownInvested += calc.invested;
       current += calc.current;
-      dayPnls.push(calc.todayPnl);
+      dayPnlsAll.push(calc.todayPnl);
       if (q?.previous_close != null && q.previous_close > 0) {
         prevValue += q.previous_close * h.quantity;
         prevValueKnown = true;
+        if (calc.todayPnl != null) dayPnlWithPrev += calc.todayPnl;
       }
     }
-    const day = sumNullable(dayPnls);
-    const dayPct = day != null && prevValueKnown && prevValue !== 0 ? (day / Math.abs(prevValue)) * 100 : null;
+    const day = sumNullable(dayPnlsAll);
+    const dayPct = prevValueKnown && prevValue !== 0 ? (dayPnlWithPrev / prevValue) * 100 : null;
     const allUnresolved = unresolved === rows.length;
-    return { invested, current: allUnresolved ? null : current, pnl: allUnresolved ? null : current - knownInvested, day, dayPct };
+    return {
+      invested: allUnresolved ? null : invested,
+      current: allUnresolved ? null : current,
+      pnl: allUnresolved ? null : current - knownInvested,
+      day: allUnresolved ? null : day,
+      dayPct,
+    };
   }, [counts, pfQuotes]);
 
   // Positions summary
@@ -256,21 +307,8 @@ export default function MarketDashboard() {
 
   const connected = settings.find((s) => s.connection_status === "connected")?.active_provider ?? null;
 
-  // Split indices into Indian vs Global using the watch-list region metadata.
-  const { data: indexWatch = [] } = useIndexWatch();
-  const regionBySymbol = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const r of indexWatch) m.set(r.symbol, r.region);
-    return m;
-  }, [indexWatch]);
-  const [indianIdx, globalIdx] = useMemo(() => {
-    const quotes = indicesData?.quotes ?? [];
-    const ind: typeof quotes = []; const glo: typeof quotes = [];
-    for (const q of quotes) {
-      (regionBySymbol.get(q.symbol) === "GLOBAL" ? glo : ind).push(q);
-    }
-    return [ind, glo];
-  }, [indicesData, regionBySymbol]);
+  // Row 1 index panels were removed (duplicated MarketStrip). Region/tile helpers dropped.
+
 
   // Bootstrap the data pipeline on demand so the dashboard fills without
   // waiting for the evening cron. Runs the same steps cron would run.
@@ -364,70 +402,63 @@ export default function MarketDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveByKey, selectedScreenState.active]);
 
-  const renderIndexTile = (q: NonNullable<typeof indicesData>["quotes"][number]) => (
-    <button
-      key={q.symbol}
-      onClick={() => nav(`/market/index/${encodeURIComponent(q.symbol)}`)}
-      title={`${q.name} — view details`}
-      style={{
-        padding: "5px 7px", border: "1px solid var(--edge)", background: "transparent",
-        textAlign: "left", cursor: "pointer", borderRadius: 2,
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--edge-strong)"; e.currentTarget.style.background = "rgba(53,214,237,0.05)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--edge)"; e.currentTarget.style.background = "transparent"; }}
-    >
-      <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 9 }}>{q.name}</div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6 }}>
-        <span style={{ fontFamily: "var(--font-display)", fontSize: 13, color: "var(--text)" }}>
-          {Number(q.price).toLocaleString(undefined, { maximumFractionDigits: 2 })}
-        </span>
-        <span style={{ fontSize: 10, color: (q.change_pct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
-          {q.change_pct == null ? "—" : `${q.change_pct >= 0 ? "+" : ""}${q.change_pct.toFixed(2)}%`}
-        </span>
-      </div>
-    </button>
-  );
 
+
+
+  const runPrimeData = () => {
+    if (busy) return;
+    // Use the app's toast layer to warn instead of a blocking window.confirm.
+    // First click arms it, second click within 5s runs the pipeline.
+    if (busy === null && !window.sessionStorage.getItem("mk.prime.armed")) {
+      window.sessionStorage.setItem("mk.prime.armed", "1");
+      setTimeout(() => window.sessionStorage.removeItem("mk.prime.armed"), 5_000);
+      push("Prime runs 4 edge functions (~1 min). Click again to confirm.", "warn");
+      return;
+    }
+    window.sessionStorage.removeItem("mk.prime.armed");
+    primeData();
+  };
+
+  const providerLabel = connected ?? "yahoo";
   const indexActions = (
     <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
       {!connected && (
-        <Link to="/market/settings" title="Using Yahoo Finance — connect Kotak Neo for live NSE" style={{ fontSize: 10, color: "var(--text-dim)", textDecoration: "none", padding: "2px 6px", border: "1px dashed var(--edge)", marginRight: 4 }}>
-          yahoo · connect kotak
+        <Link to="/market/settings" title="Using Yahoo Finance — connect a broker for live NSE quotes"
+              style={{ fontSize: 10, color: "var(--text-dim)", textDecoration: "none", padding: "2px 6px", border: "1px dashed var(--edge)", marginRight: 4 }}>
+          {providerLabel} · connect broker
         </Link>
       )}
-      <Btn size="sm" onClick={() => setManageOpen(true)} title="Manage indices"><Settings2 size={12} /></Btn>
-      <Btn size="sm" onClick={primeData} disabled={busy !== null} title={busy === "prime" ? "priming…" : "prime data pipeline"}><Sparkles size={12} /></Btn>
-      <Btn size="sm" onClick={() => refetchIndices()} disabled={indicesFetching} title="refresh"><RefreshCw size={12} /></Btn>
+      <Btn size="sm" onClick={() => setManageOpen(true)} title="Manage indices" ariaLabel="Manage indices"><Settings2 size={12} /></Btn>
+      <Btn size="sm" variant="danger" onClick={runPrimeData} disabled={busy !== null} title={busy === "prime" ? "priming…" : "prime data pipeline (scrips → EOD → aggregates → indices)"} ariaLabel="Prime data pipeline"><Sparkles size={12} /></Btn>
+      <Btn size="sm" onClick={() => refetchIndices()} disabled={indicesFetching} title="Refresh indices" ariaLabel="Refresh indices"><RefreshCw size={12} /></Btn>
     </div>
   );
 
+  const indicesLive = indicesData ? "ok" : (indicesFetching ? "warn" : "err");
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 0, height: "100%" }}>
-      {/* Row 1 · Market Summary + Global Market — equal columns */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 8, alignItems: "start", flexShrink: 0 }}>
-        <HudPanel flow title="Market Summary" live={indicesFetching ? "warn" : "ok"} actions={indexActions}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 5 }}>
-            {indianIdx.length === 0
-              ? <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 11 }}>no Indian indices tracked</div>
-              : indianIdx.map(renderIndexTile)}
-          </div>
-        </HudPanel>
-        <HudPanel flow title="Global Market" live={indicesFetching ? "warn" : "ok"}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 5 }}>
-            {globalIdx.length === 0
-              ? <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 11 }}>
-                  no global indices — <button onClick={() => setManageOpen(true)} style={{ background: "none", border: 0, color: "var(--accent)", cursor: "pointer", padding: 0, font: "inherit" }}>add one</button>
-                </div>
-              : globalIdx.map(renderIndexTile)}
-          </div>
-        </HudPanel>
+      <MarketStrip />
+      {/* Compact toolbar — index/pipeline actions live here (was two duplicate index panels) */}
+      <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 6, flexShrink: 0 }}>
+        {!connected && (
+          <Link to="/market/settings" title="Using Yahoo Finance — connect a broker for live NSE quotes"
+                style={{ fontSize: 10, color: "var(--text-dim)", textDecoration: "none", padding: "2px 6px", border: "1px dashed var(--edge)" }}>
+            {providerLabel} · connect broker
+          </Link>
+        )}
+        <Chip tone={indicesLive === "ok" ? "ok" : indicesLive === "warn" ? "warn" : "neutral"}>
+          {indicesLive === "ok" ? "indices live" : indicesLive === "warn" ? "loading…" : "no data"}
+        </Chip>
+        {indexActions}
       </div>
 
-      {/* Row 2 · Top Breakouts · Watchlist · Portfolio — 3 equal columns */}
+      {/* Row 2 · Top Breakouts · Watchlist · Portfolio (right) */}
       <div
+        className="mk-dash-row2"
         style={{
           display: "grid",
-          gridTemplateColumns: "minmax(0, 2.2fr) minmax(0, 2fr) minmax(0, 1fr)",
+          gridTemplateColumns: "minmax(0, 2.4fr) minmax(0, 1.6fr) minmax(0, 1.1fr)",
           gap: 8,
           alignItems: "stretch",
           flex: 1,
@@ -435,6 +466,7 @@ export default function MarketDashboard() {
           gridAutoRows: "1fr",
         }}
       >
+
       <HudPanel
         flow
         title="Top Breakouts"
@@ -455,11 +487,11 @@ export default function MarketDashboard() {
                 <option key={s.id} value={s.id}>{s.name}</option>
               ))}
             </select>
-            <Chip tone={usingSavedScreen ? "accent" : "neutral"}>{breakoutStatusLabel}</Chip>
             <Chip tone={savedScreenerFetching ? "warn" : "neutral"}>{breakoutCountLabel}</Chip>
             {liveQuoteState === "push" && <Chip tone="ok">push · live</Chip>}
             {liveQuoteState === "live" && <Chip tone="ok">live</Chip>}
             {liveQuoteState === "stale" && <Chip tone="warn">cached close</Chip>}
+            {liveQuoteState === "closed" && <Chip tone="neutral">market closed</Chip>}
           </div>
         }
       >
@@ -484,19 +516,19 @@ export default function MarketDashboard() {
             <PortfolioSection
               label="Holdings"
               to="/market/holdings"
-              meta={`${counts?.holdings ?? 0} held`}
+              meta={counts?.holdings ? `${counts.holdings} ${counts.holdings === 1 ? "stock" : "stocks"}` : ""}
               tiles={pf ? [
                 { label: "Value", value: pf.current == null ? "—" : `₹${Math.round(pf.current).toLocaleString("en-IN")}` },
                 { label: "Total P&L", value: pf.pnl == null ? "—" : `${pf.pnl >= 0 ? "+" : ""}₹${Math.round(pf.pnl).toLocaleString("en-IN")}`, tone: pf.pnl == null ? undefined : pf.pnl >= 0 ? "ok" : "err" },
                 { label: "Today", value: pf.day == null ? "—" : `${pf.day >= 0 ? "+" : ""}₹${Math.round(pf.day).toLocaleString("en-IN")}${pf.dayPct != null ? ` (${pf.dayPct >= 0 ? "+" : ""}${pf.dayPct.toFixed(2)}%)` : ""}`, tone: pf.day == null ? undefined : pf.day >= 0 ? "ok" : "err" },
               ] : []}
-              empty="No holdings tracked"
+              empty="No holdings yet"
             />
             {/* Positions */}
             <PortfolioSection
               label="Positions"
               to="/market/positions"
-              meta={`${posSummary.count} open`}
+              meta={posSummary.count > 0 ? `${posSummary.count} open` : ""}
               tiles={posSummary.count > 0 ? [
                 { label: "Exposure", value: `₹${Math.round(posSummary.exposure).toLocaleString("en-IN")}` },
                 { label: "Unrealized", value: posSummary.unrealized == null ? "—" : `${posSummary.unrealized >= 0 ? "+" : ""}₹${Math.round(posSummary.unrealized).toLocaleString("en-IN")}`, tone: posSummary.unrealized == null ? undefined : posSummary.unrealized >= 0 ? "ok" : "err" },
@@ -507,7 +539,7 @@ export default function MarketDashboard() {
             <PortfolioSection
               label="Orders"
               to="/market/orders"
-              meta={`${orderSummary.total} today`}
+              meta={orderSummary.total > 0 ? `${orderSummary.total} today` : ""}
               tiles={orderSummary.total > 0 ? [
                 { label: "Open", value: String(orderSummary.open), tone: orderSummary.open > 0 ? "accent" : undefined },
                 { label: "Executed", value: String(orderSummary.executed), tone: orderSummary.executed > 0 ? "ok" : undefined },
@@ -531,6 +563,7 @@ function ManageIndicesDialog({ onClose }: { onClose: () => void }) {
   const [customSym, setCustomSym] = useState("");
   const [customName, setCustomName] = useState("");
   const existing = new Set(rows.map((r) => r.symbol));
+  useEscapeClose(true, onClose);
 
   const addPreset = (p: IndexPreset) => add.mutate({
     symbol: p.symbol, name: p.name, region: p.region,
@@ -543,6 +576,11 @@ function ManageIndicesDialog({ onClose }: { onClose: () => void }) {
     const sym = customSym.trim();
     const nm = customName.trim() || sym;
     if (!sym) return;
+    if (!/^[\^A-Z0-9._=-]+$/.test(sym)) {
+      // eslint-disable-next-line no-alert
+      alert("Invalid Yahoo symbol. Use uppercase letters, digits and any of ^ . _ = - (e.g. ^GSPC, NIFTY_MIDCAP_50.NS)");
+      return;
+    }
     add.mutate({ symbol: sym, name: nm, region: "GLOBAL", nse_symbol: null, fno_enabled: false, constituents_slug: null });
     setCustomSym(""); setCustomName("");
   };
@@ -552,14 +590,20 @@ function ManageIndicesDialog({ onClose }: { onClose: () => void }) {
       position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100,
       display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
     }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
-        width: "min(720px, 96vw)", maxHeight: "90vh", overflowY: "auto",
-        background: "var(--bg)", border: "1px solid var(--edge-strong)",
-        padding: 16, display: "flex", flexDirection: "column", gap: 12,
-      }}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="manage-indices-title"
+        style={{
+          width: "min(720px, 96vw)", maxHeight: "90vh", overflowY: "auto",
+          background: "var(--bg)", border: "1px solid var(--edge-strong)",
+          padding: 16, display: "flex", flexDirection: "column", gap: 12,
+        }}
+      >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div className="hud-label" style={{ color: "var(--accent)", letterSpacing: "0.2em" }}>Manage indices</div>
-          <button onClick={onClose} className="hud-btn focus-outline" data-variant="ghost" data-size="sm" title="Close"><X size={14} /></button>
+          <div id="manage-indices-title" className="hud-label" style={{ color: "var(--accent)", letterSpacing: "0.2em" }}>Manage indices</div>
+          <button onClick={onClose} className="hud-btn focus-outline" data-variant="ghost" data-size="sm" title="Close" aria-label="Close manage indices"><X size={14} /></button>
         </div>
 
         <div>
@@ -626,18 +670,6 @@ function ManageIndicesDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-
-function StatTile({ label, value, to, tone }: { label: string; value: string; to?: string; tone?: "ok" | "err" | "accent" }) {
-  const color = tone === "ok" ? "var(--ok)" : tone === "err" ? "var(--danger)" : "var(--accent)";
-  const body = (
-    <div style={{ padding: 10, border: "1px solid var(--edge)", height: "100%" }}>
-      <div className="hud-label" style={{ color: "var(--text-dim)" }}>{label}</div>
-      <div style={{ fontFamily: "var(--font-display)", fontSize: 22, color }}>{value}</div>
-    </div>
-  );
-  return to ? <Link to={to} style={{ textDecoration: "none" }}>{body}</Link> : body;
-}
-
 type Tile = { label: string; value: string; tone?: "ok" | "err" | "accent" };
 function PortfolioSection({
   label, to, meta, tiles, empty,
@@ -646,7 +678,8 @@ function PortfolioSection({
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
         <span className="hud-label" style={{ color: "var(--text-dim)", fontSize: 10 }}>
-          {label} <span style={{ color: "var(--text-muted)" }}>· {meta}</span>
+          {label}
+          {meta ? <span style={{ color: "var(--text-muted)" }}> · {meta}</span> : null}
         </span>
         <Link to={to} style={{ color: "var(--accent)", textDecoration: "none", fontSize: 10 }}>view →</Link>
       </div>

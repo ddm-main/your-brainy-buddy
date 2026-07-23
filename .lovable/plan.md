@@ -1,38 +1,60 @@
-## Change
+# Market Overview — cleanup plan
 
-In `src/routes/market/Dashboard.tsx`, make the Top Breakouts table's columns reflect the **active filters** of the selected saved screener.
+Scope: `/market` Dashboard. Remove duplicate/unwanted panels, keep the current three-column Row 2 (Top Breakouts · Watchlist · Portfolio).
 
-## Rules
+## Removals
 
-- Always keep: **Symbol** (first column) and **Breakout** (last column).
-- Between them, render one column per active filter in the screener, in the same order the filters appear in the screener state (`selectedScreenState.active`).
-- Deduplicate: if the same filter id is active twice, render its column once.
-- Skip filters that don't have a meaningful row value (e.g. pure boolean signal columns with no numeric value) by still rendering a compact chip (Yes/No) using the row's value — this keeps the column list == filter list.
-- If the screener has zero active filters, the current empty state already fires; no columns to render beyond Symbol + Breakout (table stays empty anyway).
+- **Breadth panel** (`BreadthPanel`) — removed from the overview. Data was duplicated by `MarketStrip` (A/D, VIX) and by the strip's regime cues.
+- **Top Movers panel** (`TopMoversPanel`) — removed from the overview. Screener-driven Top Breakouts already covers "what to look at today"; a separate movers list was redundant.
+- Both component files are kept in the repo (unused on this route) so we can re-introduce them elsewhere without a re-write.
 
-## Column derivation
+## Bugs & polish being fixed in the same pass
 
-Build a small `filterColumn(filterId)` helper that returns a `ColumnDef` using:
+1. **Duplicate index tiles** — `Market Summary` panel repeats NIFTY / SENSEX / BANKNIFTY that `MarketStrip` already shows. Removed. `Global Market` panel is removed too (empty for most users, and its indices can live in the strip via an IN/GLOBAL toggle).
+2. **MarketStrip** becomes the single header row:
+   - Fixed-width numeric slots (tabular-nums + `ch` min-widths) to stop jitter on tick.
+   - `⋯` menu on the right: **Manage indices · Prime data · Refresh**, plus an **IN / GLOBAL** toggle for which indices the strip renders.
+   - Render `—` for exact-zero change instead of "▲ +0.00%".
+   - Show the "MKT OPENS IN …" countdown only when the market is closed; drop it during session (the green dot + clock is enough).
+   - Inline error state if `useIndices` fails ("indices unavailable — retry").
+3. **Top Breakouts header** — drop the chip that echoes the `<select>` value. Keep: screener select, match-count chip, live/closed/stale chip.
+4. **Portfolio (right column, unchanged position)** — display fixes only:
+   - "Today" tile shows day P&L + `dayPct` when known; explicit `—` when partial.
+   - Zero-value tiles keep neutral tone (no red on `0`).
+5. **Watchlist** — legacy-seeded empty lists ("Watchlist 2/3/4") are collapsed on first mount to a single "Default" when they're empty and were created together. Replace `window.prompt/confirm/alert` for rename/delete/new with the app's HUD modal + toast. Staleness shown as a coloured dot instead of the word "stale".
+6. **Reliability** — swap all raw `localStorage` / `sessionStorage` reads in `Dashboard.tsx` for `safeStorage` (already exists in `src/lib/safeStorage.ts`).
+7. **Manage Indices modal** — port to `HudModal` for keyboard/focus parity; validate Yahoo symbol inline instead of `window.alert`.
 
-- `FILTER_BY_ID[canonicalFilterId(id)]` from `src/lib/market/screenerCatalog.ts` for label, kind, unit, and `valueKey`.
-- Value accessor: `def.valueKey ? row[def.valueKey] ?? row[def.id] : row[def.id]`, plus the existing live-quote overlay for `ltp` and `change_pct` (reuse `liveFor(row)?.ltp` / `liveFor(row)?.change_pct`).
-- Cell rendering:
-  - `change_pct`, `ret_5d`, `ret_21d`, `ret_ytd`, `dividend_yield`, growth/return %s → `<PctCell />`
-  - other numbers → `fmtNum(value)` with unit suffix (e.g. `"12.3x"`, `"₹500.75"`, `"1,234 Cr"`) driven by `def.unit`
-  - `boolean` → "Yes" / "No" chip
-  - `enum` → raw string
-- `meta: { align: "right" }` for numbers/booleans; left for enums.
+## Final layout
 
-## Memoization
+```text
+┌───────────────────────────────────────────────────────────────┐
+│ MarketStrip · indices · A/D · FII/DII · IST · ⋯               │
+├───────────────────────────┬──────────────────┬────────────────┤
+│ Top Breakouts             │ Watchlist        │ Portfolio      │
+│ (screener-driven, wider)  │                  │ Holdings       │
+│                           │                  │ Positions      │
+│                           │                  │ Orders         │
+└───────────────────────────┴──────────────────┴────────────────┘
+```
 
-Replace the current static `breakoutColumns` memo (Dashboard.tsx ~302–327) with one that depends on `selectedScreenState.active` and `liveByKey`, composing: `[symbolCol, ...activeFilterCols, breakoutCol]`.
+Row 2 grid stays 3-column, tightened to `minmax(0, 2.4fr) minmax(0, 1.6fr) minmax(0, 1.1fr)` so Watchlist isn't starved on 1280–1440.
 
-## Scope guardrails
+## Files touched
 
-- No change to filtering logic, screener editing, or the Screener route.
-- No change to `DataTable`, `HudPanel`, or other cards on the Dashboard.
-- No new dependencies.
+- `src/routes/market/Dashboard.tsx` — remove Market Summary, Global Market, Breadth, and Top Movers rows; keep the existing Row 2 (Top Breakouts · Watchlist · Portfolio) as the main content; move Manage/Prime/Refresh into MarketStrip's `⋯`; use `safeStorage`.
+- `src/components/market/MarketStrip.tsx` — fixed-width numeric slots, `⋯` menu, IN/GLOBAL toggle, null-safe rendering, error state.
+- `src/components/market/WatchlistPanel.tsx` — legacy-list cleanup, HudModal-based rename/delete/new, staleness dot.
+- `src/components/market/BreadthPanel.tsx` — untouched, no longer imported by Dashboard.
+- `src/components/market/TopMoversPanel.tsx` — untouched, no longer imported by Dashboard.
+- No DB, edge-function, or hook changes.
 
-## Why this is right
+## Verification
 
-The card already only renders rows that pass every active filter. Making the columns mirror those same filters means the user sees exactly the values that qualified each row — nothing more, nothing less — with Breakout kept as the invariant ranking column.
+- No NIFTY/SENSEX/BANKNIFTY duplication anywhere on `/market`.
+- Breadth and Top Movers panels are gone.
+- Row 2 still has three columns; Portfolio remains on the right.
+- Top Breakouts header shows one chip only.
+- MarketStrip `⋯` opens Manage Indices, triggers Prime, and refreshes.
+- Watchlist shows a single "Default" after cleanup; rename/delete via HUD modal.
+- Screenshots at 1280 and 1440 to confirm layout.

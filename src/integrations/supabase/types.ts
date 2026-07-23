@@ -4785,6 +4785,29 @@ export type Database = {
       }
     }
     Views: {
+      market_breadth_latest: {
+        Row: {
+          advances: number | null
+          avg_rsi: number | null
+          computed_at: string | null
+          declines: number | null
+          dii_net_cr: number | null
+          fii_net_cr: number | null
+          india_vix: number | null
+          market_score: number | null
+          new_highs: number | null
+          new_lows: number | null
+          nifty_change_pct: number | null
+          nifty_close: number | null
+          pct_above_ema20: number | null
+          pct_above_ema200: number | null
+          pct_above_ema50: number | null
+          regime: string | null
+          trade_date: string | null
+          unchanged: number | null
+        }
+        Relationships: []
+      }
       market_fundamentals_sync_queue: {
         Row: {
           company_name: string | null
@@ -4911,6 +4934,40 @@ export type Database = {
         }
         Relationships: []
       }
+      market_top_movers: {
+        Row: {
+          breakout_score: number | null
+          change_pct: number | null
+          close: number | null
+          direction: string | null
+          exchange: string | null
+          rel_volume: number | null
+          rn: number | null
+          rsi14: number | null
+          sector: string | null
+          symbol: string | null
+          trade_date: string | null
+          volume: number | null
+        }
+        Relationships: []
+      }
+      market_top_movers_daily: {
+        Row: {
+          breakout_score: number | null
+          change_pct: number | null
+          close: number | null
+          direction: string | null
+          exchange: string | null
+          rel_volume: number | null
+          rn: number | null
+          rsi14: number | null
+          sector: string | null
+          symbol: string | null
+          trade_date: string | null
+          volume: number | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
       claim_market_fundamentals_sync: {
@@ -4940,6 +4997,7 @@ export type Database = {
       market_cron_call: { Args: { fn_name: string }; Returns: number }
       purge_old_jarvis_interactions: { Args: never; Returns: undefined }
       purge_old_ticker_trace: { Args: never; Returns: undefined }
+      refresh_market_top_movers: { Args: never; Returns: undefined }
       seed_default_indices: { Args: { _uid: string }; Returns: undefined }
       verify_market_cron_secret: { Args: { _secret: string }; Returns: boolean }
     }
