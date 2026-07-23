@@ -11,11 +11,12 @@ import { fmpProfile } from "../_shared/market/fmpClient.ts";
 import { yahooQuoteSummary } from "../_shared/market/yahooCrumb.ts";
 import { toYahooSymbol } from "../_shared/market/yahooClient.ts";
 
-const CHUNK = 500;
+// CHUNK sized to drain the ~1600 outstanding rows in a couple of orchestrator
+// iterations without exceeding edge worker CPU time. REFRESH_DAYS at 7 keeps
+// re-scrapes weekly (shares outstanding only changes on corporate actions).
+const CHUNK = 1600;
 const CONCURRENCY = 8;
-// Uncovered rows are re-attempted after 2 days instead of the previous 7,
-// so the backfill drains in hours instead of weeks.
-const REFRESH_DAYS = 2;
+const REFRESH_DAYS = 7;
 
 async function fetchYahooShares(symbol: string, exchange = "NSE"): Promise<number | null> {
   // Try the stock's exchange first, then swap suffix as a fallback.
@@ -85,7 +86,7 @@ Deno.serve(async (req) => {
       .select("symbol")
       .eq("is_active", true).eq("exchange", "NSE")
       .order("symbol")
-      .limit(2000);
+      .limit(3000);
     const poolSymbols = (candidatePool ?? []).map((s: any) => s.symbol);
 
     const cutoffDate = cutoff.slice(0, 10);

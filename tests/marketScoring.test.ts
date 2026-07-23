@@ -12,6 +12,7 @@ const baseSnap: IndicatorSnapshot = {
   changePct: 1,
   volume: 1000,
   volAvg20: 1000,
+  volAvg30: 1000,
   relVolume: 1,
   ema20: 98,
   ema50: 95,

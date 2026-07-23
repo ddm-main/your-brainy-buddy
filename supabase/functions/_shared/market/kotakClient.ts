@@ -446,13 +446,13 @@ export async function kotakModifyOrder(
 // Orders + trades (today).
 export async function kotakOrders(s: KotakSettings): Promise<any[]> {
   const h = await sessionHeaders(s);
-  const j = await kotakFetch(`${apiBase(s)}/orders/1.0/orders`, { headers: { ...h, accept: "application/json" } });
+  const j = await kotakFetch(`${apiBase(s)}/quick/user/orders`, { headers: { ...h, accept: "application/json" } });
   return j?.data ?? j?.orders ?? [];
 }
 
 export async function kotakTrades(s: KotakSettings): Promise<any[]> {
   const h = await sessionHeaders(s);
-  const j = await kotakFetch(`${apiBase(s)}/orders/1.0/trades`, { headers: { ...h, accept: "application/json" } });
+  const j = await kotakFetch(`${apiBase(s)}/quick/user/trades`, { headers: { ...h, accept: "application/json" } });
   return j?.data ?? j?.trades ?? [];
 }
 

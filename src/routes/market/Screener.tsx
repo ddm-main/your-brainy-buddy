@@ -40,22 +40,22 @@ import { safeStorage } from "@/lib/safeStorage";
 // ---- Columns ----
 interface ColSpec { id: string; label: string; align?: "right" | "left"; default?: boolean }
 const COLUMNS: ColSpec[] = [
-  { id: "symbol",             label: "Symbol",       default: true },
+  { id: "symbol",             label: "Stock",        default: true },
   { id: "sector",             label: "Sector",       default: true },
   { id: "industry",           label: "Industry" },
-  { id: "market_cap",         label: "Mcap (Cr)",     align: "right", default: true },
-  { id: "close",              label: "Price",         align: "right", default: true },
-  { id: "change_pct",         label: "Chg %",         align: "right", default: true },
-  { id: "volume",             label: "Volume",        align: "right" },
-  { id: "rel_volume",         label: "RVol",          align: "right" },
-  { id: "pe",                 label: "PE",            align: "right", default: true },
+  { id: "market_cap",         label: "Mcap (₹Cr)",   align: "right", default: true },
+  { id: "close",              label: "LTP (₹)",      align: "right", default: true },
+  { id: "change_pct",         label: "1D Return (%)",align: "right", default: true },
+  { id: "volume",             label: "Volume ('000)",align: "right" },
+  { id: "rel_volume",         label: "RVol",         align: "right" },
+  { id: "pe",                 label: "PE",            align: "right" },
   { id: "pb",                 label: "PB",            align: "right" },
   { id: "peg",                label: "PEG",           align: "right" },
   { id: "eps",                label: "EPS",           align: "right" },
   { id: "book_value",         label: "Book Val",      align: "right" },
-  { id: "roe",                label: "ROE",           align: "right", default: true },
+  { id: "roe",                label: "ROE",           align: "right" },
   { id: "roce",               label: "ROCE",          align: "right" },
-  { id: "debt_equity",        label: "D/E",           align: "right", default: true },
+  { id: "debt_equity",        label: "D/E",           align: "right" },
   { id: "sales_growth",       label: "Rev Grw",       align: "right" },
   { id: "profit_growth",      label: "PAT Grw",       align: "right" },
   { id: "eps_growth",         label: "EPS Grw",       align: "right" },
@@ -136,7 +136,7 @@ function fmtBound(def: FilterDef, v: number | "" | undefined): string {
   if (v === undefined || v === "") return "*";
   const digits = def.step && def.step < 1 ? 2 : 0;
   const num = Number(v).toLocaleString("en-IN", { maximumFractionDigits: digits });
-  const suffix = def.maxIsOpenEnded && def.max !== undefined && Number(v) >= def.max ? "+" : "";
+  const suffix = def.maxIsOpenEnded && def.max !== undefined && Number(v) === def.max ? "+" : "";
   return def.unit ? (def.unit === "₹" ? `₹${num}${suffix}` : `${num}${suffix}${def.unit === "%" || def.unit === "x" ? def.unit : " " + def.unit}`) : `${num}${suffix}`;
 }
 
@@ -320,23 +320,20 @@ function ScreenerInner() {
     setActive((a) => [...a, initial]);
   };
 
-  // Inline sidebar editors call this directly on every keystroke/toggle —
-  // adds the filter to `active` on first non-empty value, drops it again
-  // once cleared back to empty, so there's no separate add/remove step.
+  // Inline sidebar editors call this on every keystroke/toggle. We keep the
+  // row in `active` even when its value is empty — removal is explicit via
+  // the row's X button (onClear→removeFilter). Auto-dropping on empty made
+  // "+ Add Filter" seem to instantly delete the row when the editor's
+  // initial onChange fired with a blank value.
   const setFilterValue = (fid: string, patch: Partial<ActiveFilter>) => {
     const id = canonicalFilterId(fid);
     setActive((a) => {
       const existing = a.find((x) => canonicalFilterId(x.id) === id);
       const merged: ActiveFilter = existing ? { ...existing, ...patch, id } : { id, ...patch };
-      const isEmpty =
-        (merged.min === undefined || merged.min === "") &&
-        (merged.max === undefined || merged.max === "") &&
-        merged.bool === undefined &&
-        (!merged.values || merged.values.length === 0);
-      if (isEmpty) return a.filter((x) => canonicalFilterId(x.id) !== id);
       return existing ? a.map((x) => (canonicalFilterId(x.id) === id ? merged : x)) : [...a, merged];
     });
   };
+
   const removeFilter = (fid: string) => {
     const id = canonicalFilterId(fid);
     setActive((a) => a.filter((af) => canonicalFilterId(af.id) !== id));
@@ -502,11 +499,11 @@ function ScreenerInner() {
   const effectiveCols = useMemo(
     () => {
       if (active.length === 0) return visibleCols;
-      // Keep the user's chosen columns visible; only *add* the filtered
-      // column so the column set doesn't disappear the moment a filter is added.
-      const seen = new Set(visibleCols);
-      const extras = colsFromActiveFilters(active).filter((id) => !seen.has(id));
-      return [...visibleCols, ...extras];
+      // When filters are active, show ONLY the identity column + the columns
+      // corresponding to each selected filter — nothing else.
+      const filterCols = colsFromActiveFilters(active);
+      const seen = new Set<string>();
+      return ["symbol", ...filterCols].filter((id) => (seen.has(id) ? false : (seen.add(id), true)));
     },
     [active, visibleCols],
   );
@@ -530,19 +527,20 @@ function ScreenerInner() {
   const columns = useMemo<ColumnDef<ScreenerRow, any>[]>(() => {
     const all: Record<string, ColumnDef<ScreenerRow, any>> = {
       symbol: {
-        header: "Symbol", accessorKey: "symbol",
+        header: "Stock", accessorKey: "symbol",
         cell: ({ row }) => {
           const stale = latestTradeDate != null && row.original.trade_date != null && row.original.trade_date !== latestTradeDate;
+          const name = row.original.company_name;
           return (
-            <span>
-              <span style={{ color: "var(--accent)" }}>{row.original.symbol}</span>
-              {row.original.company_name && (
-                <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: 10 }}>{row.original.company_name}</span>
-              )}
-              {stale && (
-                <span title={`EOD stale: ${row.original.trade_date} vs latest ${latestTradeDate}`}
-                  style={{ marginLeft: 6, fontSize: 9, color: "var(--danger, #ff6a6a)", border: "1px solid currentColor", padding: "0 4px", borderRadius: 2 }}>STALE</span>
-              )}
+            <span style={{ display: "inline-flex", flexDirection: "column", lineHeight: 1.2 }}>
+              <span style={{ color: "var(--text)", fontWeight: 500 }}>
+                {name ?? row.original.symbol}
+                {stale && (
+                  <span title={`EOD stale: ${row.original.trade_date} vs latest ${latestTradeDate}`}
+                    style={{ marginLeft: 6, fontSize: 9, color: "var(--danger, #ff6a6a)", border: "1px solid currentColor", padding: "0 4px", borderRadius: 2 }}>STALE</span>
+                )}
+              </span>
+              <span style={{ color: "var(--accent)", fontSize: 10 }}>{row.original.symbol}</span>
             </span>
           );
         },
@@ -552,15 +550,12 @@ function ScreenerInner() {
         cell: ({ row }) => (
           <span style={{ fontSize: 11 }} title={row.original.sub_sector ?? row.original.industry ?? undefined}>
             {row.original.sector ?? "—"}
-            {row.original.sub_sector && row.original.sub_sector !== row.original.sector && (
-              <span style={{ color: "var(--text-muted)", marginLeft: 4, fontSize: 10 }}>· {row.original.sub_sector}</span>
-            )}
           </span>
         ),
       },
       industry:{ header: "Industry",accessorKey: "industry",cell: ({ getValue }) => <span style={{ fontSize: 11 }}>{getValue() as string ?? "—"}</span> },
       market_cap: {
-        header: "Mcap (Cr)", accessorKey: "market_cap", meta: { align: "right" },
+        header: "Mcap (₹Cr)", accessorKey: "market_cap", meta: { align: "right" },
         cell: ({ row, getValue }) => {
           const v = getValue() as number | null;
           const prov = row.original.data_provenance as Record<string, any> | null | undefined;
@@ -571,16 +566,22 @@ function ScreenerInner() {
         },
       },
       close: {
-        header: "Price", id: "livePrice", meta: { align: "right" },
+        header: "LTP (₹)", id: "livePrice", meta: { align: "right" },
         accessorFn: (r) => r.ltp,
         cell: ({ getValue }) => fmtNum(getValue() as number | null),
       },
       change_pct: {
-        header: "Chg %", id: "liveChangePct", meta: { align: "right" },
+        header: "1D Return (%)", id: "liveChangePct", meta: { align: "right" },
         accessorFn: (r) => r.change_pct,
         cell: ({ getValue }) => <PctCell value={getValue() as number | null} />,
       },
-      volume: { header: "Vol", accessorKey: "volume", meta: { align: "right" }, cell: ({ getValue }) => fmtInt(getValue() as number | null) },
+      volume: {
+        header: "Volume ('000)", accessorKey: "volume", meta: { align: "right" },
+        cell: ({ getValue }) => {
+          const v = getValue() as number | null;
+          return v == null ? "—" : fmtInt(Math.round(v / 1000));
+        },
+      },
       rel_volume: { header: "RVol", accessorKey: "rel_volume", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
       pe: { header: "PE", accessorKey: "pe", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
       pb: { header: "PB", accessorKey: "pb", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
@@ -652,33 +653,7 @@ function ScreenerInner() {
         padding: "6px 8px", border: "1px solid var(--edge)",
         background: "rgba(53,214,237,0.03)",
       }}>
-        <span className="hud-label" style={{ color: "var(--accent)", fontSize: 11, marginRight: 4 }}>Screener</span>
-        {activeSaved && (
-          <span
-            title={isModified ? "Modified since load — click Save to update" : "Loaded saved screen"}
-            style={{
-              display: "inline-flex", alignItems: "center", gap: 6,
-              padding: "3px 8px", borderRadius: 2,
-              border: `1px solid ${isModified ? "var(--warn, #d29a2b)" : "var(--edge-strong)"}`,
-              background: "rgba(53,214,237,0.06)",
-              fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em",
-              textTransform: "uppercase",
-              color: isModified ? "var(--warn, #d29a2b)" : "var(--accent)",
-            }}
-          >
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "currentColor" }} />
-            {activeSaved.name}{isModified ? " • modified" : ""}
-            <button type="button" aria-label="Detach saved screen" onClick={detachSaved}
-              style={{
-                display: "inline-flex", alignItems: "center", justifyContent: "center",
-                width: 16, height: 16, marginLeft: 2, padding: 0,
-                background: "transparent", color: "inherit",
-                border: "1px solid currentColor", borderRadius: 2, cursor: "pointer",
-              }}>
-              <X size={9} />
-            </button>
-          </span>
-        )}
+        
         <SavedPicker saved={saved} activeId={activeSavedId} onLoad={loadSaved} onDelete={(id) => {
           try { if (localStorage.getItem(DEFAULT_SAVED_KEY) === id) localStorage.removeItem(DEFAULT_SAVED_KEY); } catch { /* */ }
           if (activeSavedId === id) { setActiveSavedId(null); setActiveSavedSig(null); }
@@ -752,7 +727,7 @@ function ScreenerInner() {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0, minHeight: 0 }}>
           <HudPanel flow title={`Results · ${filtered.length}${filtered.length !== rows.length ? ` of ${rows.length}` : ""}`}
-            index="MK.SC2" live={isFetching ? "warn" : error ? "err" : "ok"}
+            live={isFetching ? "warn" : error ? "err" : "ok"}
             actions={
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                 {healthSummary && (
@@ -775,15 +750,19 @@ function ScreenerInner() {
                     EOD {healthSummary.eod ?? "—"}
                   </button>
                 )}
-                <ColumnPresetPicker onPick={setVisibleCols} />
-                <ColumnPicker value={visibleCols} onChange={setVisibleCols} />
                 <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}
-                  style={{ ...inputStyle, padding: "4px 6px", fontSize: 11 }}>
+                  style={{ ...inputStyle, padding: "4px 6px", fontSize: 11 }}
+                  title="Rows per page">
                   {[25, 50, 100, 200].map((n) => <option key={n} value={n}>{n}/page</option>)}
                 </select>
-                <Btn size="sm" onClick={exportCsv} disabled={filtered.length === 0}>
-                  <Download size={11} style={{ marginRight: 4 }} />CSV
-                </Btn>
+                {/* View · Columns · CSV grouped together as one cluster */}
+                <div style={{ display: "inline-flex", gap: 4, padding: 2, border: "1px solid var(--edge)", borderRadius: 2 }}>
+                  <ColumnPresetPicker onPick={setVisibleCols} />
+                  <ColumnPicker value={visibleCols} onChange={setVisibleCols} />
+                  <Btn size="sm" onClick={exportCsv} disabled={filtered.length === 0} title="Export as CSV" aria-label="Export CSV">
+                    <Download size={11} />
+                  </Btn>
+                </div>
               </div>
             }
           >
@@ -842,7 +821,7 @@ function FilterRail({ rows, active, onAdd, onChange, onClear, sectorList, indust
   universe: UniverseId; onUniverseChange: (u: UniverseId) => void;
 }) {
   return (
-    <HudPanel flow title="Filters" index="MK.SC-R"
+    <HudPanel flow title="Filters"
       actions={<span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)" }}>{active.length} active</span>}
     >
       <div style={{ borderBottom: "1px solid var(--edge)", paddingBottom: 10, marginBottom: 10 }}>
@@ -1063,7 +1042,7 @@ function SavedPicker({ saved, activeId, onLoad, onDelete }: {
   const ref = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
-  const pos = useAnchoredPos(triggerRef, open, "right", 360);
+  const pos = useAnchoredPos(triggerRef, open, "left", 360);
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
@@ -1090,11 +1069,11 @@ function SavedPicker({ saved, activeId, onLoad, onDelete }: {
               <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 6px", borderBottom: "1px solid var(--edge)",
                                        background: isActive ? "rgba(53,214,237,0.12)" : "transparent" }}>
                 <button onClick={() => { onLoad(s); setOpen(false); }}
-                  style={{ flex: 1, background: "none", border: "none", textAlign: "left", cursor: "pointer",
-                           color: isActive ? "var(--text)" : "var(--accent)", fontFamily: "var(--font-hud)", fontSize: 11, letterSpacing: "0.1em",
-                           display: "flex", alignItems: "center", gap: 6 }}>
-                  {isActive && <Check size={10} style={{ color: "var(--accent)" }} />}
-                  <span>{s.name}</span>
+                  style={{ flex: 1, minWidth: 0, background: "none", border: "none", textAlign: "left", cursor: "pointer",
+                           color: "var(--text)", fontFamily: "var(--font-hud)", fontSize: 11, letterSpacing: "0.1em",
+                           display: "flex", alignItems: "center", gap: 6, overflow: "hidden" }}>
+                  {isActive && <Check size={10} style={{ color: "var(--accent)", flexShrink: 0 }} />}
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</span>
                 </button>
                 <button onClick={() => onDelete(s.id)} title="Delete"
                   style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)" }}>
@@ -1217,9 +1196,13 @@ function ColumnPicker({ value, onChange }: { value: string[]; onChange: (cols: s
 
 const popoverStyle: React.CSSProperties = {
   position: "fixed", zIndex: 9999,
-  minWidth: 220, background: "var(--bg-panel)", border: "1px solid var(--edge-strong)",
+  minWidth: 220,
+  background: "var(--bg-app, #050a12)",
+  backgroundColor: "var(--bg-app, #050a12)",
+  backdropFilter: "none",
+  border: "1px solid var(--edge-strong)",
   padding: 6, display: "flex", flexDirection: "column", gap: 2,
-  boxShadow: "0 12px 32px rgba(0,0,0,0.6)",
+  boxShadow: "0 12px 32px rgba(0,0,0,0.75)",
 };
 const popoverItem: React.CSSProperties = {
   background: "transparent", border: "none", textAlign: "left",
@@ -1247,8 +1230,8 @@ function useAnchoredPos(
       const spaceBelow = window.innerHeight - r.bottom;
       const openUp = spaceBelow < estHeight && r.top > spaceBelow;
       const top = openUp ? Math.max(8, r.top - estHeight - 4) : r.bottom + 4;
-      if (align === "left") setPos({ top, left: r.left });
-      else setPos({ top, right: window.innerWidth - r.right });
+      if (align === "left") setPos({ top, left: Math.max(8, Math.min(r.left, window.innerWidth - 260)) });
+      else setPos({ top, right: Math.max(8, Math.min(window.innerWidth - r.right, window.innerWidth - 260)) });
     };
     compute();
     window.addEventListener("scroll", compute, true);
@@ -1309,11 +1292,31 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
   const [gapsOpen, setGapsOpen] = useState(false);
   const qc = useQueryClient();
   const [busy, setBusy] = useState<null | "fund" | "eod" | "agg" | "parity">(null);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const menuTriggerRef = useRef<HTMLButtonElement>(null);
-  const menuPopRef = useRef<HTMLDivElement>(null);
-  const menuPos = useAnchoredPos(menuTriggerRef, menuOpen, "right", 180);
+  const [syncStep, setSyncStep] = useState<string | null>(null);
+
+  // Last daily-sync orchestrator summary — surfaced under the chips so the
+  // 09:00 IST run's health is visible without cracking open the DB.
+  const { data: dailySync } = useQuery({
+    queryKey: ["market", "daily-sync-summary"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("market_ingestion_runs")
+        .select("status,finished_at,metadata,duration_ms")
+        .eq("source", "daily_sync_orchestrator")
+        .eq("stage", "summary")
+        .order("finished_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return data as {
+        status: string; finished_at: string | null;
+        duration_ms: number | null;
+        metadata: { steps?: Array<{ fn: string; status: string; error?: string | null }>; failed_count?: number } | null;
+      } | null;
+    },
+    refetchInterval: 5 * 60_000,
+    staleTime: 60_000,
+  });
   const latestTradeDate = useMemo(() => latestTradeDateOf(rows), [rows]);
 
   // Live pipeline status from the DB view — reflects reality regardless of
@@ -1325,6 +1328,11 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
       if (error) throw error;
       return data as {
         active_stocks: number;
+        equities_total: number;
+        equities_covered: number;
+        equities_with_sector: number;
+        mcap_nse_covered: number | null;
+        mcap_any_covered: number | null;
         fundamentals_covered: number;
         fundamentals_failed: number;
         fundamentals_last_updated_at: string | null;
@@ -1335,17 +1343,6 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      const t = e.target as Node;
-      if (menuTriggerRef.current?.contains(t) || menuPopRef.current?.contains(t)) return;
-      setMenuOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [menuOpen]);
 
   const eodLagDays = (tradeDate: string | null | undefined): number | null => {
     if (tradeDate == null || latestTradeDate == null) return null;
@@ -1383,17 +1380,24 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
       else if (r.market_cap == null) mcapNone++;
       else mcapReported++;
     }
+    // Denominators: prefer the authoritative pipeline_status view (which
+    // already excludes ETFs / index funds from the equity total) so the chips
+    // stop counting passive funds as sector/fundamentals gaps.
+    const eqTotal = pipeline?.equities_total ?? equities.length;
+    const mcapWithAny = pipeline?.mcap_any_covered ?? equities.filter((r) => r.market_cap != null).length;
+    const mcapNseAuth = pipeline?.mcap_nse_covered ?? mcapNse;
     return {
-      total: pipeline?.active_stocks ?? equities.length,
-      fundOk: pipeline?.fundamentals_covered ?? equities.filter((r) => r.pe != null || r.roe != null || r.market_cap != null).length,
+      total: eqTotal,
+      fundOk: pipeline?.equities_covered ?? pipeline?.fundamentals_covered ?? equities.filter((r) => r.pe != null || r.roe != null || r.market_cap != null).length,
       fundFailed: pipeline?.fundamentals_failed ?? 0,
-      sectorOk: withSector,
+      sectorOk: pipeline?.equities_with_sector ?? withSector,
       techOk: withTech,
       techTotal: withScore.length,
       lagOk,
       nonEquity: rows.length - equities.length,
-      mcapNse, mcapRepriced, mcapReported, mcapNone,
-      mcapDenom: equities.length,
+      mcapNse: mcapNseAuth, mcapRepriced, mcapReported, mcapNone,
+      mcapWithAny,
+      mcapDenom: eqTotal,
     };
   }, [rows, pipeline, latestTradeDate]);
 
@@ -1428,7 +1432,6 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
   ) => {
     if (busy) return;
     setBusy(key);
-    setMenuOpen(false);
     const isChunked = fn === "market-fundamentals-global-sync" || fn === "market-pipeline-eod" || fn === "market-shares-outstanding-sync";
     try {
       if (!isChunked) {
@@ -1445,7 +1448,32 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
       await qc.invalidateQueries({ queryKey: ["market"] });
     } catch (e) {
       push(`${label} failed: ${(e as Error).message}`, "err");
+      throw e;
     } finally { setBusy(null); }
+  };
+
+  const SYNC_CHAIN: Array<{
+    fn: "market-fundamentals-global-sync" | "market-pipeline-eod" | "market-pipeline-aggregates" | "market-shares-outstanding-sync" | "market-parity-refresh";
+    label: string;
+    key: "fund" | "eod" | "agg" | "parity";
+  }> = [
+    { fn: "market-fundamentals-global-sync", label: "Fundamentals", key: "fund" },
+    { fn: "market-shares-outstanding-sync", label: "Market caps", key: "fund" },
+    { fn: "market-pipeline-eod", label: "EOD technicals", key: "eod" },
+    { fn: "market-pipeline-aggregates", label: "Breadth", key: "agg" },
+    { fn: "market-parity-refresh", label: "Tickertape parity", key: "parity" },
+  ];
+
+  const syncAll = async () => {
+    if (syncStep) return;
+    try {
+      for (const step of SYNC_CHAIN) {
+        setSyncStep(step.label);
+        await trigger(step.fn, step.label, step.key);
+      }
+      push("All syncs complete", "ok");
+    } catch { /* per-step toast already fired inside trigger() */ }
+    finally { setSyncStep(null); }
   };
 
   const pctOf = (n: number, d: number) => d ? Math.round((n / d) * 100) : 0;
@@ -1474,65 +1502,42 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
       <span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
         {loading ? "loading…" : `${filteredCount} / ${stats.total}`}
       </span>
-      <Chip tone={fundPct >= 95 ? "ok" : fundPct >= 80 ? "warn" : "err"}>Fund {fundPct}%</Chip>
-      <Chip tone={sectorPct >= 95 ? "ok" : sectorPct >= 80 ? "warn" : "err"}>Sector {sectorPct}%</Chip>
-      <Chip tone={techPct >= 95 ? "ok" : techPct >= 80 ? "warn" : "err"}>Tech {techPct}%</Chip>
-      {stats.mcapDenom > 0 && (() => {
-        const nsePct = pctOf(stats.mcapNse, stats.mcapDenom);
-        const tone = nsePct >= 90 ? "ok" : nsePct >= 60 ? "warn" : "err";
-        const title = `Market-cap sources: ${stats.mcapNse} shares×close · ${stats.mcapRepriced} FMP repriced · ${stats.mcapReported} FMP reported${stats.mcapNone ? ` · ${stats.mcapNone} missing` : ""}`;
-        return <span title={title} style={{ display: "inline-flex" }}><Chip tone={tone}>MCap {nsePct}% NSE</Chip></span>;
-      })()}
-      {stats.lagOk > 0 && <Chip tone="neutral">{stats.lagOk} lag ok</Chip>}
-      {gaps.length > 0 && (
-        <button onClick={() => setGapsOpen(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }} title="Symbols missing price/change/volume — click to list">
-          <Chip tone={gaps.length > stats.total * 0.1 ? "err" : "warn"}>{gaps.length} gaps</Chip>
+      <div style={{ flexBasis: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4, gap: 12, flexWrap: "wrap" }}>
+        {dailySync?.finished_at ? (() => {
+          const finished = new Date(dailySync.finished_at);
+          const ist = new Date(finished.getTime() + 5.5 * 3600_000);
+          const hhmm = ist.toISOString().slice(11, 16);
+          const day = ist.toISOString().slice(0, 10);
+          const failed = dailySync.metadata?.failed_count ?? 0;
+          const status = dailySync.status;
+          const color = status === "ok" ? "var(--text-muted)"
+            : status === "partial" ? "var(--warn, #d4a017)"
+            : "var(--err, #d4634e)";
+          const failedFns = (dailySync.metadata?.steps ?? [])
+            .filter((s) => s.status !== "ok").map((s) => s.fn).join(", ");
+          const title = failedFns
+            ? `Failed steps: ${failedFns}`
+            : `Daily 09:00 IST orchestrator · ${dailySync.duration_ms ? Math.round(dailySync.duration_ms / 1000) + "s" : ""}`;
+          return (
+            <span
+              title={title}
+              style={{ fontFamily: "var(--font-hud)", fontSize: 10, color, letterSpacing: "0.12em", textTransform: "uppercase" }}
+            >
+              Daily sync · {status}{failed > 0 ? ` · ${failed} failed` : ""} · {day} {hhmm} IST
+            </span>
+          );
+        })() : <span />}
+        <button
+          className="hud-btn"
+          data-variant="ghost"
+          data-size="sm"
+          onClick={syncAll}
+          disabled={syncStep !== null}
+          title="Run all pipeline syncs in order"
+        >
+          <Database size={11} style={{ marginRight: 6 }} />
+          {syncStep ? `Syncing ${syncStep}…` : "Sync all"}
         </button>
-      )}
-      {stats.fundFailed > 0 && <Chip tone="err">{stats.fundFailed} fail</Chip>}
-      {scoresStale && <Chip tone="err">EOD {scoresStaleDays}d old</Chip>}
-      <HudModal open={gapsOpen} onClose={() => setGapsOpen(false)} title={`Data gaps · ${gaps.length}`} width={480}>
-        <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10 }}>
-          Equities missing an EOD row, price, change%, or volume — these are silently excluded from any filter that needs those fields, not "out of range."
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          {gaps.slice(0, 300).map((g) => (
-            <div key={`${g.symbol}:${g.exchange}`} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11, padding: "3px 0", borderBottom: "1px solid var(--edge)" }}>
-              <span style={{ color: "var(--accent)" }}>{g.symbol}</span>
-              <span style={{ color: "var(--text-muted)", textAlign: "right" }}>{g.missing.join(", ")}</span>
-            </div>
-          ))}
-        </div>
-        {gaps.length > 300 && (
-          <div style={{ marginTop: 8, fontSize: 10, color: "var(--text-muted)" }}>+{gaps.length - 300} more</div>
-        )}
-      </HudModal>
-      <div ref={menuRef} style={{ marginLeft: "auto", position: "relative" }}>
-        <button ref={menuTriggerRef} className="hud-btn" data-variant="ghost" data-size="sm"
-          onClick={() => setMenuOpen((o) => !o)} disabled={busy !== null}
-          title="Force a resync">
-          {busy ? "syncing…" : "⋯"}
-        </button>
-        {menuOpen && menuPos && createPortal(
-          <div ref={menuPopRef} style={{ ...popoverStyle, ...menuPos }}>
-            <button style={popoverItem} onClick={() => trigger("market-fundamentals-global-sync", "Fundamentals", "fund")}>
-              <Database size={11} style={{ marginRight: 6 }} />Resync fundamentals
-            </button>
-            <button style={popoverItem} onClick={() => trigger("market-pipeline-eod", "EOD technicals", "eod")}>
-              Recompute technicals
-            </button>
-            <button style={popoverItem} onClick={() => trigger("market-pipeline-aggregates", "Aggregates", "agg")}>
-              Recompute breadth
-            </button>
-            <button style={popoverItem} onClick={() => trigger("market-shares-outstanding-sync", "Market caps (shares×close)", "fund")}>
-              Resync market caps
-            </button>
-            <button style={popoverItem} onClick={() => trigger("market-parity-refresh", "Tickertape parity", "parity")}>
-              Match Tickertape values
-            </button>
-          </div>,
-          document.body,
-        )}
       </div>
     </div>
   );

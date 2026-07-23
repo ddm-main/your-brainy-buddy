@@ -119,6 +119,25 @@ describe("latestTradeDateOf + stale-trade_date gating", () => {
     expect(filterMatches(highVolume, af, "2026-07-22")).toBe(true);
   });
 
+  it("Volume > 30D Avg Volume boolean matches when the view flag is true and the row is fresh", () => {
+    const row = { symbol: "X", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", volume: 5_000_000, vol_avg30: 1_000_000, vol_gt_avg30: true };
+    const af: ActiveFilter = { id: "vol_gt_avg30", bool: true };
+    expect(filterMatches(row, af, "2026-07-22")).toBe(true);
+  });
+
+  it("Volume > 30D Avg Volume boolean excludes rows when the flag is false", () => {
+    const row = { symbol: "Y", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", volume: 500_000, vol_avg30: 1_000_000, vol_gt_avg30: false };
+    const af: ActiveFilter = { id: "vol_gt_avg30", bool: true };
+    expect(filterMatches(row, af, "2026-07-22")).toBe(false);
+  });
+
+  it("Volume > 30D Avg Volume boolean respects the tech freshness gate", () => {
+    const stale = { symbol: "Z", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-10", volume: 5_000_000, vol_avg30: 1_000_000, vol_gt_avg30: true };
+    const af: ActiveFilter = { id: "vol_gt_avg30", bool: true };
+    expect(filterMatches(stale, af, "2026-07-22")).toBe(false);
+  });
+
+
   it("uses raw 1D return for boundary comparisons while display can remain rounded", () => {
     const roundedBoundary = {
       symbol: "GENESYS", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22",

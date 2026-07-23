@@ -35,6 +35,7 @@ function fmtIsoDate(d: Date): string {
 
 // New NSE archive schema (post-2024): /content/cm/BhavCopy_NSE_CM_0_0_0_YYYYMMDD_F_0000.csv.zip
 // Old schema (pre-2024, still online for archives): /content/historical/EQUITIES/YYYY/MMM/cm{DD}{MMM}{YYYY}bhav.csv.zip
+// SME emerge bhavcopy (separate segment, missing from CM bhavcopy): /content/sme/sme{DD}{MMM}{YYYY}bhav.csv.zip
 function buildBhavcopyUrls(d: Date): string[] {
   const yyyy = d.getUTCFullYear();
   const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
@@ -44,9 +45,19 @@ function buildBhavcopyUrls(d: Date): string[] {
   const legacy = fmtArchiveDate(d);
   return [
     `https://archives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_${iso}_F_0000.csv.zip`,
+    `https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_${iso}_F_0000.csv.zip`,
     `https://archives.nseindia.com/content/historical/EQUITIES/${yyyy}/${mmm}/cm${legacy}bhav.csv.zip`,
   ];
 }
+
+function buildSmeBhavcopyUrls(d: Date): string[] {
+  const legacy = fmtArchiveDate(d);
+  return [
+    `https://nsearchives.nseindia.com/content/sme/sme${legacy}bhav.csv.zip`,
+    `https://archives.nseindia.com/content/sme/sme${legacy}bhav.csv.zip`,
+  ];
+}
+
 
 async function sha256Hex(s: string): Promise<string> {
   const buf = new TextEncoder().encode(s);
@@ -191,6 +202,32 @@ Deno.serve(async (req) => {
       rows.push({ ...norm, source: "nse_bhavcopy", source_hash: hash, fetched_at: new Date().toISOString() });
     }
 
+    // 2) Best-effort SME emerge bhavcopy for the same trade date. SME rows
+    // aren't in the CM bhavcopy, so without this the screener universe
+    // silently drops NSE emerge stocks that Tickertape includes.
+    let smeRows = 0;
+    let smeSourceUrl: string | null = null;
+    try {
+      for (const u of buildSmeBhavcopyUrls(tradeDate)) {
+        const zip = await fetchZip(u);
+        if (!zip) continue;
+        const smeCsv = await unzipFirstCsv(zip).catch(() => null);
+        if (!smeCsv) continue;
+        smeSourceUrl = u;
+        const smeParsed = parseCsv(smeCsv);
+        for (const r of smeParsed) {
+          const norm = normalizeRow(r, tradeDateIso);
+          if (!norm.symbol || norm.close == null) continue;
+          const series = norm.series || "SM";
+          if (!["SM","ST","SME","SME_EQ"].includes(series)) continue;
+          const hash = await sha256Hex([norm.symbol, tradeDateIso, norm.close, norm.volume].join("|"));
+          rows.push({ ...norm, series, source: "nse_bhavcopy_sme", source_hash: hash, fetched_at: new Date().toISOString() });
+          smeRows++;
+        }
+        break;
+      }
+    } catch { /* non-fatal */ }
+
     // Batch upsert in chunks of 500
     let inserted = 0;
     for (let i = 0; i < rows.length; i += 500) {
@@ -209,9 +246,10 @@ Deno.serve(async (req) => {
       trade_date: tradeDateIso,
       rows_ingested: inserted,
       duration_ms: Date.now() - started,
-      metadata: { source_url: sourceUrl },
+      metadata: { source_url: sourceUrl, sme_rows: smeRows, sme_source_url: smeSourceUrl },
       finished_at: new Date().toISOString(),
     });
+
 
     return new Response(JSON.stringify({
       ok: true, trade_date: tradeDateIso, rows: inserted, source_url: sourceUrl,

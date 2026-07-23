@@ -126,7 +126,7 @@ export const FILTERS: FilterDef[] = [
   { id: "sector",             label: "Sector",            category: "basics",     kind: "enum", scope: "eq" },
   { id: "industry",           label: "Industry",          category: "basics",     kind: "enum", scope: "eq" },
   { id: "ltp",                label: "Price",             category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "tech" },
-  { id: "volume",             label: "Volume",            category: "basics",     kind: "number", min: 0, max: 1_000_000, step: 100_000, scope: "tech", maxIsOpenEnded: true },
+  { id: "volume",             label: "Volume ('000)",     category: "basics",     kind: "number", min: 0, max: 1_000_000, step: 50_000, scope: "tech", maxIsOpenEnded: true, hint: "Tickertape caps at 1M+ (open-ended)" },
   { id: "pct_from_52w_high",  label: "% from 52w High",   category: "basics",     kind: "number", unit: "%", min: -100, max: 20, step: 1, scope: "tech" },
 
   // Valuation — most require positive earnings to be meaningful.
@@ -175,6 +175,7 @@ export const FILTERS: FilterDef[] = [
   // Momentum & Volume
   { id: "change_pct",         label: "1D Return %",       category: "momentum",   kind: "number", unit: "%", min: -20, max: 20, step: 0.1, scope: "tech", valueKey: "change_pct_raw" },
   { id: "rel_volume",         label: "Rel Volume",        category: "momentum",   kind: "number", unit: "x", min: 0, max: 20, step: 0.1, scope: "tech" },
+  { id: "vol_gt_avg30",       label: "Volume > 30D Avg Volume", category: "momentum", kind: "boolean", scope: "tech" },
   { id: "rel_strength_nifty", label: "RS vs NIFTY",       category: "momentum",   kind: "number", unit: "%", min: -50, max: 50, step: 1, scope: "tech" },
   { id: "sector_strength",    label: "Sector Strength",   category: "momentum",   kind: "number", min: 0, max: 1, step: 0.05, scope: "tech" },
   { id: "ret_5d",             label: "5D Return",         category: "momentum",   kind: "number", unit: "%", min: -50, max: 50, step: 0.5, scope: "tech" },
@@ -247,7 +248,7 @@ export function filterMatches(row: Record<string, any>, af: ActiveFilter, latest
   if (def.kind === "enum" && (!af.values || af.values.length === 0)) return true;
   const minNum = af.min === undefined || af.min === "" || Number.isNaN(Number(af.min)) ? null : Number(af.min);
   const maxNum = af.max === undefined || af.max === "" || Number.isNaN(Number(af.max)) ? null : Number(af.max);
-  const effectiveMaxNum = def.kind === "number" && def.maxIsOpenEnded && maxNum !== null && def.max !== undefined && maxNum >= def.max
+  const effectiveMaxNum = def.kind === "number" && def.maxIsOpenEnded && maxNum !== null && def.max !== undefined && maxNum === def.max
     ? null
     : maxNum;
   if (def.kind === "number" && minNum === null && effectiveMaxNum === null) return true;

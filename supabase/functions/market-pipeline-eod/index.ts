@@ -118,6 +118,7 @@ Deno.serve(async (req) => {
             volume_nse: snap.volume,
             volume_bse: bseVolume,
             vol_avg20: snap.volAvg20,
+            vol_avg30: snap.volAvg30,
             rel_volume: snap.relVolume,
             ema20: snap.ema20,
             ema50: snap.ema50,

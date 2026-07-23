@@ -9,11 +9,11 @@ import { Btn, Chip } from "@/components/hud/HudControls";
 import { DataTable, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { WatchlistPanel } from "@/components/market/WatchlistPanel";
-import { FundsCard } from "@/components/market/FundsCard";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "@/lib/market/api";
-import { useIndices, useIndexWatch, useIndexWatchMutations, useMarketSettings, useQuotes, useSavedScreeners, useStockScores } from "@/lib/market/hooks";
-import { filterMatches, latestTradeDateOf, type ActiveFilter, type UniverseId } from "@/lib/market/screenerCatalog";
+import { useIndices, useIndexWatch, useIndexWatchMutations, useMarketSettings, usePositions, useQuotes, useSavedScreeners, useStockScores } from "@/lib/market/hooks";
+import { useBrokerOrders } from "@/lib/market/orderHooks";
+import { FILTER_BY_ID, canonicalFilterId, filterMatches, latestTradeDateOf, type ActiveFilter, type UniverseId } from "@/lib/market/screenerCatalog";
 import { useScreenerData, type ScreenerRow } from "@/lib/market/screenerRun";
 import { ALL_PRESETS, GLOBAL_PRESETS, INDIAN_PRESETS, type IndexPreset } from "@/lib/market/indices";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -24,8 +24,8 @@ import type { Quote, StockScore } from "@/lib/market/types";
 import { holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
 
-const BREAKOUT_MIN_SCORE = 60;
-const BREAKOUT_ROWS = 12;
+
+const BREAKOUT_ROWS = 16;
 
 type BreakoutDisplayRow = StockScore | ScreenerRow;
 
@@ -54,10 +54,6 @@ function rowPrice(row: BreakoutDisplayRow): number | null {
   return r.ltp ?? r.close ?? null;
 }
 
-function rowRsi(row: BreakoutDisplayRow): number | null {
-  const r = row as any;
-  return r.rsi ?? r.rsi14 ?? null;
-}
 
 function byBreakoutDesc(a: BreakoutDisplayRow, b: BreakoutDisplayRow): number {
   return ((b.breakout_score ?? -1) - (a.breakout_score ?? -1)) || a.symbol.localeCompare(b.symbol);
@@ -70,11 +66,23 @@ export default function MarketDashboard() {
   const [busy, setBusy] = useState<string | null>(null);
   const [manageOpen, setManageOpen] = useState(false);
   const [breakoutScreenId, setBreakoutScreenId] = useState<string>(
-    () => localStorage.getItem("market.dash.breakoutScreen") ?? "default",
+    () => {
+      const v = localStorage.getItem("market.dash.breakoutScreen");
+      return v && v !== "default" ? v : "";
+    },
   );
-  useEffect(() => { localStorage.setItem("market.dash.breakoutScreen", breakoutScreenId); }, [breakoutScreenId]);
+  useEffect(() => {
+    if (breakoutScreenId) localStorage.setItem("market.dash.breakoutScreen", breakoutScreenId);
+  }, [breakoutScreenId]);
   const { data: savedScreens = [] } = useSavedScreeners();
-  const selectedScreen = breakoutScreenId === "default" ? undefined : savedScreens.find((s) => s.id === breakoutScreenId);
+  // If nothing is chosen yet (or the stored id no longer exists), fall back to
+  // the first saved screener — but never overwrite a valid user choice.
+  useEffect(() => {
+    if (savedScreens.length === 0) return;
+    const stillValid = breakoutScreenId && savedScreens.some((s) => s.id === breakoutScreenId);
+    if (!stillValid) setBreakoutScreenId(savedScreens[0].id);
+  }, [savedScreens, breakoutScreenId]);
+  const selectedScreen = savedScreens.find((s) => s.id === breakoutScreenId);
   const selectedScreenState = useMemo(() => savedScreenerState(selectedScreen), [selectedScreen]);
 
   useEffect(() => {
@@ -90,29 +98,30 @@ export default function MarketDashboard() {
   // something to narrow beyond the top-15-by-score slice.
   const { data: topBreakouts = [] } = useStockScores({ orderBy: "breakout_score", limit: 60 });
   const { data: preBreakouts = [] } = useStockScores({ orderBy: "prebreakout_score", limit: 10 });
-  const usingSavedScreen = breakoutScreenId !== "default" && Boolean(selectedScreen);
+  const usingSavedScreen = Boolean(selectedScreen);
   const { data: savedScreenerRows = [], isFetching: savedScreenerFetching } = useScreenerData(selectedScreenState.universe, usingSavedScreen);
 
+  const hasActiveFilters = selectedScreenState.active.length > 0;
   const matchingBreakouts = useMemo<BreakoutDisplayRow[]>(() => {
-    if (!usingSavedScreen) {
-      return topBreakouts.filter((s) => (s.breakout_score ?? 0) >= BREAKOUT_MIN_SCORE);
-    }
+    if (!usingSavedScreen || !hasActiveFilters) return [];
     const active = selectedScreenState.active;
     const latestDate = latestTradeDateOf(savedScreenerRows);
-    const source = active.length === 0
-      ? savedScreenerRows
-      : savedScreenerRows.filter((s) => active.every((af) => filterMatches(s as any, af, latestDate)));
+    const source = savedScreenerRows.filter((s) => active.every((af) => filterMatches(s as any, af, latestDate)));
     return [...source].sort(byBreakoutDesc);
-  }, [savedScreenerRows, selectedScreenState.active, topBreakouts, usingSavedScreen]);
+  }, [savedScreenerRows, selectedScreenState.active, usingSavedScreen, hasActiveFilters]);
 
   const filteredBreakouts = useMemo(() => matchingBreakouts.slice(0, BREAKOUT_ROWS), [matchingBreakouts]);
 
-  const breakoutStatusLabel = usingSavedScreen
-    ? `filtered · ${selectedScreen?.name ?? "screener"}`
-    : `default ≥${BREAKOUT_MIN_SCORE}`;
-  const breakoutCountLabel = usingSavedScreen
-    ? (savedScreenerFetching ? "loading" : `${matchingBreakouts.length} matches`)
-    : `${filteredBreakouts.length} shown`;
+  const breakoutStatusLabel = !usingSavedScreen
+    ? (savedScreens.length === 0 ? "no screeners saved" : "select a screener")
+    : !hasActiveFilters
+    ? "screener has no filters"
+    : `filtered · ${selectedScreen?.name ?? "screener"}`;
+  const breakoutCountLabel = !usingSavedScreen || !hasActiveFilters
+    ? "0 matches"
+    : (savedScreenerFetching ? "loading" : `${matchingBreakouts.length} matches`);
+
+
 
   // The scores above are EOD (recomputed once a day by the evening pipeline —
   // RSI/EMA/breakout scoring is inherently a daily-bar concept, same as any
@@ -198,6 +207,38 @@ export default function MarketDashboard() {
     return { invested, current: allUnresolved ? null : current, pnl: allUnresolved ? null : current - knownInvested, day, dayPct };
   }, [counts, pfQuotes]);
 
+  // Positions summary
+  const { data: positions = [] } = usePositions();
+  const openPositions = useMemo(() => positions.filter((p) => !p.closed_at), [positions]);
+  const posKeys = useMemo(() => Array.from(new Set(openPositions.map((p) => `${p.exchange}:${p.symbol}`))), [openPositions]);
+  const { data: posQuotes } = useQuotes(posKeys);
+  const posSummary = useMemo(() => {
+    const byKey = new Map((posQuotes?.quotes ?? []).map((q) => [quoteKey(q.exchange, q.symbol), q]));
+    let exposure = 0, unrealized = 0, resolved = 0;
+    for (const p of openPositions) {
+      const q = byKey.get(quoteKey(p.exchange, p.symbol));
+      const ltp = q?.ltp;
+      if (ltp == null) continue;
+      resolved++;
+      const sign = p.side === "long" ? 1 : -1;
+      exposure += ltp * p.quantity;
+      unrealized += sign * (ltp - p.entry_price) * p.quantity;
+    }
+    return { count: openPositions.length, exposure, unrealized: resolved === 0 ? null : unrealized };
+  }, [openPositions, posQuotes]);
+
+  // Broker orders summary
+  const { data: brokerOrdersData } = useBrokerOrders();
+  const orderSummary = useMemo(() => {
+    const orders = brokerOrdersData?.orders ?? [];
+    const open = orders.filter((o) => /open|pending|trigger/i.test(o.status)).length;
+    const executed = orders.filter((o) => /complete|executed|filled/i.test(o.status)).length;
+    const rejected = orders.filter((o) => /reject|cancel|fail/i.test(o.status)).length;
+    return { total: orders.length, open, executed, rejected };
+  }, [brokerOrdersData]);
+
+
+
 
   // Watchlist pulse — intersect with already-fetched top/pre breakout scores;
   // avoids fetching 1000 rows just to compute three counts.
@@ -214,6 +255,22 @@ export default function MarketDashboard() {
   }, [topBreakouts, preBreakouts, watchSet]);
 
   const connected = settings.find((s) => s.connection_status === "connected")?.active_provider ?? null;
+
+  // Split indices into Indian vs Global using the watch-list region metadata.
+  const { data: indexWatch = [] } = useIndexWatch();
+  const regionBySymbol = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of indexWatch) m.set(r.symbol, r.region);
+    return m;
+  }, [indexWatch]);
+  const [indianIdx, globalIdx] = useMemo(() => {
+    const quotes = indicesData?.quotes ?? [];
+    const ind: typeof quotes = []; const glo: typeof quotes = [];
+    for (const q of quotes) {
+      (regionBySymbol.get(q.symbol) === "GLOBAL" ? glo : ind).push(q);
+    }
+    return [ind, glo];
+  }, [indicesData, regionBySymbol]);
 
   // Bootstrap the data pipeline on demand so the dashboard fills without
   // waiting for the evening cron. Runs the same steps cron would run.
@@ -242,8 +299,8 @@ export default function MarketDashboard() {
   };
 
 
-  const breakoutColumns = useMemo<ColumnDef<BreakoutDisplayRow, any>[]>(() => [
-    {
+  const breakoutColumns = useMemo<ColumnDef<BreakoutDisplayRow, any>[]>(() => {
+    const symbolCol: ColumnDef<BreakoutDisplayRow, any> = {
       header: "Symbol", accessorKey: "symbol",
       cell: ({ row }) => (
         <span>
@@ -251,142 +308,215 @@ export default function MarketDashboard() {
           {row.original.sector && <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: 10 }}>{row.original.sector}</span>}
         </span>
       ),
-    },
-    {
-      header: "Price", id: "livePrice", meta: { align: "right" },
-      accessorFn: (s) => liveFor(s)?.ltp ?? rowPrice(s),
-      cell: ({ getValue }) => fmtNum(getValue()),
-    },
-    {
-      header: "Chg %", id: "liveChangePct", meta: { align: "right" },
-      accessorFn: (s) => liveFor(s)?.change_pct ?? s.change_pct,
-      cell: ({ getValue }) => <PctCell value={getValue()} />,
-    },
-    { header: "RVol", accessorKey: "rel_volume", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue(), 1) },
-    { header: "RSI", id: "rsi", meta: { align: "right" }, accessorFn: rowRsi, cell: ({ getValue }) => fmtNum(getValue(), 0) },
-    {
+    };
+    const breakoutCol: ColumnDef<BreakoutDisplayRow, any> = {
       header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },
       cell: ({ row }) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" />,
-    },
-    {
-      header: "Entry ≈", id: "entry", meta: { align: "right" },
-      accessorFn: (r) => r.resistance_level ?? rowPrice(r),
-      cell: ({ getValue }) => fmtNum(getValue()),
-    },
+    };
+
+    const pctIds = new Set(["change_pct", "ret_5d", "ret_21d", "ret_ytd", "dividend_yield", "sales_growth", "profit_growth", "eps_growth", "roe", "roce", "promoter_holding", "dii_holding", "fii_holding", "institutional_holding", "pct_from_52w_high", "atr_pct", "rel_strength_nifty"]);
+
+    const seen = new Set<string>([ "symbol", "breakout_score" ]);
+    const filterCols: ColumnDef<BreakoutDisplayRow, any>[] = [];
+    for (const af of selectedScreenState.active) {
+      const id = canonicalFilterId(af.id);
+      if (seen.has(id)) continue;
+      const def = FILTER_BY_ID[id];
+      if (!def) continue;
+      seen.add(id);
+
+      const accessor = (s: BreakoutDisplayRow): any => {
+        const r = s as any;
+        if (id === "ltp") return liveFor(s)?.ltp ?? r.ltp ?? r.close ?? null;
+        if (id === "change_pct") return liveFor(s)?.change_pct ?? r.change_pct_raw ?? r.change_pct ?? null;
+        if (def.valueKey) return r[def.valueKey] ?? r[id] ?? null;
+        return r[id] ?? null;
+      };
+
+      const unit = def.unit;
+      const renderNumber = (v: any) => {
+        if (v == null || v === "" || Number.isNaN(Number(v))) return "—";
+        const n = Number(v);
+        const formatted = fmtNum(n);
+        if (!unit) return formatted;
+        if (unit === "₹") return `₹${formatted}`;
+        if (unit === "%") return `${formatted}%`;
+        return `${formatted} ${unit}`;
+      };
+
+      const col: ColumnDef<BreakoutDisplayRow, any> = {
+        id: `flt_${id}`,
+        header: def.label,
+        accessorFn: accessor,
+        meta: { align: def.kind === "enum" ? "left" : "right" },
+        cell: ({ getValue }) => {
+          const v = getValue();
+          if (def.kind === "boolean") return v ? "Yes" : v === false || v == null ? "No" : "—";
+          if (def.kind === "enum") return v ?? "—";
+          if (pctIds.has(id)) return <PctCell value={v as any} />;
+          return renderNumber(v);
+        },
+      };
+      filterCols.push(col);
+    }
+
+    return [symbolCol, ...filterCols, breakoutCol];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [liveByKey]);
+  }, [liveByKey, selectedScreenState.active]);
+
+  const renderIndexTile = (q: NonNullable<typeof indicesData>["quotes"][number]) => (
+    <button
+      key={q.symbol}
+      onClick={() => nav(`/market/index/${encodeURIComponent(q.symbol)}`)}
+      title={`${q.name} — view details`}
+      style={{
+        padding: "5px 7px", border: "1px solid var(--edge)", background: "transparent",
+        textAlign: "left", cursor: "pointer", borderRadius: 2,
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--edge-strong)"; e.currentTarget.style.background = "rgba(53,214,237,0.05)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--edge)"; e.currentTarget.style.background = "transparent"; }}
+    >
+      <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 9 }}>{q.name}</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6 }}>
+        <span style={{ fontFamily: "var(--font-display)", fontSize: 13, color: "var(--text)" }}>
+          {Number(q.price).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+        </span>
+        <span style={{ fontSize: 10, color: (q.change_pct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
+          {q.change_pct == null ? "—" : `${q.change_pct >= 0 ? "+" : ""}${q.change_pct.toFixed(2)}%`}
+        </span>
+      </div>
+    </button>
+  );
+
+  const indexActions = (
+    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+      {!connected && (
+        <Link to="/market/settings" title="Using Yahoo Finance — connect Kotak Neo for live NSE" style={{ fontSize: 10, color: "var(--text-dim)", textDecoration: "none", padding: "2px 6px", border: "1px dashed var(--edge)", marginRight: 4 }}>
+          yahoo · connect kotak
+        </Link>
+      )}
+      <Btn size="sm" onClick={() => setManageOpen(true)} title="Manage indices"><Settings2 size={12} /></Btn>
+      <Btn size="sm" onClick={primeData} disabled={busy !== null} title={busy === "prime" ? "priming…" : "prime data pipeline"}><Sparkles size={12} /></Btn>
+      <Btn size="sm" onClick={() => refetchIndices()} disabled={indicesFetching} title="refresh"><RefreshCw size={12} /></Btn>
+    </div>
+  );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10, height: "100%", minHeight: 0 }}>
-      <HudPanel flow title="Market Summary" live={indicesFetching ? "warn" : "ok"} actions={
-        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-          {!connected && (
-            <Link to="/market/settings" title="Using Yahoo Finance — connect Kotak Neo for live NSE" style={{ fontSize: 10, color: "var(--text-dim)", textDecoration: "none", padding: "2px 6px", border: "1px dashed var(--edge)", marginRight: 4 }}>
-              yahoo · connect kotak
-            </Link>
-          )}
-          <Btn size="sm" onClick={() => setManageOpen(true)} title="Manage indices"><Settings2 size={12} /></Btn>
-          <Btn size="sm" onClick={primeData} disabled={busy !== null} title={busy === "prime" ? "priming…" : "prime data pipeline"}><Sparkles size={12} /></Btn>
-          <Btn size="sm" onClick={() => refetchIndices()} disabled={indicesFetching} title="refresh"><RefreshCw size={12} /></Btn>
-        </div>
-      }>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 6 }}>
-          {(indicesData?.quotes ?? []).map((q) => (
-            <button
-              key={q.symbol}
-              onClick={() => nav(`/market/index/${encodeURIComponent(q.symbol)}`)}
-              title={`${q.name} — view details`}
-              style={{
-                padding: "6px 8px", border: "1px solid var(--edge)", background: "transparent",
-                textAlign: "left", cursor: "pointer", borderRadius: 2,
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--edge-strong)"; e.currentTarget.style.background = "rgba(53,214,237,0.05)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--edge)"; e.currentTarget.style.background = "transparent"; }}
-            >
-              <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 9 }}>{q.name}</div>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6 }}>
-                <span style={{ fontFamily: "var(--font-display)", fontSize: 15, color: "var(--text)" }}>
-                  {Number(q.price).toLocaleString(undefined, { maximumFractionDigits: 2 })}
-                </span>
-                <span style={{ fontSize: 10, color: (q.change_pct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
-                  {q.change_pct == null ? "—" : `${q.change_pct >= 0 ? "+" : ""}${q.change_pct.toFixed(2)}%`}
-                </span>
-              </div>
-            </button>
-          ))}
-        </div>
-      </HudPanel>
-
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(260px, 1fr)", gap: 10, flex: "1 1 auto", minHeight: 0 }}>
-        <HudPanel
-          flow
-          title="Top Breakouts"
-          style={{ flex: 1, minHeight: 0 }}
-          actions={
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <select
-                value={breakoutScreenId}
-                onChange={(e) => setBreakoutScreenId(e.target.value)}
-                title="Filter Top Breakouts using a saved screener"
-                style={{
-                  fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
-                  background: "transparent", color: "var(--text)", border: "1px solid var(--edge)",
-                  padding: "3px 6px", cursor: "pointer",
-                }}
-              >
-                <option value="default">Default · Breakout ≥ 60</option>
-                {savedScreens.length > 0 && <option disabled>── my screeners ──</option>}
-                {savedScreens.map((s) => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
-                ))}
-              </select>
-              <Chip tone={usingSavedScreen ? "accent" : "neutral"}>{breakoutStatusLabel}</Chip>
-              <Chip tone={savedScreenerFetching ? "warn" : "neutral"}>{breakoutCountLabel}</Chip>
-              <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.1em", textTransform: "uppercase" }}>
-                {liveQuoteState === "push" && <Chip tone="ok">push · relay live</Chip>}
-                {liveQuoteState === "live" && <Chip tone="ok">price live</Chip>}
-                {liveQuoteState === "stale" && <Chip tone="warn">quotes degraded — cached close</Chip>}
-                {liveQuoteState === "none" && "price · yesterday's close"}
-              </span>
-            </div>
-          }
-        >
-          <DataTable
-            columns={breakoutColumns}
-            data={filteredBreakouts}
-            onRowClick={(r) => nav(`/market/analysis/${r.symbol}`)}
-            initialSort={[{ id: "breakout_score", desc: true }]}
-            maxHeight="100%"
-            emptyLabel={savedScreenerFetching ? "loading" : "no matches"}
-          />
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 0, height: "100%" }}>
+      {/* Row 1 · Market Summary + Global Market — equal columns */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 8, alignItems: "start", flexShrink: 0 }}>
+        <HudPanel flow title="Market Summary" live={indicesFetching ? "warn" : "ok"} actions={indexActions}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 5 }}>
+            {indianIdx.length === 0
+              ? <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 11 }}>no Indian indices tracked</div>
+              : indianIdx.map(renderIndexTile)}
+          </div>
         </HudPanel>
+        <HudPanel flow title="Global Market" live={indicesFetching ? "warn" : "ok"}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 5 }}>
+            {globalIdx.length === 0
+              ? <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                  no global indices — <button onClick={() => setManageOpen(true)} style={{ background: "none", border: 0, color: "var(--accent)", cursor: "pointer", padding: 0, font: "inherit" }}>add one</button>
+                </div>
+              : globalIdx.map(renderIndexTile)}
+          </div>
+        </HudPanel>
+      </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <HudPanel flow title="Portfolio">
-            {pf ? (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-                <StatTile label="Value" value={pf.current == null ? "—" : `₹${Math.round(pf.current).toLocaleString("en-IN")}`} to="/market/holdings" />
-                <StatTile label="Total P&L" value={pf.pnl == null ? "—" : `${pf.pnl >= 0 ? "+" : ""}₹${Math.round(pf.pnl).toLocaleString("en-IN")}`} tone={pf.pnl == null ? undefined : pf.pnl >= 0 ? "ok" : "err"} />
-                <StatTile
-                  label="Today"
-                  value={pf.day == null
-                    ? "—"
-                    : `${pf.day >= 0 ? "+" : ""}₹${Math.round(pf.day).toLocaleString("en-IN")}${pf.dayPct != null ? ` (${pf.dayPct >= 0 ? "+" : ""}${pf.dayPct.toFixed(2)}%)` : ""}`}
-                  tone={pf.day == null ? undefined : pf.day >= 0 ? "ok" : "err"}
-                />
-
-                <StatTile label={`${counts?.holdings ?? 0} held · ${counts?.watchlist ?? 0} watched`} value="" to="/market/holdings" />
-              </div>
-            ) : (
-              <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-                <Link to="/market/holdings" style={{ color: "var(--accent)", textDecoration: "none" }}>+ add holdings</Link>
-              </div>
-            )}
-          </HudPanel>
-
-          <FundsCard compact />
-          <WatchlistPanel />
-        </div>
+      {/* Row 2 · Top Breakouts · Watchlist · Portfolio — 3 equal columns */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "minmax(0, 2.2fr) minmax(0, 2fr) minmax(0, 1fr)",
+          gap: 8,
+          alignItems: "stretch",
+          flex: 1,
+          minHeight: 0,
+          gridAutoRows: "1fr",
+        }}
+      >
+      <HudPanel
+        flow
+        title="Top Breakouts"
+        actions={
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <select
+              value={breakoutScreenId}
+              onChange={(e) => setBreakoutScreenId(e.target.value)}
+              title="Filter Top Breakouts using a saved screener"
+              style={{
+                fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
+                background: "transparent", color: "var(--text)", border: "1px solid var(--edge)",
+                padding: "3px 6px", cursor: "pointer",
+              }}
+            >
+              {savedScreens.length === 0 && <option value="">No saved screeners</option>}
+              {savedScreens.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+            <Chip tone={usingSavedScreen ? "accent" : "neutral"}>{breakoutStatusLabel}</Chip>
+            <Chip tone={savedScreenerFetching ? "warn" : "neutral"}>{breakoutCountLabel}</Chip>
+            {liveQuoteState === "push" && <Chip tone="ok">push · live</Chip>}
+            {liveQuoteState === "live" && <Chip tone="ok">live</Chip>}
+            {liveQuoteState === "stale" && <Chip tone="warn">cached close</Chip>}
+          </div>
+        }
+      >
+        <DataTable
+          columns={breakoutColumns}
+          data={filteredBreakouts}
+          onRowClick={(r) => nav(`/market/analysis/${r.symbol}`)}
+          initialSort={[{ id: "breakout_score", desc: true }]}
+          maxHeight="100%"
+          emptyLabel={savedScreenerFetching ? "loading" : !usingSavedScreen ? "select a screener" : !hasActiveFilters ? "add filters to your screener" : "no matches"}
+        />
+      </HudPanel>
+        <WatchlistPanel
+          readyCount={watchPulse.ready}
+          nearCount={watchPulse.near}
+          weakCount={watchPulse.weak}
+          onSettings={() => nav("/market/settings")}
+        />
+        <HudPanel flow title="Portfolio">
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {/* Holdings */}
+            <PortfolioSection
+              label="Holdings"
+              to="/market/holdings"
+              meta={`${counts?.holdings ?? 0} held`}
+              tiles={pf ? [
+                { label: "Value", value: pf.current == null ? "—" : `₹${Math.round(pf.current).toLocaleString("en-IN")}` },
+                { label: "Total P&L", value: pf.pnl == null ? "—" : `${pf.pnl >= 0 ? "+" : ""}₹${Math.round(pf.pnl).toLocaleString("en-IN")}`, tone: pf.pnl == null ? undefined : pf.pnl >= 0 ? "ok" : "err" },
+                { label: "Today", value: pf.day == null ? "—" : `${pf.day >= 0 ? "+" : ""}₹${Math.round(pf.day).toLocaleString("en-IN")}${pf.dayPct != null ? ` (${pf.dayPct >= 0 ? "+" : ""}${pf.dayPct.toFixed(2)}%)` : ""}`, tone: pf.day == null ? undefined : pf.day >= 0 ? "ok" : "err" },
+              ] : []}
+              empty="No holdings tracked"
+            />
+            {/* Positions */}
+            <PortfolioSection
+              label="Positions"
+              to="/market/positions"
+              meta={`${posSummary.count} open`}
+              tiles={posSummary.count > 0 ? [
+                { label: "Exposure", value: `₹${Math.round(posSummary.exposure).toLocaleString("en-IN")}` },
+                { label: "Unrealized", value: posSummary.unrealized == null ? "—" : `${posSummary.unrealized >= 0 ? "+" : ""}₹${Math.round(posSummary.unrealized).toLocaleString("en-IN")}`, tone: posSummary.unrealized == null ? undefined : posSummary.unrealized >= 0 ? "ok" : "err" },
+              ] : []}
+              empty="No open positions"
+            />
+            {/* Orders */}
+            <PortfolioSection
+              label="Orders"
+              to="/market/orders"
+              meta={`${orderSummary.total} today`}
+              tiles={orderSummary.total > 0 ? [
+                { label: "Open", value: String(orderSummary.open), tone: orderSummary.open > 0 ? "accent" : undefined },
+                { label: "Executed", value: String(orderSummary.executed), tone: orderSummary.executed > 0 ? "ok" : undefined },
+                { label: "Rejected", value: String(orderSummary.rejected), tone: orderSummary.rejected > 0 ? "err" : undefined },
+              ] : []}
+              empty="No orders today"
+            />
+          </div>
+        </HudPanel>
       </div>
 
       {manageOpen && <ManageIndicesDialog onClose={() => setManageOpen(false)} />}
@@ -506,4 +636,35 @@ function StatTile({ label, value, to, tone }: { label: string; value: string; to
     </div>
   );
   return to ? <Link to={to} style={{ textDecoration: "none" }}>{body}</Link> : body;
+}
+
+type Tile = { label: string; value: string; tone?: "ok" | "err" | "accent" };
+function PortfolioSection({
+  label, to, meta, tiles, empty,
+}: { label: string; to: string; meta: string; tiles: Tile[]; empty: string }) {
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+        <span className="hud-label" style={{ color: "var(--text-dim)", fontSize: 10 }}>
+          {label} <span style={{ color: "var(--text-muted)" }}>· {meta}</span>
+        </span>
+        <Link to={to} style={{ color: "var(--accent)", textDecoration: "none", fontSize: 10 }}>view →</Link>
+      </div>
+      {tiles.length === 0 ? (
+        <div style={{ fontSize: 11, color: "var(--text-muted)", padding: "6px 2px" }}>{empty}</div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${tiles.length}, 1fr)`, gap: 4 }}>
+          {tiles.map((t) => {
+            const color = t.tone === "ok" ? "var(--ok)" : t.tone === "err" ? "var(--danger)" : t.tone === "accent" ? "var(--accent)" : "var(--text)";
+            return (
+              <div key={t.label} style={{ padding: "6px 8px", border: "1px solid var(--edge)", borderRadius: 2 }}>
+                <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 9 }}>{t.label}</div>
+                <div style={{ fontFamily: "var(--font-display)", fontSize: 15, color, fontVariantNumeric: "tabular-nums" }}>{t.value}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }

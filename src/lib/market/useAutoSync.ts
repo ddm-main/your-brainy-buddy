@@ -1,118 +1,60 @@
 // Background self-healing sync for the Market section.
 // Runs quietly: only surfaces toasts on hard errors, never on success.
 //
-// Rules of thumb (inspired by how mainstream broker apps stay fresh):
-//   • Fundamentals rarely change intra-day → check once/session, backfill if
-//     any rows have `updated_at` older than 24h.
-//   • Technical scores are day-based → refresh when `MAX(trade_date)` is not
-//     today (IST) and the market has closed at least once since.
-//   • Quotes / breadth are handled by existing polling in useQuotes/useIndices.
-//
-// The hook is mounted once from `src/routes/Market.tsx` and de-dupes via
-// localStorage timestamps so tab switches don't storm the gateway.
+// Simplified from a multi-step chain to a single call into
+// `market-daily-sync` (the same orchestrator pg_cron fires at 09:00 IST). The
+// hook only fires when today has no `daily_sync_orchestrator/summary` row in
+// `market_ingestion_runs` — i.e. the daily run hasn't landed yet — so tabbing
+// through the app after 09:00 doesn't re-storm the gateway.
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
-import { todayIstDateString } from "./liveSnapshot";
-import { marketOpen } from "./hooks";
 
-const KEYS = {
-  fund: "market:auto:fund:last",
-  eod:  "market:auto:eod:last",
-} as const;
+const KEY_LAST = "market:auto:daily-sync:last";
+const MIN_INTERVAL_MS = 6 * 3_600_000; // hard floor between attempts per tab
 
-const HOUR = 3_600_000;
-const MIN_FUND_INTERVAL = 6 * HOUR;   // avoid re-hitting a slow queue
-const MIN_EOD_INTERVAL  = 30 * 60_000;
-
-async function fireQuiet(fn: string, chunked: boolean, onError: (msg: string) => void) {
-  try {
-    if (!chunked) {
-      const { error } = await supabase.functions.invoke(fn, { body: {} });
-      if (error) throw error;
-      return;
-    }
-    // Drain chunked pipelines silently, cap at 15 invocations per background pass.
-    for (let i = 0; i < 15; i++) {
-      const { data, error } = await supabase.functions.invoke(fn, { body: {} });
-      if (error) throw error;
-      const d = (data ?? {}) as { drained?: boolean };
-      if (d.drained) break;
-    }
-  } catch (e) {
-    onError((e as Error).message || String(e));
-  }
+function todayIstDateString(): string {
+  const ist = new Date(Date.now() + 5.5 * 3600_000);
+  return ist.toISOString().slice(0, 10);
 }
 
-async function needsFundamentalsRefresh(): Promise<boolean> {
-  const { data, error } = await supabase
-    .from("market_fundamentals_global")
-    .select("updated_at")
-    .order("updated_at", { ascending: true, nullsFirst: true })
-    .limit(1)
-    .maybeSingle();
-  if (error) return false;
-  if (!data?.updated_at) return true;
-  return Date.now() - new Date(data.updated_at).getTime() > 24 * HOUR;
-}
-
-async function needsScoresRefresh(): Promise<boolean> {
-  const { data } = await supabase
-    .from("market_stock_scores")
-    .select("trade_date")
-    .order("trade_date", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (!data?.trade_date) return true;
-  // Was comparing against the UTC calendar date and had no "market closed
-  // since" check at all, so this fired starting right after IST midnight —
-  // hours before the market even opens — rather than only after today's
-  // close as the module doc above promises. IST date + only-after-close.
-  if (marketOpen()) return false;
+async function needsDailySync(): Promise<boolean> {
   const today = todayIstDateString();
-  return String(data.trade_date) < today;
+  const { data } = await supabase
+    .from("market_ingestion_runs")
+    .select("finished_at,status")
+    .eq("source", "daily_sync_orchestrator")
+    .eq("stage", "summary")
+    .order("finished_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!data?.finished_at) return true;
+  const finishedIst = new Date(new Date(data.finished_at).getTime() + 5.5 * 3600_000)
+    .toISOString().slice(0, 10);
+  return finishedIst < today;
 }
 
 export function useMarketAutoSync(): void {
   const qc = useQueryClient();
   useEffect(() => {
     let cancelled = false;
-    const notifiedRef = { current: false };
 
     const run = async () => {
-      // Fundamentals pass.
-      const lastFund = Number(localStorage.getItem(KEYS.fund) || 0);
-      if (Date.now() - lastFund > MIN_FUND_INTERVAL && await needsFundamentalsRefresh()) {
-        localStorage.setItem(KEYS.fund, String(Date.now()));
-        await fireQuiet("market-fundamentals-global-sync", true, (msg) => {
-          if (!notifiedRef.current) {
-            notifiedRef.current = true;
-            console.warn("[market auto-sync] fundamentals:", msg);
-          }
-        });
-        if (!cancelled) qc.invalidateQueries({ queryKey: ["market", "screener-rows-v3"] });
-      }
-
-      // Scores / EOD pass.
-      const lastEod = Number(localStorage.getItem(KEYS.eod) || 0);
-      if (Date.now() - lastEod > MIN_EOD_INTERVAL && await needsScoresRefresh()) {
-        localStorage.setItem(KEYS.eod, String(Date.now()));
-        await fireQuiet("market-pipeline-eod", true, (msg) => {
-          if (!notifiedRef.current) {
-            notifiedRef.current = true;
-            console.warn("[market auto-sync] eod:", msg);
-          }
-        });
-        await fireQuiet("market-pipeline-aggregates", false, (msg) => {
-          console.warn("[market auto-sync] aggregates:", msg);
-        });
+      const last = Number(localStorage.getItem(KEY_LAST) || 0);
+      if (Date.now() - last < MIN_INTERVAL_MS) return;
+      try {
+        if (!(await needsDailySync())) return;
+        localStorage.setItem(KEY_LAST, String(Date.now()));
+        const { error } = await supabase.functions.invoke("market-daily-sync", { body: {} });
+        if (error) throw error;
         if (!cancelled) qc.invalidateQueries({ queryKey: ["market"] });
+      } catch (e) {
+        console.warn("[market auto-sync] daily-sync:", (e as Error).message || String(e));
       }
     };
 
-    // Kick once shortly after mount, then every 15 minutes while the tab lives.
-    const t = setTimeout(() => { void run(); }, 2_000);
-    const iv = setInterval(() => { void run(); }, 15 * 60_000);
+    const t = setTimeout(() => { void run(); }, 3_000);
+    const iv = setInterval(() => { void run(); }, 30 * 60_000);
     return () => { cancelled = true; clearTimeout(t); clearInterval(iv); };
   }, [qc]);
 }

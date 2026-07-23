@@ -3319,6 +3319,7 @@ export type Database = {
           symbol: string
           trade_date: string | null
           vol_avg20: number | null
+          vol_avg30: number | null
           volume: number | null
           volume_bse: number | null
           volume_nse: number | null
@@ -3382,6 +3383,7 @@ export type Database = {
           symbol: string
           trade_date?: string | null
           vol_avg20?: number | null
+          vol_avg30?: number | null
           volume?: number | null
           volume_bse?: number | null
           volume_nse?: number | null
@@ -3445,6 +3447,7 @@ export type Database = {
           symbol?: string
           trade_date?: string | null
           vol_avg20?: number | null
+          vol_avg30?: number | null
           volume?: number | null
           volume_bse?: number | null
           volume_nse?: number | null
@@ -4804,6 +4807,8 @@ export type Database = {
           fundamentals_covered: number | null
           fundamentals_failed: number | null
           fundamentals_last_updated_at: string | null
+          mcap_any_covered: number | null
+          mcap_nse_covered: number | null
           scores_last_count: number | null
           scores_last_trade_date: string | null
         }
@@ -4899,6 +4904,8 @@ export type Database = {
           sync_status: string | null
           trade_date: string | null
           vol_avg20: number | null
+          vol_avg30: number | null
+          vol_gt_avg30: boolean | null
           volume: number | null
           yahoo_symbol: string | null
         }

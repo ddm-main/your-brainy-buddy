@@ -61,6 +61,8 @@ export interface ScreenerRow {
   // technicals (unified schema)
   volume: number | null;
   rel_volume: number | null;
+  vol_avg30: number | null;
+  vol_gt_avg30: boolean | null;
   ema_20: number | null;
   ema_50: number | null;
   ema_100: number | null;
@@ -119,7 +121,7 @@ async function fetchIndexMemberSet(indexKey: string): Promise<Set<string>> {
 const SCREENER_COLUMNS = [
   "symbol","exchange","company_name","sector","sub_sector","industry","market_cap",
   "is_nifty500","instrument_type","trade_date","close","previous_close","change_pct","volume",
-  "rel_volume","ema20","ema50","ema100","ema200","rsi14","macd","macd_signal",
+  "rel_volume","vol_avg30","ema20","ema50","ema100","ema200","rsi14","macd","macd_signal",
   "macd_hist","adx14","atr14","atr_pct","bb_upper","bb_lower","bb_width",
   "bb_squeeze","high_52w","low_52w","pct_from_52w_high","above_ema200",
   "higher_lows","near_resistance","resistance_level","support_level",
@@ -130,6 +132,7 @@ const SCREENER_COLUMNS = [
   "promoter_holding","fii_holding","dii_holding",
   "ret_5d","ret_21d","ret_ytd","fno_enabled","sme","data_provenance",
 ].join(",");
+
 
 async function fetchScreenerRows(): Promise<any[]> {
   const rows: any[] = [];
@@ -277,6 +280,14 @@ export function useScreenerData(universe: UniverseId, enabled = true) {
         // view uses `rsi14`, `adx14`, `atr14`, `ema20`..`ema200`
         volume:            num(s.volume),
         rel_volume:        num(s.rel_volume),
+        vol_avg30:         num(s.vol_avg30),
+        vol_gt_avg30:      (() => {
+          const vol = num(s.volume);
+          const avg = num(s.vol_avg30);
+          if (vol == null || avg == null || avg <= 0) return null;
+          return vol > avg;
+        })(),
+
         ema_20:            num(s.ema20 ?? s.ema_20),
         ema_50:            num(s.ema50 ?? s.ema_50),
         ema_100:           num(s.ema100 ?? s.ema_100),
