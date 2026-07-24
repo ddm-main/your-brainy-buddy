@@ -9,7 +9,7 @@ import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
 import { TradingViewChart, tvInterval } from "@/components/market/TradingViewChart";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
-import { ChartToolbar, DEFAULT_SETTINGS, type ChartSettings } from "@/components/market/ChartToolbar";
+import { ChartToolbar, DEFAULT_SETTINGS, isIntraday, type ChartSettings } from "@/components/market/ChartToolbar";
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
 import { NewAlertModal, StockAlertsPanel } from "@/components/market/StockAlerts";
 import { DEFAULT_STUDIES, makeStudy, normalizeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
@@ -24,7 +24,7 @@ import { RefreshCw } from "lucide-react";
 
 const STATE_STORE = "jarvis.analysis.state.v5";
 const LAYOUTS_STORE = "jarvis.analysis.layouts.v1";
-const INTRADAY_TFS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h"];
+
 
 type Persisted = {
   tf: string;
@@ -89,7 +89,10 @@ export default function Analysis() {
   const toggleStudy = useCallback((id: string) => setStudies((s) => s.map((x) => (x.id === id ? { ...x, visible: !x.visible } : x))), []);
   const removeStudy = useCallback((id: string) => setStudies((s) => s.filter((x) => x.id !== id)), []);
   const updateStudy = useCallback((u: Study) => setStudies((s) => s.map((x) => (x.id === u.id ? u : x))), []);
-  const resetStudies = useCallback(() => setStudies(DEFAULT_STUDIES), []);
+  const resetStudies = useCallback(() => {
+    if (!window.confirm("Reset all indicators to defaults? This removes any studies you've added.")) return;
+    setStudies(DEFAULT_STUDIES);
+  }, []);
   const editing = studies.find((s) => s.id === editingId) ?? null;
   const visibleStudyCount = useMemo(() => studies.filter((s) => s.visible).length, [studies]);
 
@@ -99,12 +102,12 @@ export default function Analysis() {
   const saveLayout = useCallback((name: string) => {
     try {
       const all = JSON.parse(localStorage.getItem(LAYOUTS_STORE) ?? "{}");
-      all[name] = { tf, chartType, studies, settings };
+      all[name] = { tf, chartType, tvMode, studies, settings };
       localStorage.setItem(LAYOUTS_STORE, JSON.stringify(all));
       setSavedLayouts(Object.keys(all));
       notify(`Layout "${name}" saved`);
     } catch { notify("Could not save layout"); }
-  }, [tf, chartType, studies, settings, notify]);
+  }, [tf, chartType, tvMode, studies, settings, notify]);
   const loadLayout = useCallback((name: string) => {
     try {
       const all = JSON.parse(localStorage.getItem(LAYOUTS_STORE) ?? "{}");
@@ -112,6 +115,7 @@ export default function Analysis() {
       if (!l) return;
       if (l.tf) setTf(l.tf);
       if (l.chartType) setChartType(l.chartType);
+      if (typeof l.tvMode === "boolean") setTvMode(l.tvMode);
       if (Array.isArray(l.studies)) setStudies(loadStudies(l.studies));
       if (l.settings) setSettings({ ...DEFAULT_SETTINGS, ...l.settings });
       notify(`Layout "${name}" loaded`);
@@ -166,6 +170,17 @@ export default function Analysis() {
       const y = (r.top - wrapRect.top) * devicePixelRatio;
       try { ctx.drawImage(c, x, y, r.width * devicePixelRatio, r.height * devicePixelRatio); } catch {}
     });
+    // Composite the DOM overlay (symbol/TF caption) — the OHLC/legend divs
+    // aren't part of the canvas, so exports would otherwise lose them.
+    const stamp = `${sym ?? "chart"} · ${tf} · ${new Date().toLocaleString([], { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}`;
+    ctx.font = `${12 * devicePixelRatio}px system-ui, sans-serif`;
+    ctx.textBaseline = "top";
+    const pad = 8 * devicePixelRatio;
+    const textW = ctx.measureText(stamp).width;
+    ctx.fillStyle = "rgba(4,16,22,0.75)";
+    ctx.fillRect(pad - 4, pad - 4, textW + 12, 20 * devicePixelRatio);
+    ctx.fillStyle = "#7fe9ff";
+    ctx.fillText(stamp, pad, pad);
     out.toBlob((blob) => {
       if (!blob) { notify("Screenshot failed"); return; }
       const url = URL.createObjectURL(blob);
@@ -266,6 +281,7 @@ export default function Analysis() {
               onAddStudy={addStudy}
               onResetStudies={resetStudies}
               studyCount={visibleStudyCount}
+              totalStudyCount={studies.length}
               settings={settings}
               onSettings={(u) => setSettings(u)}
               tvMode={tvMode}
@@ -277,10 +293,11 @@ export default function Analysis() {
               onLoadLayout={loadLayout}
               onDeleteLayout={deleteLayout}
               savedLayouts={savedLayouts}
+              intraday={isIntraday(tf)}
             />
             <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0 }}>
               {tvMode ? (
-                <TradingViewChart symbol={sym} interval={tvInterval(tf)} />
+                <TradingViewChart symbol={sym} exchange={exchange} interval={tvInterval(tf)} />
               ) : error ? (
                 <EmptyState hint={String((error as Error).message ?? "")}>chart unavailable</EmptyState>
               ) : isLoading || !candleData ? (
@@ -294,8 +311,10 @@ export default function Analysis() {
                   fill
                   chartType={chartType}
                   studies={studies}
-                  intraday={INTRADAY_TFS.includes(tf)}
+                  intraday={isIntraday(tf)}
                   livePrice={quote?.ltp || null}
+                  liveVolume={(quote as any)?.volume ?? null}
+                  settings={settings}
                   onToggleStudy={toggleStudy}
                   onEditStudy={setEditingId}
                   onRemoveStudy={removeStudy}
@@ -303,6 +322,7 @@ export default function Analysis() {
 
               )}
             </div>
+
           </FullscreenShell>
           <IndicatorSettingsModal study={editing} onChange={updateStudy} onRemove={removeStudy} onClose={() => setEditingId(null)} />
         </HudPanel>

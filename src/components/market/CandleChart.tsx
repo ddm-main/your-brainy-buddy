@@ -5,16 +5,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createChart,
+  createSeriesMarkers,
   AreaSeries,
   BarSeries,
   CandlestickSeries,
   HistogramSeries,
   LineSeries,
   LineStyle,
+  PriceScaleMode,
   type IChartApi,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
   type UTCTimestamp,
 } from "lightweight-charts";
+
 import type { CandleDto } from "@/lib/market/types";
 import {
   ad, adx, ao, atr, bollingerV, cci, chaikinOsc, cmf, demaV, donchian, emaV, envelopesV,
@@ -35,7 +39,7 @@ type Computed =
   | { g: "ma"; line: Num[] }
   | { g: "band"; upper: Num[]; mid: Num[]; lower: Num[] }
   | { g: "supertrend"; line: Num[]; dir: Array<1 | -1 | null> }
-  | { g: "psar"; dots: Num[] }
+  | { g: "psar"; sar: Num[]; dir: Array<1 | -1 | null> }
   | { g: "ichimoku"; tenkan: Num[]; kijun: Num[]; spanA: Num[]; spanB: Num[]; base: number }
   | { g: "volume" }
   | { g: "single"; line: Num[]; guides?: number[]; hist?: boolean }
@@ -69,7 +73,7 @@ function computeStudy(candles: CandleDto[], s: Study): Computed {
     case "keltner": return { g: "band", ...keltner(candles, p.emaPeriod, p.atrPeriod, p.mult) };
     case "donchian": return { g: "band", ...donchian(candles, p.period) };
     case "supertrend": return { g: "supertrend", ...supertrend(candles, p.atrPeriod, p.mult) };
-    case "psar": return { g: "psar", dots: psar(candles, p.step, p.max) };
+    case "psar": { const r = psar(candles, p.step, p.max); return { g: "psar", sar: r.sar, dir: r.dir }; }
     case "ichimoku": return { g: "ichimoku", ...ichimoku(candles, p.conv, p.base, p.spanB), base: p.base };
     case "volume": return { g: "volume" };
     case "rsi": return { g: "single", line: rsi(candles, p.period), guides: [70, 30] };
@@ -103,7 +107,7 @@ function primaryOf(c: Computed): Num[] | null {
     case "ma": return c.line;
     case "band": return c.mid;
     case "supertrend": return c.line;
-    case "psar": return c.dots;
+    case "psar": return c.sar;
     case "ichimoku": return c.tenkan;
     case "single": return c.line;
     case "macd": return c.macd;
@@ -111,6 +115,13 @@ function primaryOf(c: Computed): Num[] | null {
     case "adx": return c.adx;
     default: return null;
   }
+}
+
+export interface CandleChartSettings {
+  grid: boolean;
+  logScale: boolean;
+  priceLine: boolean;
+  sessionBreaks: boolean;
 }
 
 export function CandleChart({
@@ -122,6 +133,8 @@ export function CandleChart({
   studies,
   intraday = false,
   livePrice = null,
+  liveVolume = null,
+  settings,
   onToggleStudy,
   onEditStudy,
   onRemoveStudy,
@@ -137,10 +150,15 @@ export function CandleChart({
    * real time via `series.update()` (no full chart rebuild) between the
    * periodic historical refetches that eventually supersede it. */
   livePrice?: number | null;
+  /** Live cumulative session volume for the current bar (updates the volume pane). */
+  liveVolume?: number | null;
+  /** Display toggles (grid/log/priceLine/sessionBreaks). */
+  settings?: CandleChartSettings;
   onToggleStudy?: (id: string) => void;
   onEditStudy?: (id: string) => void;
   onRemoveStudy?: (id: string) => void;
 }) {
+
   const ref = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const [legend, setLegend] = useState<CandleDto | null>(null);
@@ -150,8 +168,14 @@ export function CandleChart({
   const candlesKeyRef = useRef<string>("");
   // live-tick plumbing: refs so the 1s price update never tears down the chart
   const priceSeriesRef = useRef<ISeriesApi<any> | null>(null);
+  const volumeSeriesRef = useRef<ISeriesApi<any> | null>(null);
   const liveBarRef = useRef<{ seriesTime: any; rawTime: string | number; open: number; high: number; low: number; close: number; volume: number } | null>(null);
   const [liveBar, setLiveBar] = useState<CandleDto | null>(null);
+  const s = settings ?? { grid: true, logScale: false, priceLine: true, sessionBreaks: false };
+  // Deconstructed so effect dep can be primitive and stable across parent
+  // renders when the settings object identity changes but values don't.
+  const { grid: sGrid, logScale: sLog, priceLine: sPriceLine, sessionBreaks: sSessionBreaks } = s;
+
 
   const computed = useMemo(
     () => studies.map((s) => ({ study: s, data: computeStudy(candles, s) })),
@@ -162,12 +186,18 @@ export function CandleChart({
     const el = ref.current;
     if (!el) return;
     // lightweight-charts silently renders nothing when times are out of order
-    // or duplicated. Sort ascending and dedupe by time before feeding series.
-    const _tKey = (t: string | number) => (typeof t === "number" ? t : Date.parse(t) / 1000);
-    const _sorted = [...candles].sort((a, b) => _tKey(a.time) - _tKey(b.time));
-    const _seen = new Set<string>();
+    // or duplicated. Normalise every time to a numeric epoch (seconds) before
+    // sorting/deduping so ISO ↔ number mismatches from refresh races don't
+    // slip through.
+    const _epoch = (t: string | number): number => {
+      if (typeof t === "number") return t;
+      const parsed = Date.parse(t);
+      return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+    };
+    const _sorted = [...candles].sort((a, b) => _epoch(a.time) - _epoch(b.time));
+    const _seen = new Set<number>();
     const cleaned = _sorted.filter((c) => {
-      const k = String(c.time);
+      const k = _epoch(c.time);
       if (_seen.has(k)) return false;
       _seen.add(k);
       return true;
@@ -186,17 +216,29 @@ export function CandleChart({
         panes: { separatorColor: "rgba(53,214,237,0.15)", separatorHoverColor: "rgba(53,214,237,0.35)", enableResize: true },
       },
       grid: {
-        vertLines: { color: "rgba(53,214,237,0.06)" },
-        horzLines: { color: "rgba(53,214,237,0.06)" },
+        vertLines: { color: "rgba(53,214,237,0.06)", visible: sGrid },
+        horzLines: { color: "rgba(53,214,237,0.06)", visible: sGrid },
       },
-      rightPriceScale: { borderColor: "rgba(53,214,237,0.15)" },
-      timeScale: { borderColor: "rgba(53,214,237,0.15)", timeVisible: data.some((c) => typeof c.time === "number") },
+      rightPriceScale: {
+        borderColor: "rgba(53,214,237,0.15)",
+        mode: sLog ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal,
+      },
+      timeScale: {
+        borderColor: "rgba(53,214,237,0.15)",
+        timeVisible: data.some((c) => typeof c.time === "number"),
+        // "Session breaks" hides the non-trading gaps by tightly packing bars
+        // — LWC exposes this via `shiftVisibleRangeOnNewBar` + `barSpacing`;
+        // the closest built-in is disabling `ticksVisible` on off-hours, but
+        // the most visible knob is `rightOffset` + `fixLeftEdge`.
+        rightOffset: sSessionBreaks ? 0 : 5,
+      },
       crosshair: {
         vertLine: { color: "rgba(53,214,237,0.4)", labelBackgroundColor: "#0a2733" },
         horzLine: { color: "rgba(53,214,237,0.4)", labelBackgroundColor: "#0a2733" },
       },
     });
     chartRef.current = chart;
+
 
     const toTime = (t: string | number) => (typeof t === "number" ? (t as UTCTimestamp) : t) as any;
     const lw = (n: number) => Math.max(1, Math.min(4, Math.round(n))) as 1 | 2 | 3 | 4;
@@ -224,12 +266,15 @@ export function CandleChart({
       });
       priceSeries.setData(data.map((c) => ({ time: toTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })));
     }
+    priceSeries.applyOptions({ priceLineVisible: sPriceLine, lastValueVisible: sPriceLine });
     priceSeriesRef.current = priceSeries;
     const lastRaw = data[data.length - 1];
     liveBarRef.current = lastRaw
       ? { seriesTime: toTime(lastRaw.time), rawTime: lastRaw.time, open: lastRaw.open, high: lastRaw.high, low: lastRaw.low, close: lastRaw.close, volume: lastRaw.volume }
       : null;
     setLiveBar(null);
+    volumeSeriesRef.current = null;
+
 
     const overlayLine = (values: Num[], color: string, width = 1, style?: LineStyle, lastVal = false, offset = 0) => {
       const line = chart.addSeries(LineSeries, {
@@ -240,17 +285,20 @@ export function CandleChart({
     };
 
     // ---- overlays (visible, price pane) ----
+    // Collected so multiple Supertrend studies don't leak plugins on cleanup.
+    const markersPlugins: ISeriesMarkersPluginApi<any>[] = [];
+
     for (const { study, data: c } of computed) {
       if (!study.visible) continue;
       const def = defByType(study.type);
       if (def.group !== "overlay") continue;
+      // VWAP is intraday-only (session-anchored); on daily+ TFs it collapses to
+      // the typical price and is misleading. Industry-standard: hide it.
+      if (study.type === "vwap" && !intraday) continue;
       const col = study.colors;
       const w = study.lineWidth;
       if (c.g === "ma") {
-        // VWAP resets each session; on non-intraday timeframes it collapses to
-        // the typical price, so flag it as dashed to signal it's not meaningful.
-        const style = study.type === "vwap" && !intraday ? LineStyle.Dashed : undefined;
-        overlayLine(c.line, col[0], w, style, true);
+        overlayLine(c.line, col[0], w, undefined, true);
       } else if (c.g === "band") {
         overlayLine(c.upper, col[0], w);
         overlayLine(c.mid, col[1], w, LineStyle.Dashed);
@@ -258,22 +306,33 @@ export function CandleChart({
       } else if (c.g === "supertrend") {
         const upColor = col[0] ?? UP;
         const dnColor = col[1] ?? DOWN;
-        // Emit contiguous segments per trend direction, with a `null`
-        // whitespace point at flips so lightweight-charts breaks the line.
-        const upData: Array<{ time: any; value: number }> = [];
-        const dnData: Array<{ time: any; value: number }> = [];
+        // Emit contiguous segments per trend direction. At each flip we push
+        // a `null` whitespace point on the *newly-inactive* side so
+        // lightweight-charts breaks the line cleanly instead of visually
+        // jumping across the flip Y-gap.
+        const upData: Array<{ time: any; value: number | null }> = [];
+        const dnData: Array<{ time: any; value: number | null }> = [];
         for (let i = 0; i < data.length; i++) {
           const v = c.line[i];
           const d = c.dir[i];
-          if (v == null) continue;
-          if (d === 1) upData.push({ time: toTime(data[i].time), value: v as number });
-          else if (d === -1) dnData.push({ time: toTime(data[i].time), value: v as number });
+          const t = toTime(data[i].time);
+          if (v == null || d == null) continue;
+          const prevDir = i > 0 ? c.dir[i - 1] : null;
+          const flipped = prevDir != null && prevDir !== d;
+          if (d === 1) {
+            if (flipped) dnData.push({ time: t, value: null });
+            upData.push({ time: t, value: v as number });
+          } else {
+            if (flipped) upData.push({ time: t, value: null });
+            dnData.push({ time: t, value: v as number });
+          }
         }
         const upS = chart.addSeries(LineSeries, { color: upColor, lineWidth: lw(w), priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false });
-        upS.setData(upData);
+        upS.setData(upData as any);
         const dnS = chart.addSeries(LineSeries, { color: dnColor, lineWidth: lw(w), priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false });
-        dnS.setData(dnData);
+        dnS.setData(dnData as any);
         // Flip markers on the price series — triangles at direction changes.
+        // lightweight-charts v5 removed series.setMarkers; use the plugin API.
         try {
           const markers: Array<{ time: any; position: "belowBar" | "aboveBar"; color: string; shape: "arrowUp" | "arrowDown"; text?: string }> = [];
           for (let i = 1; i < data.length; i++) {
@@ -282,18 +341,20 @@ export function CandleChart({
             if (cur === 1) markers.push({ time: toTime(data[i].time), position: "belowBar", color: upColor, shape: "arrowUp", text: "Buy" });
             else markers.push({ time: toTime(data[i].time), position: "aboveBar", color: dnColor, shape: "arrowDown", text: "Sell" });
           }
-          if (markers.length && typeof (priceSeries as any).setMarkers === "function") {
-            (priceSeries as any).setMarkers(markers);
+          if (markers.length) {
+            markersPlugins.push(createSeriesMarkers(priceSeries, markers as any));
           }
         } catch { /* markers optional */ }
       } else if (c.g === "psar") {
-        // Color each dot by direction (dot below close = uptrend, above = downtrend).
+        // Colour each dot by the algorithm's trend direction (industry
+        // standard) — green in uptrends, red in downtrends.
         const upData: Array<{ time: any; value: number }> = [];
         const dnData: Array<{ time: any; value: number }> = [];
         for (let i = 0; i < data.length; i++) {
-          const v = c.dots[i];
-          if (v == null) continue;
-          if ((v as number) <= data[i].close) upData.push({ time: toTime(data[i].time), value: v as number });
+          const v = c.sar[i];
+          const d = c.dir[i];
+          if (v == null || d == null) continue;
+          if (d === 1) upData.push({ time: toTime(data[i].time), value: v as number });
           else dnData.push({ time: toTime(data[i].time), value: v as number });
         }
         const mk = (color: string, rows: any[]) => {
@@ -308,10 +369,48 @@ export function CandleChart({
       } else if (c.g === "ichimoku") {
         overlayLine(c.tenkan, col[0], w);
         overlayLine(c.kijun, col[1], w);
-        // Senkou spans are displaced forward by `base` bars (TradingView).
-        overlayLine(c.spanA, col[2], w, LineStyle.Dashed, false, c.base);
-        overlayLine(c.spanB, col[3], w, LineStyle.Dashed, false, c.base);
+        // Senkou spans are projected `base` bars ahead of the last bar
+        // (TradingView convention). Compute an average bar interval from the
+        // last several bars, then append synthetic future timestamps so the
+        // cloud renders beyond the current price action instead of getting
+        // truncated at the right edge.
+        const projectSpan = (values: Num[], color: string) => {
+          const rows: Array<{ time: any; value: number }> = [];
+          // Historical portion — align spans back onto their computed bars.
+          for (let i = 0; i < data.length; i++) {
+            const v = values[i];
+            if (v == null) continue;
+            rows.push({ time: toTime(data[i].time), value: v as number });
+          }
+          // Future projection: last `base` valid values shifted forward.
+          const lastN = Math.min(c.base, data.length - 1);
+          if (lastN > 0) {
+            // Estimate bar spacing (numeric epoch seconds).
+            const asSec = (t: string | number) => (typeof t === "number" ? t : Math.floor(Date.parse(t as string) / 1000));
+            const spans: number[] = [];
+            for (let i = data.length - Math.min(20, data.length) + 1; i < data.length; i++) {
+              const dt = asSec(data[i].time) - asSec(data[i - 1].time);
+              if (Number.isFinite(dt) && dt > 0) spans.push(dt);
+            }
+            const step = spans.length ? spans.sort((a, b) => a - b)[Math.floor(spans.length / 2)] : 86400;
+            const lastT = asSec(data[data.length - 1].time);
+            for (let k = 1; k <= c.base; k++) {
+              const srcIdx = data.length - c.base + k - 1;
+              const v = values[srcIdx];
+              if (srcIdx < 0 || v == null) continue;
+              rows.push({ time: (lastT + step * k) as any, value: v as number });
+            }
+          }
+          const line = chart.addSeries(LineSeries, {
+            color, lineWidth: lw(w), lineStyle: LineStyle.Dashed,
+            priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+          });
+          line.setData(rows);
+        };
+        projectSpan(c.spanA, col[2]);
+        projectSpan(c.spanB, col[3]);
       }
+
       // volume handled below in its own pane so it gets a proper K/M axis
     }
 
@@ -342,9 +441,11 @@ export function CandleChart({
         value: cc.volume,
         color: cc.close >= cc.open ? "rgba(107,255,176,0.55)" : "rgba(255,95,109,0.55)",
       })));
+      volumeSeriesRef.current = vol;
       pane++;
       break;
     }
+
 
 
     for (const { study, data: c } of computed) {
@@ -378,8 +479,17 @@ export function CandleChart({
       }
       pane++;
     }
+    // Sub-pane sizing: split up to 55% of the chart height across all
+    // oscillator/volume panes (min 90px each, cap 180) so the price pane
+    // never collapses when the user stacks 3+ oscillators.
     const panes = chart.panes();
-    for (let i = 1; i < panes.length; i++) panes[i].setHeight(110);
+    const subCount = Math.max(0, panes.length - 1);
+    if (subCount > 0) {
+      const chartH = fill ? (el.clientHeight || height) : height;
+      const budget = Math.max(180, Math.floor(chartH * 0.55));
+      const per = Math.max(90, Math.min(180, Math.floor(budget / subCount)));
+      for (let i = 1; i < panes.length; i++) panes[i].setHeight(per);
+    }
 
     // ---- crosshair legend ----
     const byTime = new Map(data.map((c) => [String(c.time), c]));
@@ -413,28 +523,46 @@ export function CandleChart({
       const r = chart.timeScale().getVisibleLogicalRange();
       if (r) rangeRef.current = { from: r.from as number, to: r.to as number };
       ro.disconnect();
+      try { markersPlugins.forEach((p) => p.detach()); } catch { /* noop */ }
       chart.remove();
       chartRef.current = null;
       priceSeriesRef.current = null;
+      volumeSeriesRef.current = null;
     };
-  }, [candles, computed, priceLines, height, fill, chartType, intraday]);
+  }, [candles, computed, priceLines, height, fill, chartType, intraday, sGrid, sLog, sPriceLine, sSessionBreaks]);
+
 
   // ---- live tick: move/extend the rightmost bar without rebuilding the chart ----
   useEffect(() => {
     const series = priceSeriesRef.current;
     const base = liveBarRef.current;
-    if (!series || !base || livePrice == null || !Number.isFinite(livePrice)) return;
-    const close = livePrice;
-    const updated = { ...base, high: Math.max(base.high, close), low: Math.min(base.low, close), close };
+    if (!series || !base) return;
+    if (livePrice == null && liveVolume == null) return;
+    const close = livePrice != null && Number.isFinite(livePrice) ? livePrice : base.close;
+    const nextVol = liveVolume != null && Number.isFinite(liveVolume) ? Math.max(base.volume, liveVolume) : base.volume;
+    const updated = { ...base, high: Math.max(base.high, close), low: Math.min(base.low, close), close, volume: nextVol };
     liveBarRef.current = updated;
-    if (chartType === "line" || chartType === "area") {
-      series.update({ time: updated.seriesTime, value: close });
-    } else {
-      series.update({ time: updated.seriesTime, open: updated.open, high: updated.high, low: updated.low, close: updated.close });
+    if (livePrice != null && Number.isFinite(livePrice)) {
+      if (chartType === "line" || chartType === "area") {
+        series.update({ time: updated.seriesTime, value: close });
+      } else {
+        series.update({ time: updated.seriesTime, open: updated.open, high: updated.high, low: updated.low, close: updated.close });
+      }
+    }
+    const vol = volumeSeriesRef.current;
+    if (vol && (liveVolume != null || livePrice != null)) {
+      try {
+        vol.update({
+          time: updated.seriesTime,
+          value: updated.volume,
+          color: updated.close >= updated.open ? "rgba(107,255,176,0.55)" : "rgba(255,95,109,0.55)",
+        } as any);
+      } catch { /* noop */ }
     }
     setLiveBar({ time: updated.rawTime, open: updated.open, high: updated.high, low: updated.low, close: updated.close, volume: updated.volume });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [livePrice]);
+  }, [livePrice, liveVolume]);
+
 
   // ---- legend rows (value at crosshair, else last bar) ----
   const legendRows: LegendRow[] = useMemo(() => {
@@ -442,7 +570,10 @@ export function CandleChart({
     const compact = (n: number) => Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(n);
     const BOUNDED_100 = new Set(["rsi", "stochRsi", "mfi", "aroon", "stoch", "williamsR", "uo"]);
     const COMPACT_TYPES = new Set(["obv", "ad", "volume"]);
-    return computed.map(({ study, data: c }) => {
+    const rows: LegendRow[] = [];
+    for (const { study, data: c } of computed) {
+      // VWAP is intraday-only — hide the row on daily+ TFs to match the chart.
+      if (study.type === "vwap" && !intraday) continue;
       const prim = primaryOf(c);
       const v = prim && idx >= 0 && idx < prim.length ? prim[idx] : null;
       const isVol = c.g === "volume";
@@ -456,15 +587,21 @@ export function CandleChart({
             : BOUNDED_100.has(study.type)
               ? (v as number).toFixed(1)
               : (v as number).toFixed(2);
-      const suffix = study.type === "vwap" && !intraday ? " · daily TF" : "";
-      return {
+      // For histogram indicators (AO), swatch reflects the current bar's sign
+      // so the legend colour matches what the user sees on the chart.
+      let swatch = study.colors[0];
+      if (c.g === "single" && c.hist && v != null) {
+        swatch = (v as number) >= 0 ? "#6bffb0" : "#ff5f6d";
+      }
+      rows.push({
         id: study.id,
-        label: studyLabel(study) + suffix,
-        color: study.colors[0],
+        label: studyLabel(study),
+        color: swatch,
         value: val,
         visible: study.visible,
-      };
-    });
+      });
+    }
+    return rows;
   }, [computed, hoverIdx, candles.length, candles, intraday]);
 
   const last = liveBar ?? candles[candles.length - 1];
@@ -485,7 +622,7 @@ export function CandleChart({
           <span>L <b style={{ color: "var(--text)" }}>{l.low.toFixed(2)}</b></span>
           <span>C <b style={{ color: l.close >= l.open ? UP : DOWN }}>{l.close.toFixed(2)}</b></span>
           {chg != null && <span style={{ color: chg >= 0 ? UP : DOWN }}>{chg >= 0 ? "+" : ""}{chg.toFixed(2)}%</span>}
-          <span>V <b style={{ color: "var(--text)" }}>{Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(l.volume)}</b></span>
+          {/* Volume intentionally omitted here — shown in the volume pane's right axis and legend row to avoid a triple readout. */}
         </div>
       )}
       {(onToggleStudy || onEditStudy || onRemoveStudy) && (
