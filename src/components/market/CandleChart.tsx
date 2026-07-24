@@ -310,8 +310,10 @@ export function CandleChart({
         // a `null` whitespace point on the *newly-inactive* side so
         // lightweight-charts breaks the line cleanly instead of visually
         // jumping across the flip Y-gap.
-        const upData: Array<{ time: any; value: number | null }> = [];
-        const dnData: Array<{ time: any; value: number | null }> = [];
+        // Whitespace points in lightweight-charts are `{ time }` with NO
+        // `value` key (null is rejected by the line-series assertion).
+        const upData: Array<{ time: any; value?: number }> = [];
+        const dnData: Array<{ time: any; value?: number }> = [];
         for (let i = 0; i < data.length; i++) {
           const v = c.line[i];
           const d = c.dir[i];
@@ -319,22 +321,17 @@ export function CandleChart({
           if (v == null || d == null) continue;
           const prevDir = i > 0 ? c.dir[i - 1] : null;
           const flipped = prevDir != null && prevDir !== d;
-          // On a flip, insert a `null` whitespace point on BOTH sides so
-          // lightweight-charts doesn't draw a diagonal from the previous
-          // same-trend streak to the new one. The newly-active side's null
-          // is placed at the previous bar's timestamp to keep times strictly
-          // ascending (the active point itself lives at `t`).
           const tPrev = i > 0 ? toTime(data[i - 1].time) : t;
           if (d === 1) {
             if (flipped) {
-              dnData.push({ time: t, value: null });
-              if (upData.length) upData.push({ time: tPrev, value: null });
+              dnData.push({ time: t });
+              if (upData.length) upData.push({ time: tPrev });
             }
             upData.push({ time: t, value: v as number });
           } else {
             if (flipped) {
-              upData.push({ time: t, value: null });
-              if (dnData.length) dnData.push({ time: tPrev, value: null });
+              upData.push({ time: t });
+              if (dnData.length) dnData.push({ time: tPrev });
             }
             dnData.push({ time: t, value: v as number });
           }
