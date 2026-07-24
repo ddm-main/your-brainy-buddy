@@ -12,9 +12,13 @@ import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/
 import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 
-import { useSavedScreeners, useScreenerMutations } from "@/lib/market/hooks";
+import { useSavedScreeners, useScreenerMutations, useQuotes, useMarketSettings } from "@/lib/market/hooks";
 import { useScreenerData, useScreenerSectors, useScreenerIndustries, type ScreenerRow } from "@/lib/market/screenerRun";
 import { todayIstDateString } from "@/lib/market/liveSnapshot";
+import { quoteKey } from "@/lib/market/pnl";
+import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
+import { Link } from "react-router-dom";
 import { useUi } from "@/store/uiStore";
 import { supabase } from "@/integrations/supabase/client";
 import type { SavedScreener } from "@/lib/market/types";
@@ -178,6 +182,7 @@ function toCsv(rows: ScreenerRow[], cols: string[]): string {
 function ScreenerInner() {
   const push = useUi((s) => s.push);
   const nav = useNavigate();
+  const qc = useQueryClient();
 
   // Persisted across visits — the Screener page should resume where the user left it,
   // not reset to All Stocks / no filters every time they navigate away and back.
@@ -550,6 +555,57 @@ function ScreenerInner() {
   const paged = useMemo(() => sorted.slice(pageStart, pageStart + pageSize), [sorted, pageStart, pageSize]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
 
+  // ---- Live overlay for visible rows (Kotak WS push + 2s REST poll) --------
+  // Filter math stays on EOD (see comment at "Screener parity is EOD-first"
+  // above). But the *displayed* Price and 1D% shouldn't sit frozen at
+  // yesterday's close all session — overlay live quotes on top of the
+  // currently paginated set only (Kotak batch quote limit + relay cap ~100).
+  const visibleKeysJoined = useMemo(
+    () => Array.from(new Set(paged.map((r) => quoteKey(r.exchange ?? "NSE", r.symbol)))).sort().join(","),
+    [paged],
+  );
+  const visibleKeys = useMemo(() => (visibleKeysJoined ? visibleKeysJoined.split(",") : []), [visibleKeysJoined]);
+  const { data: liveQuotes } = useQuotes(visibleKeys, { intervalMs: 2_000 });
+  const pushTicks = useLiveTickStore((s) => s.ticks);
+  const relayAlive = useRelayAlive();
+  useEffect(() => { subscribeSymbolsForTicks(visibleKeys); }, [visibleKeysJoined]);
+  const liveByKey = useMemo(() => {
+    const m = new Map<string, { ltp: number | null; change_pct: number | null }>();
+    for (const q of liveQuotes?.quotes ?? []) {
+      m.set(quoteKey(q.exchange, q.symbol), { ltp: q.ltp ?? null, change_pct: q.change_pct ?? null });
+    }
+    for (const [key, tick] of Object.entries(pushTicks)) {
+      if (!isFreshTick(tick)) continue;
+      m.set(key, { ltp: tick.ltp, change_pct: tick.change_pct });
+    }
+    return m;
+  }, [liveQuotes, pushTicks]);
+  const anyPush = useMemo(() => visibleKeys.some((k) => isFreshTick(pushTicks[k])), [visibleKeys, pushTicks]);
+  const quoteProvider = (liveQuotes as any)?.provider as
+    | "kotak" | "yahoo" | "mixed" | "cache" | "none" | undefined;
+  // "push" > "kotak" (REST) > "mixed" > "yahoo/cache/closed"
+  const nowIst = new Date(Date.now() + 5.5 * 3600_000);
+  const istMin = nowIst.getUTCHours() * 60 + nowIst.getUTCMinutes();
+  const istDay = nowIst.getUTCDay();
+  const nseOpenNow = istDay >= 1 && istDay <= 5 && istMin >= 555 && istMin < 930;
+  const liveState = useMemo<"push" | "kotak" | "mixed" | "yahoo" | "cache" | "closed" | "idle">(() => {
+    if (visibleKeys.length === 0) return "idle";
+    if (anyPush || relayAlive) return "push";
+    if (quoteProvider === "kotak") return "kotak";
+    if (quoteProvider === "mixed") return "mixed";
+    if (quoteProvider === "cache") return nseOpenNow ? "cache" : "closed";
+    return nseOpenNow ? "yahoo" : "closed";
+  }, [visibleKeys.length, anyPush, relayAlive, quoteProvider, nseOpenNow]);
+
+  // Provider guardrail — Yahoo fallback banner (matches Dashboard UX).
+  const { data: mkSettings = [] } = useMarketSettings();
+  const activeProvider = mkSettings.find((s: any) => s.connection_status === "connected")?.active_provider ?? null;
+  const kotakConnected = activeProvider === "kotak_neo";
+  const showKotakBanner =
+    !kotakConnected &&
+    (quoteProvider === "yahoo" || quoteProvider === "mixed" || quoteProvider === "cache") &&
+    typeof window !== "undefined" && !sessionStorage.getItem("mk.screener.kotak-banner.dismissed");
+
   const columns = useMemo<ColumnDef<ScreenerRow, any>[]>(() => {
     const all: Record<string, ColumnDef<ScreenerRow, any>> = {
       symbol: {
@@ -593,12 +649,18 @@ function ScreenerInner() {
       },
       close: {
         header: "LTP (₹)", id: "livePrice", meta: { align: "right" },
-        accessorFn: (r) => r.ltp,
+        accessorFn: (r) => {
+          const live = liveByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
+          return live?.ltp ?? r.ltp;
+        },
         cell: ({ getValue }) => fmtNum(getValue() as number | null),
       },
       change_pct: {
         header: "1D Return (%)", id: "liveChangePct", meta: { align: "right" },
-        accessorFn: (r) => r.change_pct,
+        accessorFn: (r) => {
+          const live = liveByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
+          return live?.change_pct ?? r.change_pct;
+        },
         cell: ({ getValue }) => <PctCell value={getValue() as number | null} />,
       },
       volume: {
@@ -669,7 +731,7 @@ function ScreenerInner() {
     };
     return effectiveCols.map((id) => all[id]).filter(Boolean);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveCols, latestTradeDate]);
+  }, [effectiveCols, latestTradeDate, liveByKey]);
 
   const [healthOpen, setHealthOpen] = useState(false);
 
@@ -719,6 +781,27 @@ function ScreenerInner() {
         </div>
       )}
 
+      {showKotakBanner && (
+        <div role="status" style={{
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+          padding: "6px 10px", border: "1px dashed var(--edge-strong, var(--edge))", borderRadius: 3,
+          fontSize: 11, color: "var(--text-dim, var(--text-muted))", background: "rgba(255,180,60,0.04)", flexShrink: 0,
+        }}>
+          <span style={{ color: "var(--warn, #f5a524)" }}>●</span>
+          <span>Prices are <b>~15 minutes delayed</b> (Yahoo Finance). Connect Kotak Neo for real-time quotes.</span>
+          <Link to="/market/settings" style={{
+            marginLeft: "auto", color: "var(--accent)", textDecoration: "none",
+            border: "1px solid var(--edge)", padding: "2px 8px", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
+          }}>Connect Kotak Neo</Link>
+          <button
+            onClick={() => { sessionStorage.setItem("mk.screener.kotak-banner.dismissed", "1"); qc.invalidateQueries({ queryKey: ["market"] }); }}
+            aria-label="Dismiss for this session"
+            className="hud-btn focus-outline" data-variant="ghost" data-size="sm"
+            title="Dismiss for this session"
+          ><X size={12} /></button>
+        </div>
+      )}
+
       {/* Save-as modal — replaces the always-visible inline input. */}
       <HudModal open={saveModalOpen} onClose={() => setSaveModalOpen(false)}
         title={activeSaved ? `Save a copy of "${activeSaved.name}"` : "Save screener"} width={380}>
@@ -758,6 +841,32 @@ function ScreenerInner() {
             live={isFetching ? "warn" : error ? "err" : "ok"}
             actions={
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                {(() => {
+                  const label =
+                    liveState === "push"   ? "push · kotak" :
+                    liveState === "kotak"  ? "live · kotak" :
+                    liveState === "mixed"  ? "live · mixed" :
+                    liveState === "yahoo"  ? "delayed · yahoo" :
+                    liveState === "cache"  ? "cached" :
+                    liveState === "closed" ? "closed" : "idle";
+                  const tone =
+                    liveState === "push" || liveState === "kotak" ? "var(--ok, #4ade80)" :
+                    liveState === "mixed" ? "var(--warn, #d29a2b)" :
+                    liveState === "yahoo" || liveState === "cache" ? "var(--danger, #ff6a6a)" :
+                    "var(--text-muted)";
+                  return (
+                    <span title={`Price / 1D% source for the visible page — filters and other columns stay on EOD.`}
+                      style={{
+                        display: "inline-flex", alignItems: "center", gap: 6,
+                        padding: "3px 8px", border: "1px solid var(--edge)",
+                        fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
+                        color: "var(--text-muted)", borderRadius: 2,
+                      }}>
+                      <span style={{ width: 6, height: 6, borderRadius: "50%", background: tone }} />
+                      {label}
+                    </span>
+                  );
+                })()}
                 {healthSummary && (
                   <button type="button" onClick={() => setHealthOpen(true)}
                     title={`Pipeline: Fund ${healthSummary.fundPct}% · Sector ${healthSummary.sectorPct}% · Tech ${healthSummary.techPct}% — click for details`}

@@ -118,11 +118,22 @@ export function useQuotes(keys: string[], opts?: { intervalMs?: number }) {
   // need a faster REST poll (~3s) to feel "live" instead of updating once
   // a minute. Off-hours we keep the just-closed short window then stop.
   const openInterval = opts?.intervalMs ?? 1_000;
+  const open = marketOpen();
   return useQuery({
     queryKey: ["market", "quotes", [...keys].sort().join(",")],
     queryFn: () => callMarketFn<{ quotes: Quote[]; source: string }>("market-quotes", { symbols: keys }),
     enabled: keys.length > 0,
-    refetchInterval: marketOpen() ? openInterval : justClosedWindow() ? 15_000 : false,
+    refetchInterval: open ? openInterval : justClosedWindow() ? 15_000 : false,
+    // During market hours the poll itself keeps the data fresh — a short
+    // stale window prevents duplicate parallel fetches when many components
+    // subscribe. Off-hours the value can't move, so cache it and stop firing
+    // refetches on remount/focus.
+    staleTime: open ? Math.max(500, openInterval - 200) : Infinity,
+    refetchOnWindowFocus: open,
+    refetchOnReconnect: open,
+    // Keep the last successful batch visible while a new fetch is in flight
+    // so subscribing new symbols (paging/filtering) doesn't blank the table.
+    placeholderData: (prev: unknown) => prev as any,
   });
 }
 

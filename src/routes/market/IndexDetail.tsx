@@ -1,6 +1,6 @@
 // Index detail page — Chart / Technicals / F&O / Constituents.
 // Reached from Market Dashboard by clicking an index card.
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { HudPanel } from "@/components/hud/HudPanel";
@@ -15,11 +15,14 @@ import { DEFAULT_STUDIES, makeStudy, type IndicatorType, type Study } from "@/li
 import { TradingViewChart, tvInterval } from "@/components/market/TradingViewChart";
 import { FullscreenShell } from "@/components/market/FullscreenShell";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
-import { useCandles, useIndexConstituents, useIndexWatch, useIndices, useOptionChain } from "@/lib/market/hooks";
+import { useCandles, useIndexConstituents, useIndexWatch, useIndices, useOptionChain, useQuotes } from "@/lib/market/hooks";
 import { findPreset, tvSymbolFor } from "@/lib/market/indices";
 import { bollinger, ema, macd, rsi, sma } from "@/lib/market/chartIndicators";
 import type { CandleDto, IndexConstituent } from "@/lib/market/types";
 import { useNotifications } from "@/store/notificationStore";
+import { quoteKey } from "@/lib/market/pnl";
+import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
 
 type Tab = "chart" | "technicals" | "fno" | "constituents";
 
@@ -338,26 +341,54 @@ function FnOPanel({ nseSymbol }: { nseSymbol: string }) {
 
 function ConstituentsPanel({ slug, onRow }: { slug: string; onRow: (sym: string) => void }) {
   const { data, isLoading } = useIndexConstituents(slug);
+  const members = data?.members ?? [];
+
+  // Live overlay for Price / Chg% — filters/other columns stay on EOD, but
+  // the two most price-sensitive columns get Kotak push + REST poll.
+  const keysJoined = useMemo(
+    () => Array.from(new Set(members.map((m) => quoteKey("NSE", m.symbol)))).sort().join(","),
+    [members],
+  );
+  const keys = useMemo(() => (keysJoined ? keysJoined.split(",") : []), [keysJoined]);
+  const { data: liveQuotes } = useQuotes(keys, { intervalMs: 2_000 });
+  const pushTicks = useLiveTickStore((s) => s.ticks);
+  useEffect(() => { subscribeSymbolsForTicks(keys); }, [keysJoined]);
+  const liveByKey = useMemo(() => {
+    const m = new Map<string, { ltp: number | null; change_pct: number | null }>();
+    for (const q of liveQuotes?.quotes ?? []) {
+      m.set(quoteKey(q.exchange, q.symbol), { ltp: q.ltp ?? null, change_pct: q.change_pct ?? null });
+    }
+    for (const [key, tick] of Object.entries(pushTicks)) {
+      if (!isFreshTick(tick)) continue;
+      m.set(key, { ltp: tick.ltp, change_pct: tick.change_pct });
+    }
+    return m;
+  }, [liveQuotes, pushTicks]);
+
   const cols = useMemo<ColumnDef<IndexConstituent, any>[]>(() => [
     { header: "Symbol", accessorKey: "symbol",
       cell: ({ row }) => <span><span style={{ color: "var(--accent)" }}>{row.original.symbol}</span>
         {row.original.company && <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: 10 }}>{row.original.company}</span>}
       </span> },
     { header: "Sector", accessorKey: "sector" },
-    { header: "Price", accessorKey: "close", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue()) },
-    { header: "Chg %", accessorKey: "change_pct", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue()} /> },
+    { header: "Price", id: "livePrice", meta: { align: "right" },
+      accessorFn: (r) => liveByKey.get(quoteKey("NSE", r.symbol))?.ltp ?? r.close,
+      cell: ({ getValue }) => fmtNum(getValue() as number | null) },
+    { header: "Chg %", id: "liveChangePct", meta: { align: "right" },
+      accessorFn: (r) => liveByKey.get(quoteKey("NSE", r.symbol))?.change_pct ?? r.change_pct,
+      cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
     { header: "RVol", accessorKey: "rel_volume", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue(), 1) },
     { header: "RSI", accessorKey: "rsi14", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue(), 0) },
     { header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },
       cell: ({ getValue }) => <ScoreBadge score={getValue() as number | null} label="breakout score" /> },
-  ], []);
+  ], [liveByKey]);
 
   return (
     <HudPanel flow title="Constituents" index="MK.IDX.M">
       {isLoading ? <div className="hud-label">loading members…</div>
-        : (data?.members ?? []).length === 0
+        : members.length === 0
           ? <EmptyState hint={data?.reason ?? "upstream empty"}>no constituents</EmptyState>
-          : <DataTable columns={cols} data={data!.members} onRowClick={(r) => onRow(r.symbol)}
+          : <DataTable columns={cols} data={members} onRowClick={(r) => onRow(r.symbol)}
               initialSort={[{ id: "breakout_score", desc: true }]} emptyLabel="no members" />}
     </HudPanel>
   );
