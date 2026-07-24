@@ -320,10 +320,18 @@ export function CandleChart({
           const prevDir = i > 0 ? c.dir[i - 1] : null;
           const flipped = prevDir != null && prevDir !== d;
           if (d === 1) {
-            if (flipped) dnData.push({ time: t, value: null });
+            if (flipped) {
+              dnData.push({ time: t, value: null });
+              // Break the up-line's connection to its previous streak so
+              // lightweight-charts doesn't draw a diagonal across the gap.
+              if (upData.length) upData.push({ time: t, value: null });
+            }
             upData.push({ time: t, value: v as number });
           } else {
-            if (flipped) upData.push({ time: t, value: null });
+            if (flipped) {
+              upData.push({ time: t, value: null });
+              if (dnData.length) dnData.push({ time: t, value: null });
+            }
             dnData.push({ time: t, value: v as number });
           }
         }
