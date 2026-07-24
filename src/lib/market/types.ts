@@ -26,6 +26,11 @@ export interface Quote {
   change_pct: number | null;
   day_change: number | null;
   source?: string | null;
+  // Per-quote provider that actually served this row ("kotak" | "yahoo" |
+  // "cache"). The Screener overlays intraday values on a row ONLY when this
+  // is "kotak" — Yahoo/cache stay on the EOD number the filter used, so the
+  // displayed 1D% can't drift below the range the user filtered on.
+  provider?: string | null;
   as_of?: string | null;
   previous_close_as_of?: string | null;
   stale?: boolean | null;

@@ -570,13 +570,18 @@ function ScreenerInner() {
   const relayAlive = useRelayAlive();
   useEffect(() => { subscribeSymbolsForTicks(visibleKeys); }, [visibleKeysJoined]);
   const liveByKey = useMemo(() => {
-    const m = new Map<string, { ltp: number | null; change_pct: number | null }>();
+    const m = new Map<string, { ltp: number | null; change_pct: number | null; provider: string | null }>();
     for (const q of liveQuotes?.quotes ?? []) {
-      m.set(quoteKey(q.exchange, q.symbol), { ltp: q.ltp ?? null, change_pct: q.change_pct ?? null });
+      m.set(quoteKey(q.exchange, q.symbol), {
+        ltp: q.ltp ?? null,
+        change_pct: q.change_pct ?? null,
+        provider: (q as any).provider ?? q.source ?? null,
+      });
     }
+    // Push ticks always come from the Kotak WS relay — treat as "kotak".
     for (const [key, tick] of Object.entries(pushTicks)) {
       if (!isFreshTick(tick)) continue;
-      m.set(key, { ltp: tick.ltp, change_pct: tick.change_pct });
+      m.set(key, { ltp: tick.ltp, change_pct: tick.change_pct, provider: "kotak" });
     }
     return m;
   }, [liveQuotes, pushTicks]);
@@ -597,14 +602,19 @@ function ScreenerInner() {
     return nseOpenNow ? "yahoo" : "closed";
   }, [visibleKeys.length, anyPush, relayAlive, quoteProvider, nseOpenNow]);
 
-  // Provider guardrail — Yahoo fallback banner (matches Dashboard UX).
+  // Provider guardrail — Kotak disconnected banner + reconnect prompt.
   const { data: mkSettings = [] } = useMarketSettings();
-  const activeProvider = mkSettings.find((s: any) => s.connection_status === "connected")?.active_provider ?? null;
-  const kotakConnected = activeProvider === "kotak_neo";
+  const kotakRow = mkSettings.find((s: any) => s.active_provider === "kotak_neo");
+  const kotakConnected = kotakRow?.connection_status === "connected";
+  const kotakConfigured = !!kotakRow?.consumer_key;
+  const kotakDisconnected = kotakConfigured && !kotakConnected;
   const showKotakBanner =
     !kotakConnected &&
     (quoteProvider === "yahoo" || quoteProvider === "mixed" || quoteProvider === "cache") &&
     typeof window !== "undefined" && !sessionStorage.getItem("mk.screener.kotak-banner.dismissed");
+  const openKotakReconnect = () => {
+    try { window.dispatchEvent(new Event("kotak:reconnect")); } catch { /* */ }
+  };
 
   const columns = useMemo<ColumnDef<ScreenerRow, any>[]>(() => {
     const all: Record<string, ColumnDef<ScreenerRow, any>> = {
@@ -651,7 +661,11 @@ function ScreenerInner() {
         header: "LTP (₹)", id: "livePrice", meta: { align: "right" },
         accessorFn: (r) => {
           const live = liveByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
-          return live?.ltp ?? r.ltp;
+          // Only overlay when the live value actually came from Kotak (push
+          // tick or Kotak REST). Yahoo/cache values would silently disagree
+          // with the EOD row the filter matched on, so we stay on EOD.
+          if (live && live.provider === "kotak" && live.ltp != null) return live.ltp;
+          return r.ltp;
         },
         cell: ({ getValue }) => fmtNum(getValue() as number | null),
       },
@@ -659,7 +673,8 @@ function ScreenerInner() {
         header: "1D Return (%)", id: "liveChangePct", meta: { align: "right" },
         accessorFn: (r) => {
           const live = liveByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
-          return live?.change_pct ?? r.change_pct;
+          if (live && live.provider === "kotak" && live.change_pct != null) return live.change_pct;
+          return r.change_pct;
         },
         cell: ({ getValue }) => <PctCell value={getValue() as number | null} />,
       },
@@ -842,29 +857,38 @@ function ScreenerInner() {
             actions={
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                 {(() => {
-                  const label =
-                    liveState === "push"   ? "push · kotak" :
-                    liveState === "kotak"  ? "live · kotak" :
-                    liveState === "mixed"  ? "live · mixed" :
-                    liveState === "yahoo"  ? "delayed · yahoo" :
-                    liveState === "cache"  ? "cached" :
-                    liveState === "closed" ? "closed" : "idle";
-                  const tone =
-                    liveState === "push" || liveState === "kotak" ? "var(--ok, #4ade80)" :
-                    liveState === "mixed" ? "var(--warn, #d29a2b)" :
-                    liveState === "yahoo" || liveState === "cache" ? "var(--danger, #ff6a6a)" :
-                    "var(--text-muted)";
+                  const disc = kotakDisconnected && (liveState === "yahoo" || liveState === "cache" || liveState === "mixed" || liveState === "idle");
+                  const label = disc
+                    ? "kotak disconnected · reconnect"
+                    : liveState === "push"   ? "push · kotak"
+                    : liveState === "kotak"  ? "live · kotak"
+                    : liveState === "mixed"  ? "live · mixed"
+                    : liveState === "yahoo"  ? "delayed · yahoo"
+                    : liveState === "cache"  ? "cached"
+                    : liveState === "closed" ? "closed" : "idle";
+                  const tone = disc ? "var(--danger, #ff6a6a)"
+                    : liveState === "push" || liveState === "kotak" ? "var(--ok, #4ade80)"
+                    : liveState === "mixed" ? "var(--warn, #d29a2b)"
+                    : liveState === "yahoo" || liveState === "cache" ? "var(--danger, #ff6a6a)"
+                    : "var(--text-muted)";
+                  const Cmp: any = disc ? "button" : "span";
                   return (
-                    <span title={`Price / 1D% source for the visible page — filters and other columns stay on EOD.`}
+                    <Cmp
+                      onClick={disc ? openKotakReconnect : undefined}
+                      title={disc
+                        ? "Kotak Neo session isn't connected — click to reconnect and enable real-time quotes."
+                        : "Price / 1D% source for the visible page — filters and other columns stay on EOD."}
                       style={{
                         display: "inline-flex", alignItems: "center", gap: 6,
                         padding: "3px 8px", border: "1px solid var(--edge)",
+                        background: "transparent",
                         fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
-                        color: "var(--text-muted)", borderRadius: 2,
+                        color: disc ? "var(--danger, #ff6a6a)" : "var(--text-muted)",
+                        borderRadius: 2, cursor: disc ? "pointer" : "default",
                       }}>
                       <span style={{ width: 6, height: 6, borderRadius: "50%", background: tone }} />
                       {label}
-                    </span>
+                    </Cmp>
                   );
                 })()}
                 {healthSummary && (
