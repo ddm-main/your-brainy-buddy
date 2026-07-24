@@ -1,9 +1,14 @@
 // Compact one-line HUD strip pinned above the Market dashboard rows.
-// Surfaces market status, IST clock, key indices, A/D, and FII/DII net.
-// All timing/tick logic is delegated to the shared useMarketStatus hook
-// so re-renders are throttled off-hours and paused when the tab is hidden.
-import { useMemo } from "react";
+// Surfaces market status, IST clock, key indices, A/D, FII/DII net, and
+// the single source-of-truth provider chip (live · kotak / ~15m · yahoo).
+// Push ticks from the Kotak WS relay are overlaid on top of REST quotes for
+// the four index symbols so NIFTY/BANKNIFTY/SENSEX/VIX go realtime the
+// moment the relay is up.
+import { useEffect, useMemo } from "react";
 import { useIndices, useBreadth, useMarketStatus } from "@/lib/market/hooks";
+import { Chip } from "@/components/hud/HudControls";
+import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
 
 const SLOT_SYMBOLS: Array<{ symbol: string; label: string }> = [
   { symbol: "^NSEI",     label: "NIFTY" },
@@ -13,25 +18,55 @@ const SLOT_SYMBOLS: Array<{ symbol: string; label: string }> = [
 ];
 
 const fmtNum = (n: number | null | undefined, d = 2) =>
-  n == null || Number.isNaN(n) ? "—" : n.toLocaleString(undefined, { maximumFractionDigits: d });
+  n == null || Number.isNaN(n) ? "—" : n.toLocaleString("en-IN", { maximumFractionDigits: d });
 
-export function MarketStrip() {
-  const { data: indicesData } = useIndices();
+interface Props {
+  actions?: React.ReactNode;
+}
+
+export function MarketStrip({ actions }: Props) {
+  const { data: indicesData } = useIndices() as { data: any };
   const { data: breadth } = useBreadth();
   const status = useMarketStatus();
+  const pushTicks = useLiveTickStore((s) => s.ticks);
+  const relayAlive = useRelayAlive();
+
+  // Ask the WS relay to push ticks for the four indices too. Debounced upstream.
+  useEffect(() => {
+    subscribeSymbolsForTicks(SLOT_SYMBOLS.map((s) => `NSE:${s.symbol}`));
+  }, []);
 
   const bySym = useMemo(() => {
     const m = new Map<string, { price: number; change_pct: number | null }>();
-    for (const q of indicesData?.quotes ?? []) m.set(q.symbol, { price: q.price, change_pct: q.change_pct });
+    for (const q of (indicesData?.quotes ?? []) as any[]) {
+      // Overlay a fresh push tick when we have one for this symbol.
+      const tick = pushTicks[`NSE:${q.symbol}`];
+      if (isFreshTick(tick)) {
+        m.set(q.symbol, { price: tick.ltp, change_pct: tick.change_pct });
+      } else {
+        m.set(q.symbol, { price: q.price, change_pct: q.change_pct });
+      }
+    }
     return m;
-  }, [indicesData]);
+  }, [indicesData, pushTicks]);
 
   const ad = breadth ? { adv: breadth.advances ?? 0, dec: breadth.declines ?? 0 } : null;
-  // FIX (was silently null): the columns are fii_net_cr / dii_net_cr, already
-  // stored in crores; the previous code read fii_net_cash and divided by 1e7,
-  // which produced NaN and never rendered.
   const fiiCr = breadth?.fii_net_cr ?? null;
   const diiCr = breadth?.dii_net_cr ?? null;
+
+  // Provider chip — single source of truth for whether index/quote data is
+  // real-time. Push takes precedence: if the relay has emitted for any
+  // index (or announced itself), we're on live push ticks.
+  const anyIndexPush = SLOT_SYMBOLS.some((s) => isFreshTick(pushTicks[`NSE:${s.symbol}`]));
+  const provider = indicesData?.provider as "kotak" | "yahoo" | "mixed" | "cache" | "none" | undefined;
+  const chip = (() => {
+    if (anyIndexPush || relayAlive) return { tone: "ok" as const, label: "push · kotak", title: "Push ticks from local Kotak Neo WS relay" };
+    if (provider === "kotak") return { tone: "ok" as const, label: "live · kotak", title: "Real-time quotes via Kotak Neo" };
+    if (provider === "mixed") return { tone: "warn" as const, label: "live · mixed", title: "Kotak for some symbols, Yahoo (~15m delayed) for the rest" };
+    if (provider === "cache") return { tone: "warn" as const, label: "cached", title: "Provider unreachable — showing last cached close" };
+    if (provider === "yahoo") return { tone: "warn" as const, label: "~15m · yahoo", title: "Yahoo Finance is ~15m delayed on NSE. Connect Kotak Neo for real-time quotes." };
+    return { tone: "neutral" as const, label: "no data", title: "" };
+  })();
 
   return (
     <div
@@ -88,6 +123,7 @@ export function MarketStrip() {
               {fiiCr >= 0 ? "+" : ""}{fmtNum(fiiCr, 0)}cr
             </span>
           )}
+          {fiiCr != null && diiCr != null && <span style={{ color: "var(--text-dim)" }}>/</span>}
           {diiCr != null && (
             <span style={{ color: diiCr >= 0 ? "var(--ok)" : "var(--danger)", fontVariantNumeric: "tabular-nums" }}>
               {diiCr >= 0 ? "+" : ""}{fmtNum(diiCr, 0)}cr
@@ -95,6 +131,10 @@ export function MarketStrip() {
           )}
         </span>
       )}
+      <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6 }}>
+        <span title={chip.title}><Chip tone={chip.tone}>{chip.label}</Chip></span>
+        {actions}
+      </span>
     </div>
   );
 }

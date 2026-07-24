@@ -19,10 +19,11 @@ import { ALL_PRESETS, GLOBAL_PRESETS, INDIAN_PRESETS, type IndexPreset } from "@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { RefreshCw, Settings2, Sparkles, Trash2, X } from "lucide-react";
+import { RefreshCw, Settings2, Trash2, X } from "lucide-react";
 import type { Quote, StockScore } from "@/lib/market/types";
-import { holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
+import { holdingPnl, quoteKey } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
 import { useEscapeClose } from "@/lib/useEscapeClose";
 import { MarketStrip } from "@/components/market/MarketStrip";
 
@@ -84,7 +85,8 @@ export default function MarketDashboard() {
   const push = useUi((s) => s.push);
   const nav = useNavigate();
   const qc = useQueryClient();
-  const [busy, setBusy] = useState<string | null>(null);
+  const [, setBusy] = useState<string | null>(null);
+  void setBusy;
   const [manageOpen, setManageOpen] = useState(false);
   const [breakoutScreenId, setBreakoutScreenId] = useState<string>(
     () => {
@@ -168,8 +170,17 @@ export default function MarketDashboard() {
     [topBreakouts, preBreakouts, filteredBreakouts],
   );
   const scoreKeys = useMemo(() => (scoreKeysJoined ? scoreKeysJoined.split(",") : []), [scoreKeysJoined]);
-  const { data: scoreQuotes } = useQuotes(scoreKeys);
+  // Top Breakouts symbols rotate with filter selection, so most of them are
+  // outside the Kotak WS relay's holdings/watchlist subscription set. Poll
+  // the REST batch every ~3s during market hours to make the panel feel live
+  // rather than updating once a minute.
+  const { data: scoreQuotes } = useQuotes(scoreKeys, { intervalMs: 3_000 });
   const pushTicks = useLiveTickStore((s) => s.ticks);
+  const relayAlive = useRelayAlive();
+  // Ask the Kotak WS relay to push ticks for whatever's on screen — filters
+  // rotate the symbol set constantly, so a static holdings/watchlist-only
+  // subscription would miss Top Breakouts entirely.
+  useEffect(() => { subscribeSymbolsForTicks(scoreKeys); }, [scoreKeysJoined]);
   const liveByKey = useMemo(() => {
     const m = new Map((scoreQuotes?.quotes ?? []).map((q) => [quoteKey(q.exchange, q.symbol), q]));
     for (const [key, tick] of Object.entries(pushTicks)) {
@@ -181,15 +192,23 @@ export default function MarketDashboard() {
   }, [scoreQuotes, pushTicks]);
   const liveFor = (s: BreakoutDisplayRow) => liveByKey.get(rowKey(s));
   const anyPush = useMemo(() => scoreKeys.some((k) => isFreshTick(pushTicks[k])), [scoreKeys, pushTicks]);
-  const liveQuoteState = useMemo<"push" | "live" | "stale" | "closed" | "none">(() => {
-    if (anyPush) return "push";
+  // Provider-aware live state — reads the batch-level `provider` summary the
+  // edge function now returns (kotak / yahoo / mixed / cache / none). This
+  // replaces the old "any stale row → delayed" heuristic that mislabeled
+  // Kotak-fulfilled batches when Yahoo backfilled a handful of symbols.
+  const quoteProvider = (scoreQuotes as any)?.provider as
+    | "kotak" | "yahoo" | "mixed" | "cache" | "none" | undefined;
+  const liveQuoteState = useMemo<"push" | "kotak" | "mixed" | "yahoo" | "cache" | "closed" | "none">(() => {
+    // Relay handshake OR any fresh push tick both prove the WS relay is up.
+    if (anyPush || relayAlive) return "push";
     const quotes = scoreQuotes?.quotes ?? [];
     if (quotes.length === 0) return "none";
-    const hasStale = quotes.some((q) => q.stale);
-    if (!hasStale) return "live";
-    // Stale outside market hours = expected end-of-day snapshot, not a problem.
-    return isNseOpen() ? "stale" : "closed";
-  }, [scoreQuotes, anyPush, scoreKeys]);
+    if (quoteProvider === "kotak") return "kotak";
+    if (quoteProvider === "mixed") return "mixed";
+    if (quoteProvider === "cache") return isNseOpen() ? "cache" : "closed";
+    // Yahoo (or unknown) — during hours it's ~15m delayed, off-hours it's just the close.
+    return isNseOpen() ? "yahoo" : "closed";
+  }, [scoreQuotes, anyPush, scoreKeys, quoteProvider, relayAlive]);
 
   const { data: counts } = useQuery({
     queryKey: ["market", "dash-counts"],
@@ -231,7 +250,6 @@ export default function MarketDashboard() {
     let dayPnlWithPrev = 0;   // day P&L only for rows that also have prev_close
     let prevValue = 0;
     let prevValueKnown = false;
-    const dayPnlsAll: Array<number | null> = [];
     for (const h of rows) {
       const q = byKey.get(quoteKey(h.exchange, h.symbol));
       const calc = holdingPnl({ quantity: h.quantity, avgPrice: h.avg_price, quote: q });
@@ -239,22 +257,24 @@ export default function MarketDashboard() {
       if (calc.current == null) { unresolved++; continue; }
       knownInvested += calc.invested;
       current += calc.current;
-      dayPnlsAll.push(calc.todayPnl);
       if (q?.previous_close != null && q.previous_close > 0) {
         prevValue += q.previous_close * h.quantity;
         prevValueKnown = true;
         if (calc.todayPnl != null) dayPnlWithPrev += calc.todayPnl;
       }
     }
-    const day = sumNullable(dayPnlsAll);
+    // ₹ and % now share the same resolved-with-prev_close set — no more
+    // "denominator from one subset, numerator from another" mismatch.
+    const day = prevValueKnown ? dayPnlWithPrev : null;
     const dayPct = prevValueKnown && prevValue !== 0 ? (dayPnlWithPrev / prevValue) * 100 : null;
     const allUnresolved = unresolved === rows.length;
     return {
       invested: allUnresolved ? null : invested,
       current: allUnresolved ? null : current,
       pnl: allUnresolved ? null : current - knownInvested,
-      day: allUnresolved ? null : day,
+      day,
       dayPct,
+      partial: unresolved > 0 && !allUnresolved,
     };
   }, [counts, pfQuotes]);
 
@@ -284,8 +304,10 @@ export default function MarketDashboard() {
     const orders = brokerOrdersData?.orders ?? [];
     const open = orders.filter((o) => /open|pending|trigger/i.test(o.status)).length;
     const executed = orders.filter((o) => /complete|executed|filled/i.test(o.status)).length;
-    const rejected = orders.filter((o) => /reject|cancel|fail/i.test(o.status)).length;
-    return { total: orders.length, open, executed, rejected };
+    // Split cancelled (user-initiated) from rejected/failed (exchange or broker).
+    const cancelled = orders.filter((o) => /cancel/i.test(o.status)).length;
+    const rejected = orders.filter((o) => /reject|fail/i.test(o.status)).length;
+    return { total: orders.length, open, executed, cancelled, rejected };
   }, [brokerOrdersData]);
 
 
@@ -310,148 +332,102 @@ export default function MarketDashboard() {
   // Row 1 index panels were removed (duplicated MarketStrip). Region/tile helpers dropped.
 
 
-  // Bootstrap the data pipeline on demand so the dashboard fills without
-  // waiting for the evening cron. Runs the same steps cron would run.
-  const primeData = async () => {
-    setBusy("prime");
-    const steps: Array<{ label: string; fn: string }> = [
-      { label: "Syncing scrip master", fn: "market-scrips-sync" },
-      { label: "Running EOD pipeline", fn: "market-pipeline-eod" },
-      { label: "Computing aggregates", fn: "market-pipeline-aggregates" },
-      { label: "Refreshing indices", fn: "market-indices" },
-    ];
-    try {
-      for (const s of steps) {
-        push(`${s.label}…`, "info");
-        await callMarketFn(s.fn);
-      }
-      push("Market data primed", "ok");
-      await refetchIndices();
-      // Invalidate the react-query caches the dashboard reads from.
-      window.dispatchEvent(new Event("market:refresh"));
-    } catch (e) {
-      push(toSafeError(e, "Prime failed").message, "err");
-    } finally {
-      setBusy(null);
-    }
-  };
+  // Prime-data pipeline is now hosted in Market Settings → Data Pipeline.
 
 
+  // Top Breakouts columns are FIXED — filters narrow rows, they no longer add
+  // columns. Full filter-column projection stays available on /market/screener
+  // where it belongs. Order: Symbol | Price | 1D Return % | Market Cap | Breakout.
   const breakoutColumns = useMemo<ColumnDef<BreakoutDisplayRow, any>[]>(() => {
-    const symbolCol: ColumnDef<BreakoutDisplayRow, any> = {
-      header: "Symbol", accessorKey: "symbol",
-      cell: ({ row }) => (
-        <span>
-          <span style={{ color: "var(--accent)" }}>{row.original.symbol}</span>
-          {row.original.sector && <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: 10 }}>{row.original.sector}</span>}
-        </span>
-      ),
+    const inr = (n: number | null | undefined) =>
+      n == null || Number.isNaN(n) ? "—" : `₹${Number(n).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+    const crore = (n: number | null | undefined) => {
+      if (n == null || Number.isNaN(Number(n))) return "—";
+      const v = Number(n);
+      if (v >= 1_00_000) return `${(v / 1_00_000).toFixed(2)}L Cr`;
+      if (v >= 1_000) return `${(v / 1_000).toFixed(2)}K Cr`;
+      return `${v.toFixed(0)} Cr`;
     };
-    const breakoutCol: ColumnDef<BreakoutDisplayRow, any> = {
-      header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },
-      cell: ({ row }) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" />,
-    };
-
-    const pctIds = new Set(["change_pct", "ret_5d", "ret_21d", "ret_ytd", "dividend_yield", "sales_growth", "profit_growth", "eps_growth", "roe", "roce", "promoter_holding", "dii_holding", "fii_holding", "institutional_holding", "pct_from_52w_high", "atr_pct", "rel_strength_nifty"]);
-
-    const seen = new Set<string>([ "symbol", "breakout_score" ]);
-    const filterCols: ColumnDef<BreakoutDisplayRow, any>[] = [];
-    for (const af of selectedScreenState.active) {
-      const id = canonicalFilterId(af.id);
-      if (seen.has(id)) continue;
-      const def = FILTER_BY_ID[id];
-      if (!def) continue;
-      seen.add(id);
-
-      const accessor = (s: BreakoutDisplayRow): any => {
-        const r = s as any;
-        if (id === "ltp") return liveFor(s)?.ltp ?? r.ltp ?? r.close ?? null;
-        if (id === "change_pct") return liveFor(s)?.change_pct ?? r.change_pct_raw ?? r.change_pct ?? null;
-        if (def.valueKey) return r[def.valueKey] ?? r[id] ?? null;
-        return r[id] ?? null;
-      };
-
-      const unit = def.unit;
-      const renderNumber = (v: any) => {
-        if (v == null || v === "" || Number.isNaN(Number(v))) return "—";
-        const n = Number(v);
-        const formatted = fmtNum(n);
-        if (!unit) return formatted;
-        if (unit === "₹") return `₹${formatted}`;
-        if (unit === "%") return `${formatted}%`;
-        return `${formatted} ${unit}`;
-      };
-
-      const col: ColumnDef<BreakoutDisplayRow, any> = {
-        id: `flt_${id}`,
-        header: def.label,
-        accessorFn: accessor,
-        meta: { align: def.kind === "enum" ? "left" : "right" },
-        cell: ({ getValue }) => {
-          const v = getValue();
-          if (def.kind === "boolean") return v ? "Yes" : v === false || v == null ? "No" : "—";
-          if (def.kind === "enum") return v ?? "—";
-          if (pctIds.has(id)) return <PctCell value={v as any} />;
-          return renderNumber(v);
-        },
-      };
-      filterCols.push(col);
-    }
-
-    return [symbolCol, ...filterCols, breakoutCol];
+    return [
+      {
+        header: "Symbol", accessorKey: "symbol",
+        cell: ({ row }) => (
+          <span>
+            <span style={{ color: "var(--accent)" }}>{row.original.symbol}</span>
+            {row.original.sector && <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: 10 }}>{row.original.sector}</span>}
+          </span>
+        ),
+      },
+      {
+        id: "price",
+        header: "Price",
+        accessorFn: (s) => liveFor(s)?.ltp ?? (s as any).ltp ?? (s as any).close ?? null,
+        meta: { align: "right" },
+        cell: ({ getValue }) => inr(getValue() as any),
+      },
+      {
+        id: "change_pct",
+        header: "1D %",
+        accessorFn: (s) => liveFor(s)?.change_pct ?? (s as any).change_pct_raw ?? (s as any).change_pct ?? null,
+        meta: { align: "right" },
+        cell: ({ getValue }) => <PctCell value={getValue() as any} />,
+      },
+      {
+        id: "market_cap",
+        header: "Mkt Cap",
+        accessorFn: (s) => (s as any).market_cap ?? null,
+        meta: { align: "right" },
+        cell: ({ getValue }) => crore(getValue() as any),
+      },
+      {
+        header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },
+        cell: ({ row }) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" />,
+      },
+    ];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveByKey, selectedScreenState.active]);
+  }, [liveByKey]);
 
 
 
 
-  const runPrimeData = () => {
-    if (busy) return;
-    // Use the app's toast layer to warn instead of a blocking window.confirm.
-    // First click arms it, second click within 5s runs the pipeline.
-    if (busy === null && !window.sessionStorage.getItem("mk.prime.armed")) {
-      window.sessionStorage.setItem("mk.prime.armed", "1");
-      setTimeout(() => window.sessionStorage.removeItem("mk.prime.armed"), 5_000);
-      push("Prime runs 4 edge functions (~1 min). Click again to confirm.", "warn");
-      return;
-    }
-    window.sessionStorage.removeItem("mk.prime.armed");
-    primeData();
-  };
-
-  const providerLabel = connected ?? "yahoo";
   const indexActions = (
     <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-      {!connected && (
-        <Link to="/market/settings" title="Using Yahoo Finance — connect a broker for live NSE quotes"
-              style={{ fontSize: 10, color: "var(--text-dim)", textDecoration: "none", padding: "2px 6px", border: "1px dashed var(--edge)", marginRight: 4 }}>
-          {providerLabel} · connect broker
-        </Link>
-      )}
-      <Btn size="sm" onClick={() => setManageOpen(true)} title="Manage indices" ariaLabel="Manage indices"><Settings2 size={12} /></Btn>
-      <Btn size="sm" variant="danger" onClick={runPrimeData} disabled={busy !== null} title={busy === "prime" ? "priming…" : "prime data pipeline (scrips → EOD → aggregates → indices)"} ariaLabel="Prime data pipeline"><Sparkles size={12} /></Btn>
+      <Btn size="sm" onClick={() => setManageOpen(true)} title="Manage indices · advanced actions" ariaLabel="Manage indices"><Settings2 size={12} /></Btn>
       <Btn size="sm" onClick={() => refetchIndices()} disabled={indicesFetching} title="Refresh indices" ariaLabel="Refresh indices"><RefreshCw size={12} /></Btn>
     </div>
   );
 
-  const indicesLive = indicesData ? "ok" : (indicesFetching ? "warn" : "err");
+  // Kotak-connect banner: shown when the provider is Yahoo (~15m delayed)
+  // AND Kotak isn't connected, unless the user dismissed it this session.
+  const kotakConnected = connected === "kotak_neo";
+  const showKotakBanner =
+    !kotakConnected &&
+    (quoteProvider === "yahoo" || quoteProvider === "mixed" || quoteProvider === "cache") &&
+    !sessionStorage.getItem("mk.dash.kotak-banner.dismissed");
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 0, height: "100%" }}>
-      <MarketStrip />
-      {/* Compact toolbar — index/pipeline actions live here (was two duplicate index panels) */}
-      <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 6, flexShrink: 0 }}>
-        {!connected && (
-          <Link to="/market/settings" title="Using Yahoo Finance — connect a broker for live NSE quotes"
-                style={{ fontSize: 10, color: "var(--text-dim)", textDecoration: "none", padding: "2px 6px", border: "1px dashed var(--edge)" }}>
-            {providerLabel} · connect broker
-          </Link>
-        )}
-        <Chip tone={indicesLive === "ok" ? "ok" : indicesLive === "warn" ? "warn" : "neutral"}>
-          {indicesLive === "ok" ? "indices live" : indicesLive === "warn" ? "loading…" : "no data"}
-        </Chip>
-        {indexActions}
-      </div>
+      <MarketStrip actions={indexActions} />
+      {showKotakBanner && (
+        <div role="status" style={{
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+          padding: "6px 10px", border: "1px dashed var(--edge-strong)", borderRadius: 3,
+          fontSize: 11, color: "var(--text-dim)", background: "rgba(255,180,60,0.04)", flexShrink: 0,
+        }}>
+          <span style={{ color: "var(--warn, #f5a524)" }}>●</span>
+          <span>Prices are <b>~15 minutes delayed</b> (Yahoo Finance). Connect Kotak Neo for real-time quotes across Overview, Screener, and Portfolio.</span>
+          <Link to="/market/settings" style={{
+            marginLeft: "auto", color: "var(--accent)", textDecoration: "none",
+            border: "1px solid var(--edge)", padding: "2px 8px", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
+          }}>Connect Kotak Neo</Link>
+          <button
+            onClick={() => { sessionStorage.setItem("mk.dash.kotak-banner.dismissed", "1"); qc.invalidateQueries({ queryKey: ["market"] }); }}
+            aria-label="Dismiss for this session"
+            className="hud-btn focus-outline" data-variant="ghost" data-size="sm"
+            title="Dismiss for this session"
+          ><X size={12} /></button>
+        </div>
+      )}
 
       {/* Row 2 · Top Breakouts · Watchlist · Portfolio (right) */}
       <div
@@ -487,11 +463,8 @@ export default function MarketDashboard() {
                 <option key={s.id} value={s.id}>{s.name}</option>
               ))}
             </select>
-            <Chip tone={savedScreenerFetching ? "warn" : "neutral"}>{breakoutCountLabel}</Chip>
-            {liveQuoteState === "push" && <Chip tone="ok">push · live</Chip>}
-            {liveQuoteState === "live" && <Chip tone="ok">live</Chip>}
-            {liveQuoteState === "stale" && <Chip tone="warn">cached close</Chip>}
-            {liveQuoteState === "closed" && <Chip tone="neutral">market closed</Chip>}
+            <Chip tone="neutral">{breakoutCountLabel}</Chip>
+            {/* Provider chip lives on the MarketStrip now — one source of truth. */}
           </div>
         }
       >
@@ -535,28 +508,39 @@ export default function MarketDashboard() {
               ] : []}
               empty="No open positions"
             />
-            {/* Orders */}
-            <PortfolioSection
-              label="Orders"
-              to="/market/orders"
-              meta={orderSummary.total > 0 ? `${orderSummary.total} today` : ""}
-              tiles={orderSummary.total > 0 ? [
-                { label: "Open", value: String(orderSummary.open), tone: orderSummary.open > 0 ? "accent" : undefined },
-                { label: "Executed", value: String(orderSummary.executed), tone: orderSummary.executed > 0 ? "ok" : undefined },
-                { label: "Rejected", value: String(orderSummary.rejected), tone: orderSummary.rejected > 0 ? "err" : undefined },
-              ] : []}
-              empty="No orders today"
-            />
+            {/* Orders — one-line summary instead of a mini order-book. Full
+                breakdown lives on /market/orders. */}
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                <Link to="/market/orders" style={{ color: "var(--text)", textDecoration: "none", fontSize: 12, letterSpacing: "0.04em" }}>Orders</Link>
+                <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                  {orderSummary.total > 0 ? `${orderSummary.total} today` : "No orders today"}
+                </span>
+              </div>
+              {orderSummary.total > 0 && (
+                <div style={{ fontSize: 11, color: "var(--text-dim)", display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <span><span style={{ color: "var(--accent)" }}>{orderSummary.open}</span> open</span>
+                  <span><span style={{ color: "var(--ok)" }}>{orderSummary.executed}</span> executed</span>
+                  {orderSummary.cancelled > 0 && <span><span style={{ color: "var(--text)" }}>{orderSummary.cancelled}</span> cancelled</span>}
+                  {orderSummary.rejected > 0 && <span><span style={{ color: "var(--danger)" }}>{orderSummary.rejected}</span> rejected</span>}
+                </div>
+              )}
+            </div>
           </div>
         </HudPanel>
       </div>
 
-      {manageOpen && <ManageIndicesDialog onClose={() => setManageOpen(false)} />}
+      {manageOpen && (
+        <ManageIndicesDialog
+          onClose={() => setManageOpen(false)}
+        />
+      )}
     </div>
   );
 }
 
 function ManageIndicesDialog({ onClose }: { onClose: () => void }) {
+  const push = useUi((s) => s.push);
   const { data: rows = [] } = useIndexWatch();
   const { add, remove } = useIndexWatchMutations();
   const [tab, setTab] = useState<"IN" | "GLOBAL" | "custom">("IN");
@@ -577,8 +561,7 @@ function ManageIndicesDialog({ onClose }: { onClose: () => void }) {
     const nm = customName.trim() || sym;
     if (!sym) return;
     if (!/^[\^A-Z0-9._=-]+$/.test(sym)) {
-      // eslint-disable-next-line no-alert
-      alert("Invalid Yahoo symbol. Use uppercase letters, digits and any of ^ . _ = - (e.g. ^GSPC, NIFTY_MIDCAP_50.NS)");
+      push("Invalid Yahoo symbol. Use uppercase letters, digits and any of ^ . _ = - (e.g. ^GSPC, NIFTY_MIDCAP_50.NS)", "err");
       return;
     }
     add.mutate({ symbol: sym, name: nm, region: "GLOBAL", nse_symbol: null, fno_enabled: false, constituents_slug: null });
@@ -665,6 +648,8 @@ function ManageIndicesDialog({ onClose }: { onClose: () => void }) {
             <Btn size="sm" onClick={addCustom} disabled={!customSym.trim() || add.isPending}>add</Btn>
           </div>
         )}
+
+        {/* Prime-data pipeline moved to Market Settings → Data Pipeline. */}
       </div>
     </div>
   );

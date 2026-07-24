@@ -112,15 +112,17 @@ export function useMarketStatus() {
   return status;
 }
 
-export function useQuotes(keys: string[]) {
+export function useQuotes(keys: string[], opts?: { intervalMs?: number }) {
+  // Callers can override the market-hours REST poll interval — e.g. Top
+  // Breakouts symbols that aren't in the Kotak WS relay's subscription set
+  // need a faster REST poll (~3s) to feel "live" instead of updating once
+  // a minute. Off-hours we keep the just-closed short window then stop.
+  const openInterval = opts?.intervalMs ?? 1_000;
   return useQuery({
     queryKey: ["market", "quotes", [...keys].sort().join(",")],
     queryFn: () => callMarketFn<{ quotes: Quote[]; source: string }>("market-quotes", { symbols: keys }),
     enabled: keys.length > 0,
-    // On-screen symbols only (caller scopes `keys`) — near-second refresh.
-    // Keep short-polling for a few minutes after close to land the settled
-    // EOD tick, rather than freezing on whichever LTP raced in at 15:30.
-    refetchInterval: marketOpen() ? 1_000 : justClosedWindow() ? 15_000 : false,
+    refetchInterval: marketOpen() ? openInterval : justClosedWindow() ? 15_000 : false,
   });
 }
 

@@ -60,8 +60,8 @@ export interface ScreenerRow {
 
   // technicals (unified schema)
   volume: number | null;
-  rel_volume: number | null;
   vol_avg30: number | null;
+  rel_volume: number | null;
   vol_gt_avg30: boolean | null;
   ema_20: number | null;
   ema_50: number | null;
@@ -121,7 +121,7 @@ async function fetchIndexMemberSet(indexKey: string): Promise<Set<string>> {
 const SCREENER_COLUMNS = [
   "symbol","exchange","company_name","sector","sub_sector","industry","market_cap",
   "is_nifty500","instrument_type","trade_date","close","previous_close","change_pct","volume",
-  "rel_volume","vol_avg30","ema20","ema50","ema100","ema200","rsi14","macd","macd_signal",
+  "rel_volume","vol_avg30","vol_gt_avg30","ema20","ema50","ema100","ema200","rsi14","macd","macd_signal",
   "macd_hist","adx14","atr14","atr_pct","bb_upper","bb_lower","bb_width",
   "bb_squeeze","high_52w","low_52w","pct_from_52w_high","above_ema200",
   "higher_lows","near_resistance","resistance_level","support_level",
@@ -141,6 +141,7 @@ async function fetchScreenerRows(): Promise<any[]> {
       .from("market_screener_rows")
       .select(SCREENER_COLUMNS)
       .eq("is_active", true)
+      .eq("exchange", "NSE")
       .order("breakout_score", { ascending: false, nullsFirst: false })
       .order("symbol", { ascending: true })
       .range(from, from + 999);
@@ -161,11 +162,11 @@ function applyUniverseFilter(
   rows: any[],
   universeSet: Set<string> | "nifty500" | "fno" | "sme" | null,
 ): any[] {
-  if (universeSet === null) return rows;
-  if (universeSet === "nifty500") return rows.filter((r) => Boolean(r.is_nifty500));
-  if (universeSet === "fno")      return rows.filter((r) => Boolean(r.fno_enabled));
+  if (universeSet === null) return rows.filter((r) => r.instrument_type === "EQ");
+  if (universeSet === "nifty500") return rows.filter((r) => r.instrument_type === "EQ" && Boolean(r.is_nifty500));
+  if (universeSet === "fno")      return rows.filter((r) => r.instrument_type === "EQ" && Boolean(r.fno_enabled));
   if (universeSet === "sme")      return rows.filter((r) => Boolean(r.sme));
-  return rows.filter((r) => universeSet.has(r.symbol));
+  return rows.filter((r) => r.instrument_type === "EQ" && universeSet.has(r.symbol));
 }
 
 async function resolveUniverseFilter(

@@ -199,13 +199,6 @@ export function relVolume(volumes: number[], avgPeriod = 20): number | null {
   return avg === 0 ? null : today / avg;
 }
 
-function median(values: number[]): number | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
-}
-
 // True if the last `count` swing lows are strictly ascending.
 export function higherLows(lows: number[], lookback = 40, count = 3): boolean {
   const window = lows.slice(-lookback);
@@ -326,10 +319,12 @@ export function computeSnapshot(candles: Candle[]): IndicatorSnapshot | null {
     volumes.length >= 21
       ? volumes.slice(-21, -1).reduce((x, y) => x + y, 0) / 20
       : null;
-  // Match market screener behaviour: their "30D avg volume" behaves like a
-  // typical-volume baseline, so one block-trade spike should not suppress the
-  // next month of otherwise high-volume names.
-  const volAvg30 = volumes.length >= 30 ? median(volumes.slice(-30)) : null;
+  // Average of the 30 completed sessions before today. The current session is
+  // deliberately excluded: "today's volume > 30D average" must not dilute its
+  // own comparison baseline.
+  const volAvg30 = volumes.length >= 31
+    ? volumes.slice(-31, -1).reduce((sum, value) => sum + value, 0) / 30
+    : null;
 
   // BB squeeze: current width in the bottom 20% of the last 120 sessions' widths
   const widths = bb.width.slice(-120).filter((w): w is number => w != null);

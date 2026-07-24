@@ -5,7 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import type { ColumnDef } from "@tanstack/react-table";
+import type { ColumnDef, SortingState } from "@tanstack/react-table";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { HudModal } from "@/components/hud/HudModal";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
@@ -28,6 +28,7 @@ import {
   coverageOf,
   canonicalFilterId,
   latestTradeDateOf,
+  isEquityRow,
   TECH_FRESHNESS_LAG_DAYS,
   type ActiveFilter,
   type FilterDef,
@@ -46,7 +47,9 @@ const COLUMNS: ColSpec[] = [
   { id: "market_cap",         label: "Mcap (₹Cr)",   align: "right", default: true },
   { id: "close",              label: "LTP (₹)",      align: "right", default: true },
   { id: "change_pct",         label: "1D Return (%)",align: "right", default: true },
-  { id: "volume",             label: "Volume ('000)",align: "right" },
+  { id: "volume",             label: "Volume",       align: "right" },
+  { id: "vol_avg30",          label: "30D Avg Vol",  align: "right" },
+  { id: "vol_gt_avg30",       label: "Vol > 30D",    align: "right" },
   { id: "rel_volume",         label: "RVol",         align: "right" },
   { id: "pe",                 label: "PE",            align: "right" },
   { id: "pb",                 label: "PB",            align: "right" },
@@ -88,6 +91,7 @@ const FILTER_TO_COL: Record<string, string> = {
   market_cap: "market_cap",
   ltp: "close",
   volume: "volume",
+  vol_gt_avg30: "vol_gt_avg30",
   change_pct: "change_pct",
   pct_from_52w_high: "pct_from_52w_high",
   rel_volume: "rel_volume",
@@ -234,7 +238,7 @@ function ScreenerInner() {
   // Worst-of-3 coverage summary for the compact status pill in the Results
   // header. Full breakdown still lives behind the Health modal.
   const healthSummary = useMemo(() => {
-    const eq = rows.filter((r) => (r.instrument_type ?? "EQ") === "EQ");
+    const eq = rows.filter(isEquityRow);
     if (eq.length === 0) return null;
     const fundOk = eq.filter((r) => r.pe != null || r.roe != null || r.market_cap != null).length;
     const sectorOk = eq.filter((r) => r.sector != null).length;
@@ -508,20 +512,42 @@ function ScreenerInner() {
     [active, visibleCols],
   );
 
+  const defaultSorting = useMemo<SortingState>(() => (
+    active.some((filter) => canonicalFilterId(filter.id) === "change_pct")
+      ? [{ id: "liveChangePct", desc: true }]
+      : [{ id: "breakout_score", desc: true }]
+  ), [active]);
+  const [sorting, setSorting] = useState<SortingState>(defaultSorting);
+  useEffect(() => { setSorting(defaultSorting); }, [defaultSorting]);
+
+  const sorted = useMemo(() => {
+    if (sorting.length === 0) return filtered;
+    const { id, desc } = sorting[0];
+    const field = id === "livePrice" ? "ltp" : id === "liveChangePct" ? "change_pct" : id;
+    return [...filtered].sort((a, b) => {
+      const av = (a as any)[field];
+      const bv = (b as any)[field];
+      if (av == null && bv == null) return a.symbol.localeCompare(b.symbol);
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      const cmp = typeof av === "number" && typeof bv === "number" ? av - bv : String(av).localeCompare(String(bv));
+      return (desc ? -cmp : cmp) || a.symbol.localeCompare(b.symbol);
+    });
+  }, [filtered, sorting]);
+
   const exportCsv = () => {
-    const csv = toCsv(filtered, effectiveCols);
+    const csv = toCsv(sorted, effectiveCols);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     const stamp = new Date().toISOString().slice(0, 10);
-    // Universe + filter count + row count baked into the filename for traceability.
-    a.href = url; a.download = `screener_${universe}_${active.length}f_${filtered.length}rows_${stamp}.csv`;
+    a.href = url; a.download = `screener_${universe}_${active.length}f_${sorted.length}rows_${stamp}.csv`;
     a.click(); URL.revokeObjectURL(url);
   };
 
-  // Paginate visible rows client-side.
+  // Paginate only after globally sorting the complete filtered collection.
   const pageStart = page * pageSize;
-  const paged = useMemo(() => filtered.slice(pageStart, pageStart + pageSize), [filtered, pageStart, pageSize]);
+  const paged = useMemo(() => sorted.slice(pageStart, pageStart + pageSize), [sorted, pageStart, pageSize]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
 
   const columns = useMemo<ColumnDef<ScreenerRow, any>[]>(() => {
@@ -576,12 +602,14 @@ function ScreenerInner() {
         cell: ({ getValue }) => <PctCell value={getValue() as number | null} />,
       },
       volume: {
-        header: "Volume ('000)", accessorKey: "volume", meta: { align: "right" },
+        header: "Volume", accessorKey: "volume", meta: { align: "right" },
         cell: ({ getValue }) => {
           const v = getValue() as number | null;
-          return v == null ? "—" : fmtInt(Math.round(v / 1000));
+          return v == null ? "—" : fmtInt(v);
         },
       },
+      vol_avg30: { header: "30D Avg Vol", accessorKey: "vol_avg30", meta: { align: "right" }, cell: ({ getValue }) => fmtInt(getValue() as number | null) },
+      vol_gt_avg30: { header: "Vol > 30D", accessorKey: "vol_gt_avg30", meta: { align: "right" }, cell: ({ getValue }) => getValue() == null ? "—" : getValue() ? "Yes" : "No" },
       rel_volume: { header: "RVol", accessorKey: "rel_volume", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
       pe: { header: "PE", accessorKey: "pe", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
       pb: { header: "PB", accessorKey: "pb", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
@@ -747,7 +775,7 @@ function ScreenerInner() {
                         : healthSummary.tone === "warn" ? "var(--warn, #d29a2b)"
                         : "var(--danger, #ff6a6a)",
                     }} />
-                    EOD {healthSummary.eod ?? "—"}
+                    EOD {healthSummary.eod ?? "—"} · same-session values
                   </button>
                 )}
                 <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}
@@ -773,8 +801,9 @@ function ScreenerInner() {
                 <DataTable
                   columns={columns}
                   data={paged}
+                  sorting={sorting}
+                  onSortingChange={setSorting}
                   onRowClick={(r) => nav(`/market/analysis/${r.symbol}`)}
-                  initialSort={[{ id: "breakout_score", desc: true }]}
                   emptyLabel={rows.length === 0 && !isFetching ? "market pipeline is warming up" : "no matches"}
                   emptyHint={rows.length === 0 && !isFetching ? "automatic sync is enabled; refresh shortly" : "loosen the filters or change the universe"}
                 />

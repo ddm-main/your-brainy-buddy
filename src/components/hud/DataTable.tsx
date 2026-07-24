@@ -7,6 +7,7 @@ import {
   useReactTable,
   type ColumnDef,
   type SortingState,
+  type OnChangeFn,
 } from "@tanstack/react-table";
 import { EmptyState } from "@/components/hud/HudControls";
 
@@ -33,6 +34,8 @@ export function DataTable<T>({
   data,
   onRowClick,
   initialSort,
+  sorting: controlledSorting,
+  onSortingChange,
   emptyLabel = "no data",
   emptyHint,
   maxHeight,
@@ -41,16 +44,19 @@ export function DataTable<T>({
   data: T[];
   onRowClick?: (row: T) => void;
   initialSort?: SortingState;
+  sorting?: SortingState;
+  onSortingChange?: OnChangeFn<SortingState>;
   emptyLabel?: string;
   emptyHint?: string;
   maxHeight?: number | string;
 }) {
-  const [sorting, setSorting] = useState<SortingState>(initialSort ?? []);
+  const [internalSorting, setInternalSorting] = useState<SortingState>(initialSort ?? []);
+  const sorting = controlledSorting ?? internalSorting;
   const table = useReactTable({
     data,
     columns,
     state: { sorting },
-    onSortingChange: setSorting,
+    onSortingChange: onSortingChange ?? setInternalSorting,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
   });

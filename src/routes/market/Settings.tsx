@@ -208,6 +208,27 @@ export default function MarketSettings() {
     finally { setBusy(null); }
   };
 
+  // Prime all EOD steps in sequence — replaces the old dashboard "Prime data"
+  // button so bootstrap lives with the other pipeline controls.
+  const runPrimeAll = async () => {
+    const steps: Array<[string, string]> = [
+      ["market-scrips-sync", "Universe sync"],
+      ["market-pipeline-eod", "EOD batch"],
+      ["market-pipeline-aggregates", "Aggregates"],
+      ["market-indices", "Index refresh"],
+    ];
+    setBusy("prime-all");
+    try {
+      for (const [fn, label] of steps) {
+        push(`${label}…`, "info");
+        const r = await callFn(fn, {});
+        setPipeline({ step: label, ...r });
+      }
+      push("Pipeline primed", "ok");
+    } catch (e) { push(toSafeError(e, "Prime failed").message, "err"); }
+    finally { setBusy(null); }
+  };
+
   const kotak = rows.kotak_neo;
   const kotakConnected = kotak?.connection_status === "connected";
   const liveProvider: Provider = kotakConnected ? "kotak_neo" : "yahoo";
@@ -358,6 +379,9 @@ export default function MarketSettings() {
             <RefreshCw size={11} style={{ marginRight: 4 }} />{busy === "market-pipeline-aggregates" ? "finalizing…" : "Finalize aggregates"}
           </Btn>
           <Btn onClick={() => runPipeline("market-indices", "Index refresh")} disabled={busy !== null}>Refresh indices</Btn>
+          <Btn onClick={runPrimeAll} disabled={busy !== null} title="Runs Universe → EOD → Aggregates → Indices in sequence (~1 min). Use to bootstrap or force-refresh scores, breadth, and top movers.">
+            {busy === "prime-all" ? "priming…" : "Prime pipeline (all)"}
+          </Btn>
           <Btn onClick={() => runPipeline("market-fundamentals-global-sync", "Fundamentals sync")} disabled={busy !== null} title="Populates fundamentals (PE, PB, ROE, market cap, sector) from Yahoo. ~2 min for the full universe.">
             <Database size={11} style={{ marginRight: 4 }} />{busy === "market-fundamentals-global-sync" ? "syncing… (~2 min)" : "Sync fundamentals"}
           </Btn>
