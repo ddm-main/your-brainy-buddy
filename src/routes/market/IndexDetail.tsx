@@ -44,7 +44,6 @@ export default function IndexDetail() {
 
   const [tab, setTab] = useState<Tab>("chart");
   const [tf, setTf] = useState("1D");
-  const [range, setRange] = useState("6M");
   const [chartType, setChartType] = useState<ChartType>("candles");
   const [tvMode, setTvMode] = useState(false);
   const [fs, setFs] = useState(false);
@@ -107,9 +106,15 @@ export default function IndexDetail() {
     }, "image/png");
   }, [tf, symbol, notify]);
 
-  const handleSaveLayout = useCallback(() => {
-    notify("Chart layout saved");
-  }, [notify]);
+  const handleSaveLayout = useCallback((name: string) => {
+    try {
+      const key = `jarvis.chart.layouts.index.${symbol}`;
+      const all = JSON.parse(localStorage.getItem(key) ?? "{}");
+      all[name] = { tf, chartType, studies, settings };
+      localStorage.setItem(key, JSON.stringify(all));
+      notify(`Layout "${name}" saved`);
+    } catch { notify("Could not save layout"); }
+  }, [notify, symbol, tf, chartType, studies, settings]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -157,8 +162,6 @@ export default function IndexDetail() {
               symbol={symbol}
               tf={tf}
               onTf={setTf}
-              range={range}
-              onRange={setRange}
               chartType={chartType}
               onChartType={setChartType}
               onAddStudy={addStudy}

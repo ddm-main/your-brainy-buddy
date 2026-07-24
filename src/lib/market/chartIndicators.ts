@@ -615,14 +615,15 @@ export function ad(candles: CandleDto[]): Num[] {
 export function aroon(candles: CandleDto[], period = 14): { up: Num[]; down: Num[] } {
   const n = candles.length;
   const up: Num[] = new Array(n).fill(null), down: Num[] = new Array(n).fill(null);
-  for (let i = period; i < n; i++) {
+  // Window is exactly `period` bars (TradingView convention).
+  for (let i = period - 1; i < n; i++) {
     let hi = -Infinity, lo = Infinity, hIdx = i, lIdx = i;
-    for (let j = i - period; j <= i; j++) {
+    for (let j = i - period + 1; j <= i; j++) {
       if (candles[j].high >= hi) { hi = candles[j].high; hIdx = j; }
       if (candles[j].low <= lo) { lo = candles[j].low; lIdx = j; }
     }
-    up[i] = (100 * (period - (i - hIdx))) / period;
-    down[i] = (100 * (period - (i - lIdx))) / period;
+    up[i] = (100 * (period - 1 - (i - hIdx))) / (period - 1);
+    down[i] = (100 * (period - 1 - (i - lIdx))) / (period - 1);
   }
   return { up, down };
 }

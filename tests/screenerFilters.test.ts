@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { filterMatches, excludedByMissingData, coverageOf, latestTradeDateOf, type ActiveFilter } from "../src/lib/market/screenerCatalog";
+import { colsFromActiveFilters } from "../src/lib/market/screenerColumnModel";
 
 // A row with a full EOD triple (ltp/change_pct/volume via trade_date) but no
 // technical indicators synced yet — the exact shape that used to get dropped
@@ -50,6 +51,24 @@ describe("filterMatches — scope-aware applicability", () => {
     const etfRow = { symbol: "ETF1", exchange: "NSE", instrument_type: "ETF", trade_date: "2026-07-21", pe: null };
     const af: ActiveFilter = { id: "pe", min: 10 };
     expect(filterMatches(etfRow, af)).toBe(true);
+  });
+});
+
+describe("saved screener column parity", () => {
+  it("derives the same result columns for the Deep screeners filter in Screener and Overview", () => {
+    const active: ActiveFilter[] = [
+      { id: "market_cap", min: 1000, max: 100000 },
+      { id: "ltp", min: 100, max: 10000 },
+      { id: "change_pct", min: 5, max: 10 },
+      { id: "vol_gt_avg30", bool: true },
+    ];
+
+    expect(colsFromActiveFilters(active, { skipBooleans: true })).toEqual([
+      "symbol",
+      "market_cap",
+      "close",
+      "change_pct",
+    ]);
   });
 });
 

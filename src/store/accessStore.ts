@@ -25,9 +25,7 @@ export const useAccessStore = create<State>((set) => ({
     ]);
     const isAdmin = (roles ?? []).some((r: { role: string }) => r.role === "admin");
     const sectionSet = new Set<AppSection>(
-      isAdmin
-        ? ALL_SECTIONS
-        : ((access ?? []).map((a: { section: string }) => a.section as AppSection)),
+      (access ?? []).map((a: { section: string }) => a.section as AppSection),
     );
     set({ ready: true, role: isAdmin ? "admin" : "user", sections: sectionSet });
   },

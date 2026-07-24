@@ -3297,6 +3297,7 @@ export type Database = {
           atr_pct: number | null
           atr14: number | null
           base_depth_pct: number | null
+          base_duration_days: number | null
           base_len_days: number | null
           base_tightness: number | null
           bb_lower: number | null
@@ -3304,12 +3305,14 @@ export type Database = {
           bb_squeeze: boolean | null
           bb_upper: number | null
           bb_width: number | null
+          breakout_freshness_days: number | null
           breakout_score: number | null
           breakout_score_v2: number | null
           change_pct: number | null
           change_pct_adjusted: number | null
           close: number | null
           close_adjusted: number | null
+          close_in_range_pct: number | null
           computed_at: string
           delivery_pct: number | null
           depth_imbalance: number | null
@@ -3351,6 +3354,7 @@ export type Database = {
           rolling_high_20_date: string | null
           rolling_high_55: number | null
           rolling_high_55_date: string | null
+          rs_percentile: number | null
           rs_percentile_nifty: number | null
           rsi14: number | null
           score_components: Json | null
@@ -3375,6 +3379,7 @@ export type Database = {
           atr_pct?: number | null
           atr14?: number | null
           base_depth_pct?: number | null
+          base_duration_days?: number | null
           base_len_days?: number | null
           base_tightness?: number | null
           bb_lower?: number | null
@@ -3382,12 +3387,14 @@ export type Database = {
           bb_squeeze?: boolean | null
           bb_upper?: number | null
           bb_width?: number | null
+          breakout_freshness_days?: number | null
           breakout_score?: number | null
           breakout_score_v2?: number | null
           change_pct?: number | null
           change_pct_adjusted?: number | null
           close?: number | null
           close_adjusted?: number | null
+          close_in_range_pct?: number | null
           computed_at?: string
           delivery_pct?: number | null
           depth_imbalance?: number | null
@@ -3429,6 +3436,7 @@ export type Database = {
           rolling_high_20_date?: string | null
           rolling_high_55?: number | null
           rolling_high_55_date?: string | null
+          rs_percentile?: number | null
           rs_percentile_nifty?: number | null
           rsi14?: number | null
           score_components?: Json | null
@@ -3453,6 +3461,7 @@ export type Database = {
           atr_pct?: number | null
           atr14?: number | null
           base_depth_pct?: number | null
+          base_duration_days?: number | null
           base_len_days?: number | null
           base_tightness?: number | null
           bb_lower?: number | null
@@ -3460,12 +3469,14 @@ export type Database = {
           bb_squeeze?: boolean | null
           bb_upper?: number | null
           bb_width?: number | null
+          breakout_freshness_days?: number | null
           breakout_score?: number | null
           breakout_score_v2?: number | null
           change_pct?: number | null
           change_pct_adjusted?: number | null
           close?: number | null
           close_adjusted?: number | null
+          close_in_range_pct?: number | null
           computed_at?: string
           delivery_pct?: number | null
           depth_imbalance?: number | null
@@ -3507,6 +3518,7 @@ export type Database = {
           rolling_high_20_date?: string | null
           rolling_high_55?: number | null
           rolling_high_55_date?: string | null
+          rs_percentile?: number | null
           rs_percentile_nifty?: number | null
           rsi14?: number | null
           score_components?: Json | null

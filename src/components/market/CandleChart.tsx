@@ -44,7 +44,16 @@ type Computed =
   | { g: "adx"; adx: Num[]; plusDi: Num[]; minusDi: Num[]; guides?: number[] };
 
 function computeStudy(candles: CandleDto[], s: Study): Computed {
-  const p = s.params;
+  // Clamp any user param to a safe integer (period-like) so a bad -5 doesn't
+  // silently cascade into all-null output. Ratios (mult/step/pct) are clamped
+  // to a small positive floor but keep decimals.
+  const p: Record<string, number> = {};
+  for (const [k, v] of Object.entries(s.params)) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) { p[k] = 1; continue; }
+    if (k === "mult" || k === "step" || k === "max" || k === "pct") p[k] = Math.max(0.001, n);
+    else p[k] = Math.max(1, Math.floor(n));
+  }
   const src = () => sourceValues(candles, s.source ?? "close");
   switch (s.type) {
     case "ema": return { g: "ma", line: emaV(src(), p.period) };
@@ -247,33 +256,70 @@ export function CandleChart({
         overlayLine(c.mid, col[1], w, LineStyle.Dashed);
         overlayLine(c.lower, col[2], w);
       } else if (c.g === "supertrend") {
-        const upData = data.flatMap((cc, i) => (c.line[i] != null && c.dir[i] === 1 ? [{ time: toTime(cc.time), value: c.line[i] as number }] : []));
-        const dnData = data.flatMap((cc, i) => (c.line[i] != null && c.dir[i] === -1 ? [{ time: toTime(cc.time), value: c.line[i] as number }] : []));
-        const upS = chart.addSeries(LineSeries, { color: UP, lineWidth: lw(w), priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+        const upColor = col[0] ?? UP;
+        const dnColor = col[1] ?? DOWN;
+        // Emit contiguous segments per trend direction, with a `null`
+        // whitespace point at flips so lightweight-charts breaks the line.
+        const upData: Array<{ time: any; value: number }> = [];
+        const dnData: Array<{ time: any; value: number }> = [];
+        for (let i = 0; i < data.length; i++) {
+          const v = c.line[i];
+          const d = c.dir[i];
+          if (v == null) continue;
+          if (d === 1) upData.push({ time: toTime(data[i].time), value: v as number });
+          else if (d === -1) dnData.push({ time: toTime(data[i].time), value: v as number });
+        }
+        const upS = chart.addSeries(LineSeries, { color: upColor, lineWidth: lw(w), priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false });
         upS.setData(upData);
-        const dnS = chart.addSeries(LineSeries, { color: DOWN, lineWidth: lw(w), priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+        const dnS = chart.addSeries(LineSeries, { color: dnColor, lineWidth: lw(w), priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false });
         dnS.setData(dnData);
+        // Flip markers on the price series — triangles at direction changes.
+        try {
+          const markers: Array<{ time: any; position: "belowBar" | "aboveBar"; color: string; shape: "arrowUp" | "arrowDown"; text?: string }> = [];
+          for (let i = 1; i < data.length; i++) {
+            const prev = c.dir[i - 1], cur = c.dir[i];
+            if (prev == null || cur == null || prev === cur) continue;
+            if (cur === 1) markers.push({ time: toTime(data[i].time), position: "belowBar", color: upColor, shape: "arrowUp", text: "Buy" });
+            else markers.push({ time: toTime(data[i].time), position: "aboveBar", color: dnColor, shape: "arrowDown", text: "Sell" });
+          }
+          if (markers.length && typeof (priceSeries as any).setMarkers === "function") {
+            (priceSeries as any).setMarkers(markers);
+          }
+        } catch { /* markers optional */ }
       } else if (c.g === "psar") {
-        const s = chart.addSeries(LineSeries, { color: col[0], lineVisible: false, pointMarkersVisible: true, pointMarkersRadius: 1.6, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
-        s.setData(lineData(c.dots));
+        // Color each dot by direction (dot below close = uptrend, above = downtrend).
+        const upData: Array<{ time: any; value: number }> = [];
+        const dnData: Array<{ time: any; value: number }> = [];
+        for (let i = 0; i < data.length; i++) {
+          const v = c.dots[i];
+          if (v == null) continue;
+          if ((v as number) <= data[i].close) upData.push({ time: toTime(data[i].time), value: v as number });
+          else dnData.push({ time: toTime(data[i].time), value: v as number });
+        }
+        const mk = (color: string, rows: any[]) => {
+          const line = chart.addSeries(LineSeries, {
+            color, lineVisible: false, pointMarkersVisible: true, pointMarkersRadius: 3,
+            priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+          });
+          line.setData(rows);
+        };
+        mk(col[0] ?? UP, upData);
+        mk(DOWN, dnData);
       } else if (c.g === "ichimoku") {
         overlayLine(c.tenkan, col[0], w);
         overlayLine(c.kijun, col[1], w);
         // Senkou spans are displaced forward by `base` bars (TradingView).
         overlayLine(c.spanA, col[2], w, LineStyle.Dashed, false, c.base);
         overlayLine(c.spanB, col[3], w, LineStyle.Dashed, false, c.base);
-      } else if (c.g === "volume") {
-        const volSeries = chart.addSeries(HistogramSeries, { priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
-        chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-        volSeries.setData(data.map((cc) => ({ time: toTime(cc.time), value: cc.volume, color: cc.close >= cc.open ? "rgba(107,255,176,0.25)" : "rgba(255,95,109,0.25)" })));
       }
+      // volume handled below in its own pane so it gets a proper K/M axis
     }
 
     for (const pl of priceLines ?? []) {
       priceSeries.createPriceLine({ price: pl.price, color: pl.color, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: pl.label });
     }
 
-    // ---- oscillators (visible, one sub-pane each) ----
+    // ---- oscillators + volume (visible, one sub-pane each) ----
     let pane = 1;
     const paneLine = (values: Num[], color: string, p: number, width = 1) => {
       const s = chart.addSeries(LineSeries, { color, lineWidth: lw(width), priceLineVisible: false, lastValueVisible: true }, p);
@@ -282,6 +328,24 @@ export function CandleChart({
     };
     const guide = (s: ISeriesApi<any>, price: number) =>
       s.createPriceLine({ price, color: "rgba(127,233,255,0.28)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: "" });
+
+    // Volume gets its own sub-pane so it renders a proper K / M axis on the right.
+    for (const { study, data: c } of computed) {
+      if (!study.visible || c.g !== "volume") continue;
+      const vol = chart.addSeries(HistogramSeries, {
+        priceFormat: { type: "volume" },
+        priceLineVisible: false,
+        lastValueVisible: true,
+      }, pane);
+      vol.setData(data.map((cc) => ({
+        time: toTime(cc.time),
+        value: cc.volume,
+        color: cc.close >= cc.open ? "rgba(107,255,176,0.55)" : "rgba(255,95,109,0.55)",
+      })));
+      pane++;
+      break;
+    }
+
 
     for (const { study, data: c } of computed) {
       if (!study.visible) continue;
@@ -375,18 +439,33 @@ export function CandleChart({
   // ---- legend rows (value at crosshair, else last bar) ----
   const legendRows: LegendRow[] = useMemo(() => {
     const idx = hoverIdx ?? candles.length - 1;
+    const compact = (n: number) => Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(n);
+    const BOUNDED_100 = new Set(["rsi", "stochRsi", "mfi", "aroon", "stoch", "williamsR", "uo"]);
+    const COMPACT_TYPES = new Set(["obv", "ad", "volume"]);
     return computed.map(({ study, data: c }) => {
       const prim = primaryOf(c);
       const v = prim && idx >= 0 && idx < prim.length ? prim[idx] : null;
+      const isVol = c.g === "volume";
+      const rawVol = isVol && idx >= 0 && candles[idx] ? candles[idx].volume : null;
+      const val: string = isVol
+        ? (rawVol != null ? compact(rawVol) : "—")
+        : v == null
+          ? "—"
+          : COMPACT_TYPES.has(study.type)
+            ? compact(v as number)
+            : BOUNDED_100.has(study.type)
+              ? (v as number).toFixed(1)
+              : (v as number).toFixed(2);
+      const suffix = study.type === "vwap" && !intraday ? " · daily TF" : "";
       return {
         id: study.id,
-        label: studyLabel(study),
+        label: studyLabel(study) + suffix,
         color: study.colors[0],
-        value: c.g === "volume" ? "" : v != null ? (v as number).toFixed(2) : "—",
+        value: val,
         visible: study.visible,
       };
     });
-  }, [computed, hoverIdx, candles.length]);
+  }, [computed, hoverIdx, candles.length, candles, intraday]);
 
   const last = liveBar ?? candles[candles.length - 1];
   const l = legend ?? last;
@@ -406,7 +485,7 @@ export function CandleChart({
           <span>L <b style={{ color: "var(--text)" }}>{l.low.toFixed(2)}</b></span>
           <span>C <b style={{ color: l.close >= l.open ? UP : DOWN }}>{l.close.toFixed(2)}</b></span>
           {chg != null && <span style={{ color: chg >= 0 ? UP : DOWN }}>{chg >= 0 ? "+" : ""}{chg.toFixed(2)}%</span>}
-          <span>V <b style={{ color: "var(--text)" }}>{Intl.NumberFormat("en-IN", { notation: "compact" }).format(l.volume)}</b></span>
+          <span>V <b style={{ color: "var(--text)" }}>{Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(l.volume)}</b></span>
         </div>
       )}
       {(onToggleStudy || onEditStudy || onRemoveStudy) && (

@@ -54,6 +54,12 @@ function snapFromRow(r: any): IndicatorSnapshot {
     rollingHigh20: r.rolling_high_20 ?? null,
     rollingHigh55: r.rolling_high_55 ?? null,
     obvSlope20: r.obv_slope_20 ?? null,
+    baseTightness: r.base_tightness ?? null,
+    baseDepthPct: r.base_depth_pct ?? null,
+    baseDurationDays: r.base_duration_days ?? null,
+    rsPercentile: r.rs_percentile ?? null,
+    closeInRangePct: r.close_in_range_pct ?? null,
+    breakoutFreshnessDays: r.breakout_freshness_days ?? null,
     ema20Series: [],
     ema50Series: [],
     ema200Series: [],
@@ -176,6 +182,22 @@ Deno.serve(async (req) => {
     }
     const nSectors = sectorStats.length || 1;
 
+    // ---- RS percentile ranks over universe (based on ema50-anchored return) ----
+    const rsInputs: { key: string; rs: number }[] = [];
+    for (const r of rows) {
+      if (r.close != null && r.ema50 != null && r.ema50 !== 0) {
+        const base = r.ema100 ?? r.ema50;
+        const stockTrendPct = ((r.close - base) / base) * 100;
+        rsInputs.push({ key: `${r.symbol}|${r.exchange}`, rs: stockTrendPct });
+      }
+    }
+    rsInputs.sort((a, b) => a.rs - b.rs);
+    const rsPct = new Map<string, number>();
+    const n = rsInputs.length;
+    rsInputs.forEach((it, idx) => {
+      rsPct.set(it.key, n > 1 ? Math.round((idx / (n - 1)) * 1000) / 10 : 50);
+    });
+
     // ---- Final scoring with market context ----
     let updated = 0;
     for (let i = 0; i < rows.length; i += 50) {
@@ -189,7 +211,8 @@ Deno.serve(async (req) => {
           const stockTrendPct = ((r.close - base) / base) * 100;
           relStrength = stockTrendPct - (niftyClose != null && niftyReturn55 != null ? niftyReturn55 * 0.5 : 0);
         }
-        const snap = snapFromRow(r);
+        const rsPercentile = rsPct.get(`${r.symbol}|${r.exchange}`) ?? null;
+        const snap = { ...snapFromRow(r), rsPercentile };
         const ctx = { sectorStrength, regime, relStrengthNifty: relStrength, deliveryPct: null };
         const bs = breakoutScore(snap, ctx);
         const ps = preBreakoutScore(snap, ctx);
@@ -198,6 +221,7 @@ Deno.serve(async (req) => {
         const { error } = await svc.from("market_stock_scores").update({
           sector_strength: Math.round(sectorStrength * 100) / 100,
           rel_strength_nifty: relStrength != null ? Math.round(relStrength * 100) / 100 : null,
+          rs_percentile: rsPercentile,
           breakout_score: bs.score,
           prebreakout_score: ps.score,
           score_components: scoreComponents,

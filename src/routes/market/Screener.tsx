@@ -11,6 +11,7 @@ import { HudModal } from "@/components/hud/HudModal";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
+import { AddToWatchlistButton } from "@/components/market/AddToWatchlistButton";
 
 import { useSavedScreeners, useScreenerMutations, useQuotes, useMarketSettings } from "@/lib/market/hooks";
 import { useScreenerData, useScreenerSectors, useScreenerIndustries, type ScreenerRow } from "@/lib/market/screenerRun";
@@ -91,36 +92,14 @@ const STATE_STORE_KEY = "screener.state.v2"; // { universe, active, savedId } �
 // Filter-id → column-id map used when the user has active filters. The
 // results grid then renders ONLY the columns matching what they filtered on
 // (plus Symbol as the row identity), matching Tickertape-style behaviour.
-const FILTER_TO_COL: Record<string, string> = {
-  market_cap: "market_cap",
-  ltp: "close",
-  volume: "volume",
-  vol_gt_avg30: "vol_gt_avg30",
-  change_pct: "change_pct",
-  pct_from_52w_high: "pct_from_52w_high",
-  rel_volume: "rel_volume",
-  pe: "pe", pb: "pb", peg: "peg", eps: "eps", book_value: "book_value",
-  dividend_yield: "dividend_yield",
-  roe: "roe", roce: "roce",
-  debt_equity: "debt_equity",
-  sales_growth: "sales_growth", profit_growth: "profit_growth", eps_growth: "eps_growth",
-  promoter_holding: "promoter_holding", dii_holding: "dii_holding",
-  fii_holding: "fii_holding", institutional_holding: "institutional_holding",
-  rsi: "rsi", adx: "adx",
-  ret_5d: "ret_5d", ret_21d: "ret_21d", ret_ytd: "ret_ytd",
-  breakout_score: "breakout_score", prebreakout_score: "prebreakout_score",
-  sector: "sector", industry: "industry",
-};
+// FILTER_TO_COL and colsFromActiveFilters live in ../../lib/market/screenerColumns
+// so /market Overview → Top Breakouts renders the same columns as this page.
+import { colsFromActiveFilters as sharedColsFromActiveFilters } from "@/lib/market/screenerColumns";
 const COL_IDS = new Set(COLUMNS.map((c) => c.id));
 function colsFromActiveFilters(active: ActiveFilter[]): string[] {
-  const out: string[] = ["symbol"];
-  const seen = new Set(out);
-  for (const f of active) {
-    const id = canonicalFilterId(f.id);
-    const col = FILTER_TO_COL[id];
-    if (col && COL_IDS.has(col) && !seen.has(col)) { out.push(col); seen.add(col); }
-  }
-  return out;
+  // Restrict to columns this Screener table actually renders and skip boolean
+  // filters (Yes/No values are redundant with the active-filter chip).
+  return sharedColsFromActiveFilters(active, { skipBooleans: true, allowedCols: COL_IDS });
 }
 
 function normalizeActiveFilters(filters: ActiveFilter[]): ActiveFilter[] {
@@ -745,8 +724,23 @@ function ScreenerInner() {
       },
     };
     return effectiveCols.map((id) => all[id]).filter(Boolean);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveCols, latestTradeDate, liveByKey]);
+
+  const columnsWithActions = useMemo<ColumnDef<ScreenerRow, any>[]>(() => {
+    return [
+      ...columns,
+      {
+        id: "actions", header: "", enableSorting: false, meta: { align: "right" } as any,
+        cell: ({ row }: any) => (
+          <AddToWatchlistButton
+            symbol={row.original.symbol}
+            exchange={(row.original.exchange as "NSE" | "BSE") ?? "NSE"}
+          />
+        ),
+      },
+    ];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columns]);
 
   const [healthOpen, setHealthOpen] = useState(false);
 
@@ -932,14 +926,17 @@ function ScreenerInner() {
             ) : (
               <>
                 <DataTable
-                  columns={columns}
+                  columns={columnsWithActions}
                   data={paged}
                   sorting={sorting}
                   onSortingChange={setSorting}
                   onRowClick={(r) => nav(`/market/analysis/${r.symbol}`)}
+                  numbered
+                  startIndex={pageStart}
                   emptyLabel={rows.length === 0 && !isFetching ? "market pipeline is warming up" : "no matches"}
                   emptyHint={rows.length === 0 && !isFetching ? "automatic sync is enabled; refresh shortly" : "loosen the filters or change the universe"}
                 />
+
                 {active.length > 0 && filtered.length === 0 && rows.length > 0 && (
                   <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", padding: "8px 10px", border: "1px dashed var(--edge)" }}>
                     <span style={{ fontSize: 11, color: "var(--text-muted)" }}>No matches for the current filters.</span>

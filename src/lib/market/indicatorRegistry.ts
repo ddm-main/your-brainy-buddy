@@ -76,10 +76,10 @@ export const INDICATOR_DEFS: IndicatorDef[] = [
   { type: "keltner", label: "Keltner Channels", group: "overlay", params: [P("emaPeriod", "EMA"), P("atrPeriod", "ATR"), P("mult", "Mult", 0.5, 10, 0.1)], lines: [{ label: "Upper", defaultColor: AM }, { label: "Basis", defaultColor: AM }, { label: "Lower", defaultColor: AM }], defaultParams: { emaPeriod: 20, atrPeriod: 10, mult: 2 }, defaultWidth: 1 },
   { type: "donchian", label: "Donchian Channels", group: "overlay", params: [P("period", "Length")], lines: [{ label: "Upper", defaultColor: BL }, { label: "Basis", defaultColor: BL }, { label: "Lower", defaultColor: BL }], defaultParams: { period: 20 }, defaultWidth: 1 },
   { type: "vwap", label: "VWAP", group: "overlay", params: [], lines: [{ label: "VWAP", defaultColor: PK }], defaultParams: {}, defaultWidth: 1 },
-  { type: "supertrend", label: "Supertrend", group: "overlay", params: [P("atrPeriod", "ATR"), P("mult", "Mult", 0.5, 10, 0.1)], lines: [{ label: "Supertrend", defaultColor: UP }], defaultParams: { atrPeriod: 10, mult: 3 }, defaultWidth: 2 },
+  { type: "supertrend", label: "Supertrend", group: "overlay", params: [P("atrPeriod", "ATR"), P("mult", "Mult", 0.5, 10, 0.1)], lines: [{ label: "Up trend", defaultColor: UP }, { label: "Down trend", defaultColor: DN }], defaultParams: { atrPeriod: 10, mult: 3 }, defaultWidth: 2 },
   { type: "psar", label: "Parabolic SAR", group: "overlay", params: [P("step", "Step", 0.001, 1, 0.001), P("max", "Max", 0.01, 1, 0.01)], lines: [{ label: "PSAR", defaultColor: GY }], defaultParams: { step: 0.02, max: 0.2 }, defaultWidth: 1 },
   { type: "ichimoku", label: "Ichimoku Cloud", group: "overlay", params: [P("conv", "Conversion"), P("base", "Base"), P("spanB", "Span B")], lines: [{ label: "Conversion", defaultColor: TE }, { label: "Base", defaultColor: PK }, { label: "Span A", defaultColor: UP }, { label: "Span B", defaultColor: DN }], defaultParams: { conv: 9, base: 26, spanB: 52 }, defaultWidth: 1 },
-  { type: "volume", label: "Volume", group: "overlay", params: [], lines: [{ label: "Volume", defaultColor: BL }], defaultParams: {}, defaultWidth: 1 },
+  { type: "volume", label: "Volume", group: "overlay", params: [], lines: [{ label: "Volume (bar color follows candle)", defaultColor: UP }], defaultParams: {}, defaultWidth: 1 },
   // ---- oscillators ----
   { type: "rsi", label: "RSI", group: "oscillator", params: [P("period", "Length")], lines: [{ label: "RSI", defaultColor: LI }], defaultParams: { period: 14 }, defaultWidth: 1 },
   { type: "macd", label: "MACD", group: "oscillator", params: [P("fast", "Fast"), P("slow", "Slow"), P("signal", "Signal")], lines: [{ label: "MACD", defaultColor: TE }, { label: "Signal", defaultColor: AM }, { label: "Hist", defaultColor: GR }], defaultParams: { fast: 12, slow: 26, signal: 9 }, defaultWidth: 1 },
@@ -152,6 +152,7 @@ export function normalizeStudy(raw: Study): Study | null {
 export const DEFAULT_STUDIES: Study[] = [
   makeStudy("ema", { params: { period: 20 } }),
   makeStudy("ema", { params: { period: 50 } }),
+  makeStudy("supertrend"),
   makeStudy("volume"),
 ];
 

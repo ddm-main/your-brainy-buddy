@@ -22,7 +22,8 @@ import { FullscreenShell } from "@/components/market/FullscreenShell";
 import { useNotifications } from "@/store/notificationStore";
 import { RefreshCw } from "lucide-react";
 
-const STATE_STORE = "jarvis.analysis.state.v4";
+const STATE_STORE = "jarvis.analysis.state.v5";
+const LAYOUTS_STORE = "jarvis.analysis.layouts.v1";
 const INTRADAY_TFS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h"];
 
 type Persisted = {
@@ -31,7 +32,6 @@ type Persisted = {
   tvMode: boolean;
   studies: Study[];
   settings: ChartSettings;
-  range: string;
 };
 
 const defaultState: Persisted = {
@@ -40,7 +40,6 @@ const defaultState: Persisted = {
   tvMode: false,
   studies: DEFAULT_STUDIES,
   settings: DEFAULT_SETTINGS,
-  range: "6M",
 };
 
 // Drop studies whose type no longer exists and backfill missing params/colours.
@@ -76,7 +75,6 @@ export default function Analysis() {
   };
   const initial = useMemo(loadState, []);
   const [tf, setTf] = useState(initial.tf);
-  const [range, setRange] = useState(initial.range);
   const [chartType, setChartType] = useState<ChartType>(initial.chartType);
   const [tvMode, setTvMode] = useState(initial.tvMode);
   const [fs, setFs] = useState(false);
@@ -93,11 +91,45 @@ export default function Analysis() {
   const updateStudy = useCallback((u: Study) => setStudies((s) => s.map((x) => (x.id === u.id ? u : x))), []);
   const resetStudies = useCallback(() => setStudies(DEFAULT_STUDIES), []);
   const editing = studies.find((s) => s.id === editingId) ?? null;
+  const visibleStudyCount = useMemo(() => studies.filter((s) => s.visible).length, [studies]);
+
+  const [savedLayouts, setSavedLayouts] = useState<string[]>(() => {
+    try { return Object.keys(JSON.parse(localStorage.getItem(LAYOUTS_STORE) ?? "{}")); } catch { return []; }
+  });
+  const saveLayout = useCallback((name: string) => {
+    try {
+      const all = JSON.parse(localStorage.getItem(LAYOUTS_STORE) ?? "{}");
+      all[name] = { tf, chartType, studies, settings };
+      localStorage.setItem(LAYOUTS_STORE, JSON.stringify(all));
+      setSavedLayouts(Object.keys(all));
+      notify(`Layout "${name}" saved`);
+    } catch { notify("Could not save layout"); }
+  }, [tf, chartType, studies, settings, notify]);
+  const loadLayout = useCallback((name: string) => {
+    try {
+      const all = JSON.parse(localStorage.getItem(LAYOUTS_STORE) ?? "{}");
+      const l = all[name];
+      if (!l) return;
+      if (l.tf) setTf(l.tf);
+      if (l.chartType) setChartType(l.chartType);
+      if (Array.isArray(l.studies)) setStudies(loadStudies(l.studies));
+      if (l.settings) setSettings({ ...DEFAULT_SETTINGS, ...l.settings });
+      notify(`Layout "${name}" loaded`);
+    } catch { notify("Could not load layout"); }
+  }, [notify]);
+  const deleteLayout = useCallback((name: string) => {
+    try {
+      const all = JSON.parse(localStorage.getItem(LAYOUTS_STORE) ?? "{}");
+      delete all[name];
+      localStorage.setItem(LAYOUTS_STORE, JSON.stringify(all));
+      setSavedLayouts(Object.keys(all));
+    } catch { /* noop */ }
+  }, []);
 
   useEffect(() => {
-    const payload: Persisted = { tf, chartType, tvMode, studies, settings, range };
+    const payload: Persisted = { tf, chartType, tvMode, studies, settings };
     localStorage.setItem(STATE_STORE, JSON.stringify(payload));
-  }, [tf, chartType, tvMode, studies, settings, range]);
+  }, [tf, chartType, tvMode, studies, settings]);
 
   // F toggles fullscreen when not typing in an input
   useEffect(() => {
@@ -146,9 +178,6 @@ export default function Analysis() {
     }, "image/png");
   }, [tf, sym, notify]);
 
-  const handleSaveLayout = useCallback(() => {
-    notify("Chart layout saved");
-  }, [notify]);
   const { data: candleData, isLoading, error } = useCandles(sym, tf, exchange);
 
   const { data: scores = [] } = useStockScores({ symbol: sym, limit: 1 });
@@ -184,10 +213,14 @@ export default function Analysis() {
 
   const priceLines = useMemo(() => {
     const lines: Array<{ price: number; label: string; color: string }> = [];
-    if (score?.resistance_level) lines.push({ price: score.resistance_level, label: "R", color: "#ffb84d" });
-    if (score?.support_level) lines.push({ price: score.support_level, label: "S", color: "#6bffb0" });
+    const r = liveScore?.snapshot.resistance ?? score?.resistance_level ?? null;
+    const s = liveScore?.snapshot.support ?? score?.support_level ?? null;
+    const rFallback = liveScore?.snapshot.resistanceFallback ?? false;
+    const sFallback = liveScore?.snapshot.supportFallback ?? false;
+    if (r) lines.push({ price: r, label: rFallback ? "R*" : "R", color: "#ffb84d" });
+    if (s) lines.push({ price: s, label: sFallback ? "S*" : "S", color: "#6bffb0" });
     return lines;
-  }, [score]);
+  }, [liveScore, score]);
 
   // No standalone "Analysis" destination — this view is always reached by
   // clicking a symbol elsewhere. A missing/invalid param sends the user back
@@ -225,15 +258,14 @@ export default function Analysis() {
           <FullscreenShell fullscreen={fs} onExit={() => setFs(false)} title={`${sym} · ${tf}`}>
             <ChartToolbar
               symbol={sym}
+              exchange={exchange}
               tf={tf}
               onTf={setTf}
-              range={range}
-              onRange={setRange}
               chartType={chartType}
               onChartType={setChartType}
               onAddStudy={addStudy}
               onResetStudies={resetStudies}
-              studyCount={studies.length}
+              studyCount={visibleStudyCount}
               settings={settings}
               onSettings={(u) => setSettings(u)}
               tvMode={tvMode}
@@ -241,7 +273,10 @@ export default function Analysis() {
               onFullscreen={() => setFs(true)}
               onAlert={() => setAlertModalOpen(true)}
               onScreenshot={handleScreenshot}
-              onSaveLayout={handleSaveLayout}
+              onSaveLayout={saveLayout}
+              onLoadLayout={loadLayout}
+              onDeleteLayout={deleteLayout}
+              savedLayouts={savedLayouts}
             />
             <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0 }}>
               {tvMode ? (
@@ -255,7 +290,7 @@ export default function Analysis() {
               ) : (
                 <CandleChart
                   candles={candleData.candles}
-                  priceLines={tf === "1D" ? priceLines : undefined}
+                  priceLines={priceLines}
                   fill
                   chartType={chartType}
                   studies={studies}
@@ -355,8 +390,22 @@ export default function Analysis() {
               {!score && !liveScore && <span style={{ color: "var(--text-muted)", fontSize: 11 }}>pipeline pending</span>}
             </span>
           </Row>
-          <Row label="Resistance" mono>{fmtNum(liveScore?.snapshot.resistance ?? score?.resistance_level)}</Row>
-          <Row label="Support" mono>{fmtNum(liveScore?.snapshot.support ?? score?.support_level)}</Row>
+          <Row label="Resistance" mono>
+            {fmtNum(liveScore?.snapshot.resistance ?? score?.resistance_level)}
+            {liveScore?.snapshot.resistanceTouches ? (
+              <span style={{ color: "var(--text-muted)", fontSize: 10, marginLeft: 6 }}>
+                {liveScore.snapshot.resistanceTouches}×{liveScore.snapshot.resistanceFallback ? " • range hi" : ""}
+              </span>
+            ) : null}
+          </Row>
+          <Row label="Support" mono>
+            {fmtNum(liveScore?.snapshot.support ?? score?.support_level)}
+            {liveScore?.snapshot.supportTouches ? (
+              <span style={{ color: "var(--text-muted)", fontSize: 10, marginLeft: 6 }}>
+                {liveScore.snapshot.supportTouches}×{liveScore.snapshot.supportFallback ? " • range lo" : ""}
+              </span>
+            ) : null}
+          </Row>
         </HudPanel>
 
         <HudPanel flow title="Indicators (Daily)" index="A4" actions={liveScore ? <Chip tone="ok">live</Chip> : undefined}>

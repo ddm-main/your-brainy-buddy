@@ -29,79 +29,84 @@ export function breakoutScore(s: IndicatorSnapshot, ctx: MarketContext): ScoreRe
   const c: Record<string, number> = {};
 
   // --- Trigger & momentum (25) ---
-  // v2: real breakout trigger = close above a rolling N-day high, magnitude in
-  // ATR units. Falls back to pctFrom52wHigh when rolling highs are unavailable
-  // (older pipeline snapshots) so the scorer degrades gracefully rather than
-  // going silent.
+  // Real breakout trigger = close above rolling N-day high, magnitude in ATRs.
+  // Falls back to pctFrom52wHigh when rolling highs are unavailable.
   const pivot = s.rollingHigh20 ?? null;
   const atr = s.atr14 ?? null;
   if (pivot != null && s.close != null && atr != null && atr > 0) {
-    // (close − pivot) in ATRs. 0 = at pivot, 1 = classic breakout, 2+ = strong.
     const atrsAbove = (s.close - pivot) / atr;
-    // 0 → 0, 0.05 → 6 (fresh close-above), 1.0 → 15 (full).
-    c.trigger = ramp(atrsAbove, 0, 1) * 15;
+    c.trigger = ramp(atrsAbove, 0, 1) * 10;
   } else {
-    // Fallback: proximity to 52w high. At high → full; −15% → 0.
     const pf = s.pctFrom52wHigh;
-    c.trigger = pf == null ? 0 : ramp(pf, -15, 0) * 15;
+    c.trigger = pf == null ? 0 : ramp(pf, -15, 0) * 10;
   }
+  // Close-in-range: at high of the day = full 3pts, at low = 0.
+  const cir = s.closeInRangePct;
+  c.close_in_range = cir == null ? 0 : ramp(cir, 40, 90) * 3;
+  // Freshness: today's breakout > 3-day-old breakout > week-old. 0d=full, 5d+=0.
+  const fresh = s.breakoutFreshnessDays;
+  c.freshness = fresh == null ? 0 : Math.max(0, (1 - fresh / 5)) * 2;
   // ADX shows a real trend behind the move: 15 → 0, 30+ → full (max 5).
   c.adx = s.adx14 == null ? 0 : ramp(s.adx14, 15, 30) * 5;
   // MACD confirmation (bullish + rising hist).
   const macdBull = s.macd != null && s.macdSignal != null && s.macd > s.macdSignal;
   c.macd = (macdBull ? 3 : 0) + (s.macdHistRising ? 2 : 0);
 
+  // --- Base quality (15) ---
+  // Tight, shallow, mature bases break out cleaner. All optional.
+  const bt = s.baseTightness;
+  const bd = s.baseDepthPct;
+  const bDur = s.baseDurationDays;
+  c.base_tightness = bt == null ? 0 : (1 - ramp(bt, 0.02, 0.08)) * 6;   // ≤2%SD full, ≥8% none
+  c.base_depth = bd == null ? 0 : (1 - ramp(bd, 8, 30)) * 5;             // ≤8% full, ≥30% none
+  c.base_duration = bDur == null ? 0 : ramp(bDur, 10, 30) * 4;           // ≥30 sessions full
+
   // --- Volume/participation (20) ---
   const rv = s.relVolume ?? 0;
-  // Graded: 1.0× → 0, 3.0× → full. Beyond 3× keeps the max (no bonus for spikes).
   c.volume = ramp(rv, 1, 3) * 10;
-  // OBV slope over ~20 sessions confirms accumulation (max 4). Null → 0.
   const obv = s.obvSlope20 ?? null;
   c.obv = obv == null ? 0 : ramp(obv, 0, 1) * 4;
-  // Delivery % — graded 30 → 70. Missing degrades to 0 (unchanged behaviour).
   const dp = ctx.deliveryPct;
   c.delivery = dp == null ? 0 : ramp(dp, 30, 70) * 6;
 
-  // --- Trend (20) ---
-  c.above_ema200 = s.aboveEma200 ? 10 : 0;
-  c.ema_alignment = s.emaAligned ? 10 : 0;
+  // --- Trend (10) ---
+  c.above_ema200 = s.aboveEma200 ? 5 : 0;
+  c.ema_alignment = s.emaAligned ? 5 : 0;
 
-  // --- Momentum (RSI) (10) --- graded, no dead band.
-  // 45 → 0, 60 → full, 75 → full, 85 → 0 (overbought is bad again).
+  // --- Momentum (RSI) (5) --- graded, no dead band.
   const rsi = s.rsi14;
-  if (rsi == null) c.rsi = 0;
-  else if (rsi <= 45) c.rsi = 0;
-  else if (rsi < 60) c.rsi = ((rsi - 45) / 15) * 10;
-  else if (rsi <= 75) c.rsi = 10;
-  else if (rsi < 85) c.rsi = ((85 - rsi) / 10) * 10;
-  else c.rsi = 0;
-  c.rsi = clamp(c.rsi, 0, 10);
+  let rsiScore = 0;
+  if (rsi == null) rsiScore = 0;
+  else if (rsi <= 45) rsiScore = 0;
+  else if (rsi < 60) rsiScore = ((rsi - 45) / 15) * 5;
+  else if (rsi <= 75) rsiScore = 5;
+  else if (rsi < 85) rsiScore = ((85 - rsi) / 10) * 5;
+  c.rsi = clamp(rsiScore, 0, 5);
 
   // --- RS & context (15) ---
   const rs = ctx.relStrengthNifty;
-  c.rel_strength = rs == null ? 3 : ramp(rs, -5, 15) * 8;
+  c.rel_strength = rs == null ? 2 : ramp(rs, -5, 15) * 5;
+  // RS percentile vs universe (0..100). Full at 90+, none at ≤50.
+  const rsP = ctx.relStrengthNifty != null && s.rsPercentile == null ? null : s.rsPercentile;
+  c.rs_percentile = rsP == null ? 0 : ramp(rsP, 50, 90) * 3;
   c.sector_strength = ctx.sectorStrength == null ? 2 : ctx.sectorStrength * 4;
   c.breadth = ctx.regime === "bullish" ? 3 : ctx.regime === "neutral" ? 1.5 : 0;
 
   // --- Risk penalties (subtract; floor 0) ---
-  // Over-extension in ATR: close > EMA20 by many ATRs → chase-trap.
   let penalty = 0;
   const penalties: Record<string, number> = {};
   if (s.atr14 != null && s.atr14 > 0 && s.ema20 != null && s.close != null) {
     const atrsAboveEma = (s.close - s.ema20) / s.atr14;
-    const p = ramp(atrsAboveEma, 3, 6) * 15; // 3 ATRs → 0, 6+ ATRs → -15
+    const p = ramp(atrsAboveEma, 3, 6) * 15;
     if (p > 0) { penalties.overextension = p; penalty += p; }
   }
-  // Thin liquidity: sub-1× volume during a "breakout" isn't a breakout.
   if (rv > 0 && rv < 0.8) {
-    const p = (0.8 - rv) * 10; // up to -8
+    const p = (0.8 - rv) * 10;
     penalties.thin_volume = p; penalty += p;
   }
 
   const gross = Object.values(c).reduce((a, b) => a + b, 0);
   let total = gross - penalty;
-  // v2: apply regime multiplier to breakout score (preBreakout already does).
-  // Bullish tape amplifies, bearish tape dampens. Same 0.7× floor as preBreakout.
   const regimeMult = ctx.regime === "bullish" ? 1.05 : ctx.regime === "bearish" ? 0.7 : 1;
   total *= regimeMult;
   const components = Object.fromEntries(Object.entries(c).map(([k, v]) => [k, Math.round(v * 10) / 10]));

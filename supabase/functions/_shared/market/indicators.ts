@@ -220,34 +220,221 @@ export function higherLows(lows: number[], lookback = 40, count = 3): boolean {
   return true;
 }
 
-// Cluster swing highs/lows into support & resistance nearest to the last close.
+// Detect swing pivots (fractals) with configurable side-strength. Right-side
+// window is allowed to shrink at the tail so the most recent swing isn't
+// silently dropped (the previous implementation ignored the last two bars).
+type Pivot = { price: number; index: number; volume: number };
+function findPivots(
+  window: Candle[],
+  side: "high" | "low",
+  strength: number,
+): Pivot[] {
+  const out: Pivot[] = [];
+  for (let i = strength; i < window.length; i++) {
+    const c = window[i];
+    const val = side === "high" ? c.high : c.low;
+    let ok = true;
+    // left side: strict
+    for (let k = 1; k <= strength; k++) {
+      const other = side === "high" ? window[i - k].high : window[i - k].low;
+      if (side === "high" ? other >= val : other <= val) { ok = false; break; }
+    }
+    if (!ok) continue;
+    // right side: shrink at tail, allow equality only when we have < strength bars
+    const rightBars = Math.min(strength, window.length - 1 - i);
+    for (let k = 1; k <= rightBars; k++) {
+      const other = side === "high" ? window[i + k].high : window[i + k].low;
+      if (side === "high" ? other >= val : other <= val) { ok = false; break; }
+    }
+    if (!ok) continue;
+    out.push({ price: val, index: i, volume: c.volume });
+  }
+  return out;
+}
+
+// Cluster pivots by ATR% band, weight by touches + recency + volume.
+type Cluster = { price: number; touches: number; strength: number };
+function clusterPivots(pivots: Pivot[], bandPct: number, windowLen: number): Cluster[] {
+  const sorted = [...pivots].sort((a, b) => a.price - b.price);
+  const clusters: Cluster[] = [];
+  let bucket: Pivot[] = [];
+  const flush = () => {
+    if (!bucket.length) return;
+    const vwPrice = bucket.reduce((s, p) => s + p.price * Math.max(1, p.volume), 0) /
+                    bucket.reduce((s, p) => s + Math.max(1, p.volume), 0);
+    // recency: newer pivots weight more (0..1 across window)
+    const recency = bucket.reduce((s, p) => s + p.index / Math.max(1, windowLen - 1), 0);
+    clusters.push({ price: vwPrice, touches: bucket.length, strength: bucket.length + recency });
+    bucket = [];
+  };
+  for (const p of sorted) {
+    if (!bucket.length) { bucket.push(p); continue; }
+    const ref = bucket[bucket.length - 1].price;
+    if (Math.abs(p.price - ref) / ref <= bandPct) bucket.push(p);
+    else { flush(); bucket.push(p); }
+  }
+  flush();
+  return clusters;
+}
+
+// Cluster swing highs/lows into support & resistance zones weighted by
+// touches, recency, and volume. Returns the strongest zone above/below the
+// last close, with ATR-scaled tolerance so a slightly-cleared level still
+// counts. Falls back to lookback high/low so ATH/ATL stocks still get levels.
 export function supportResistance(
   candles: Candle[],
-  lookback = 60,
-): { support: number | null; resistance: number | null } {
+  lookback = 250,
+): {
+  support: number | null;
+  resistance: number | null;
+  supportTouches: number;
+  resistanceTouches: number;
+  supportFallback: boolean;
+  resistanceFallback: boolean;
+} {
+  const empty = {
+    support: null, resistance: null,
+    supportTouches: 0, resistanceTouches: 0,
+    supportFallback: false, resistanceFallback: false,
+  };
   const window = candles.slice(-lookback);
-  if (window.length < 10) return { support: null, resistance: null };
+  if (window.length < 20) return empty;
   const lastClose = window[window.length - 1].close;
-  const highs: number[] = [];
-  const lows: number[] = [];
-  for (let i = 2; i < window.length - 2; i++) {
-    const c = window[i];
-    if (c.high > window[i - 1].high && c.high > window[i - 2].high && c.high > window[i + 1].high && c.high > window[i + 2].high) {
-      highs.push(c.high);
-    }
-    if (c.low < window[i - 1].low && c.low < window[i - 2].low && c.low < window[i + 1].low && c.low < window[i + 2].low) {
-      lows.push(c.low);
-    }
+  const a = atr(window, 14);
+  const atrV = lastDefined(a) ?? (lastClose * 0.02);
+  const band = Math.max(0.003, (0.5 * atrV) / lastClose); // cluster band, min 0.3%
+  const tol = 0.25 * atrV;                                 // "still counts" tolerance
+
+  const strength = 3;
+  const hiPivots = findPivots(window, "high", strength);
+  const loPivots = findPivots(window, "low", strength);
+  const hiClusters = clusterPivots(hiPivots, band, window.length);
+  const loClusters = clusterPivots(loPivots, band, window.length);
+
+  const aboveHi = hiClusters
+    .filter((c) => c.price >= lastClose - tol)
+    .sort((a, b) => b.strength - a.strength || a.price - b.price)[0];
+  const belowLo = loClusters
+    .filter((c) => c.price <= lastClose + tol)
+    .sort((a, b) => b.strength - a.strength || b.price - a.price)[0];
+
+  let resistance: number | null = aboveHi?.price ?? null;
+  let resistanceTouches = aboveHi?.touches ?? 0;
+  let resistanceFallback = false;
+  if (resistance == null) {
+    const hi = Math.max(...window.map((c) => c.high));
+    resistance = hi;
+    resistanceFallback = true;
   }
-  const resistance = highs.filter((h) => h > lastClose).sort((a, b) => a - b)[0] ?? null;
-  const support = lows.filter((l) => l < lastClose).sort((a, b) => b - a)[0] ?? null;
-  return { support, resistance };
+  let support: number | null = belowLo?.price ?? null;
+  let supportTouches = belowLo?.touches ?? 0;
+  let supportFallback = false;
+  if (support == null) {
+    const lo = Math.min(...window.map((c) => c.low));
+    support = lo;
+    supportFallback = true;
+  }
+  return { support, resistance, supportTouches, resistanceTouches, supportFallback, resistanceFallback };
 }
 
 function lastDefined(series: (number | null)[]): number | null {
   for (let i = series.length - 1; i >= 0; i--) if (series[i] != null) return series[i];
   return null;
 }
+
+// On-Balance Volume series (aligned to candles).
+export function obv(candles: Candle[]): number[] {
+  const out: number[] = new Array(candles.length).fill(0);
+  for (let i = 1; i < candles.length; i++) {
+    const dir = candles[i].close > candles[i - 1].close ? 1 : candles[i].close < candles[i - 1].close ? -1 : 0;
+    out[i] = out[i - 1] + dir * candles[i].volume;
+  }
+  return out;
+}
+
+// Normalized least-squares slope of the last `period` values of a series.
+// Returned in "per-session-relative-to-mean" units so it's comparable across symbols.
+export function normalizedSlope(series: number[], period = 20): number | null {
+  if (series.length < period) return null;
+  const y = series.slice(-period);
+  const n = y.length;
+  const xMean = (n - 1) / 2;
+  const yMean = y.reduce((a, b) => a + b, 0) / n;
+  let num = 0, den = 0;
+  for (let i = 0; i < n; i++) {
+    num += (i - xMean) * (y[i] - yMean);
+    den += (i - xMean) ** 2;
+  }
+  if (den === 0) return 0;
+  const slope = num / den;
+  const scale = Math.max(1, Math.abs(yMean));
+  return slope / scale;
+}
+
+// Rolling max of highs over last `period` sessions, excluding today.
+export function rollingHighExclToday(candles: Candle[], period = 20): number | null {
+  if (candles.length < period + 1) return null;
+  const window = candles.slice(-period - 1, -1);
+  let h = -Infinity;
+  for (const c of window) if (c.high > h) h = c.high;
+  return Number.isFinite(h) ? h : null;
+}
+
+// Sessions since the price first cleared the rolling-N high. 0 = broke out today.
+// Null when no breakout in the last `lookback` sessions.
+export function breakoutFreshnessDays(candles: Candle[], period = 20, lookback = 10): number | null {
+  if (candles.length < period + 2) return null;
+  for (let k = 0; k < lookback && k < candles.length - period - 1; k++) {
+    const i = candles.length - 1 - k;
+    const win = candles.slice(i - period, i);
+    let h = -Infinity;
+    for (const c of win) if (c.high > h) h = c.high;
+    if (candles[i].close > h) {
+      // Check that the previous session did NOT close above the same-shifted high.
+      if (k === lookback - 1) return k;
+      const prevWin = candles.slice(i - period - 1, i - 1);
+      let ph = -Infinity;
+      for (const c of prevWin) if (c.high > ph) ph = c.high;
+      if (candles[i - 1].close <= ph) return k;
+    }
+  }
+  return null;
+}
+
+// Where today's close lies in its daily range, 0..100. 100 = at high, 0 = at low.
+export function closeInRangePct(c: Candle): number | null {
+  const rng = c.high - c.low;
+  if (!Number.isFinite(rng) || rng <= 0) return null;
+  return ((c.close - c.low) / rng) * 100;
+}
+
+// Base metrics: measure the last `window` sessions as a consolidation base.
+export function baseMetrics(candles: Candle[], window = 30): {
+  tightness: number | null;
+  depthPct: number | null;
+  durationDays: number | null;
+} {
+  if (candles.length < window) return { tightness: null, depthPct: null, durationDays: null };
+  const slice = candles.slice(-window);
+  const closes = slice.map((c) => c.close);
+  const mean = closes.reduce((a, b) => a + b, 0) / closes.length;
+  if (mean === 0) return { tightness: null, depthPct: null, durationDays: window };
+  const variance = closes.reduce((a, b) => a + (b - mean) ** 2, 0) / closes.length;
+  const sd = Math.sqrt(variance);
+  const tightness = sd / mean; // lower = tighter
+  let hi = -Infinity, lo = Infinity;
+  for (const c of slice) { if (c.high > hi) hi = c.high; if (c.low < lo) lo = c.low; }
+  const depthPct = hi > 0 ? ((hi - lo) / hi) * 100 : null;
+  // Duration = trailing sessions where close stayed within ±(depthPct*0.75)% of mean.
+  let duration = 0;
+  const band = Math.abs(depthPct ?? 0) * 0.75;
+  for (let i = candles.length - 1; i >= 0; i--) {
+    if (Math.abs((candles[i].close - mean) / mean) * 100 <= band) duration++;
+    else break;
+  }
+  return { tightness, depthPct, durationDays: duration || window };
+}
+
 
 export interface IndicatorSnapshot {
   close: number;
@@ -281,12 +468,23 @@ export interface IndicatorSnapshot {
   support: number | null;
   resistance: number | null;
   nearResistance: boolean;
+  supportTouches?: number;
+  resistanceTouches?: number;
+  supportFallback?: boolean;
+  resistanceFallback?: boolean;
   macdHistRising: boolean;
   // Rolling N-day highs (scoring v2 breakout trigger). Optional: pipelines that
   // haven't been updated still work — the trigger falls back to pctFrom52wHigh.
   rollingHigh20?: number | null;
   rollingHigh55?: number | null;
   obvSlope20?: number | null;
+  // v2 scoring inputs. All optional — scoring degrades gracefully when null.
+  baseTightness?: number | null;      // stddev/mean of closes over base window, lower = tighter
+  baseDepthPct?: number | null;       // (high−low)/high over base, % (lower = shallower/healthier)
+  baseDurationDays?: number | null;   // sessions in current base
+  rsPercentile?: number | null;       // 0..100 vs universe over 55 sessions
+  closeInRangePct?: number | null;    // 0..100 — where today closed within its daily range
+  breakoutFreshnessDays?: number | null; // sessions since 20d high was first cleared; 0 = today
   // series for chart overlays (aligned to candles)
   ema20Series: (number | null)[];
   ema50Series: (number | null)[];
@@ -345,15 +543,26 @@ export function computeSnapshot(candles: Candle[]): IndicatorSnapshot | null {
   const atrAvg = atrSeries.length ? atrSeries.reduce((x, y) => x + y, 0) / atrSeries.length : null;
   const atrContracting = atrV != null && atrAvg != null && atrV < atrAvg * 0.85;
 
-  const sr = supportResistance(candles, 60);
+  const sr = supportResistance(candles, 250);
+  // ATR-scaled "near resistance": within 0.5×ATR% of the level (min 1%).
+  const nearBand = atrV != null && close ? Math.max(0.01, (0.5 * atrV) / close) : 0.03;
   const nearRes =
-    sr.resistance != null && close >= sr.resistance * 0.97 && close < sr.resistance;
+    sr.resistance != null && close >= sr.resistance * (1 - nearBand) && close < sr.resistance;
 
   const macdHistSeries = m.hist.filter((v): v is number => v != null);
   const macdHistRising =
     macdHistSeries.length >= 3 &&
     macdHistSeries[macdHistSeries.length - 1] > macdHistSeries[macdHistSeries.length - 2] &&
     macdHistSeries[macdHistSeries.length - 2] > macdHistSeries[macdHistSeries.length - 3];
+
+  // v2 scoring inputs
+  const obvSeries = obv(candles);
+  const obvSlope20 = normalizedSlope(obvSeries, 20);
+  const rH20 = rollingHighExclToday(candles, 20);
+  const rH55 = rollingHighExclToday(candles, 55);
+  const freshness = breakoutFreshnessDays(candles, 20, 10);
+  const cir = closeInRangePct(last);
+  const base = baseMetrics(candles, 30);
 
   return {
     close,
@@ -388,7 +597,19 @@ export function computeSnapshot(candles: Candle[]): IndicatorSnapshot | null {
     support: sr.support,
     resistance: sr.resistance,
     nearResistance: nearRes,
+    supportTouches: sr.supportTouches,
+    resistanceTouches: sr.resistanceTouches,
+    supportFallback: sr.supportFallback,
+    resistanceFallback: sr.resistanceFallback,
     macdHistRising,
+    rollingHigh20: rH20,
+    rollingHigh55: rH55,
+    obvSlope20,
+    baseTightness: base.tightness,
+    baseDepthPct: base.depthPct,
+    baseDurationDays: base.durationDays,
+    closeInRangePct: cir,
+    breakoutFreshnessDays: freshness,
     ema20Series: e20,
     ema50Series: e50,
     ema200Series: e200,

@@ -1,152 +1,89 @@
 
-# Market Deep-Check & Hardening — Execution Plan
+## Audit of the Analysis chart section
 
-Ground-truth review of the codebase against your brief. What's already landed vs. what's still open, and the exact order I'll ship it in (DB first per your rule).
+I traced the full chart stack: `Analysis.tsx` → `ChartToolbar.tsx` → `CandleChart.tsx` → `chartIndicators.ts` / `indicatorRegistry.ts`. Here's what I found, then what I'll change.
 
-## Already implemented (verified in code — will NOT re-do)
+### Bugs & issues found
 
-- Portfolio 4-tab (Overview / Holdings / Positions / Orders), `FundsCard`, `OrderTicket` with MARKET/LIMIT/SL/SL-M · MIS/CNC/NRML · trigger + margin preview — all wired.
-- Backend: `market-funds`, `market-order-place` (Zod + margin guard), `market-order-modify`, `market-order-cancel`, `market-autotrade-fills` — deployed; migration `20260722095559` adds `exit_order_type`, `broker_sl_order_id`, fill columns.
-- `market-autotrade-fills` **already** uses shared `kotakOrders()` via `withKotakSession` (WS3.1 done; no `kotakOrderBook` stub left).
-- Provider split in `_shared/market/resolver.ts` (Kotak→Yahoo for price; FMP→Yahoo→NSE for fundamentals; alpha→computed for technicals).
-- `preferNseExchange` / `kotakSegmentFor` / `pickNsePreferredListing` shared helpers **exist** on both server (`supabase/functions/_shared/market/exchangePreference.ts`) and client (`src/lib/market/exchangePreference.ts`).
-- Cron: `market-alerts-eval` scheduled (migration `20260724102927`); `market-ai-recommend-nightly` scheduled (migration `20260722081142`). WS3.4 already done.
-- Realtime tick coverage wired on Dashboard, Screener, Watchlist, Holdings, Positions, PortfolioOverview, IndexDetail, MarketStrip; `PriceSourceChip` present on portfolio surfaces.
-- Daily orchestrator edge function `market-daily-sync` deployed (previous turn); cron insert was interrupted — re-issued below.
+**Toolbar (`ChartToolbar.tsx`)**
+1. **Duplicate duration controls.** Two menus both look like "durations": `Interval` (1D, 1W…) and `Range` (1 Day, 6 Months…). The `range` state is stored in localStorage and set on click, but `useCandles(sym, tf, exchange)` **never receives it** — Range is pure decoration. This is the "duplicate durations" the user is seeing.
+2. **Two fullscreen buttons.** "More → Fullscreen · F" and a standalone maximize icon at the far right do the same thing.
+3. **"Save current layout" is a no-op** — `handleSaveLayout` only toasts "Chart layout saved"; nothing is persisted beyond the studies/settings that autosave anyway.
+4. **"Layout → 2 charts / 2×2 grid"** are permanently disabled ("soon") — clutter.
+5. **"Open on tradingview.com"** hardcodes `NSE:` even when exchange is BSE.
+6. **`Indicators` badge count** shows total studies including hidden ones — misleading when you toggle visibility off.
+7. Menu is disabled in TV mode but there's no visual cue on the toolbar row explaining why several controls grey out at once.
 
-## Still open — what this plan ships
+**Indicator registry & math (`indicatorRegistry.ts`, `chartIndicators.ts`)**
+8. **Supertrend already exists** but on the chart it renders as two thin lines (green up-segments, red down-segments) with no fill and no flip markers — doesn't look like industry standard. The `col[0]` color from the study settings is ignored (hardcoded UP/DOWN).
+9. **Ichimoku cloud is missing the shaded cloud** — only the 4 lines are drawn, no Span A/B fill (the whole point of Ichimoku).
+10. **VWAP** silently degrades to "typical price" on daily+ timeframes; we mark it dashed but never tell the user why in the legend.
+11. **PSAR** draws as a connected `LineSeries` with `lineVisible: false` and `pointMarkersRadius: 1.6` — dots are barely visible and there's no color per trend flip.
+12. **Volume study**: default color in registry is `BL` (blue), but on the chart bars are hardcoded green/red — the swatch in the picker lies.
+13. **`aroon`** uses `period + 1` window (loops `j = i-period; j <= i`) instead of `period` — off-by-one vs. TradingView.
+14. **`stoch` smoothing param** exists but `stochastic()` applies `smooth` to raw %K then `dPeriod` to that; TradingView convention is opposite (K = SMA of raw over `smooth`, then D = SMA(K, dPeriod)) — matches, but the label "Smooth" is under "%K" in UI and confusingly named. Cosmetic only.
+15. **`sma` / `ema` (candle-based versions)** are hard-coded to `close` and ignore the `source` param — but the study registry advertises `hasSource: true` for MAs. `computeStudy` correctly routes MAs through `emaV(src(),…)` so this works, but the candle-based `sma()`/`ema()`/`wma()` exports are now dead code that will mislead anyone reading `chartIndicators.ts`.
+16. **`macd` seed for signal EMA** requires `signalP` full non-null macd values before emitting — correct, but combined with the slow EMA warmup this delays first signal print by ~34 bars. Match TradingView by using EMA-seed = first value (not SMA of first N) so signal starts earlier. Minor.
+17. **`stochRsi` `k` param** — registry `defaultParams` are `{ rsiPeriod: 14, stochPeriod: 14, k: 3, d: 3 }`, but the function positional args are `(candles, rsiPeriod, stochPeriod, kPeriod, dPeriod)` — call site passes `p.k`/`p.d`, correct. OK.
+18. **`chartType` change** rebuilds the entire chart (candles→line), which is fine, but the `computed` memo also rebuilds every render because `studies` array identity changes even when studies didn't. Wrap toggle/remove/update in stable identity or memoize `computed` on serialized studies. Perf, not correctness.
+19. **Live tick**: `livePrice` updates the last bar's high/low/close but **does not extend a new bar** across a session boundary. On intraday timeframes after the current-bar's window closes, ticks still glue to the old bar until the next fetch. Low-priority.
 
----
+**Indicator settings modal**
+20. Params use free numeric input with `min/max/step` from `ParamMeta`, but there's no client-side clamping, so entering `-5` for period silently produces NaN cascades. `atr(candles, -5)` returns all-null and the study renders blank with no error.
 
-### Phase 0 — DB & scheduling (runs first, one migration + one insert)
+**Legend / crosshair**
+21. Legend value formatting uses `.toFixed(2)` for every study — Aroon (0–100), OBV (raw shares), MFI (0–100) all get 2 decimals whether meaningful or not. OBV in particular should be compact-formatted (K/M/B) like the OHLCV header does.
 
-**Migration `market_hardening_v1`:**
+### What I'll change
 
-1. **Token drift reconcile.** Add `market_stocks.kotak_token bigint` mirror; backfill from `market_data.kotak_token` where present, else from existing `market_stocks.token`. Add a view column `market_pipeline_status.token_coverage_pct` (equities with a non-null Kotak token / equities total). Keep both physical columns for one release; `provider.ts` + relay will read a single accessor (Phase 2).
-2. **Score-drift schema aid.** No column change needed — `market_data` already has `rsi`, `ltp`, `above_ema_200`, `breakout_score`, `prebreakout_score`, `score_components`. Just create index `idx_market_data_breakout_score_desc` for the AI-recommend query (Phase 4).
-3. **Scoring v2 inputs.** Add nullable columns to `market_data`:
-   - `obv_slope_20 numeric` (OBV linear-regression slope over 20 sessions)
-   - `rolling_high_20 numeric`, `rolling_high_55 numeric`
-   - `base_depth_pct numeric`, `base_length_days smallint`, `base_tightness numeric`
-   - `dist_to_resistance_atr numeric`, `dist_from_pivot_atr numeric`
-   - `rs_percentile_nifty smallint` (0–100)
-   Populated by the updated pipeline aggregator (Phase 6). Backfill left null; scoring v2 degrades gracefully.
-4. **Backtest calibration table.** `public.market_scoring_calibration(id, model_version, component, weight numeric, r2 numeric, sample_n int, computed_at)` — persists the fitted weights so scoring.ts loads them at cold start. Full RLS + grants.
-5. **Provenance chip.** Add `market_data.price_source text` ('push_kotak' / 'live_kotak' / 'yahoo' / 'cache') set by `market-quotes` when it writes back; UI reads it as fallback when no fresh tick.
+Scope is chart-section-only (toolbar + registry + CandleChart + settings modal). No API/DB work.
 
-**Insert (data-only, uses vault-held cron secret — cannot go in migration):**
+**1. De-duplicate durations & clean the toolbar** (`ChartToolbar.tsx`, `Analysis.tsx`)
+- Remove the entire **Range** menu. Delete the `range`/`onRange` props, drop it from `Persisted`. Interval (`tf`) becomes the single source of truth.
+- Remove the standalone right-side fullscreen icon (keep the one in More).
+- Delete the disabled "2 charts / 2×2 grid" items; either keep "Save layout" wired to a real persistence slot (a named preset in localStorage) or remove it. I'll wire it to save the current `{studies, settings, chartType, tf}` under `jarvis.analysis.layout.<name>` with a "Load layout" submenu, so it stops being a lie.
+- Fix TradingView external link to use `${exchange}:${symbol}`.
+- `Indicators` badge counts only `visible` studies.
+- Add a small tooltip on the "TV" segment explaining why chart-type/indicators grey out.
 
-6. `cron.schedule('market-daily-sync-0900-ist', '30 3 * * *', ...)`; unschedule the redundant every-15-min `market-fundamentals-global-sync` and every-4-min `market-pipeline-eod` — the orchestrator now owns them.
+**2. Fix indicator rendering** (`CandleChart.tsx`)
+- **Supertrend**: render as a stepped line with a translucent fill to price (green fill below price when `dir=1`, red fill above when `dir=-1`), plus small triangle markers at flips (TradingView-style). Honor `study.colors[0/1]` for up/down.
+- **Ichimoku cloud**: add two BaselineSeries (or two LineSeries + area fill approximation) between Span A and Span B, green when A>B, red when B>A.
+- **PSAR**: switch to a dot-only rendering using `LineSeries` with `lineVisible:false` + `pointMarkersRadius: 3` and color-swap per direction (compare dot vs. close).
+- **Volume**: sync the registry swatch (`defaultColor`) with the actual green/red bars — set swatch to the up color and note "bar color reflects candle direction" in the picker.
+- **VWAP**: append a `(session-anchored — daily TF ignored)` note in the legend row when non-intraday.
+- **Legend formatting**: introduce a per-def `format` helper — `compact` for OBV/AD/Volume, `.toFixed(2)` for prices, `.toFixed(1)` for oscillators bounded 0–100 (RSI, StochRSI, MFI, Aroon, %K/%D, %R).
 
----
+**3. Fix indicator math bugs** (`chartIndicators.ts`)
+- **Aroon**: change loop to `j = i - period + 1; j <= i` so window is exactly `period` bars.
+- Delete dead candle-based `sma()`, `ema()`, `wma()`, `bollinger()` exports (superseded by `smaV`/`emaV`/`wmaV`/`bollingerV`).
+- MACD signal: keep current SMA-seed but emit the seeded value one bar earlier (currently we skip the seed bar). Small alignment fix.
+- Add param clamping in `computeStudy`: coerce `period`/`fast`/`slow`/`signal`/`atrPeriod` etc. to `Math.max(1, Math.floor(n))` before running math, so bad user input can't produce all-null output.
 
-### Phase 1 — Ground-truth spot-check of Kotak endpoints
+**4. Supertrend (already exists — polish + surface it)**
+- The user asked to "add Supertrend" — it's registered but visually mediocre. After the render polish in (2), promote it into `DEFAULT_STUDIES` alongside EMA 20/50/Volume, so a new user sees it immediately.
+- Registry: add a second color slot for the down-trend segment so users can theme both.
 
-Before any code hardens around them:
-- Live probe (1-share non-filling LIMIT) to verify `market-order-modify` / `market-order-cancel` endpoint shapes in `kotakClient.ts` (currently commented "inferred").
-- Verify `parseKotakLimits` field names match `/quick/user/limits` payload against the Kotak Neo app funds screen; record any correction into `kotakClient.ts` + a note in `System/Logs/2026-07-24.md`.
+**5. Indicator settings modal**
+- Clamp inputs to `[min, max]` on blur and round to `step`. Show inline validation when out of range.
 
-Deliverable: any string fixes to `kotakClient.ts`; nothing else changes if endpoints are correct.
+**6. Persistence bump**
+- Bump `STATE_STORE` to `v5` because the `Persisted` shape loses `range`; the loader already falls back to `defaultState` on parse errors, so old v4 blobs will just reset cleanly.
 
----
+### Files to touch
 
-### Phase 2 — Token coverage & relay reliability (WS1.1–1.2)
+```text
+src/components/market/ChartToolbar.tsx     — remove Range, dedupe fullscreen, layout save/load, tv link fix, indicator count
+src/routes/market/Analysis.tsx             — drop range state, bump store to v5, DEFAULT_STUDIES incl. Supertrend
+src/components/market/CandleChart.tsx      — Supertrend fill+markers, Ichimoku cloud, PSAR dots, per-study legend formatter, VWAP note
+src/lib/market/chartIndicators.ts          — aroon window fix, drop dead exports, param clamping helper
+src/lib/market/indicatorRegistry.ts        — Supertrend second color, Volume swatch fix, DEFAULT_STUDIES
+src/components/market/IndicatorSettingsModal.tsx — clamp/round on blur
+```
 
-- `provider.ts` + relay read tokens through a new `_shared/market/tokenMap.ts` helper that prefers `market_data.kotak_token`, falls back to `market_stocks.kotak_token`, then legacy `market_stocks.token`. One canonical accessor everywhere.
-- New `market-scrips-sync` pass writes into both columns; log `token_coverage_pct` per run.
-- `src/routes/config/MarketConfig.tsx`: add "Kotak token coverage %" chip + "Relay: streaming / polling" indicator (already have `useRelayAlive`) with last-tick-age.
-- `Apps/relay/kotak-ws-relay.mjs`: add exponential-backoff reconnect on WS close, heartbeat every 30 s, exit non-zero on fatal auth so pm2/nssm restarts it. Update `README.md` with `pm2 start ecosystem.config.js` snippet (Windows: `nssm install`).
+### Explicitly out of scope
 
----
-
-### Phase 3 — Per-surface live-price audit (WS1.3, WS1.4)
-
-Sweep every surface that renders a price/change%:
-
-- Screener results **grid** columns (not just filter matching) → overlay `usePreferLiveTick` on displayed LTP/change%.
-- `IndexDetail` header + constituent rows.
-- `AutoTrade` open-position rows.
-- `Orders` book pending-order LTP column.
-- `Analysis` header already overlays; verify EMA overlays recomputed only from Kotak-consistent candles.
-
-Every surface renders `<PriceSourceChip>` (or an inline `push·kotak / live·kotak / cache / delayed·yahoo` badge from the row's `price_source`).
-
-**Indices Kotak-first:** `market-indices` currently Yahoo-first. Add Kotak index-token quotes for `NIFTY 50`, `NIFTY BANK`, `NIFTY MIDCAP 100`, `INDIA VIX` when the user has Kotak connected; fall back to Yahoo. Ship Kotak index tokens as a small seed insert.
-
----
-
-### Phase 4 — Score-table drift fix (WS4.1)
-
-- `market-ai-recommend/index.ts`: swap the read from `market_stock_scores(rsi14, close, above_ema200)` to `market_data(rsi, ltp, above_ema_200, breakout_score, score_components)`; adjust column refs.
-- `market-stock-insight/index.ts`: same swap; keep the `score_components` blob as the tooltip source.
-- Add a small compatibility fallback that reads legacy only if new value is null, so any partial-migration row still renders.
-
----
-
-### Phase 5 — Chart forming candle (WS2)
-
-- `CandleChart.tsx` / `TradingViewChart.tsx`: during market hours, mutate the last bar's `close/high/low` from `usePreferLiveTick` on every render so the forming candle tracks the header LTP; recompute the last EMA point from the mutated close.
-- Add a `chart-source` chip ("candles · kotak" / "candles · yahoo") sourced from `market-candles` response metadata (new field).
-- `market-candles`: when Kotak `/charts/v2/history` returns empty for a 1D/5m timeframe that Kotak *should* have, log a `chart_fallback_yahoo` row into `market_ingestion_runs` so we can see silent degradation.
-
----
-
-### Phase 6 — Trading code hardening (WS3, WS5)
-
-- `market-autotrade-eval`:
-  - Entry sizing calls `getFunds()` and clamps against real `available_margin` (not just `max_capital_per_rule`).
-  - If `rule.exit_order_type` ∈ ('SL','SL-M'), place resting broker stop right after entry fill, store `broker_sl_order_id`.
-  - Circuit-breaker P&L reads `filled_price` (not `requested_price`).
-- `AutoTrade.tsx`: surface broker positions from `market-positions` next to the ledger-derived list; mismatch → orange chip.
-- Regenerate `src/integrations/supabase/types.ts` so `market_funds`, `market_autotrade_*` are typed → drop `as any` casts in `orderHooks.ts` / `autotradeHooks.ts`.
-
----
-
-### Phase 7 — NSE-preferred resolution audit (WS1.4b)
-
-- `SymbolSearchInput`, `getTokenMap`, `getActiveProvider`, `market-order-place` default routing, screener default `exchange` param → all call `preferNseExchange()` / `pickNsePreferredListing()` at the resolution boundary.
-- `market_data` / `market_stocks` lookups keyed by symbol resolve to the NSE row when both exist.
-- Holdings/Positions keep the broker-reported exchange, but their LTP reads through the NSE listing when the symbol has an NSE token.
-- Regression test in `tests/exchangePreference.test.ts` locks the rule.
-
----
-
-### Phase 8 — Breakout Score v2 (WS7)
-
-Rewrite `_shared/market/scoring.ts`:
-
-**Trigger & magnitude (25)** — close above `rolling_high_20/55` (real pivot); magnitude in ATR units; close-in-range (today's OHLC); freshness (1–3-session-old triggers score highest).
-
-**Volume/participation (20)** — graded `relVolume`, `deliveryPct`, `obv_slope_20`.
-
-**Trend & momentum (20)** — graded EMA stack + spacing (uses `atr14` to score spacing quality), `adx14` band (>25 rewarded), MACD-hist slope, RSI rising + >50 (drop the 55–70 cap; overbought is only penalized when combined with over-extension).
-
-**Base quality (15)** — `base_tightness`, `base_length_days`, `bbSqueeze`/`atrContracting` re-derived from **raw** indicators (fixes the circular read from yesterday's `score_components` in `snapFromRow`).
-
-**Relative strength & context (15)** — `rs_percentile_nifty` (IBD-style) + rising RS line + `sectorStrength`, then apply a market-breadth regime multiplier to the *breakout* score (parity with pre-breakout).
-
-**Risk penalties (subtract, floor 0)** — over-extension in ATR units above pivot/EMA20; thin turnover; `dist_to_resistance_atr` too small (limited room); gap/erratic-base flag.
-
-**Calibration.** New `market-backtest-calibrate` edge function: pulls 12 months of `market_daily_prices` + `market_data` history, computes 5/10/20-day forward returns per (symbol, date), fits a logistic regression on the graded component vector against "forward return in top-quartile", writes fitted weights to `market_scoring_calibration`. `scoring.ts` loads them at cold start (fallback: shipped defaults). Weekly cron on Sunday 06:00 IST.
-
-**Contract stability.** Keep `breakoutScore(snap, ctx) → { score: 0..100, components: Record<string, number> }` shape. `ScoreBadge` / Screener tooltips keep working. Extend `tests/marketScoring.test.ts` with cases for trigger vs. proximity, extension penalty, ADX rewarded, calibration override.
-
----
-
-### Phase 9 — Verification (post-approval, exits plan mode)
-
-- `bun tsgo` clean; `bunx vitest run` green (new tests included).
-- Dev server + relay during market hours: LTP/change% for ~10 liquid symbols + indices match Kotak Neo app / NSE within a tick; source chip shows `push·kotak` / `live·kotak`.
-- Non-filling LIMIT round-trip: place → modify → cancel via the UI; `market_autotrade_orders` reflects status; `filled_price` written by fills worker on a real fill.
-- Screener re-run: `breakout_score` differs materially from v1 on a true breakout vs. a proximity-only name; backtest report shows fitted weights beat defaults on forward-return separation.
-- Append one-liner to `System/Logs/2026-07-24.md`.
-
----
-
-## Technical details
-
-- New migration touches only `market_stocks`, `market_data`, `market_pipeline_status`, `market_scoring_calibration`. All GRANTs + RLS included.
-- `preferNseExchange()` helper stays the single rule authority; no scattered ternaries added.
-- No secrets requested (Kotak / Lovable AI / cron secret already configured).
-- Backtest calibration runs off-market-hours and writes only to `market_scoring_calibration`; scoring.ts hot-path stays synchronous with cached weights.
-- Files touched (primary): `supabase/functions/_shared/market/{provider,tokenMap,scoring,exchangePreference}.ts`, `market-{ai-recommend,stock-insight,candles,indices,autotrade-eval,scrips-sync,backtest-calibrate}/index.ts`, `Apps/relay/kotak-ws-relay.mjs`, `src/components/market/{CandleChart,TradingViewChart,PriceSourceChip}.tsx`, `src/routes/market/{Screener,IndexDetail,AutoTrade,Orders}.tsx`, `src/routes/config/MarketConfig.tsx`, `src/integrations/supabase/types.ts` (regen), `tests/marketScoring.test.ts`, new `tests/exchangePreference.test.ts`.
+- Multi-chart layouts (2×2 grid) — real work, separate feature.
+- Server-driven historical range beyond `tf` — needs `useCandles`/edge-function changes.
+- Drawing tools (trendlines, Fib) — separate feature.
+- TradingView-mode parity (its UI owns its own indicators/settings).

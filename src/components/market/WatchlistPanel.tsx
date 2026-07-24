@@ -234,7 +234,12 @@ export function WatchlistPanel({
                   {i.symbol} <span style={{ color: "var(--text-dim)", fontSize: 10 }}>{i.exchange}</span>
                 </Link>
                 <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <span style={{ fontVariantNumeric: "tabular-nums" }}>{q ? q.ltp.toFixed(2) : "—"}</span>
+                  <span
+                    style={{ fontVariantNumeric: "tabular-nums" }}
+                    title={q?.source ? `price source: ${q.source}${q?.stale ? " · stale" : ""}` : undefined}
+                  >
+                    {q ? q.ltp.toFixed(2) : "—"}
+                  </span>
                   <span
                     style={{ minWidth: 56, textAlign: "right", color: (q?.change_pct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}
                     title={q?.previous_close != null

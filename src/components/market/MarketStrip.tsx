@@ -5,6 +5,7 @@
 // the four index symbols so NIFTY/BANKNIFTY/SENSEX/VIX go realtime the
 // moment the relay is up.
 import { useEffect, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { useIndices, useBreadth, useMarketStatus } from "@/lib/market/hooks";
 import { Chip } from "@/components/hud/HudControls";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
@@ -25,6 +26,7 @@ interface Props {
 }
 
 export function MarketStrip({ actions }: Props) {
+  const nav = useNavigate();
   const { data: indicesData } = useIndices() as { data: any };
   const { data: breadth } = useBreadth();
   const status = useMarketStatus();
@@ -98,22 +100,45 @@ export function MarketStrip({ actions }: Props) {
         const pct = q?.change_pct;
         const tone = pct == null ? "var(--text-dim)" : pct >= 0 ? "var(--ok)" : "var(--danger)";
         return (
-          <span key={s.symbol} style={{ display: "inline-flex", gap: 6 }}>
+          <button
+            key={s.symbol}
+            onClick={() => nav(`/market/index/${encodeURIComponent(s.symbol)}`)}
+            className="focus-outline"
+            aria-label={`Open ${s.label} details`}
+            title={`Open ${s.label} details`}
+            style={{
+              display: "inline-flex", gap: 6, alignItems: "baseline",
+              background: "transparent", border: 0, padding: "2px 4px",
+              margin: 0, cursor: "pointer", font: "inherit", color: "inherit",
+              borderRadius: 2,
+            }}
+          >
             <span style={{ color: "var(--text-muted)" }}>{s.label}</span>
             <span style={{ color: "var(--text)", fontVariantNumeric: "tabular-nums" }}>{q ? fmtNum(q.price) : "—"}</span>
             <span style={{ color: tone, fontVariantNumeric: "tabular-nums" }}>
               {pct == null ? "" : `${pct > 0 ? "▲" : pct < 0 ? "▼" : ""}${Math.abs(pct).toFixed(2)}%`}
             </span>
-          </span>
+          </button>
         );
       })}
       {ad && (ad.adv > 0 || ad.dec > 0) && (
-        <span style={{ display: "inline-flex", gap: 6 }}>
+        <button
+          onClick={() => nav(`/market?panel=breadth`)}
+          className="focus-outline"
+          aria-label="Open market breadth details"
+          title="Open market breadth details"
+          style={{
+            display: "inline-flex", gap: 6, alignItems: "baseline",
+            background: "transparent", border: 0, padding: "2px 4px",
+            margin: 0, cursor: "pointer", font: "inherit", color: "inherit",
+            borderRadius: 2,
+          }}
+        >
           <span style={{ color: "var(--text-muted)" }}>A/D</span>
           <span style={{ color: "var(--ok)" }}>{ad.adv}</span>
           <span style={{ color: "var(--text-dim)" }}>/</span>
           <span style={{ color: "var(--danger)" }}>{ad.dec}</span>
-        </span>
+        </button>
       )}
       {(fiiCr != null || diiCr != null) && (
         <span style={{ display: "inline-flex", gap: 6 }} title="FII / DII net flow (₹ crores)">

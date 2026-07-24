@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { CandlestickChart, LineChart, BarChart3, AreaChart, Activity, Bell, LayoutGrid, MoreHorizontal, Maximize2, ExternalLink, Settings, Camera, CalendarRange, Save, Search } from "lucide-react";
+import { useEffect, useState } from "react";
+import { CandlestickChart, LineChart, BarChart3, AreaChart, Activity, Bell, LayoutGrid, MoreHorizontal, Maximize2, ExternalLink, Settings, Camera, Save, Search, Trash2 } from "lucide-react";
 import { Menu, MenuItem, MenuGroup, MenuDivider } from "@/components/hud/Menu";
 import type { ChartType } from "@/components/market/CandleChart";
 import {
@@ -19,18 +19,6 @@ const TIMEFRAMES = [
   { key: "1D", label: "1D" },
   { key: "1W", label: "1W" },
   { key: "1M", label: "1M" },
-];
-
-const RANGES = [
-  { key: "1D", label: "1 Day" },
-  { key: "5D", label: "5 Days" },
-  { key: "1M", label: "1 Month" },
-  { key: "3M", label: "3 Months" },
-  { key: "6M", label: "6 Months" },
-  { key: "YTD", label: "Year to date" },
-  { key: "1Y", label: "1 Year" },
-  { key: "5Y", label: "5 Years" },
-  { key: "ALL", label: "All" },
 ];
 
 const CHART_TYPES: Array<{ key: ChartType; label: string; icon: React.ReactNode }> = [
@@ -56,10 +44,9 @@ export const DEFAULT_SETTINGS: ChartSettings = {
 
 export interface ChartToolbarProps {
   symbol: string;
+  exchange?: "NSE" | "BSE";
   tf: string;
   onTf: (v: string) => void;
-  range?: string;
-  onRange?: (v: string) => void;
   chartType: ChartType;
   onChartType: (v: ChartType) => void;
   onAddStudy: (type: IndicatorType) => void;
@@ -72,17 +59,20 @@ export interface ChartToolbarProps {
   onFullscreen: () => void;
   onAlert: () => void;
   onScreenshot?: () => void;
-  onSaveLayout?: () => void;
+  onSaveLayout?: (name: string) => void;
+  onLoadLayout?: (name: string) => void;
+  onDeleteLayout?: (name: string) => void;
+  savedLayouts?: string[];
 }
 
 export function ChartToolbar({
-  symbol, tf, onTf, range, onRange, chartType, onChartType, onAddStudy, onResetStudies, studyCount = 0,
-  settings, onSettings, tvMode, onTvMode, onFullscreen, onAlert, onScreenshot, onSaveLayout,
+  symbol, exchange = "NSE", tf, onTf, chartType, onChartType, onAddStudy, onResetStudies, studyCount = 0,
+  settings, onSettings, tvMode, onTvMode, onFullscreen, onAlert, onScreenshot,
+  onSaveLayout, onLoadLayout, onDeleteLayout, savedLayouts = [],
 }: ChartToolbarProps) {
   const activeType = CHART_TYPES.find((c) => c.key === chartType) ?? CHART_TYPES[0];
-  const activeCount = studyCount;
+  const activeCount = studyCount; // count of visible studies, caller filters
   const s = settings ?? DEFAULT_SETTINGS;
-  const activeRange = RANGES.find((r) => r.key === range);
 
   return (
     <div className="mk-chart-toolbar">
@@ -100,24 +90,6 @@ export function ChartToolbar({
       </Menu>
 
       <Divider />
-
-      {/* Range */}
-      {onRange && (
-        <>
-          <Menu label={activeRange?.label ?? "Range"} icon={<CalendarRange size={12} />} width={180}>
-            {(close) => (
-              <MenuGroup title="Date range">
-                {RANGES.map((r) => (
-                  <MenuItem key={r.key} selected={range === r.key} onClick={() => { onRange(r.key); close(); }}>
-                    {r.label}
-                  </MenuItem>
-                ))}
-              </MenuGroup>
-            )}
-          </Menu>
-          <Divider />
-        </>
-      )}
 
       {/* Chart type */}
       <Menu label={activeType.label} icon={activeType.icon} width={180} disabled={tvMode} title={tvMode ? "Switch off TradingView to change chart type" : undefined}>
@@ -154,29 +126,59 @@ export function ChartToolbar({
         <span>Alert</span>
       </button>
 
-      <Menu label="Layout" icon={<LayoutGrid size={12} />} width={180}>
-        {(close) => (
-          <>
-            <MenuGroup title="Layout">
-              <MenuItem selected>Single</MenuItem>
-              <MenuItem disabled hint="soon">2 charts</MenuItem>
-              <MenuItem disabled hint="soon">2 × 2 grid</MenuItem>
-            </MenuGroup>
-            {onSaveLayout && (
-              <>
-                <MenuDivider />
-                <MenuGroup title="Save">
-                  <MenuItem onClick={() => { onSaveLayout(); close(); }}>
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                      <Save size={11} /> Save current layout
-                    </span>
-                  </MenuItem>
-                </MenuGroup>
-              </>
-            )}
-          </>
-        )}
-      </Menu>
+      {onSaveLayout && (
+        <Menu label="Layouts" icon={<LayoutGrid size={12} />} width={240}>
+          {(close) => (
+            <>
+              {savedLayouts.length > 0 && (
+                <>
+                  <MenuGroup title="Saved">
+                    {savedLayouts.map((name) => (
+                      <div key={name} style={{ display: "flex", alignItems: "center" }}>
+                        <button
+                          type="button"
+                          className="mk-menu-item"
+                          style={{ flex: 1 }}
+                          onClick={() => { onLoadLayout?.(name); close(); }}
+                          title={`Load layout: ${name}`}
+                        >
+                          <span className="mk-menu-item-check" />
+                          <span style={{ flex: 1, textAlign: "left" }}>{name}</span>
+                        </button>
+                        {onDeleteLayout && (
+                          <button
+                            type="button"
+                            className="mk-menu-item"
+                            style={{ flex: "0 0 auto", padding: "6px 10px", opacity: 0.7 }}
+                            title={`Delete layout: ${name}`}
+                            onClick={(e) => { e.stopPropagation(); onDeleteLayout(name); }}
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </MenuGroup>
+                  <MenuDivider />
+                </>
+              )}
+              <MenuGroup title="Save">
+                <MenuItem
+                  onClick={() => {
+                    const name = window.prompt("Layout name", `Layout ${savedLayouts.length + 1}`);
+                    if (name && name.trim()) onSaveLayout(name.trim());
+                    close();
+                  }}
+                >
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                    <Save size={11} /> Save current layout
+                  </span>
+                </MenuItem>
+              </MenuGroup>
+            </>
+          )}
+        </Menu>
+      )}
 
       {/* Settings */}
       {onSettings && (
@@ -219,7 +221,7 @@ export function ChartToolbar({
             <MenuGroup title="External">
               <a
                 className="mk-menu-item"
-                href={`https://www.tradingview.com/chart/?symbol=NSE:${symbol}`}
+                href={`https://www.tradingview.com/chart/?symbol=${exchange}:${symbol}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={close}
@@ -236,7 +238,7 @@ export function ChartToolbar({
       <div style={{ flex: 1, minWidth: 8 }} />
 
       {/* Native / TV segmented */}
-      <div className="mk-seg" role="group" aria-label="Chart engine">
+      <div className="mk-seg" role="group" aria-label="Chart engine" title="TV mode delegates chart type, indicators & settings to the TradingView embed">
         <button
           type="button"
           className={`mk-seg-btn ${!tvMode ? "is-on" : ""}`}
@@ -250,17 +252,6 @@ export function ChartToolbar({
           title="TradingView embed (real-time)"
         >TV</button>
       </div>
-
-      <button
-        type="button"
-        className="mk-menu-trigger"
-        onClick={onFullscreen}
-        title="Fullscreen (F)"
-        aria-label="Fullscreen"
-        style={{ padding: "4px 6px" }}
-      >
-        <Maximize2 size={12} />
-      </button>
     </div>
   );
 }

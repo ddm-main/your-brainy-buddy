@@ -133,19 +133,18 @@ export default function AdminConfig() {
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {ALL_SECTIONS.map((s) => {
-                  const on = r.role === "admin" || r.sections.includes(s);
-                  const locked = r.role === "admin";
+                  const on = r.sections.includes(s);
                   return (
                     <button
                       key={s}
-                      disabled={locked || busy}
+                      disabled={busy}
                       onClick={() => { void toggleSection(r.id, s, r.sections)(); }}
                       style={{
                         padding: "4px 10px", border: `1px solid ${on ? "var(--edge-strong)" : "var(--edge)"}`,
                         background: on ? "rgba(53,214,237,0.08)" : "transparent",
                         color: on ? "var(--accent)" : "var(--text-dim)",
                         fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em",
-                        textTransform: "uppercase", cursor: locked ? "not-allowed" : "pointer", borderRadius: 2,
+                        textTransform: "uppercase", cursor: busy ? "wait" : "pointer", borderRadius: 2,
                       }}
                     >{s}</button>
                   );
@@ -198,12 +197,10 @@ export default function AdminConfig() {
               <div className="hud-label" style={{ marginBottom: 6 }}>Sections</div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {ALL_SECTIONS.map((s) => {
-                  const on = invite.role === "admin" || invite.sections.has(s);
-                  const locked = invite.role === "admin";
+                  const on = invite.sections.has(s);
                   return (
                     <button
                       key={s}
-                      disabled={locked}
                       onClick={() => {
                         const next = new Set(invite.sections);
                         if (next.has(s)) next.delete(s); else next.add(s);
@@ -214,7 +211,7 @@ export default function AdminConfig() {
                         background: on ? "rgba(53,214,237,0.08)" : "transparent",
                         color: on ? "var(--accent)" : "var(--text-dim)",
                         fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em",
-                        textTransform: "uppercase", cursor: locked ? "not-allowed" : "pointer", borderRadius: 2,
+                        textTransform: "uppercase", cursor: "pointer", borderRadius: 2,
                       }}
                     >{s}</button>
                   );

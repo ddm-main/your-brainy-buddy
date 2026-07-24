@@ -15,6 +15,7 @@ import { useIndices, useIndexWatch, useIndexWatchMutations, useMarketSettings, u
 import { useBrokerOrders } from "@/lib/market/orderHooks";
 import { FILTER_BY_ID, canonicalFilterId, filterMatches, latestTradeDateOf, type ActiveFilter, type UniverseId } from "@/lib/market/screenerCatalog";
 import { useScreenerData, type ScreenerRow } from "@/lib/market/screenerRun";
+import { colsFromActiveFilters, overviewColumnMap, OVERVIEW_COL_IDS } from "@/lib/market/screenerColumns";
 import { ALL_PRESETS, GLOBAL_PRESETS, INDIAN_PRESETS, type IndexPreset } from "@/lib/market/indices";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
@@ -26,10 +27,6 @@ import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
 import { useEscapeClose } from "@/lib/useEscapeClose";
 import { MarketStrip } from "@/components/market/MarketStrip";
-
-
-const BREAKOUT_ROWS = 16;
-
 // IST market hours check (Mon–Fri 09:15–15:30). Used to differentiate
 // "cached close" (intraday stale data — actionable) from "closed" (after
 // hours — expected). Uses Intl to avoid TZ drift on non-IST clients.
@@ -47,6 +44,7 @@ function isNseOpen(now: Date = new Date()): boolean {
 }
 
 const DEFAULT_BREAKOUT_KEY = "market.dash.breakoutScreen";
+const SCREENER_DEFAULT_SAVED_KEY = "market.screener.defaultSavedId";
 const EXPLICIT_CLEAR = "__cleared__";
 
 type BreakoutDisplayRow = StockScore | ScreenerRow;
@@ -61,8 +59,19 @@ function savedScreenerState(screen: { filters?: unknown } | undefined): { active
   const raw = screen?.filters;
   if (!raw || Array.isArray(raw) || typeof raw !== "object") return { active: [], universe: "all" };
   const payload = raw as { active?: unknown; universe?: unknown };
+  const seen = new Set<string>();
+  const active = Array.isArray(payload.active)
+    ? payload.active.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const filter = item as ActiveFilter;
+      const id = canonicalFilterId(filter.id);
+      if (!FILTER_BY_ID[id] || seen.has(id)) return [];
+      seen.add(id);
+      return [{ ...filter, id }];
+    })
+    : [];
   return {
-    active: Array.isArray(payload.active) ? payload.active as ActiveFilter[] : [],
+    active,
     universe: isUniverseId(payload.universe) ? payload.universe : "all",
   };
 }
@@ -81,6 +90,19 @@ function byBreakoutDesc(a: BreakoutDisplayRow, b: BreakoutDisplayRow): number {
   return ((b.breakout_score ?? -1) - (a.breakout_score ?? -1)) || a.symbol.localeCompare(b.symbol);
 }
 
+function bySavedScreenerDefault(active: ActiveFilter[]): (a: BreakoutDisplayRow, b: BreakoutDisplayRow) => number {
+  const hasChangeFilter = active.some((filter) => canonicalFilterId(filter.id) === "change_pct");
+  if (!hasChangeFilter) return byBreakoutDesc;
+  return (a, b) => {
+    const av = (a as any).change_pct;
+    const bv = (b as any).change_pct;
+    if (av == null && bv == null) return byBreakoutDesc(a, b);
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return (Number(bv) - Number(av)) || byBreakoutDesc(a, b);
+  };
+}
+
 export default function MarketDashboard() {
   const push = useUi((s) => s.push);
   const nav = useNavigate();
@@ -92,7 +114,9 @@ export default function MarketDashboard() {
     () => {
       const v = localStorage.getItem(DEFAULT_BREAKOUT_KEY);
       if (v === EXPLICIT_CLEAR) return "";
-      return v && v !== "default" ? v : "";
+      if (v && v !== "default") return v;
+      const screenerDefault = localStorage.getItem(SCREENER_DEFAULT_SAVED_KEY);
+      return screenerDefault && screenerDefault !== "default" ? screenerDefault : "";
     },
   );
   useEffect(() => {
@@ -116,7 +140,11 @@ export default function MarketDashboard() {
     }
     const stored = (() => { try { return localStorage.getItem(DEFAULT_BREAKOUT_KEY); } catch { return null; } })();
     if (stored === EXPLICIT_CLEAR) return; // user asked for "no filter"
-    setBreakoutScreenId(savedScreens[0].id);
+    const screenerDefault = (() => { try { return localStorage.getItem(SCREENER_DEFAULT_SAVED_KEY); } catch { return null; } })();
+    const preferred = screenerDefault && savedScreens.some((s) => s.id === screenerDefault)
+      ? screenerDefault
+      : savedScreens[0].id;
+    setBreakoutScreenId(preferred);
   }, [savedScreens, breakoutScreenId]);
   const selectedScreen = savedScreens.find((s) => s.id === breakoutScreenId);
   const selectedScreenState = useMemo(() => savedScreenerState(selectedScreen), [selectedScreen]);
@@ -143,10 +171,10 @@ export default function MarketDashboard() {
     const active = selectedScreenState.active;
     const latestDate = latestTradeDateOf(savedScreenerRows);
     const source = savedScreenerRows.filter((s) => active.every((af) => filterMatches(s as any, af, latestDate)));
-    return [...source].sort(byBreakoutDesc);
+    return [...source].sort(bySavedScreenerDefault(active));
   }, [savedScreenerRows, selectedScreenState.active, usingSavedScreen, hasActiveFilters]);
 
-  const filteredBreakouts = useMemo(() => matchingBreakouts.slice(0, BREAKOUT_ROWS), [matchingBreakouts]);
+  const filteredBreakouts = matchingBreakouts;
 
   // One chip only — the screener name is already visible in the <select>.
   // Show the count when a screener with filters is active, otherwise a
@@ -155,7 +183,9 @@ export default function MarketDashboard() {
     ? (savedScreens.length === 0 ? "no screeners saved" : "select a screener")
     : !hasActiveFilters
     ? "screener has no filters"
-    : (savedScreenerFetching ? "loading…" : `${matchingBreakouts.length} matches`);
+    : savedScreenerFetching
+    ? "loading…"
+    : `${matchingBreakouts.length} of ${savedScreenerRows.length}`;
 
 
 
@@ -335,57 +365,30 @@ export default function MarketDashboard() {
   // Prime-data pipeline is now hosted in Market Settings → Data Pipeline.
 
 
-  // Top Breakouts columns are FIXED — filters narrow rows, they no longer add
-  // columns. Full filter-column projection stays available on /market/screener
-  // where it belongs. Order: Symbol | Price | 1D Return % | Market Cap | Breakout.
+  // Top Breakouts columns mirror /market/screener — derived from the saved
+  // screener's active filters, minus boolean filters (Yes/No values are
+  // already conveyed by the filter chip itself). With no active saved filter,
+  // fall back to a compact breakout table.
   const breakoutColumns = useMemo<ColumnDef<BreakoutDisplayRow, any>[]>(() => {
-    const inr = (n: number | null | undefined) =>
-      n == null || Number.isNaN(n) ? "—" : `₹${Number(n).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
-    const crore = (n: number | null | undefined) => {
-      if (n == null || Number.isNaN(Number(n))) return "—";
-      const v = Number(n);
-      if (v >= 1_00_000) return `${(v / 1_00_000).toFixed(2)}L Cr`;
-      if (v >= 1_000) return `${(v / 1_000).toFixed(2)}K Cr`;
-      return `${v.toFixed(0)} Cr`;
-    };
-    return [
-      {
-        header: "Symbol", accessorKey: "symbol",
-        cell: ({ row }) => (
-          <span>
-            <span style={{ color: "var(--accent)" }}>{row.original.symbol}</span>
-            {row.original.sector && <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: 10 }}>{row.original.sector}</span>}
-          </span>
-        ),
-      },
-      {
-        id: "price",
-        header: "Price",
-        accessorFn: (s) => liveFor(s)?.ltp ?? (s as any).ltp ?? (s as any).close ?? null,
-        meta: { align: "right" },
-        cell: ({ getValue }) => inr(getValue() as any),
-      },
-      {
-        id: "change_pct",
-        header: "1D %",
-        accessorFn: (s) => liveFor(s)?.change_pct ?? (s as any).change_pct_raw ?? (s as any).change_pct ?? null,
-        meta: { align: "right" },
-        cell: ({ getValue }) => <PctCell value={getValue() as any} />,
-      },
-      {
-        id: "market_cap",
-        header: "Mkt Cap",
-        accessorFn: (s) => (s as any).market_cap ?? null,
-        meta: { align: "right" },
-        cell: ({ getValue }) => crore(getValue() as any),
-      },
-      {
-        header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },
-        cell: ({ row }) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" />,
-      },
-    ];
+    const colMap = overviewColumnMap<BreakoutDisplayRow>();
+    const ids = hasActiveFilters
+      ? colsFromActiveFilters(selectedScreenState.active, {
+        skipBooleans: true,
+        allowedCols: OVERVIEW_COL_IDS,
+      })
+      : ["symbol", "market_cap", "close", "change_pct", "breakout_score"];
+    const seen = new Set<string>();
+    const out: ColumnDef<BreakoutDisplayRow, any>[] = [];
+    for (const id of ids) {
+      if (seen.has(id) || !colMap[id]) continue;
+      seen.add(id);
+      out.push(colMap[id]);
+    }
+    out.push(colMap["actions"]);
+    return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveByKey]);
+  }, [selectedScreenState.active, hasActiveFilters, liveByKey]);
+
 
 
 
@@ -472,7 +475,7 @@ export default function MarketDashboard() {
           columns={breakoutColumns}
           data={filteredBreakouts}
           onRowClick={(r) => nav(`/market/analysis/${r.symbol}`)}
-          initialSort={[{ id: "breakout_score", desc: true }]}
+          numbered
           maxHeight="100%"
           emptyLabel={savedScreenerFetching ? "loading" : !usingSavedScreen ? "select a screener" : !hasActiveFilters ? "add filters to your screener" : "no matches"}
         />

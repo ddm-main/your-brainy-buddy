@@ -39,6 +39,8 @@ export function DataTable<T>({
   emptyLabel = "no data",
   emptyHint,
   maxHeight,
+  numbered,
+  startIndex = 0,
 }: {
   columns: ColumnDef<T, any>[];
   data: T[];
@@ -49,6 +51,10 @@ export function DataTable<T>({
   emptyLabel?: string;
   emptyHint?: string;
   maxHeight?: number | string;
+  /** Render a leading "#" column with 1-based row numbers. */
+  numbered?: boolean;
+  /** Zero-based offset for `numbered` (e.g. pageStart when paginated). */
+  startIndex?: number;
 }) {
   const [internalSorting, setInternalSorting] = useState<SortingState>(initialSort ?? []);
   const sorting = controlledSorting ?? internalSorting;
@@ -69,6 +75,9 @@ export function DataTable<T>({
         <thead>
           {table.getHeaderGroups().map((hg) => (
             <tr key={hg.id}>
+              {numbered && (
+                <th style={{ ...thStyle, textAlign: "right", width: 36 }}>#</th>
+              )}
               {hg.headers.map((h) => {
                 const sorted = h.column.getIsSorted();
                 const align = (h.column.columnDef.meta as any)?.align ?? "left";
@@ -91,7 +100,7 @@ export function DataTable<T>({
           ))}
         </thead>
         <tbody>
-          {table.getRowModel().rows.map((row) => (
+          {table.getRowModel().rows.map((row, idx) => (
             <tr
               key={row.id}
               onClick={onRowClick ? () => onRowClick(row.original) : undefined}
@@ -99,6 +108,16 @@ export function DataTable<T>({
               onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = "rgba(53,214,237,0.05)"; }}
               onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "transparent"; }}
             >
+              {numbered && (
+                <td style={{
+                  padding: "5px 8px",
+                  borderBottom: "1px solid var(--edge)",
+                  color: "var(--text-muted)",
+                  textAlign: "right",
+                  fontVariantNumeric: "tabular-nums",
+                  fontSize: 11,
+                }}>{startIndex + idx + 1}</td>
+              )}
               {row.getVisibleCells().map((cell) => {
                 const align = (cell.column.columnDef.meta as any)?.align ?? "left";
                 return (
