@@ -1,1 +1,4 @@
 project_id = "ybtaxgstmxnlwurkritg"
+
+[functions.admin-users]
+verify_jwt = false

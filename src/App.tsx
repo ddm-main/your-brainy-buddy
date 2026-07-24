@@ -15,6 +15,8 @@ import { useNotifications } from "@/store/notificationStore";
 import { startReminderPoller } from "@/lib/reminders";
 import { startMarketAlertsPoller, formatAlertEvent } from "@/lib/market/alertsPoller";
 import { useSession } from "@/lib/useSession";
+import { useAccessStore } from "@/store/accessStore";
+import AccessGate from "@/components/access/AccessGate";
 
 
 const Home = lazy(() => import("@/routes/Home"));
@@ -31,6 +33,15 @@ const ResetPassword = lazy(() => import("@/routes/ResetPassword"));
 
 export default function App() {
   const { session, ready } = useSession();
+  const loadAccess = useAccessStore((s) => s.load);
+  const resetAccess = useAccessStore((s) => s.reset);
+  const accessReady = useAccessStore((s) => s.ready);
+  useEffect(() => {
+    if (!ready) return;
+    if (session?.user?.id) loadAccess(session.user.id);
+    else resetAccess();
+  }, [session?.user?.id, ready, loadAccess, resetAccess]);
+
   useEffect(() => {
     if (!session) return;
 
@@ -74,6 +85,7 @@ export default function App() {
 
 
   if (!ready) return <BootFallback />;
+  if (session && !accessReady) return <BootFallback />;
 
   const path = window.location.pathname;
   const isReset = path === "/reset-password" || window.location.hash.includes("type=recovery");
@@ -140,16 +152,16 @@ function AnimatedRoutes() {
         <BootScanline triggerKey={location.pathname} />
         <Routes location={location}>
 
-          <Route path="/" element={<Home />} />
-          <Route path="/tasks" element={<Tasks />} />
-          <Route path="/market/*" element={<Market />} />
+          <Route path="/" element={<AccessGate section="hud"><Home /></AccessGate>} />
+          <Route path="/tasks" element={<AccessGate section="tasks"><Tasks /></AccessGate>} />
+          <Route path="/market/*" element={<AccessGate section="market"><Market /></AccessGate>} />
           <Route path="/notes" element={<Navigate to="/market" replace />} />
           <Route path="/workspace" element={<Navigate to="/tasks" replace />} />
           <Route path="/decisions" element={<Navigate to="/tasks" replace />} />
-          <Route path="/inbox" element={<Inbox />} />
-          <Route path="/finance/*" element={<Finance />} />
-          <Route path="/projects/*" element={<Projects />} />
-          <Route path="/config/*" element={<Config />} />
+          <Route path="/inbox" element={<AccessGate section="inbox"><Inbox /></AccessGate>} />
+          <Route path="/finance/*" element={<AccessGate section="finance"><Finance /></AccessGate>} />
+          <Route path="/projects/*" element={<AccessGate section="projects"><Projects /></AccessGate>} />
+          <Route path="/config/*" element={<AccessGate section="config"><Config /></AccessGate>} />
           <Route path="/settings" element={<Navigate to="/config" replace />} />
           <Route path="/auth" element={<Auth />} />
           <Route path="/reset-password" element={<ResetPassword />} />

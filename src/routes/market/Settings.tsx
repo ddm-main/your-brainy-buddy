@@ -9,6 +9,7 @@ import { authFetch } from "@/lib/authFetch";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { Database, LockKeyhole, Pencil, Play, RefreshCw, TestTube2 } from "lucide-react";
+import { useAccessStore } from "@/store/accessStore";
 
 type Provider = "kotak_neo" | "yahoo";
 type ServiceProvider = "fmp" | "alpha_vantage" | "nse" | "bse";
@@ -50,6 +51,8 @@ const SERVICE_META: Record<ServiceProvider, { name: string; role: string; fetche
 
 export default function MarketSettings() {
   const push = useUi((s) => s.push);
+  const role = useAccessStore((s) => s.role);
+  const isAdmin = role === "admin";
   const [rows, setRows] = useState<Record<Provider, Settings | null>>({ kotak_neo: null, yahoo: null });
   const [busy, setBusy] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
@@ -303,38 +306,47 @@ export default function MarketSettings() {
             status="available" statusTone="ok" live={liveProvider === "yahoo"}
             actions={<Btn size="sm" onClick={() => testConnection("yahoo")} disabled={busy !== null}><TestTube2 size={11} style={{ marginRight: 4 }} />Test</Btn>}
           />
-          <ProviderCard
-            name="Kotak Neo" role="Broker" fetches={FETCHES.kotak_neo}
-            status={kotakStatus} statusTone={kotakConnected ? "ok" : kotakStatus === "pending_otp" ? "warn" : kotak?.last_error ? "err" : "neutral"}
-            live={liveProvider === "kotak_neo"}
-            meta={
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
-                {kotakConnected && kotak?.greeting_name && <span>Connected: <b style={{ color: "var(--accent)" }}>{kotak.greeting_name}</b></span>}
-                {kotak?.token_expires_at && (
-                  <span title="Kotak hard-expires every session nightly near midnight IST for every app — not app-controlled. Auto-login means it renews without you.">
-                    {autoLoginEnabled ? "Fresh until" : "Valid until"} {new Date(kotak.token_expires_at).toLocaleDateString([], { day: "2-digit", month: "short" })}
-                    {!autoLoginEnabled && ", then reconnect manually"}
-                  </span>
-                )}
-                {kotakConfigured && <Chip tone={autoLoginEnabled ? "ok" : "warn"}>{autoLoginEnabled ? "auto-login on" : "auto-login off"}</Chip>}
-              </div>
-            }
-            error={kotak?.last_error ?? undefined}
-            expanded={kotakExpanded}
-            actions={
-              <>
-                {kotakBroken && !editing && (
-                  <Btn size="sm" variant="primary" onClick={startLogin} disabled={busy !== null}>
-                    {busy === "login" ? "reconnecting…" : "Re-login"}
+          {isAdmin ? (
+            <ProviderCard
+              name="Kotak Neo" role="Broker" fetches={FETCHES.kotak_neo}
+              status={kotakStatus} statusTone={kotakConnected ? "ok" : kotakStatus === "pending_otp" ? "warn" : kotak?.last_error ? "err" : "neutral"}
+              live={liveProvider === "kotak_neo"}
+              meta={
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+                  {kotakConnected && kotak?.greeting_name && <span>Connected: <b style={{ color: "var(--accent)" }}>{kotak.greeting_name}</b></span>}
+                  {kotak?.token_expires_at && (
+                    <span title="Kotak hard-expires every session nightly near midnight IST for every app — not app-controlled. Auto-login means it renews without you.">
+                      {autoLoginEnabled ? "Fresh until" : "Valid until"} {new Date(kotak.token_expires_at).toLocaleDateString([], { day: "2-digit", month: "short" })}
+                      {!autoLoginEnabled && ", then reconnect manually"}
+                    </span>
+                  )}
+                  {kotakConfigured && <Chip tone={autoLoginEnabled ? "ok" : "warn"}>{autoLoginEnabled ? "auto-login on" : "auto-login off"}</Chip>}
+                </div>
+              }
+              error={kotak?.last_error ?? undefined}
+              expanded={kotakExpanded}
+              actions={
+                <>
+                  {kotakBroken && !editing && (
+                    <Btn size="sm" variant="primary" onClick={startLogin} disabled={busy !== null}>
+                      {busy === "login" ? "reconnecting…" : "Re-login"}
+                    </Btn>
+                  )}
+                  <Btn size="sm" onClick={() => testConnection("kotak_neo")} disabled={busy !== null}><TestTube2 size={11} style={{ marginRight: 4 }} />Test</Btn>
+                  <Btn size="sm" variant={editing ? "primary" : "ghost"} onClick={() => setEditing((v) => !v)}>
+                    <Pencil size={11} style={{ marginRight: 4 }} />{editing ? "Close" : kotakConfigured ? "Edit" : "Add credentials"}
                   </Btn>
-                )}
-                <Btn size="sm" onClick={() => testConnection("kotak_neo")} disabled={busy !== null}><TestTube2 size={11} style={{ marginRight: 4 }} />Test</Btn>
-                <Btn size="sm" variant={editing ? "primary" : "ghost"} onClick={() => setEditing((v) => !v)}>
-                  <Pencil size={11} style={{ marginRight: 4 }} />{editing ? "Close" : kotakConfigured ? "Edit" : "Add credentials"}
-                </Btn>
-              </>
-            }
-          />
+                </>
+              }
+            />
+          ) : (
+            <div style={{
+              padding: "12px 14px", border: "1px solid var(--edge)",
+              background: "rgba(53,214,237,0.03)", fontSize: 12, color: "var(--text-dim)", lineHeight: 1.5,
+            }}>
+              Broker session is managed by an admin — live market data is provided automatically. You don't need to enter any Kotak credentials.
+            </div>
+          )}
         </div>
 
         <SectionLabel>Secondary Providers</SectionLabel>

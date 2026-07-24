@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
 import { supabase } from "@/integrations/supabase/client";
-import { Mail, Landmark, FolderKanban, LogOut, LineChart, type LucideIcon } from "lucide-react";
+import { Mail, Landmark, FolderKanban, LogOut, LineChart, ShieldCheck, type LucideIcon } from "lucide-react";
+import { useAccessStore } from "@/store/accessStore";
 
 type Card = {
   to: string;
@@ -10,6 +11,7 @@ type Card = {
   desc: string;
   table: string;
   icon: LucideIcon;
+  adminOnly?: boolean;
 };
 
 const CARDS: Card[] = [
@@ -17,10 +19,13 @@ const CARDS: Card[] = [
   { to: "/config/finance",  label: "Finance",  desc: "Banks, accounts, cards, loans, goals, subscriptions",   table: "",               icon: Landmark },
   { to: "/config/projects", label: "Projects", desc: "Active projects and areas",                              table: "projects",       icon: FolderKanban },
   { to: "/config/market",   label: "Market",   desc: "Data pipeline health, fundamentals & technicals resync", table: "market_stocks",  icon: LineChart },
+  { to: "/config/admin",    label: "Admin",    desc: "Users, roles, and section access",                       table: "",               icon: ShieldCheck, adminOnly: true },
 ];
 
 export default function ConfigHome() {
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const role = useAccessStore((s) => s.role);
+  const visibleCards = CARDS.filter((c) => (c.adminOnly ? role === "admin" : true));
 
   useEffect(() => {
     let cancelled = false;
@@ -39,7 +44,7 @@ export default function ConfigHome() {
   return (
     <HudPanel title="Configuration" index="CFG" live="ok" bodyClass="overflow-auto">
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 10 }}>
-        {CARDS.map((c) => {
+        {visibleCards.map((c) => {
           const Icon = c.icon;
           const n = counts[c.table];
           return (

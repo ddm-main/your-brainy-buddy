@@ -4783,6 +4783,48 @@ export type Database = {
           },
         ]
       }
+      user_page_access: {
+        Row: {
+          created_at: string
+          id: string
+          section: Database["public"]["Enums"]["app_section"]
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          section: Database["public"]["Enums"]["app_section"]
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          section?: Database["public"]["Enums"]["app_section"]
+          user_id?: string
+        }
+        Relationships: []
+      }
+      user_roles: {
+        Row: {
+          created_at: string
+          id: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          role?: Database["public"]["Enums"]["app_role"]
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       market_breadth_latest: {
@@ -4982,6 +5024,20 @@ export type Database = {
           yahoo_symbol: string
         }[]
       }
+      has_role: {
+        Args: {
+          _role: Database["public"]["Enums"]["app_role"]
+          _user_id: string
+        }
+        Returns: boolean
+      }
+      has_section_access: {
+        Args: {
+          _section: Database["public"]["Enums"]["app_section"]
+          _user_id: string
+        }
+        Returns: boolean
+      }
       increment_jarvis_usage: {
         Args: {
           _endpoint?: string
@@ -5002,6 +5058,15 @@ export type Database = {
       verify_market_cron_secret: { Args: { _secret: string }; Returns: boolean }
     }
     Enums: {
+      app_role: "admin" | "user"
+      app_section:
+        | "hud"
+        | "market"
+        | "finance"
+        | "tasks"
+        | "projects"
+        | "inbox"
+        | "config"
       email_category:
         | "important"
         | "needs_reply"
@@ -5182,6 +5247,16 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
+      app_role: ["admin", "user"],
+      app_section: [
+        "hud",
+        "market",
+        "finance",
+        "tasks",
+        "projects",
+        "inbox",
+        "config",
+      ],
       email_category: [
         "important",
         "needs_reply",

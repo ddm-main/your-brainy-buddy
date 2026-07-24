@@ -6,6 +6,7 @@ import ErrorBoundary from "@/components/hud/ErrorBoundary";
 import { useMarketAutoSync } from "@/lib/market/useAutoSync";
 import { useRealtimeTicks } from "@/lib/market/useRealtimeTicks";
 import { KotakReconnectModal } from "@/components/market/KotakReconnectModal";
+import { useAccessStore } from "@/store/accessStore";
 
 const Dashboard = lazy(() => import("@/routes/market/Dashboard"));
 const Holdings = lazy(() => import("@/routes/market/Holdings"));
@@ -98,7 +99,9 @@ function SubTabStrip({ subs, currentPath }: { subs: Sub[]; currentPath: string }
 
 export default function Market() {
   const loc = useLocation();
-  const activeGroup = GROUPS.find((g) => g.match(loc.pathname)) ?? GROUPS[0];
+  const isAdmin = useAccessStore((s) => s.role === "admin");
+  const groups = GROUPS.filter((g) => isAdmin || g.key !== "settings");
+  const activeGroup = groups.find((g) => g.match(loc.pathname)) ?? groups[0];
   useEffect(() => { document.title = `Market · ${activeGroup.label}`; }, [activeGroup.key]);
   useMarketAutoSync();
   useRealtimeTicks();
@@ -108,7 +111,7 @@ export default function Market() {
     <div style={{ padding: 12, height: "100%", display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
       <KotakReconnectModal />
       <div role="tablist" aria-label="Market sections" style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-        {GROUPS.map((g) => {
+        {groups.map((g) => {
           const active = g.key === activeGroup.key;
           return (
             <NavLink key={g.key} to={g.to} end={g.to === "/market"} role="tab" aria-selected={active}
@@ -142,7 +145,7 @@ export default function Market() {
               <Route path="ai/:symbol" element={<AIEngine />} />
               <Route path="index/:symbol" element={<IndexDetail />} />
               <Route path="autotrade" element={<AutoTrade />} />
-              <Route path="settings" element={<MarketSettings />} />
+              <Route path="settings" element={isAdmin ? <MarketSettings /> : <Navigate to="/market" replace />} />
               <Route path="*" element={<Navigate to="/market" replace />} />
             </Routes>
           </Suspense>

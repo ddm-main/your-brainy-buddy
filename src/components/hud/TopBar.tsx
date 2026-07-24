@@ -1,24 +1,57 @@
 import { NavLink, Link, useLocation } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
-import { Bell, SlidersHorizontal, Wifi } from "lucide-react";
+import { Bell, SlidersHorizontal, Wifi, LogOut, User as UserIcon } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 
 import { useEffect, useRef, useState } from "react";
 import { useAiStatus } from "@/store/aiStatusStore";
 import { useNotifications } from "@/store/notificationStore";
+import { useAccessStore, type AppSection } from "@/store/accessStore";
 import { motion, AnimatePresence } from "framer-motion";
 
-const NAV = [
-  { to: "/", label: "HUD" },
-  { to: "/market", label: "Market" },
-  { to: "/finance", label: "Finance" },
-  { to: "/tasks", label: "Tasks" },
-  { to: "/projects", label: "Projects" },
+const NAV: { to: string; label: string; section: AppSection }[] = [
+  { to: "/", label: "HUD", section: "hud" },
+  { to: "/market", label: "Market", section: "market" },
+  { to: "/finance", label: "Finance", section: "finance" },
+  { to: "/tasks", label: "Tasks", section: "tasks" },
+  { to: "/projects", label: "Projects", section: "projects" },
 ];
 
 export default function TopBar() {
   const loc = useLocation();
   const navigate = useNavigate();
+  const role = useAccessStore((s) => s.role);
+  const sections = useAccessStore((s) => s.sections);
+  const resetAccess = useAccessStore((s) => s.reset);
+  const canConfig = role === "admin" || sections.has("config");
+
+  const [email, setEmail] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    supabase.auth.getUser().then(({ data }) => {
+      if (!cancelled) setEmail(data.user?.email ?? null);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const [userOpen, setUserOpen] = useState(false);
+  const userRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!userOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (userRef.current && !userRef.current.contains(e.target as Node)) setUserOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [userOpen]);
+
+  const signOut = async () => {
+    setUserOpen(false);
+    await supabase.auth.signOut();
+    resetAccess();
+    navigate("/auth");
+  };
+
   const [now, setNow] = useState(new Date());
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -106,7 +139,7 @@ export default function TopBar() {
       </Link>
 
       <nav style={{ display: "flex", gap: 4 }}>
-        {NAV.map((n) => {
+        {NAV.filter((n) => role === "admin" || sections.has(n.section)).map((n) => {
           const active = n.to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(n.to);
           return (
             <NavLink
@@ -194,14 +227,53 @@ export default function TopBar() {
             )}
           </AnimatePresence>
         </div>
-        <button
-          className="focus-outline"
-          title="Config"
-          onClick={() => navigate("/config")}
-          style={iconBtn}
-        >
-          <SlidersHorizontal size={13} />
-        </button>
+        <div ref={userRef} style={{ position: "relative" }}>
+          <button
+            className="focus-outline"
+            title="Account"
+            onClick={() => setUserOpen((v) => !v)}
+            style={iconBtn}
+          >
+            <UserIcon size={13} />
+          </button>
+          <AnimatePresence>
+            {userOpen && (
+              <motion.div
+                initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }}
+                className="hud-panel"
+                style={{ position: "absolute", top: "calc(100% + 8px)", right: 0, width: 240, zIndex: 50 }}
+              >
+                <span className="hud-corner tl" /><span className="hud-corner tr" />
+                <span className="hud-corner bl" /><span className="hud-corner br" />
+                <div style={{ padding: "10px 12px", borderBottom: "1px solid var(--edge)" }}>
+                  <div className="hud-label" style={{ color: "var(--text-muted)" }}>Signed in</div>
+                  <div style={{ fontSize: 12, color: "var(--text)", marginTop: 2, wordBreak: "break-all" }}>
+                    {email ?? "…"}
+                  </div>
+                  <div className="hud-label" style={{ color: "var(--accent)", marginTop: 4 }}>{role ?? "—"}</div>
+                </div>
+                <div style={{ padding: 6, display: "flex", flexDirection: "column", gap: 2 }}>
+                  {canConfig && (
+                    <button
+                      className="focus-outline"
+                      onClick={() => { setUserOpen(false); navigate("/config"); }}
+                      style={menuItem}
+                    >
+                      <SlidersHorizontal size={13} /> Configuration
+                    </button>
+                  )}
+                  <button
+                    className="focus-outline"
+                    onClick={signOut}
+                    style={{ ...menuItem, color: "var(--danger)" }}
+                  >
+                    <LogOut size={13} /> Sign out
+                  </button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
       </div>
     </header>
   );
@@ -213,6 +285,14 @@ const iconBtn = {
   width: 28, height: 28, border: "1px solid var(--edge)",
   color: "var(--text-dim)", borderRadius: 2,
   background: "transparent", cursor: "pointer",
+} as const;
+
+const menuItem = {
+  display: "flex", alignItems: "center", gap: 8,
+  padding: "8px 10px", background: "transparent",
+  border: "1px solid transparent", color: "var(--text)",
+  cursor: "pointer", fontFamily: "var(--font-hud)", fontSize: 11,
+  letterSpacing: "0.14em", textTransform: "uppercase", textAlign: "left" as const,
 } as const;
 
 function StatusChip({ label, ok, icon, title }: { label: string; ok: boolean; icon: any; title?: string }) {

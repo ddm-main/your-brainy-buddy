@@ -17,8 +17,10 @@ import { callMarketFn } from "@/lib/market/api";
 import { useMarketSettings } from "@/lib/market/hooks";
 import { toSafeError } from "@/lib/errors";
 import { useUi } from "@/store/uiStore";
+import { useAccessStore } from "@/store/accessStore";
 
 export function KotakReconnectModal() {
+  const role = useAccessStore((s) => s.role);
   const { data: settings = [] } = useMarketSettings();
   const kotak = settings.find((s) => s.active_provider === "kotak_neo");
   const qc = useQueryClient();
@@ -71,6 +73,7 @@ export function KotakReconnectModal() {
     } finally { setBusy(false); }
   };
 
+  if (role !== "admin") return null;
   if (!broken || dismissed) return null;
 
   return (
