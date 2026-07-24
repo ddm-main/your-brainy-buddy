@@ -8,6 +8,8 @@ import { FundsCard } from "@/components/market/FundsCard";
 import { useQuotes, usePositions } from "@/lib/market/hooks";
 import { holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
+import { PriceSourceChip } from "@/components/market/PriceSourceChip";
 
 type Holding = { symbol: string; exchange: string; quantity: number; avg_price: number };
 
@@ -27,6 +29,7 @@ export default function PortfolioOverview() {
   const holdingKeys = useMemo(() => rows.map((h) => `${h.exchange}:${h.symbol}`), [rows]);
   const positionKeys = useMemo(() => positions.map((p) => `${p.exchange}:${p.symbol}`), [positions]);
   const allKeys = useMemo(() => [...new Set([...holdingKeys, ...positionKeys])], [holdingKeys, positionKeys]);
+  useEffect(() => { subscribeSymbolsForTicks(allKeys); }, [allKeys]);
   const { data: quotesData } = useQuotes(allKeys);
   const restQuotes = useMemo(() => {
     const map: Record<string, import("@/lib/market/types").Quote> = {};
@@ -65,7 +68,7 @@ export default function PortfolioOverview() {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 12 }}>
       <FundsCard />
-      <HudPanel flow title="Holdings" index="MK.PO1" actions={<Link to="/market/holdings" className="hud-label" style={{ color: "var(--accent-soft)" }}>view →</Link>}>
+      <HudPanel flow title="Holdings" index="MK.PO1" actions={<><PriceSourceChip compact /> <Link to="/market/holdings" className="hud-label" style={{ color: "var(--accent-soft)", marginLeft: 6 }}>view →</Link></>}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 8 }}>
           <Stat label="Invested" value={inr(hSummary.invested)} />
           <Stat label="Current" value={inr(hSummary.current)} />

@@ -282,6 +282,11 @@ export interface IndicatorSnapshot {
   resistance: number | null;
   nearResistance: boolean;
   macdHistRising: boolean;
+  // Rolling N-day highs (scoring v2 breakout trigger). Optional: pipelines that
+  // haven't been updated still work — the trigger falls back to pctFrom52wHigh.
+  rollingHigh20?: number | null;
+  rollingHigh55?: number | null;
+  obvSlope20?: number | null;
   // series for chart overlays (aligned to candles)
   ema20Series: (number | null)[];
   ema50Series: (number | null)[];

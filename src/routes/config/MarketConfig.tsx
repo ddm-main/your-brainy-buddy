@@ -16,6 +16,8 @@ type Pipeline = {
   fundamentals_last_updated_at: string | null;
   scores_last_trade_date: string | null;
   scores_last_count: number | null;
+  token_covered?: number | null;
+  token_coverage_pct?: number | null;
 } | null;
 
 function timeAgo(ts: string | null): string {
@@ -80,6 +82,8 @@ export default function MarketConfig() {
   const fundOk = pipeline?.fundamentals_covered ?? 0;
   const fundFailed = pipeline?.fundamentals_failed ?? 0;
   const fundPct = total ? Math.round((fundOk / total) * 100) : 0;
+  const tokenCovered = pipeline?.token_covered ?? 0;
+  const tokenPct = pipeline?.token_coverage_pct ?? (total ? Math.round((tokenCovered / total) * 100) : 0);
 
   const stat: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 4, padding: "10px 12px", border: "1px solid var(--edge)", background: "rgba(53,214,237,0.03)" };
   const statLabel: React.CSSProperties = { fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.16em", textTransform: "uppercase", color: "var(--text-muted)" };
@@ -117,6 +121,13 @@ export default function MarketConfig() {
             <div style={statLabel}>Scores Trade Date</div>
             <div style={statValue}>{pipeline?.scores_last_trade_date ?? "—"}</div>
             <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{pipeline?.scores_last_count ?? 0} rows</div>
+          </div>
+          <div style={stat}>
+            <div style={statLabel}>Kotak Token Coverage</div>
+            <div style={statValue}>{tokenCovered} <span style={{ fontSize: 12, color: "var(--text-muted)" }}>/ {total}</span></div>
+            <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+              <Chip tone={tokenPct >= 90 ? "ok" : tokenPct >= 70 ? "warn" : "err"}>{tokenPct}%</Chip>
+            </div>
           </div>
         </div>
 

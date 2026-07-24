@@ -14,6 +14,8 @@ import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 import { approxAnnualizedReturnPct, holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 import { useQuotes } from "@/lib/market/hooks";
 import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
+import { PriceSourceChip } from "@/components/market/PriceSourceChip";
 import { PortfolioAllocation } from "@/components/market/PortfolioAllocation";
 import { OrderTicket } from "@/components/market/OrderTicket";
 
@@ -77,6 +79,7 @@ export default function Holdings() {
 
   // Live quotes: same shared 1s market-hours hook every other page uses.
   const quoteKeys = useMemo(() => rows.map((h) => `${h.exchange}:${h.symbol}`), [rows]);
+  useEffect(() => { subscribeSymbolsForTicks(quoteKeys); }, [quoteKeys]);
   const { data: quotesData, isFetching: quotesFetching, refetch: refetchQuotes } = useQuotes(quoteKeys);
   const restQuotes = useMemo(() => {
     const map: Record<string, import("@/lib/market/types").Quote> = {};

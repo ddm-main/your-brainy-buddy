@@ -1,5 +1,5 @@
 // Market Positions — active trades: broker sync + manual journal + live P&L.
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import type { ColumnDef } from "@tanstack/react-table";
 import { HudPanel } from "@/components/hud/HudPanel";
@@ -15,6 +15,8 @@ import { Download, Plus, ShoppingCart, Trash2, X } from "lucide-react";
 import type { Position, Quote } from "@/lib/market/types";
 import { positionPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
+import { PriceSourceChip } from "@/components/market/PriceSourceChip";
 import { OrderTicket } from "@/components/market/OrderTicket";
 
 const emptyForm = { symbol: "", exchange: "NSE", side: "long", quantity: "", entry_price: "", stop_loss: "", target: "", journal_notes: "" };
@@ -32,6 +34,7 @@ export default function Positions() {
   const open = useMemo(() => positions.filter((p) => !p.closed_at), [positions]);
   const closed = useMemo(() => positions.filter((p) => p.closed_at), [positions]);
   const keys = useMemo(() => [...new Set(open.map((p) => `${p.exchange}:${p.symbol}`))], [open]);
+  useEffect(() => { subscribeSymbolsForTicks(keys); }, [keys]);
   const { data: quotesData } = useQuotes(keys);
   const liveTicks = useLiveTickStore((s) => s.ticks);
   const quoteMap = useMemo(() => {

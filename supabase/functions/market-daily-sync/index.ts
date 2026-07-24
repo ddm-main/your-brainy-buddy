@@ -5,6 +5,7 @@
 // see from the DB whether the daily sync landed cleanly.
 import { preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
+import { createClient } from "npm:@supabase/supabase-js@2";
 
 type StepFn =
   | "market-nse-bhavcopy-sync"
@@ -33,7 +34,34 @@ const MAX_DRAIN_ITERATIONS = 40;
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
-  const gate = await requireCronSecret(req); if (gate) return gate;
+  // Two accepted callers:
+  //  1) pg_cron via the vault-held x-cron-secret header (09:00 IST job)
+  //  2) A signed-in user hitting "Sync all" (Screener) or the client
+  //     auto-sync in useAutoSync.ts — throttled to once per day per client.
+  // Anonymous callers are rejected.
+  const hasCronHeader = req.headers.get("x-cron-secret") != null;
+  if (hasCronHeader) {
+    const gate = await requireCronSecret(req); if (gate) return gate;
+  } else {
+    const auth = req.headers.get("Authorization");
+    if (!auth?.startsWith("Bearer ")) {
+      return new Response(JSON.stringify({ error: "unauthorized" }), {
+        status: 401, headers: { "Content-Type": "application/json" },
+      });
+    }
+    const token = auth.slice(7);
+    const supa = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!,
+      { global: { headers: { Authorization: auth } } },
+    );
+    const { data, error } = await supa.auth.getClaims(token);
+    if (error || !data?.claims?.sub) {
+      return new Response(JSON.stringify({ error: "unauthorized" }), {
+        status: 401, headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
 
   const svc = svcClient();
   const cronSecret =

@@ -13,6 +13,7 @@ import { SymbolSearchInput, type SymbolOption } from "@/components/market/Symbol
 import { quoteKey } from "@/lib/market/pnl";
 import { useQuotes } from "@/lib/market/hooks";
 import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
 import type { Quote } from "@/lib/market/types";
 import { OrderTicket } from "@/components/market/OrderTicket";
 
@@ -83,6 +84,7 @@ export function WatchlistPanel({
   }, [activeId]);
 
   const quoteKeys = useMemo(() => items.map((i) => `${i.exchange}:${i.symbol}`), [items]);
+  useEffect(() => { subscribeSymbolsForTicks(quoteKeys); }, [quoteKeys]);
   const { data: quotesData, isFetching: quotesFetching, refetch: refetchQuotes } = useQuotes(quoteKeys);
   const restQuotes = useMemo(() => {
     const map: Record<string, Quote> = {};

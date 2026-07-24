@@ -40,6 +40,9 @@ const baseSnap: IndicatorSnapshot = {
   resistance: 108,
   nearResistance: false,
   macdHistRising: true,
+  rollingHigh20: null,
+  rollingHigh55: null,
+  obvSlope20: null,
   ema20Series: [],
   ema50Series: [],
   ema200Series: [],
@@ -105,10 +108,45 @@ describe("breakoutScore", () => {
   });
 
   it("penalizes overbought RSI", () => {
-    const sweet = breakoutScore({ ...baseSnap, rsi14: 62 }, neutralCtx);
-    const hot = breakoutScore({ ...baseSnap, rsi14: 85 }, neutralCtx);
+    const sweet = breakoutScore({ ...baseSnap, rsi14: 65 }, neutralCtx);
+    const hot = breakoutScore({ ...baseSnap, rsi14: 88 }, neutralCtx);
     expect(sweet.components.rsi).toBe(10);
     expect(hot.components.rsi).toBe(0);
+  });
+
+  it("applies an over-extension penalty when price is many ATRs above EMA20", () => {
+    // 6 ATRs above EMA20 → full -15 penalty
+    const extended = breakoutScore(
+      { ...baseSnap, close: 100, ema20: 88, atr14: 2 },
+      neutralCtx,
+    );
+    expect(extended.components.penalty_overextension).toBeLessThan(0);
+  });
+
+  it("floors total at 0 even under heavy penalties", () => {
+    const weakExtended = breakoutScore(
+      { ...baseSnap, close: 100, ema20: 80, atr14: 2, relVolume: 0.3, rsi14: 30, aboveEma200: false, emaAligned: false, macd: -1, macdSignal: 0, macdHistRising: false, pctFrom52wHigh: -40 },
+      { ...neutralCtx, regime: "bearish", relStrengthNifty: -20 },
+    );
+    expect(weakExtended.score).toBeGreaterThanOrEqual(0);
+  });
+
+  it("rewards a real close-above-pivot trigger more than mere 52w-high proximity", () => {
+    const nearHigh = breakoutScore(
+      { ...baseSnap, pctFrom52wHigh: -1, rollingHigh20: null, rollingHigh55: null },
+      neutralCtx,
+    );
+    const brokeOut = breakoutScore(
+      { ...baseSnap, close: 102, atr14: 2, rollingHigh20: 100, rollingHigh55: 100, pctFrom52wHigh: -1 },
+      neutralCtx,
+    );
+    expect(brokeOut.components.trigger).toBeGreaterThan(nearHigh.components.trigger);
+  });
+
+  it("bearish regime dampens the breakout score", () => {
+    const bull = breakoutScore(baseSnap, { ...neutralCtx, regime: "bullish" }).score;
+    const bear = breakoutScore(baseSnap, { ...neutralCtx, regime: "bearish" }).score;
+    expect(bull).toBeGreaterThan(bear);
   });
 });
 

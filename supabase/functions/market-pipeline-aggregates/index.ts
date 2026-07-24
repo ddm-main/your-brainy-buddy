@@ -8,12 +8,22 @@ import type { IndicatorSnapshot } from "../_shared/market/indicators.ts";
 import { yahooChartRetry } from "../_shared/market/yahooClient.ts";
 
 // Rebuild the scorer's input from a market_stock_scores row (joined with stocks).
+// v2 fix: `atrContracting` and `macdHistRising` used to be read from yesterday's
+// `score_components`, which is circular (score → components → tomorrow's score).
+// Derive them from raw indicator columns instead so today's score reflects
+// today's tape.
 function snapFromRow(r: any): IndicatorSnapshot {
+  // bb_width < 0.06 (~6% of price) is a reasonable "squeeze / contracting"
+  // proxy when a rolling bbWidth history isn't in the row.
+  const bbw = typeof r.bb_width === "number" ? r.bb_width : null;
+  const atrContracting = bbw != null ? bbw < 0.06 : false;
+  const macdHistRising = typeof r.macd_hist === "number" && r.macd_hist > 0;
   return {
     close: r.close ?? 0,
     changePct: r.change_pct,
     volume: r.volume ?? 0,
     volAvg20: r.vol_avg20,
+    volAvg30: r.vol_avg30 ?? null,
     relVolume: r.rel_volume,
     ema20: r.ema20,
     ema50: r.ema50,
@@ -30,7 +40,7 @@ function snapFromRow(r: any): IndicatorSnapshot {
     bbLower: r.bb_lower,
     bbWidth: r.bb_width,
     bbSqueeze: !!r.bb_squeeze,
-    atrContracting: !!(r.score_components?.prebreakout?.atr_contraction > 0),
+    atrContracting,
     high52w: r.high_52w,
     low52w: r.low_52w,
     pctFrom52wHigh: r.pct_from_52w_high,
@@ -40,7 +50,10 @@ function snapFromRow(r: any): IndicatorSnapshot {
     support: r.support_level,
     resistance: r.resistance_level,
     nearResistance: !!r.near_resistance,
-    macdHistRising: !!(r.score_components?.breakout?.macd >= 10),
+    macdHistRising,
+    rollingHigh20: r.rolling_high_20 ?? null,
+    rollingHigh55: r.rolling_high_55 ?? null,
+    obvSlope20: r.obv_slope_20 ?? null,
     ema20Series: [],
     ema50Series: [],
     ema200Series: [],
