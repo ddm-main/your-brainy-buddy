@@ -214,10 +214,26 @@ export function CandleChart({
     const istDate = new Intl.DateTimeFormat("en-GB", {
       timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "2-digit",
     });
+    const istDayMonth = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata", day: "2-digit", month: "short",
+    });
+    const istMonthYear = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata", month: "short", year: "2-digit",
+    });
     const istDateTime = new Intl.DateTimeFormat("en-GB", {
       timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "2-digit",
       hour: "2-digit", minute: "2-digit", hour12: false,
     });
+    // IST day-key ("YYYY-MM-DD") for detecting session boundaries on the axis.
+    const istDayKey = (d: Date) => {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
+      }).formatToParts(d);
+      const y = parts.find((p) => p.type === "year")?.value ?? "";
+      const m = parts.find((p) => p.type === "month")?.value ?? "";
+      const dd = parts.find((p) => p.type === "day")?.value ?? "";
+      return `${y}-${m}-${dd}`;
+    };
     // Detect intraday by the median gap between the first few numeric bars
     // (< 1 day = intraday). Falls back to intraday if unknown.
     const _nums = data.map((c) => c.time).filter((t): t is number => typeof t === "number").slice(0, 8);
@@ -227,16 +243,45 @@ export function CandleChart({
       _medianGap = gaps[Math.floor(gaps.length / 2)] || 0;
     }
     const isIntraday = _medianGap > 0 ? _medianGap < 86_400 : true;
+    const isMonthly = _medianGap >= 86_400 * 27;
+    // Track last-seen day/month across tick formatter calls so we can print
+    // the date on the first tick of a new session (industry standard: TV,
+    // Kite, Tickertape all switch label style at day boundaries).
+    let _lastDayKey = "";
+    let _lastMonthKey = "";
     const fmtAxis = (t: any) => {
       if (typeof t !== "number") return String(t);
       const d = new Date(t * 1000);
-      return isIntraday ? istTime.format(d) : istDate.format(d);
+      if (isMonthly) {
+        // Monthly/weekly bars: month + year, with year prefix on Jan.
+        return istMonthYear.format(d);
+      }
+      if (!isIntraday) {
+        // Daily bars: show DD Mon, prefix year on first tick of a new year.
+        const monthKey = istDayKey(d).slice(0, 7);
+        const yearKey = monthKey.slice(0, 4);
+        const label = istDayMonth.format(d);
+        if (yearKey !== _lastMonthKey.slice(0, 4)) {
+          _lastMonthKey = monthKey;
+          return `${label} '${yearKey.slice(2)}`;
+        }
+        _lastMonthKey = monthKey;
+        return label;
+      }
+      // Intraday: show date on the first tick of a new day, else HH:mm.
+      const dayKey = istDayKey(d);
+      if (dayKey !== _lastDayKey) {
+        _lastDayKey = dayKey;
+        return istDayMonth.format(d);
+      }
+      return istTime.format(d);
     };
     const fmtCrosshair = (t: any) => {
       if (typeof t !== "number") return String(t);
       const d = new Date(t * 1000);
       return isIntraday ? istDateTime.format(d) : istDate.format(d);
     };
+
 
     const chart = createChart(el, {
       height: fill ? el.clientHeight || height : height,
