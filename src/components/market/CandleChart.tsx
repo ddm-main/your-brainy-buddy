@@ -204,6 +204,32 @@ export function CandleChart({
     });
     const data = cleaned;
 
+    // NSE session is 09:15–15:30 IST. Lightweight-charts defaults to UTC, so
+    // without an IST formatter the market opens at "03:45" on every chart.
+    // Format epoch seconds through Asia/Kolkata for both axis ticks and the
+    // crosshair label; underlying data stays in UTC.
+    const istTime = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+    const istDate = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "2-digit",
+    });
+    const istDateTime = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "2-digit",
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+    const isIntraday = interval !== "1D" && interval !== "1W" && interval !== "1M";
+    const fmtAxis = (t: any) => {
+      if (typeof t !== "number") return String(t);
+      const d = new Date(t * 1000);
+      return isIntraday ? istTime.format(d) : istDate.format(d);
+    };
+    const fmtCrosshair = (t: any) => {
+      if (typeof t !== "number") return String(t);
+      const d = new Date(t * 1000);
+      return isIntraday ? istDateTime.format(d) : istDate.format(d);
+    };
+
     const chart = createChart(el, {
       height: fill ? el.clientHeight || height : height,
       width: el.clientWidth || 600,
@@ -214,6 +240,9 @@ export function CandleChart({
         fontSize: 11,
         attributionLogo: false,
         panes: { separatorColor: "rgba(53,214,237,0.15)", separatorHoverColor: "rgba(53,214,237,0.35)", enableResize: true },
+      },
+      localization: {
+        timeFormatter: fmtCrosshair,
       },
       grid: {
         vertLines: { color: "rgba(53,214,237,0.06)", visible: sGrid },
@@ -226,6 +255,7 @@ export function CandleChart({
       timeScale: {
         borderColor: "rgba(53,214,237,0.15)",
         timeVisible: data.some((c) => typeof c.time === "number"),
+        tickMarkFormatter: fmtAxis,
         // "Session breaks" hides the non-trading gaps by tightly packing bars
         // — LWC exposes this via `shiftVisibleRangeOnNewBar` + `barSpacing`;
         // the closest built-in is disabling `ticksVisible` on off-hours, but
