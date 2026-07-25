@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { useTopMovers } from "@/lib/market/hooks";
+import { Return1DCell, deriveChangeAbs } from "@/components/hud/DataTable";
 
 type Dir = "gain" | "lose";
 
@@ -43,8 +44,8 @@ export function TopMoversPanel() {
       ) : (
         <div style={{ display: "flex", flexDirection: "column" }}>
           {rows.map((r) => {
-            const pct = r.change_pct ?? 0;
-            const tone = pct >= 0 ? "var(--ok)" : "var(--danger)";
+            const pct = r.change_pct ?? null;
+            const abs = deriveChangeAbs(r.close, pct);
             return (
               <button
                 key={`${r.exchange}:${r.symbol}`}
@@ -66,8 +67,8 @@ export function TopMoversPanel() {
                 <span style={{ color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>
                   {r.close == null ? "—" : `₹${r.close.toFixed(2)}`}
                 </span>
-                <span style={{ color: tone, fontVariantNumeric: "tabular-nums", minWidth: 62, textAlign: "right" }}>
-                  {`${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`}
+                <span style={{ fontVariantNumeric: "tabular-nums", minWidth: 120, textAlign: "right" }}>
+                  <Return1DCell abs={abs} pct={pct} />
                 </span>
               </button>
             );

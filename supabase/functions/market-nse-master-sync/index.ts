@@ -1,3 +1,4 @@
+// Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
 // market-nse-master-sync — pull the official NSE equity master (EQUITY_L.csv)
 // and expand market_stocks + market_nse_master to the full active NSE universe
 // (EQ/BE/BZ/SM/ST/SME series). Tickertape screens against this same set.

@@ -120,7 +120,7 @@ async function fetchIndexMemberSet(indexKey: string): Promise<Set<string>> {
 // columns from the wire, ~30% smaller responses than the previous `select("*")`.
 const SCREENER_COLUMNS = [
   "symbol","exchange","company_name","sector","sub_sector","industry","market_cap",
-  "is_nifty500","instrument_type","trade_date","close","previous_close","change_pct","volume",
+  "is_nifty500","instrument_type","trade_date","close","previous_close","change_abs","change_pct","volume",
   "rel_volume","vol_avg30","vol_gt_avg30","ema20","ema50","ema100","ema200","rsi14","macd","macd_signal",
   "macd_hist","adx14","atr14","atr_pct","bb_upper","bb_lower","bb_width",
   "bb_squeeze","high_52w","low_52w","pct_from_52w_high","above_ema200",

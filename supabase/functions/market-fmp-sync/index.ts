@@ -1,3 +1,4 @@
+// Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
 // market-fmp-sync — nightly trickle sync of Financial Modeling Prep data
 // (Priority 2 fundamentals per the multi-provider spec). FMP's free tier is
 // 250 requests/day; fmpFundamentals() costs 6 calls/symbol, so this budgets

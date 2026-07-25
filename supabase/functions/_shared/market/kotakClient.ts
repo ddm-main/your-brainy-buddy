@@ -62,7 +62,7 @@ export class KotakError extends Error {
 // only place in this backend besides yahooClient.ts that needs this).
 async function kotakFetch(url: string, init: RequestInit, attempt = 1): Promise<any> {
   const r = await fetch(url, init);
-  if (r.status === 429 && attempt <= 3) {
+  if (r.status === 429 && attempt <= 2) {
     const retryAfterSec = Number(r.headers.get("retry-after"));
     const delayMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
       ? retryAfterSec * 1000
@@ -194,20 +194,79 @@ export async function kotakHoldings(s: KotakSettings): Promise<any[]> {
   return j?.data ?? [];
 }
 
+// Full envelope variant — sync uses `stat` to distinguish "empty book" from
+// "upstream returned garbage" before deleting rows. If `stat` is absent we
+// treat presence of a `data` array as OK (Kotak has inconsistent envelopes).
+export async function kotakHoldingsEnvelope(s: KotakSettings): Promise<{ rows: any[]; ok: boolean; raw: any }> {
+  const h = await sessionHeaders(s);
+  const j = await kotakFetch(`${apiBase(s)}/portfolio/v1/holdings`, { headers: h });
+  const rows = Array.isArray(j?.data) ? j.data : [];
+  const stat = String(j?.stat ?? j?.stCode ?? "").toLowerCase();
+  const ok = stat === "ok" || (stat === "" && Array.isArray(j?.data));
+  return { rows, ok, raw: j };
+}
+
 export async function kotakPositions(s: KotakSettings): Promise<any[]> {
   const h = await sessionHeaders(s);
   const j = await kotakFetch(`${apiBase(s)}/quick/user/positions`, { headers: h });
   return j?.data ?? [];
 }
 
+export async function kotakPositionsEnvelope(s: KotakSettings): Promise<{ rows: any[]; ok: boolean; raw: any }> {
+  const h = await sessionHeaders(s);
+  const j = await kotakFetch(`${apiBase(s)}/quick/user/positions`, { headers: h });
+  const rows = Array.isArray(j?.data) ? j.data : [];
+  const stat = String(j?.stat ?? j?.stCode ?? "").toLowerCase();
+  const ok = stat === "ok" || (stat === "" && Array.isArray(j?.data));
+  return { rows, ok, raw: j };
+}
+
 export async function kotakLimits(s: KotakSettings): Promise<any> {
   const h = await sessionHeaders(s);
-  return kotakFetch(`${apiBase(s)}/quick/user/limits`, {
+  // /quick/user/limits intermittently returns 5xx / empty bodies when queried
+  // with {ALL,ALL,ALL} on cash-only Neo accounts. Try the concrete cash combo
+  // first (what most retail accounts have), fall back to the broadcast query,
+  // and treat empty bodies as "combo not applicable" — advance rather than
+  // burn the whole attempt.
+  const combos: Array<{ seg: string; exch: string; prod: string }> = [
+    { seg: "CASH", exch: "NSE", prod: "ALL" },
+    { seg: "ALL",  exch: "ALL", prod: "ALL" },
+    { seg: "FO",   exch: "NSE", prod: "ALL" },
+  ];
+  let lastErr: unknown = null;
+  for (const body of combos) {
+    try {
+      const j = await kotakFetch(`${apiBase(s)}/quick/user/limits`, {
+        method: "POST",
+        headers: { ...h, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      // Only accept combos that returned a real payload; empty {} → next combo.
+      if (j && typeof j === "object" && Object.keys(j).length > 0) return j;
+    } catch (e) {
+      lastErr = e;
+      const status = (e as any)?.status;
+      // Auth failures are terminal — no combo will fix a bad session.
+      if (typeof status === "number" && status === 401) throw e;
+      if (typeof status === "number" && status === 403) throw e;
+      // Everything else (429, 5xx, empty-body) → try the next combo.
+    }
+  }
+  throw lastErr ?? new KotakError("Kotak limits: no payload from any segment combination", 502);
+}
+
+// Fallback margin endpoint. Neo web uses /quick/user/margin as an alternative
+// to /quick/user/limits — it returns the same shape (Net / CashAvailable /
+// MarginUsed / Collateral) but is more reliable on cash-only accounts.
+export async function kotakUserMargin(s: KotakSettings): Promise<any> {
+  const h = await sessionHeaders(s);
+  return await kotakFetch(`${apiBase(s)}/quick/user/margin`, {
     method: "POST",
     headers: { ...h, "Content-Type": "application/json" },
-    body: JSON.stringify({ seg: "ALL", exch: "ALL", prod: "ALL" }),
+    body: JSON.stringify({ seg: "CASH", exch: "NSE", prod: "ALL" }),
   });
 }
+
 
 // Quotes need an active session and go through the per-user baseUrl.
 // neoSymbols look like "nse_cm|11536".
@@ -378,6 +437,13 @@ export interface KotakFundsSnapshot {
   used_margin: number | null;
   collateral: number | null;
   payin_amount: number | null;
+  // Extended breakdown (nullable — Kotak returns different subsets by account type).
+  cash_balance: number | null;
+  payout_amount: number | null;
+  span_margin: number | null;
+  exposure_margin: number | null;
+  realized_mtm: number | null;
+  unrealized_mtm: number | null;
   raw: unknown;
 }
 export function parseKotakLimits(j: any): KotakFundsSnapshot {
@@ -390,15 +456,33 @@ export function parseKotakLimits(j: any): KotakFundsSnapshot {
     }
     return null;
   };
-  return {
+  const snap: KotakFundsSnapshot = {
     net_cash: pickNum(["Net", "net", "netCash", "NetCash"]),
-    available_margin: pickNum(["CashAvailable", "cashAvailable", "AvailableMargin", "availableMargin", "MarginAvailable", "marginAvailable"]),
-    used_margin: pickNum(["MarginUsed", "marginUsed", "MarginUtilized", "marginUtilized", "Utilised", "utilised"]),
-    collateral: pickNum(["Collateral", "collateral", "CollateralAmount", "collateralAmount"]),
+    available_margin: pickNum(["CashAvailable", "cashAvailable", "AvailableMargin", "availableMargin", "MarginAvailable", "marginAvailable", "AvlblCash", "avlblCash"]),
+    used_margin: pickNum(["MarginUsed", "marginUsed", "MarginUtilized", "marginUtilized", "Utilised", "utilised", "MarginUtilised", "marginUtilised"]),
+    collateral: pickNum(["Collateral", "collateral", "CollateralAmount", "collateralAmount", "CollateralValue", "collateralValue"]),
     payin_amount: pickNum(["Payin", "payin", "PayIn", "payIn", "PayinAmount", "payinAmount"]),
+    cash_balance: pickNum(["Cash", "cash", "CashBalance", "cashBalance", "OpeningBalance", "openingBalance"]),
+    payout_amount: pickNum(["Payout", "payout", "PayOut", "payOut", "PayoutAmount", "payoutAmount"]),
+    span_margin: pickNum(["SPAN", "span", "SpanMargin", "spanMargin"]),
+    exposure_margin: pickNum(["Exposure", "exposure", "ExposureMargin", "exposureMargin"]),
+    realized_mtm: pickNum(["Realized", "realized", "RealisedMtoM", "realisedMtoM", "RealisedPnL", "realisedPnL"]),
+    unrealized_mtm: pickNum(["Unrealized", "unrealized", "UnrealisedMtoM", "unrealisedMtoM", "UnrealisedPnL", "unrealisedPnL", "MtoM", "mtoM"]),
     raw: d,
   };
+  const anyValue = snap.net_cash != null || snap.available_margin != null
+    || snap.used_margin != null || snap.collateral != null || snap.payin_amount != null
+    || snap.cash_balance != null;
+  if (!anyValue) {
+    throw new KotakError(
+      "Kotak limits payload empty — no recognized fields",
+      502,
+      JSON.stringify(j).slice(0, 500),
+    );
+  }
+  return snap;
 }
+
 
 export async function kotakPlaceOrder(s: KotakSettings, input: PlaceOrderInput): Promise<KotakOrderResult> {
   const h = await sessionHeaders(s);
@@ -490,6 +574,24 @@ export async function persistSession(
 
 
 // Run an authenticated call; on 401 retry once after unattended re-login.
+// In-isolate mutex keyed by settings row id — without this, N concurrent
+// fetches that all fail their initial call with 401 would each mint a new
+// session, race to persist, and end up with one client holding a token
+// that the DB just overwrote (surfacing as a second wave of 401s). We
+// serialize the re-login step per settings row within an isolate; the
+// waiter re-reads the persisted session before retrying so it inherits
+// the fresh tokens minted by the winner.
+const reloginLocks: Map<string, Promise<void>> = new Map();
+
+async function withReloginLock<T>(settingsId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = reloginLocks.get(settingsId) ?? Promise.resolve();
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  reloginLocks.set(settingsId, prev.then(() => gate));
+  try { await prev; return await fn(); }
+  finally { release(); if (reloginLocks.get(settingsId) === gate) reloginLocks.delete(settingsId); }
+}
+
 export async function withKotakSession<T>(
   svc: SupabaseClient,
   s: KotakSettings,
@@ -500,15 +602,27 @@ export async function withKotakSession<T>(
     return await fn(s);
   } catch (e) {
     if (e instanceof KotakError && (e.status === 401 || e.status === 403) && s.totp_secret_enc) {
-      const sess = await kotakAutoLogin(s);
-      await persistSession(svc, s, sess, encrypt);
-      const fresh: KotakSettings = {
-        ...s,
-        sid: sess.editSid,
-        hs_server_id: sess.hsServerId,
-        base_url: sess.apiBase,
-        session_token_enc: await encrypt(sess.editToken),
-      };
+      const fresh: KotakSettings = await withReloginLock(s.id, async () => {
+        // Another concurrent call may have already refreshed the session
+        // while we waited on the lock. Re-read; if the persisted token is
+        // newer than what we came in with, use it and skip the login.
+        const { data: latest } = await svc.from("market_api_settings")
+          .select("session_token_enc,sid,hs_server_id,base_url,connection_status,token_expires_at")
+          .eq("id", s.id).maybeSingle();
+        if (latest && latest.connection_status === "connected"
+          && latest.session_token_enc && latest.session_token_enc !== s.session_token_enc) {
+          return { ...s, ...latest } as KotakSettings;
+        }
+        const sess = await kotakAutoLogin(s);
+        await persistSession(svc, s, sess, encrypt);
+        return {
+          ...s,
+          sid: sess.editSid,
+          hs_server_id: sess.hsServerId,
+          base_url: sess.apiBase,
+          session_token_enc: await encrypt(sess.editToken),
+        };
+      });
       return await fn(fresh);
     }
     if (e instanceof KotakError && (e.status === 401 || e.status === 403)) {
@@ -519,4 +633,43 @@ export async function withKotakSession<T>(
     }
     throw e;
   }
+}
+
+// Position conversion — change product code (MIS ↔ CNC ↔ NRML) on an open
+// position without flattening/re-buying. Kotak Neo endpoint mirrors the
+// place/modify pattern; the body shape follows their v2 quick-order API.
+// If Kotak returns an error, it surfaces cleanly to the caller.
+export interface ConvertPositionInput {
+  exchangeSegment: string;     // e.g. "nse_cm"
+  tradingSymbol: string;       // e.g. "RELIANCE-EQ"
+  instrumentToken?: string;
+  transactionType: "BUY" | "SELL"; // side of the OPEN position (long=BUY, short=SELL)
+  quantity: number;
+  fromProduct: "MIS" | "CNC" | "NRML";
+  toProduct: "MIS" | "CNC" | "NRML";
+}
+
+export async function kotakConvertPosition(
+  s: KotakSettings,
+  input: ConvertPositionInput,
+): Promise<{ status: string; raw: any }> {
+  if (input.fromProduct === input.toProduct) {
+    throw new KotakError("From-product and to-product cannot be the same", 400);
+  }
+  const h = await sessionHeaders(s);
+  const body: Record<string, string> = {
+    es: input.exchangeSegment,
+    ts: input.tradingSymbol,
+    qt: String(input.quantity),
+    tt: input.transactionType === "BUY" ? "B" : "S",
+    fPrd: input.fromProduct,
+    tPrd: input.toProduct,
+  };
+  if (input.instrumentToken) body.tk = input.instrumentToken;
+  const j = await kotakFetch(`${apiBase(s)}/quick/order/rule/ms/pos-conversion`, {
+    method: "POST",
+    headers: { ...h, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: String(j?.stat ?? j?.stCode ?? ""), raw: j };
 }

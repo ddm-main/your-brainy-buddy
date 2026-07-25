@@ -5,7 +5,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
-import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
+import { DataTable, deriveChangeAbs, fmtInt, fmtNum, PctCell, Return1DCell } from "@/components/hud/DataTable";
 import type { ColumnDef } from "@tanstack/react-table";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
 import { ChartToolbar, DEFAULT_SETTINGS, type ChartSettings } from "@/components/market/ChartToolbar";
@@ -125,9 +125,8 @@ export default function IndexDetail() {
           <span style={{ fontFamily: "var(--font-display)", fontSize: 30, color: "var(--text)" }}>
             {quote ? Number(quote.price).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"}
           </span>
-          <span style={{ fontSize: 14, color: (chgPct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
-            {chgPct == null ? "—" : `${chgPct >= 0 ? "+" : ""}${chgPct.toFixed(2)}%`}
-            {chgAbs != null && <span style={{ marginLeft: 6 }}>({chgAbs >= 0 ? "+" : ""}{fmtNum(chgAbs)})</span>}
+          <span style={{ fontSize: 14 }}>
+            <Return1DCell abs={chgAbs} pct={chgPct} />
           </span>
           <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{symbol} · {region}</span>
           {fno && <Chip tone="accent">F&O</Chip>}
@@ -195,7 +194,9 @@ export default function IndexDetail() {
                   onToggleStudy={toggleStudy}
                   onEditStudy={setEditingId}
                   onRemoveStudy={removeStudy}
+                  source={candlesData?.provider ?? null}
                 />
+
               )}
             </div>
           </FullscreenShell>
@@ -357,13 +358,16 @@ function ConstituentsPanel({ slug, onRow }: { slug: string; onRow: (sym: string)
   const pushTicks = useLiveTickStore((s) => s.ticks);
   useEffect(() => { subscribeSymbolsForTicks(keys); }, [keysJoined]);
   const liveByKey = useMemo(() => {
-    const m = new Map<string, { ltp: number | null; change_pct: number | null }>();
+    const m = new Map<string, { ltp: number | null; change_pct: number | null; change_abs: number | null }>();
     for (const q of liveQuotes?.quotes ?? []) {
-      m.set(quoteKey(q.exchange, q.symbol), { ltp: q.ltp ?? null, change_pct: q.change_pct ?? null });
+      const ltp = q.ltp ?? null;
+      const pct = q.change_pct ?? null;
+      const abs = q.day_change ?? (ltp != null && q.previous_close != null ? ltp - q.previous_close : deriveChangeAbs(ltp, pct));
+      m.set(quoteKey(q.exchange, q.symbol), { ltp, change_pct: pct, change_abs: abs });
     }
     for (const [key, tick] of Object.entries(pushTicks)) {
       if (!isFreshTick(tick)) continue;
-      m.set(key, { ltp: tick.ltp, change_pct: tick.change_pct });
+      m.set(key, { ltp: tick.ltp, change_pct: tick.change_pct, change_abs: deriveChangeAbs(tick.ltp, tick.change_pct) });
     }
     return m;
   }, [liveQuotes, pushTicks]);
@@ -377,9 +381,14 @@ function ConstituentsPanel({ slug, onRow }: { slug: string; onRow: (sym: string)
     { header: "Price", id: "livePrice", meta: { align: "right" },
       accessorFn: (r) => liveByKey.get(quoteKey("NSE", r.symbol))?.ltp ?? r.close,
       cell: ({ getValue }) => fmtNum(getValue() as number | null) },
-    { header: "Chg %", id: "liveChangePct", meta: { align: "right" },
+    { header: "1D Return", id: "liveChangePct", meta: { align: "right" },
       accessorFn: (r) => liveByKey.get(quoteKey("NSE", r.symbol))?.change_pct ?? r.change_pct,
-      cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
+      cell: ({ row }) => {
+        const live = liveByKey.get(quoteKey("NSE", row.original.symbol));
+        const pct = live?.change_pct ?? row.original.change_pct ?? null;
+        const abs = live?.change_abs ?? deriveChangeAbs(live?.ltp ?? row.original.close ?? null, pct);
+        return <Return1DCell abs={abs} pct={pct} />;
+      } },
     { header: "RVol", accessorKey: "rel_volume", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue(), 1) },
     { header: "RSI", accessorKey: "rsi14", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue(), 0) },
     { header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },

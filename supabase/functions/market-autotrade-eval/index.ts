@@ -22,8 +22,12 @@ function marketOpenNow(): boolean {
   const ist = new Date(d.getTime() + 5.5 * 3600_000);
   const day = ist.getUTCDay(); if (day === 0 || day === 6) return false;
   const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
-  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+  // Skip the first 90 s after open — opening-auction crossover has bad LTPs
+  // and huge spreads that produce false entries and slippage. Industry
+  // practice (Streak/Tradetron) is to hold algo entries out of 9:15 sharp.
+  return mins >= 9 * 60 + 16 && mins <= 15 * 60 + 30;
 }
+
 
 // A tick slow enough to still be running when the next cron fire starts
 // (broker latency, many rules/users) must not let two ticks act on the same
@@ -47,15 +51,10 @@ interface Rule {
   symbol: string | null; exchange: string; watchlist_id: string | null;
   entry_conditions: ScreenerGroup[]; exit_conditions: ScreenerGroup[];
   stop_loss_pct: number | null; target_pct: number | null;
+  trail_stop_pct: number | null;
   product: "MIS" | "CNC"; order_type: "MARKET" | "LIMIT"; limit_offset_pct: number | null;
   sizing_mode: "fixed_qty" | "fixed_capital"; sizing_value: number;
   is_armed: boolean;
-  // "MARKET" (default) keeps the soft in-app SL trigger — the eval cron
-  // notices the drop and sells at market. "SL" / "SL-M" places a real
-  // broker-side stop-loss at entry time so a stop still fires when the
-  // eval cron misses a tick (network/broker latency, a skipped cron run).
-  // Cancelled automatically on any other exit path so the SL doesn't
-  // linger and fire against a position that's already been closed.
   exit_order_type: "MARKET" | "LIMIT" | "SL" | "SL-M";
 }
 interface OrderRow {
@@ -179,18 +178,20 @@ Deno.serve(async (req) => {
 
       try {
         usersProcessed++;
-        // Ordered by created_at so the per-symbol dedup below (whichever
-        // armed rule reaches a symbol first wins it for this tick) is
-        // deterministic across ticks rather than depending on unspecified
-        // row order.
+        // BOTH armed and disarmed rules — disarmed rules must still supply
+        // stop-loss/target/exit logic for positions they opened while armed
+        // (previously an open position from a since-disarmed rule got zero
+        // exit protection until manual flatten). Entry loop below re-filters
+        // to is_armed so disarming still blocks NEW entries.
         const { data: rules } = await svc.from("market_autotrade_rules")
-          .select("*").eq("user_id", userId).eq("is_armed", true).order("created_at", { ascending: true });
+          .select("*").eq("user_id", userId).order("created_at", { ascending: true });
 
         const { provider, settings: kotakSettings } = await getActiveProvider(svc, userId);
         if (provider.name !== "kotak_neo" || !kotakSettings || kotakSettings.connection_status !== "connected") {
           if (rules?.length) await log(svc, userId, "skip", "Kotak not connected — AutoTrade paused for this tick");
           continue;
         }
+
 
         const { data: allOrders } = await svc.from("market_autotrade_orders")
           .select("id,rule_id,symbol,exchange,side,leg,quantity,status,filled_price,requested_price,filled_at,created_at")
@@ -279,9 +280,39 @@ Deno.serve(async (req) => {
             const { data: scoreRow } = await svc.from("market_stock_scores").select("*")
               .eq("symbol", pos.symbol).eq("exchange", pos.exchange).maybeSingle();
             const changePct = ((ltp - pos.entryPrice) / pos.entryPrice) * 100;
+
+            // Trailing-stop ratchet: track high-water mark of LTP since entry
+            // on the latest entry order row for this rule+symbol; exit when
+            // LTP drops trail_stop_pct% from that high. Only meaningful once
+            // the position is in profit (high >= entryPrice), so the trail
+            // doesn't stack with (and dominate) the fixed stop_loss_pct.
+            let trailExit: string | null = null;
+            if (rule.trail_stop_pct && rule.trail_stop_pct > 0) {
+              const { data: entryRow } = await svc.from("market_autotrade_orders")
+                .select("id,high_water_ltp")
+                .eq("user_id", userId).eq("rule_id", rule.id)
+                .eq("symbol", pos.symbol).eq("exchange", pos.exchange)
+                .eq("leg", "entry").in("status", ["placed", "filled"])
+                .order("created_at", { ascending: false }).limit(1).maybeSingle();
+              if (entryRow) {
+                const prevHigh = Number(entryRow.high_water_ltp ?? pos.entryPrice);
+                const newHigh = Math.max(prevHigh, ltp);
+                if (newHigh > prevHigh) {
+                  await svc.from("market_autotrade_orders").update({ high_water_ltp: newHigh }).eq("id", entryRow.id);
+                }
+                if (newHigh > pos.entryPrice) {
+                  const dropPct = ((newHigh - ltp) / newHigh) * 100;
+                  if (dropPct >= Math.abs(rule.trail_stop_pct)) {
+                    trailExit = `trail-stop ${rule.trail_stop_pct}% (high ₹${newHigh.toFixed(2)} → ₹${ltp.toFixed(2)})`;
+                  }
+                }
+              }
+            }
+
             let exitReason: string | null = null;
             if (rule.stop_loss_pct != null && changePct <= -Math.abs(rule.stop_loss_pct)) exitReason = `stop-loss ${rule.stop_loss_pct}%`;
             else if (rule.target_pct != null && changePct >= Math.abs(rule.target_pct)) exitReason = `target ${rule.target_pct}%`;
+            else if (trailExit) exitReason = trailExit;
             else if (rule.exit_conditions?.length && scoreRow && evaluateGroups(scoreRow, rule.exit_conditions, today)) exitReason = "exit condition met";
             if (!exitReason) continue;
 
@@ -337,8 +368,9 @@ Deno.serve(async (req) => {
           remainingMargin = fundsSnap.available_margin;
         } catch { /* fall through — broker rejection is the backstop */ }
 
-        // ---- Entries ----
-        for (const rule of rules as Rule[]) {
+        // ---- Entries ---- (armed rules only — disarmed rules still ran
+        // exits above so open positions stay protected).
+        for (const rule of (rules as Rule[]).filter((r) => r.is_armed)) {
           if (!rule.entry_conditions?.length) continue;
           if (openPositions.some((p) => p.ruleId === rule.id)) continue; // duplicate-fire guard
           if (openPositions.length >= settings.max_open_positions) {
@@ -352,8 +384,16 @@ Deno.serve(async (req) => {
             } else if (rule.watchlist_id) {
               const { data: items } = await svc.from("market_watchlist_items")
                 .select("symbol,exchange").eq("watchlist_id", rule.watchlist_id);
-              scopeSymbols = (items ?? []) as Array<{ symbol: string; exchange: string }>;
+              // Watchlist rows can legally omit exchange — fall back to the
+              // rule's declared exchange (or NSE) so the quote key isn't
+              // `undefined:SYMBOL` and silently miss every push.
+              scopeSymbols = (items ?? []).map((it: any) => ({
+                symbol: it.symbol,
+                exchange: it.exchange || rule.exchange || "NSE",
+              }));
+
             }
+
             if (scopeSymbols.length === 0) continue;
 
             const symbols = [...new Set(scopeSymbols.map((s) => s.symbol))];

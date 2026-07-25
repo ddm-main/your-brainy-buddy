@@ -4,7 +4,7 @@
 // that don't carry a meaningful numeric/text value (boolean filters like
 // "Volume > 30D Avg Volume" show Yes/No which is redundant with the chip).
 import type { ColumnDef } from "@tanstack/react-table";
-import { fmtInt, fmtNum, PctCell } from "../../components/hud/DataTable";
+import { fmtInt, fmtNum, PctCell, Return1DCell, deriveChangeAbs } from "../../components/hud/DataTable";
 import { ScoreBadge } from "../../components/market/ScoreBadge";
 import { AddToWatchlistButton } from "../../components/market/AddToWatchlistButton";
 export { FILTER_TO_COL, colsFromActiveFilters, type ColsFromFiltersOpts } from "./screenerColumnModel";
@@ -34,8 +34,12 @@ export function overviewColumnMap<TRow extends Record<string, any>>(): Record<st
       cell: ({ getValue }: any) => fmtNum(getValue() as number | null),
     },
     change_pct: {
-      header: "1D Return (%)", accessorKey: "change_pct", meta: { align: "right" } as any,
-      cell: ({ row }: any) => <PctCell value={row.original.change_pct ?? null} />,
+      header: "1D Return", accessorKey: "change_pct", meta: { align: "right" } as any,
+      cell: ({ row }: any) => {
+        const r = row.original;
+        const abs = r.change_abs ?? deriveChangeAbs(r.ltp ?? r.close ?? null, r.change_pct ?? null);
+        return <Return1DCell abs={abs} pct={r.change_pct ?? null} />;
+      },
     },
     volume:      { header: "Volume",     accessorKey: "volume",           meta: { align: "right" } as any, cell: ({ getValue }: any) => fmtInt(getValue() as number | null) },
     vol_avg30:   { header: "30D Avg Vol",accessorKey: "vol_avg30",        meta: { align: "right" } as any, cell: ({ getValue }: any) => fmtInt(getValue() as number | null) },

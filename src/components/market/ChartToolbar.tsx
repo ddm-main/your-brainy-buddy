@@ -9,7 +9,9 @@ import {
 
 // Trimmed to the timeframes the backend actually serves without duplicates.
 // Dropped: 3m/30m (dupes of neighbours), 2h/4h (no EOD pipeline coverage for
-// Indian equities — returned empty candles). TV mode still accepts everything.
+// Indian equities), 45m/3h (no INTRADAY map entry in market-candles — the
+// edge fn 400s on them and the chart went blank). TV mode still accepts
+// everything via tvInterval().
 export const TIMEFRAMES = [
   { key: "1m", label: "1m", intraday: true },
   { key: "5m", label: "5m", intraday: true },

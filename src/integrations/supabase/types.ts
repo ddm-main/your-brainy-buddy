@@ -1603,6 +1603,9 @@ export type Database = {
           created_at: string
           data_center: string | null
           exchange: string | null
+          funds_last_attempt_at: string | null
+          funds_last_error_code: string | null
+          funds_retry_after_at: string | null
           greeting_name: string | null
           hs_server_id: string | null
           id: string
@@ -1633,6 +1636,9 @@ export type Database = {
           created_at?: string
           data_center?: string | null
           exchange?: string | null
+          funds_last_attempt_at?: string | null
+          funds_last_error_code?: string | null
+          funds_retry_after_at?: string | null
           greeting_name?: string | null
           hs_server_id?: string | null
           id?: string
@@ -1663,6 +1669,9 @@ export type Database = {
           created_at?: string
           data_center?: string | null
           exchange?: string | null
+          funds_last_attempt_at?: string | null
+          funds_last_error_code?: string | null
+          funds_retry_after_at?: string | null
           greeting_name?: string | null
           hs_server_id?: string | null
           id?: string
@@ -1731,6 +1740,7 @@ export type Database = {
           exchange: string
           filled_at: string | null
           filled_price: number | null
+          high_water_ltp: number | null
           id: string
           last_broker_sync_at: string | null
           leg: string
@@ -1753,6 +1763,7 @@ export type Database = {
           exchange?: string
           filled_at?: string | null
           filled_price?: number | null
+          high_water_ltp?: number | null
           id?: string
           last_broker_sync_at?: string | null
           leg: string
@@ -1775,6 +1786,7 @@ export type Database = {
           exchange?: string
           filled_at?: string | null
           filled_price?: number | null
+          high_water_ltp?: number | null
           id?: string
           last_broker_sync_at?: string | null
           leg?: string
@@ -1818,6 +1830,7 @@ export type Database = {
           stop_loss_pct: number | null
           symbol: string | null
           target_pct: number | null
+          trail_stop_pct: number | null
           updated_at: string
           user_id: string
           watchlist_id: string | null
@@ -1839,6 +1852,7 @@ export type Database = {
           stop_loss_pct?: number | null
           symbol?: string | null
           target_pct?: number | null
+          trail_stop_pct?: number | null
           updated_at?: string
           user_id: string
           watchlist_id?: string | null
@@ -1860,6 +1874,7 @@ export type Database = {
           stop_loss_pct?: number | null
           symbol?: string | null
           target_pct?: number | null
+          trail_stop_pct?: number | null
           updated_at?: string
           user_id?: string
           watchlist_id?: string | null
@@ -2432,6 +2447,78 @@ export type Database = {
         }
         Relationships: []
       }
+      market_gtt_orders: {
+        Row: {
+          broker_order_id: string | null
+          created_at: string
+          exchange: string
+          expires_at: string | null
+          id: string
+          last_error: string | null
+          notes: string | null
+          order_type: string
+          price: number | null
+          product: string
+          quantity: number
+          side: string
+          status: string
+          symbol: string
+          trigger_price: number
+          trigger_price_upper: number | null
+          trigger_type: string
+          triggered_at: string | null
+          triggered_leg: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          broker_order_id?: string | null
+          created_at?: string
+          exchange?: string
+          expires_at?: string | null
+          id?: string
+          last_error?: string | null
+          notes?: string | null
+          order_type?: string
+          price?: number | null
+          product?: string
+          quantity: number
+          side: string
+          status?: string
+          symbol: string
+          trigger_price: number
+          trigger_price_upper?: number | null
+          trigger_type?: string
+          triggered_at?: string | null
+          triggered_leg?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          broker_order_id?: string | null
+          created_at?: string
+          exchange?: string
+          expires_at?: string | null
+          id?: string
+          last_error?: string | null
+          notes?: string | null
+          order_type?: string
+          price?: number | null
+          product?: string
+          quantity?: number
+          side?: string
+          status?: string
+          symbol?: string
+          trigger_price?: number
+          trigger_price_upper?: number | null
+          trigger_type?: string
+          triggered_at?: string | null
+          triggered_leg?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       market_holdings: {
         Row: {
           avg_price: number
@@ -2442,9 +2529,12 @@ export type Database = {
           id: string
           investment_type: string | null
           notes: string | null
+          pledged_qty: number | null
           quantity: number
+          settled_qty: number | null
           source: Database["public"]["Enums"]["market_holding_source"]
           symbol: string
+          t1_qty: number | null
           updated_at: string
           user_id: string
         }
@@ -2457,9 +2547,12 @@ export type Database = {
           id?: string
           investment_type?: string | null
           notes?: string | null
+          pledged_qty?: number | null
           quantity: number
+          settled_qty?: number | null
           source?: Database["public"]["Enums"]["market_holding_source"]
           symbol: string
+          t1_qty?: number | null
           updated_at?: string
           user_id: string
         }
@@ -2472,9 +2565,12 @@ export type Database = {
           id?: string
           investment_type?: string | null
           notes?: string | null
+          pledged_qty?: number | null
           quantity?: number
+          settled_qty?: number | null
           source?: Database["public"]["Enums"]["market_holding_source"]
           symbol?: string
+          t1_qty?: number | null
           updated_at?: string
           user_id?: string
         }
@@ -2847,7 +2943,9 @@ export type Database = {
           entry_price: number
           exchange: string
           exit_price: number | null
+          exit_source: string | null
           id: string
+          is_broker_synced: boolean
           journal_notes: string | null
           opened_at: string
           pnl: number | null
@@ -2866,7 +2964,9 @@ export type Database = {
           entry_price: number
           exchange?: string
           exit_price?: number | null
+          exit_source?: string | null
           id?: string
+          is_broker_synced?: boolean
           journal_notes?: string | null
           opened_at?: string
           pnl?: number | null
@@ -2885,7 +2985,9 @@ export type Database = {
           entry_price?: number
           exchange?: string
           exit_price?: number | null
+          exit_source?: string | null
           id?: string
+          is_broker_synced?: boolean
           journal_notes?: string | null
           opened_at?: string
           pnl?: number | null
@@ -2897,6 +2999,36 @@ export type Database = {
           trailing_stop?: number | null
           updated_at?: string
           user_id?: string
+        }
+        Relationships: []
+      }
+      market_provider_health: {
+        Row: {
+          created_at: string
+          endpoint: string
+          error: string | null
+          id: string
+          latency_ms: number | null
+          ok: boolean
+          provider: string
+        }
+        Insert: {
+          created_at?: string
+          endpoint: string
+          error?: string | null
+          id?: string
+          latency_ms?: number | null
+          ok: boolean
+          provider: string
+        }
+        Update: {
+          created_at?: string
+          endpoint?: string
+          error?: string | null
+          id?: string
+          latency_ms?: number | null
+          ok?: boolean
+          provider?: string
         }
         Relationships: []
       }
@@ -2996,6 +3128,45 @@ export type Database = {
           source?: string
           symbol?: string
           updated_at?: string
+        }
+        Relationships: []
+      }
+      market_realized_pnl_daily: {
+        Row: {
+          created_at: string
+          day: string
+          exchange: string
+          id: string
+          quantity: number
+          realized: number
+          source: string
+          symbol: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          day: string
+          exchange: string
+          id?: string
+          quantity: number
+          realized: number
+          source?: string
+          symbol: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          day?: string
+          exchange?: string
+          id?: string
+          quantity?: number
+          realized?: number
+          source?: string
+          symbol?: string
+          updated_at?: string
+          user_id?: string
         }
         Relationships: []
       }
@@ -3554,6 +3725,7 @@ export type Database = {
           is_active: boolean
           is_nifty500: boolean
           isin: string | null
+          kotak_segment: string | null
           last_fundamentals_sync_at: string | null
           last_price_sync_at: string | null
           lot_size: number | null
@@ -3595,6 +3767,7 @@ export type Database = {
           is_active?: boolean
           is_nifty500?: boolean
           isin?: string | null
+          kotak_segment?: string | null
           last_fundamentals_sync_at?: string | null
           last_price_sync_at?: string | null
           lot_size?: number | null
@@ -3636,6 +3809,7 @@ export type Database = {
           is_active?: boolean
           is_nifty500?: boolean
           isin?: string | null
+          kotak_segment?: string | null
           last_fundamentals_sync_at?: string | null
           last_price_sync_at?: string | null
           lot_size?: number | null
@@ -4989,6 +5163,7 @@ export type Database = {
           bb_width: number | null
           book_value: number | null
           breakout_score: number | null
+          change_abs: number | null
           change_pct: number | null
           close: number | null
           close_adjusted: number | null

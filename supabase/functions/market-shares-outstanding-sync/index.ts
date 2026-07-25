@@ -1,9 +1,13 @@
+// Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
 // market-shares-outstanding-sync — populate market_shares_outstanding.
 // Waterfall (Tickertape parity): Yahoo v10 quoteSummary (crumb-authenticated)
 // → NSE quote-equity issuedSize → FMP profile. Yahoo is primary because NSE's
 // endpoint frequently 401/blocks non-browser callers on Supabase edge IPs,
 // which is why market_shares_outstanding was sitting at 0 rows.
+// Kotak Neo isn't in the chain — the /quote payload doesn't expose shares
+// outstanding, so this stays vendor-only regardless of the user's broker.
 // Chunked, resumable: skips rows refreshed within 7 days.
+
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { nseFetch } from "../_shared/market/nseClient.ts";

@@ -151,8 +151,11 @@ export const fmtNum = (v: number | null | undefined, digits = 2): string =>
 export const fmtInt = (v: number | null | undefined): string =>
   v == null ? "—" : v.toLocaleString("en-IN", { maximumFractionDigits: 0 });
 
-export const fmtPct = (v: number | null | undefined, digits = 2): string =>
-  v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(digits)}%`;
+// `signed` controls the leading "+" for non-negative values. Change % and
+// return metrics benefit from the sign; yields, "% from 52w high" and other
+// naturally single-signed values look odd with a "+" so pass `false`.
+export const fmtPct = (v: number | null | undefined, digits = 2, signed = true): string =>
+  v == null ? "—" : `${signed && v >= 0 ? "+" : ""}${v.toFixed(digits)}%`;
 
 export function PctCell({ value }: { value: number | null | undefined }) {
   if (value == null) return <span style={{ color: "var(--text-muted)" }}>—</span>;
@@ -161,4 +164,35 @@ export function PctCell({ value }: { value: number | null | undefined }) {
       {fmtPct(value)}
     </span>
   );
+}
+
+// Unified "1D return" cell used everywhere day-change is surfaced:
+//   +3.14 (+8.83%)   —abs and pct shown together (screener-parity).
+// Falls back to whichever value is available; renders "—" when neither is.
+// Sign/colour is driven by pct when present, otherwise by abs.
+export function Return1DCell({ abs, pct }: { abs: number | null | undefined; pct: number | null | undefined }) {
+  const absOk = abs != null && Number.isFinite(abs);
+  const pctOk = pct != null && Number.isFinite(pct);
+  if (!absOk && !pctOk) return <span style={{ color: "var(--text-muted)" }}>—</span>;
+  const sign = pctOk ? (pct as number) : (abs as number);
+  const color = sign > 0 ? "var(--ok)" : sign < 0 ? "var(--danger)" : "var(--text-dim)";
+  const absTxt = absOk ? `${(abs as number) >= 0 ? "+" : "−"}${Math.abs(abs as number).toFixed(2)}` : null;
+  const pctTxt = pctOk ? `${(pct as number) >= 0 ? "+" : "−"}${Math.abs(pct as number).toFixed(2)}%` : null;
+  return (
+    <span style={{ color, whiteSpace: "nowrap" }}>
+      {absTxt ?? pctTxt}
+      {absTxt && pctTxt ? ` (${pctTxt})` : ""}
+    </span>
+  );
+}
+
+// Derive the absolute rupee day-change from an ltp + change_pct pair when the
+// raw abs isn't in the payload (live-tick overlays, top-mover view, etc.):
+//   abs = ltp * pct / (100 + pct)
+// Returns null when either input is missing or the denominator collapses.
+export function deriveChangeAbs(ltp: number | null | undefined, pct: number | null | undefined): number | null {
+  if (ltp == null || !Number.isFinite(ltp) || pct == null || !Number.isFinite(pct)) return null;
+  const denom = 100 + pct;
+  if (Math.abs(denom) < 1e-6) return null;
+  return (ltp * pct) / denom;
 }

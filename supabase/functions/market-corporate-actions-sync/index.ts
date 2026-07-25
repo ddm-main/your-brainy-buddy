@@ -1,3 +1,4 @@
+// Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
 // market-corporate-actions-sync — pulls NSE corporate actions (dividends,
 // splits, bonuses, board meetings, results dates). Cron path (daily) covers
 // every symbol across every user's watchlist+holdings; user-JWT path scopes

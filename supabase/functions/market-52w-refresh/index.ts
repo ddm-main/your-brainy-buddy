@@ -1,9 +1,12 @@
-// market-52w-refresh — recomputes 52-week high/low from Yahoo v8/chart data
-// (adjusted for splits/dividends by Yahoo itself). Writes back to
+// market-52w-refresh — recomputes 52-week high/low. Kotak-first via
+// getServiceProvider (uses provider.getOHLCV, which itself falls back to
+// Yahoo per-symbol); the direct Yahoo v8/chart fetch is a last-resort
+// fallback only when the provider throws. Writes back to
 // market_stock_scores.high_52w / low_52w AND market_fundamentals_global.
-// Chunked and jittered to respect Yahoo rate limits.
+// Chunked and jittered to respect rate limits.
 import { preflight, jsonResponse, errorResponse, svcClient, corsFor } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
+import { getServiceProvider } from "../_shared/market/provider.ts";
 
 const CHUNK = 150;
 const CONCURRENCY = 4;
@@ -51,6 +54,7 @@ Deno.serve(async (req) => {
 
   try {
     const svc = svcClient();
+    const { provider } = await getServiceProvider(svc);
     // Prioritize active NSE equities whose 52w row is missing or older than 7 days.
     const cutoff = new Date(Date.now() - 7 * 86400_000).toISOString();
     const { data: stale } = await svc
@@ -64,12 +68,28 @@ Deno.serve(async (req) => {
     let updated = 0, failed = 0;
     const started = Date.now();
 
+    const compute52w = async (symbol: string, exchange: string) => {
+      try {
+        const candles = await provider.getOHLCV(symbol, exchange, "1y", "1d");
+        if (candles.length < 20) return null;
+        let hi = -Infinity, lo = Infinity;
+        for (const c of candles) {
+          if (Number.isFinite(c.high) && c.high > hi) hi = c.high;
+          if (Number.isFinite(c.low) && c.low > 0 && c.low < lo) lo = c.low;
+        }
+        if (!Number.isFinite(hi) || !Number.isFinite(lo)) return null;
+        return { high: hi, low: lo, asOf: Date.now() };
+      } catch {
+        return await fetchYahoo52w(symbol);
+      }
+    };
+
     const workers = Array.from({ length: CONCURRENCY }, async () => {
       while (work.length > 0) {
         const item = work.shift();
         if (!item) break;
         try {
-          const res = await fetchYahoo52w(item.symbol);
+          const res = await compute52w(item.symbol, item.exchange);
           if (!res) { failed++; await sleep(150); continue; }
           const { high, low } = res;
           const patches = [
@@ -85,10 +105,10 @@ Deno.serve(async (req) => {
     await Promise.all(workers);
 
     await svc.from("market_ingestion_runs").insert({
-      source: "yahoo_52w_refresh", stage: "fetch",
+      source: "market_52w_refresh", stage: "fetch",
       status: failed > updated ? "partial" : "ok",
       rows_ingested: updated, duration_ms: Date.now() - started,
-      metadata: { failed, attempted: updated + failed },
+      metadata: { failed, attempted: updated + failed, provider: (provider as any).name ?? "unknown" },
       finished_at: new Date().toISOString(),
     });
 

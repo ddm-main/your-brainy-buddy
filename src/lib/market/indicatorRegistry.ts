@@ -162,9 +162,6 @@ export function normalizeStudy(raw: Study): Study | null {
 
 
 export const DEFAULT_STUDIES: Study[] = [
-  makeStudy("ema", { params: { period: 20 } }),
-  makeStudy("ema", { params: { period: 50 } }),
-  makeStudy("supertrend"),
   makeStudy("volume"),
 ];
 

@@ -6,7 +6,8 @@ const EmailConfig = lazy(() => import("@/routes/config/EmailConfig"));
 const ConfigHome = lazy(() => import("@/routes/config/ConfigHome"));
 const FinanceConfig = lazy(() => import("@/routes/config/FinanceConfig"));
 const ProjectsConfig = lazy(() => import("@/routes/config/ProjectsConfig"));
-const MarketConfig = lazy(() => import("@/routes/config/MarketConfig"));
+
+const SystemDataConfig = lazy(() => import("@/routes/config/SystemDataConfig"));
 const AdminConfig = lazy(() => import("@/routes/config/AdminConfig"));
 
 const TABS = [
@@ -14,7 +15,7 @@ const TABS = [
   { to: "/config/email", label: "Email", adminOnly: false },
   { to: "/config/finance", label: "Finance", adminOnly: false },
   { to: "/config/projects", label: "Projects", adminOnly: false },
-  { to: "/config/market", label: "Market", adminOnly: false },
+  { to: "/config/system-data", label: "System Data", adminOnly: true },
   { to: "/config/admin", label: "Admin", adminOnly: true },
 ] as { to: string; label: string; exact?: boolean; adminOnly: boolean }[];
 
@@ -53,7 +54,8 @@ export default function Config() {
             <Route path="email/*" element={<EmailConfig />} />
             <Route path="finance/*" element={<FinanceConfig />} />
             <Route path="projects" element={<ProjectsConfig />} />
-            <Route path="market" element={<MarketConfig />} />
+            
+            {isAdmin && <Route path="system-data" element={<SystemDataConfig />} />}
             {isAdmin && <Route path="admin" element={<AdminConfig />} />}
           </Routes>
         </Suspense>

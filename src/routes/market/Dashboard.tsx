@@ -6,7 +6,7 @@ import { Link, useNavigate } from "react-router-dom";
 import type { ColumnDef } from "@tanstack/react-table";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip } from "@/components/hud/HudControls";
-import { DataTable, fmtNum, PctCell } from "@/components/hud/DataTable";
+import { DataTable, deriveChangeAbs, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { WatchlistPanel } from "@/components/market/WatchlistPanel";
 import { supabase } from "@/integrations/supabase/client";
@@ -20,7 +20,7 @@ import { ALL_PRESETS, GLOBAL_PRESETS, INDIAN_PRESETS, type IndexPreset } from "@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { RefreshCw, Settings2, Trash2, X } from "lucide-react";
+import { Settings2, Trash2, X } from "lucide-react";
 import type { Quote, StockScore } from "@/lib/market/types";
 import { holdingPnl, quoteKey } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
@@ -156,7 +156,7 @@ export default function MarketDashboard() {
   }, [qc]);
 
 
-  const { data: indicesData, refetch: refetchIndices, isFetching: indicesFetching } = useIndices();
+  const { data: indicesData } = useIndices();
   const { data: settings = [] } = useMarketSettings();
   // Fetched pool is wider than what's shown (12) so the filter bar below has
   // something to narrow beyond the top-15-by-score slice.
@@ -216,7 +216,10 @@ export default function MarketDashboard() {
     for (const [key, tick] of Object.entries(pushTicks)) {
       if (!isFreshTick(tick)) continue;
       const base = m.get(key);
-      m.set(key, base ? { ...base, ltp: tick.ltp, change_pct: tick.change_pct } : ({ ltp: tick.ltp, change_pct: tick.change_pct } as any));
+      const abs = deriveChangeAbs(tick.ltp, tick.change_pct);
+      m.set(key, base
+        ? { ...base, ltp: tick.ltp, change_pct: tick.change_pct, day_change: abs }
+        : ({ ltp: tick.ltp, change_pct: tick.change_pct, day_change: abs } as any));
     }
     return m;
   }, [scoreQuotes, pushTicks]);
@@ -396,7 +399,6 @@ export default function MarketDashboard() {
   const indexActions = (
     <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
       <Btn size="sm" onClick={() => setManageOpen(true)} title="Manage indices · advanced actions" ariaLabel="Manage indices"><Settings2 size={12} /></Btn>
-      <Btn size="sm" onClick={() => refetchIndices()} disabled={indicesFetching} title="Refresh indices" ariaLabel="Refresh indices"><RefreshCw size={12} /></Btn>
     </div>
   );
 

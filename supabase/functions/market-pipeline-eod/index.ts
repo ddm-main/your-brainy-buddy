@@ -8,7 +8,7 @@ import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from
 import { istTradeDate, requireCronSecret } from "../_shared/market/cron.ts";
 import { computeSnapshot } from "../_shared/market/indicators.ts";
 import { breakoutScore, preBreakoutScore } from "../_shared/market/scoring.ts";
-import { yahooChartRetry } from "../_shared/market/yahooClient.ts";
+import { getServiceProvider } from "../_shared/market/provider.ts";
 
 const CHUNK = 100;
 const CONCURRENCY = 5;
@@ -17,6 +17,11 @@ Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
   try {
     const svc = svcClient();
+    // Resolve the service-level provider once per invocation — this is
+    // Kotak Neo whenever a connected account exists (falls back to Yahoo
+    // transparently). Per-symbol getOHLCV then prefers Kotak candles for any
+    // stock with an instrument token, and only spills to Yahoo when it can't.
+    const { provider } = await getServiceProvider(svc);
     if (req.headers.get("x-cron-secret") != null) {
       const guard = await requireCronSecret(req);
       if (guard) return guard;
@@ -55,7 +60,7 @@ Deno.serve(async (req) => {
         if (!stock) break;
         let success = false;
         try {
-          const candles = await yahooChartRetry(stock.yahoo_symbol ?? `${stock.symbol}.NS`, "2y", "1d");
+          const candles = await provider.getOHLCV(stock.symbol, stock.exchange ?? "NSE", "2y", "1d");
           if (candles.length < 30) throw new Error("insufficient candles");
 
           const snap = computeSnapshot(candles);
@@ -69,7 +74,7 @@ Deno.serve(async (req) => {
           // silently corrupting the stored series.
           if (snap.changePct != null && Math.abs(snap.changePct) > 40) {
             await svc.from("market_provider_health").insert({
-              provider: "yahoo", endpoint: "market-pipeline-eod", ok: false,
+              provider: (provider as any).name ?? "unknown", endpoint: "market-pipeline-eod", ok: false,
               error: `outlier rejected: ${stock.symbol} close ${snap.close} is ${snap.changePct.toFixed(1)}% from prior close — not written`,
             });
             throw new Error("price outlier rejected");
@@ -163,7 +168,7 @@ Deno.serve(async (req) => {
         } catch (err) {
           failCount++;
           await svc.from("market_provider_health").insert({
-            provider: "yahoo", endpoint: "market-pipeline-eod", ok: false,
+            provider: (provider as any).name ?? "unknown", endpoint: "market-pipeline-eod", ok: false,
             error: `${stock.symbol}: ${err instanceof Error ? err.message : String(err)}`,
           });
         } finally {

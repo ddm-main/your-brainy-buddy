@@ -1,7 +1,12 @@
+// Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
 // market-fundamentals-global-sync — chunked, resumable fundamentals sync.
 // Fetches Yahoo quoteSummary first (with rename-map + Yahoo search fallback),
 // merges NSE public metadata, derives PB/PEG/dividend_yield when Yahoo omits them,
 // and records per-symbol sync status.
+// Kotak Neo isn't in the chain: its /quote payload has no P&L / balance /
+// ratios / ownership fields, so fundamentals stay vendor-only regardless
+// of whether the user is connected to a broker.
+
 import { preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
 import { requireUserId } from "../_shared/auth.ts";

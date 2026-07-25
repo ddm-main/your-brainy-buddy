@@ -14,7 +14,10 @@ type Row = {
   sections: AppSection[];
 };
 
-const OWNER_ID = "2ff4497a-dedc-4885-98e5-435b26894275";
+// Configurable via VITE_OWNER_USER_ID (see .env.example). Falls back to the
+// original hardcoded owner id so existing deployments keep working.
+const OWNER_ID = (import.meta.env.VITE_OWNER_USER_ID as string | undefined)?.trim()
+  || "2ff4497a-dedc-4885-98e5-435b26894275";
 
 async function call(action: string, extra: Record<string, unknown> = {}) {
   const { data, error } = await supabase.functions.invoke("admin-users", {

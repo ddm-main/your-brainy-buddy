@@ -13,6 +13,9 @@ export interface ApiSettings {
   token_expires_at: string | null;
   last_sync_at: string | null;
   last_error: string | null;
+  funds_last_attempt_at?: string | null;
+  funds_last_error_code?: string | null;
+  funds_retry_after_at?: string | null;
   ucc: string | null;
   greeting_name: string | null;
   totp_secret_enc?: string | null;
@@ -196,6 +199,8 @@ export interface Position {
   pnl: number | null;
   trailing_stop: number | null;
   journal_notes: string | null;
+  is_broker_synced?: boolean | null;
+  exit_source?: string | null;
 }
 
 export interface CandleDto {
@@ -211,6 +216,8 @@ export interface CandlesResponse {
   candles: CandleDto[];
   emas: Record<string, Array<{ t: number; v: number | null }>>;
   timeframe: string;
+  /** Primary provider that served this response ("kotak_neo" or "yahoo"). Best-effort — kotak may internally fall back to yahoo per-symbol. */
+  provider?: "kotak_neo" | "yahoo";
 }
 
 export interface SavedScreener {

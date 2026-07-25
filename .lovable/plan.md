@@ -1,33 +1,48 @@
-# Add chart timezone bug to Market audit
+# 1D Return — Unified "+abs (+pct%)" Display
 
-Append one new issue to `.lovable/plan.md` under section "12. UX / navigation / cross-cutting" and add it to the Phase-2 shortlist.
+## Goal
 
-## The bug
+Everywhere 1D return is rendered in the app, show absolute rupee change alongside the percentage, matching the Screener grid: `+3.14 (+8.83%)` (green/red by sign, `—` when unknown). No business-logic changes — pure presentation.
 
-CandleChart renders bar times in **UTC**, not IST. Screenshot on `/market/analysis/KABRAEXTRU` (15M) shows the session starting at `03:45` — that is 09:15 IST (NSE open) displayed as UTC. NSE session (09:15–15:30 IST) therefore appears as 03:45–10:00 on every chart, and the daily separator lands at 05:30 IST midnight instead of the actual trading day boundary.
+## Shared helper (new)
 
-Root cause (confirmed by reads):
-- `src/components/market/CandleChart.tsx` (line 207) calls `createChart` with no `localization.timeFormatter` / no `timeScale.tickMarkFormatter`. Lightweight-charts defaults to UTC for numeric `UTCTimestamp` values.
-- `TradingViewChart.tsx` already passes `timezone: "Asia/Kolkata"` — only the native chart is wrong.
-- Backend candle payloads (`market-candles`) return correct UTC epoch seconds; no server change needed.
+Add `Return1DCell` to `src/components/hud/DataTable.tsx` (next to `PctCell`):
 
-## Fix
+- Props: `{ abs: number | null | undefined; pct: number | null | undefined }`.
+- Renders `+A.AA (+P.PP%)` when both known, falls back to whichever is available, `—` when neither. Uses `var(--ok)` / `var(--danger)` / `var(--text-dim)` by sign of pct (fallback: sign of abs). Uses the same minus glyph and `whiteSpace: nowrap` as the current Screener cell.
+- When only abs is missing but `ltp` + `previous_close` (or `day_change`) are derivable at the callsite, callers may pass a computed abs. The helper itself does no derivation.
 
-In `src/components/market/CandleChart.tsx`, in the `createChart(...)` options:
+Also refactor Screener's inline cell (`src/routes/market/Screener.tsx` L658–678) to use `Return1DCell` so it stays the single source of truth.
 
-1. Add `localization.timeFormatter` that formats a `UTCTimestamp` as IST (`Asia/Kolkata`) using `Intl.DateTimeFormat` — 24-hour, `HH:mm` for intraday, `DD MMM 'YY` for daily+.
-2. Add `timeScale.tickMarkFormatter` mirroring the same IST formatting so axis labels and the crosshair label agree.
-3. Keep the underlying data in UTC epoch seconds — do NOT shift timestamps; only the display layer changes.
+## Callsites to update
 
-Verification:
-- On a 15M chart, first visible tick of a trading day must read `09:15`, last `15:30`.
-- Daily separator lines must land at IST midnight, not 05:30.
-- Crosshair tooltip time must match the axis.
+Each callsite computes `abs` from data already at hand — no new fetches, no schema changes.
 
-## Plan.md edits
+1. **Overview / Top Breakouts grid** — `src/lib/market/screenerColumns.tsx` `change_pct` column: replace `<PctCell value={row.original.change_pct}/>` with `<Return1DCell abs={row.original.change_abs} pct={row.original.change_pct}/>`. (`change_abs` already selected by `screenerRun.ts` and present in `market_screener_rows`.)
+2. **Watchlist** — `src/components/market/WatchlistPanel.tsx` L251–256: use `Return1DCell` with `abs = q?.day_change ?? (q?.ltp && q?.previous_close ? q.ltp - q.previous_close : null)`, `pct = q?.change_pct`.
+3. **Top Movers strip** — `src/components/market/TopMoversPanel.tsx` L46: same helper; derive abs from row (`day_change` / `ltp − prev_close` as available).
+4. **Market Strip (indices)** — `src/components/market/MarketStrip.tsx` L44–75: extend the live/quote map with `change_abs`, feed into `Return1DCell`. Live-tick source already carries `ltp` + `change_pct`; derive abs from `ltp * pct / (100 + pct)` when `change_abs` isn't in the tick payload (same trick Screener uses at L664–665).
+5. **Index Detail** — `src/routes/market/IndexDetail.tsx`:
+   - Header (L66–67) already has both `chgPct` and `chgAbs` — ensure it renders in the unified `+A (+P%)` format.
+   - Constituents table column (L383–384): extend `liveByKey` map to also carry `change_abs` (compute from live tick when missing), swap `PctCell` for `Return1DCell`.
+6. **Positions table** — `src/routes/market/Positions.tsx` L192: column shows day-change %. Swap for `Return1DCell` fed with `quote.day_change`/derived abs and `quote.change_pct`.
+7. **Breadth Details dialog** — `src/components/market/BreadthDetailsDialog.tsx` L85–87: swap the inline `%` span for `Return1DCell` (abs from `s.change_abs` if present in that row shape, else derived from `s.ltp` + `s.change_pct`; if abs isn't derivable there, the helper falls back to `+P.PP%`).
+8. **Dashboard "Top Breakouts" table** — `src/routes/market/Dashboard.tsx` uses the shared `overviewColumnMap`, so it inherits the fix from #1. Verify the live-tick overlay at L219 carries `change_abs` too (add it, derived from tick's ltp + pct).
+9. **Analysis header** — `src/routes/market/Analysis.tsx` L283: header currently shows `chgPct` only. Add abs from `quote.day_change` (or derived) and render in unified format.
 
-1. Add row 64 in section 12:
-   > 64 — CandleChart renders times in UTC; NSE session shows as 03:45–10:00 instead of 09:15–15:30 IST. Only `TradingViewChart.tsx` sets `timezone: "Asia/Kolkata"`; native `CandleChart.tsx` has no `localization.timeFormatter` / `tickMarkFormatter`. — `src/components/market/CandleChart.tsx`
-2. Add `#64` to the "Next step" shortlist (chart correctness) alongside `#16` day-P&L.
+## Not in scope
 
-No other files change in this pass — implementation of #64 will land in the Phase-2 push together with the rest of the shortlist.
+- No changes to filtering, sorting, freshness gating, DB views, or edge functions.
+- Sort behavior stays keyed on `change_pct` (unchanged accessor).
+- Portfolio Overview P&L cards already show ₹ + % — leave alone.
+
+## Technical notes
+
+- Sign source: use `pct` for color when present, else `abs`. Zero → dim. This matches Screener today.
+- Formatting: `abs.toFixed(2)` with `+`/`−` (Unicode minus) prefix; `pct.toFixed(2)%` likewise; single `whiteSpace: nowrap` span, so column widths stay tight.
+- No new DB columns needed — `change_abs` exists on `market_screener_rows`; `Quote.day_change` + `previous_close` cover the live paths.
+
+## Verification
+
+- Typecheck (`tsgo`) + `bunx vitest run` (existing tests unaffected).
+- Playwright: load `/market` (Top Breakouts), `/market/screener`, `/market/positions`, `/market/holdings`, an index detail page, and a symbol Analysis page; screenshot each and confirm the `+abs (+pct%)` format renders with correct colors.

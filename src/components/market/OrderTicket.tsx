@@ -72,7 +72,12 @@ export function OrderTicket({
     if ((orderType === "LIMIT" || orderType === "SL") && !Number(price)) { push("Price required", "warn"); return; }
     if ((orderType === "SL" || orderType === "SL-M") && !Number(trigger)) { push("Trigger price required", "warn"); return; }
     const dq = disclosedQty ? Number(disclosedQty) : undefined;
-    if (dq != null && (!Number.isFinite(dq) || dq < 0 || dq > q)) { push("Disclosed qty must be between 0 and quantity", "warn"); return; }
+    if (dq != null) {
+      if (!Number.isFinite(dq) || dq < 0 || dq > q) { push("Disclosed qty must be between 0 and quantity", "warn"); return; }
+      // NSE rule: iceberg disclosed quantity must be at least 10% of order qty.
+      const minDq = Math.ceil(q * 0.10);
+      if (dq > 0 && dq < minDq) { push(`Disclosed qty must be ≥ 10% of order qty (min ${minDq})`, "warn"); return; }
+    }
     // Confirm on large notional — fat-finger guard. ₹1L threshold.
     if (notional >= 100_000 && !confirm(`Place ${side} ${q} ${symbol} for ${inr(notional)}?`)) return;
     const input: PlaceOrderInput = {

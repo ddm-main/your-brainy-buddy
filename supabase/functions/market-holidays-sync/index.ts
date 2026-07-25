@@ -1,3 +1,4 @@
+// Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
 // market-holidays-sync — pulls NSE's trading-holiday list. Low-churn data
 // (known months ahead, changes yearly), so this runs on a light annual cron
 // plus manual trigger rather than a live pipeline.

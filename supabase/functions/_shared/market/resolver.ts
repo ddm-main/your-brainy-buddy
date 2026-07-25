@@ -29,7 +29,17 @@ interface Provider {
 }
 
 // Provider priority chains per field type
+// Provider priority chains per field type.
+//
+// Policy: Kotak Neo is primary for any field it can serve (live price,
+// previous close, volume, change, 52-week range, OHLCV via getOHLCV). Yahoo /
+// FMP / Alpha Vantage / NSE are used only for data Kotak Neo does not expose
+// (fundamentals, technical indicators, ownership, news, shares outstanding,
+// company reference metadata). When adding a new field, put "kotak" first
+// if the /all quote payload carries it — otherwise start the chain with the
+// vendor that actually publishes the data.
 const PRIORITY_CHAINS: Record<string, string[]> = {
+
   // Live price — Kotak (real-time) → Yahoo (delayed). Stooq used to be a
   // third fallback here, but its public CSV endpoint now sits behind a
   // browser JS anti-bot challenge a server-side fetch can't pass — kept out
@@ -78,8 +88,11 @@ const PRIORITY_CHAINS: Record<string, string[]> = {
   face_value: ["yahoo"],
 
   // 52-week range
-  high_52w: ["yahoo", "nse", "fmp"],
-  low_52w: ["yahoo", "nse", "fmp"],
+  // Kotak /all quote payload includes 52w hi/lo when we have the token — try
+  // it first so a single Kotak batch covers price + 52w range, then Yahoo/
+  // NSE/FMP fill in whatever's still null.
+  high_52w: ["kotak", "yahoo", "nse", "fmp"],
+  low_52w: ["kotak", "yahoo", "nse", "fmp"],
   beta: ["fmp", "yahoo"],
 
   // Technical indicators — Alpha Vantage (if quota available) → computed locally
@@ -166,6 +179,19 @@ function extractFieldValue(field: FieldName, providerData: any, providerName: st
   // Field name mapping per provider
   switch (providerName) {
     case "kotak":
+      // Kotak's getQuotes wrapper may internally fall back to Yahoo when the
+      // symbol has no instrument token. When that happens providerData.source
+      // is "yahoo" — callers (resolveField) use this to label the FieldResult
+      // honestly instead of falsely tagging every kotak-chain hit as kotak.
+      if (field === "ltp") return providerData.price ?? null;
+      if (field === "previous_close") return providerData.previous_close ?? providerData.prev_close ?? null;
+      if (field === "volume") return providerData.volume ?? null;
+      if (field === "change_abs") return providerData.change_abs ?? null;
+      if (field === "change_pct") return providerData.change_pct ?? null;
+      if (field === "high_52w") return providerData.high_52w ?? null;
+      if (field === "low_52w") return providerData.low_52w ?? null;
+      return null;
+
     case "yahoo":
       // Quote responses
       if (field === "ltp") return providerData.price ?? null;
@@ -275,7 +301,11 @@ export async function resolveField(
       const value = extractFieldValue(req.field, providerData, providerName);
 
       if (value != null) {
-        return { value, source: providerName };
+        // Kotak's fetcher transparently falls back to Yahoo for symbols
+        // without an instrument token; honor the actual source it reports
+        // so downstream labelling ("live · kotak" vs "yahoo") is truthful.
+        const actualSource = typeof providerData?.source === "string" ? providerData.source : providerName;
+        return { value, source: actualSource };
       }
     } catch (e) {
       console.error(`Provider ${providerName} failed for ${req.field} (${req.exchange}:${req.symbol}):`, e);

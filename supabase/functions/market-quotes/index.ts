@@ -175,6 +175,11 @@ Deno.serve(async (req) => {
         previous_close: stale || dayUnavailable ? null : q.previous_close ?? null,
         change_pct: stale || dayUnavailable ? null : q.change_pct ?? null,
         day_change: stale || dayUnavailable ? null : q.change_abs ?? null,
+        // Today's cumulative traded volume from the provider — used by the
+        // chart's live-bar volume overlay and the Analysis right-rail
+        // "Volume" readout. Kotak surfaces `vol_traded_today`; Yahoo
+        // surfaces `regularMarketVolume`. Null when neither has coverage.
+        volume: (q as any).volume ?? null,
         source: q.source,
         provider: (q.source === "cache" ? "cache" : String(q.source ?? provider.name)) as string,
         as_of: q.as_of ?? null,

@@ -8,6 +8,7 @@
 //     the broker will reject with a clean error we surface.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { getActiveProvider, type FundsSnapshot } from "../_shared/market/provider.ts";
+import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 import { z } from "npm:zod";
 
 const OrderSchema = z.object({
@@ -25,10 +26,22 @@ const OrderSchema = z.object({
   skipMarginCheck: z.boolean().optional(),
 });
 
+// 60 orders / minute per user — well beyond any human, catches runaway
+// loops. Kotak itself will throttle much sooner, but a friendly 429 here
+// avoids burning API budget and leaves an audit trail.
+const limiter = createMarketLimiter(60, 60_000);
+
+// Intraday leverage assumed for the margin guardrail. Kotak's real leverage
+// per scrip varies and F&O SPAN margin isn't derivable client-side; these
+// constants keep the check useful (catches obvious over-orders) without
+// false-rejecting reasonable MIS trades. Broker validation is the backstop.
+const PRODUCT_LEVERAGE: Record<string, number> = { MIS: 5, CNC: 1, NRML: 1 };
+
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
   const auth = await requireUserId(req);
   if ("error" in auth) return new Response("unauthorized", { status: 401, headers: corsFor(req) });
+  const rl = limiter.guard(req, auth.userId); if (rl) return rl;
 
   let body: unknown;
   try { body = await req.json(); } catch { return errorResponse(req, "invalid json", 400); }
@@ -42,6 +55,16 @@ Deno.serve(async (req) => {
   }
   if ((input.orderType === "SL" || input.orderType === "SL-M") && !input.triggerPrice) {
     return errorResponse(req, "triggerPrice is required for SL / SL-M orders", 400);
+  }
+  // NSE iceberg rule: disclosed qty must be ≥ 10% of order qty (or 0 = no iceberg).
+  if (input.disclosedQuantity && input.disclosedQuantity > 0) {
+    const minDq = Math.ceil(input.quantity * 0.10);
+    if (input.disclosedQuantity < minDq) {
+      return errorResponse(req, `disclosedQuantity must be at least 10% of quantity (min ${minDq})`, 400);
+    }
+    if (input.disclosedQuantity > input.quantity) {
+      return errorResponse(req, "disclosedQuantity cannot exceed quantity", 400);
+    }
   }
 
   const svc = svcClient();
@@ -74,9 +97,16 @@ Deno.serve(async (req) => {
         } else {
           funds = { available_margin: cached.available_margin, net_cash: null, used_margin: null, collateral: null, payin_amount: null, source: "kotak" };
         }
+        // Leverage-aware guardrail: MIS gets ~5× (equity intraday), CNC
+        // needs full cash (1×). Previously every product was treated as
+        // 1×, which false-rejected legitimate MIS orders on small accounts
+        // (a ₹200k MIS order on ₹50k free margin is fine at 5×, but was
+        // being blocked as "insufficient").
+        const leverage = PRODUCT_LEVERAGE[input.product] ?? 1;
         const notional = input.quantity * refPrice;
-        if (funds?.available_margin != null && funds.available_margin > 0 && notional > funds.available_margin) {
-          return errorResponse(req, `Insufficient margin: order needs ₹${notional.toFixed(0)} but only ₹${funds.available_margin.toFixed(0)} available. Set skipMarginCheck to override.`, 400);
+        const marginNeeded = notional / leverage;
+        if (funds?.available_margin != null && funds.available_margin > 0 && marginNeeded > funds.available_margin) {
+          return errorResponse(req, `Insufficient margin: ${input.product} order needs ₹${marginNeeded.toFixed(0)} (notional ₹${notional.toFixed(0)} at ${leverage}× leverage) but only ₹${funds.available_margin.toFixed(0)} available. Set skipMarginCheck to override.`, 400);
         }
       }
     }

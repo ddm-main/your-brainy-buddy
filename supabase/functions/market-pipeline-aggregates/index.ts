@@ -6,6 +6,7 @@ import { istTradeDate, requireCronSecret } from "../_shared/market/cron.ts";
 import { classifyRegime, breakoutScore, preBreakoutScore } from "../_shared/market/scoring.ts";
 import type { IndicatorSnapshot } from "../_shared/market/indicators.ts";
 import { yahooChartRetry } from "../_shared/market/yahooClient.ts";
+import { getServiceProvider } from "../_shared/market/provider.ts";
 
 // Rebuild the scorer's input from a market_stock_scores row (joined with stocks).
 // v2 fix: `atrContracting` and `macdHistRising` used to be read from yesterday's
@@ -123,12 +124,36 @@ Deno.serve(async (req) => {
     const avgRsi = rsiVals.length ? rsiVals.reduce((a: number, b: number) => a + b, 0) / rsiVals.length : null;
     const regime = classifyRegime(pctAboveEma50, avgRsi);
 
-    // NIFTY context (also used for relative strength)
+    // NIFTY context (also used for relative strength).
+    // Prefer Kotak Neo daily candles when any user has an active session
+    // (getServiceProvider picks the most-recently-updated connected Kotak
+    // row). Falls back to Yahoo when no Kotak session is available — this
+    // is a cron path with no user context, so Kotak may legitimately not
+    // be reachable and Yahoo's daily NIFTY close is fine for breadth.
     let niftyClose: number | null = null;
     let niftyChangePct: number | null = null;
     let niftyReturn55: number | null = null;
     try {
-      const nifty = await yahooChartRetry("^NSEI", "6mo", "1d");
+      const { provider } = await getServiceProvider(svc);
+      let nifty: Array<{ close: number }> = [];
+      let providerErr: string | null = null;
+      try {
+        nifty = await provider.getOHLCV("NIFTY", "NSE", "6mo", "1d");
+      } catch (e) {
+        providerErr = e instanceof Error ? e.message : String(e);
+      }
+      if (nifty.length < 2) {
+        // Kotak branch failed or returned nothing — log the true origin
+        // (provider name) before falling back to Yahoo so provenance is visible.
+        await svc.from("market_provider_health").insert({
+          provider: (provider as any).name ?? "unknown",
+          endpoint: "market-pipeline-aggregates",
+          ok: false,
+          latency_ms: 0,
+          error: (providerErr ?? "empty candles from primary — falling back to yahoo").slice(0, 500),
+        }).then(() => {}, () => {});
+        nifty = await yahooChartRetry("^NSEI", "6mo", "1d");
+      }
       const last = nifty[nifty.length - 1];
       const prev = nifty[nifty.length - 2];
       niftyClose = last?.close ?? null;
@@ -136,6 +161,7 @@ Deno.serve(async (req) => {
       const base = nifty[Math.max(0, nifty.length - 56)];
       niftyReturn55 = last && base ? ((last.close - base.close) / base.close) * 100 : null;
     } catch { /* breadth still useful without NIFTY */ }
+
 
     await svc.from("market_breadth_daily").upsert({
       trade_date: today,

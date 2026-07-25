@@ -3,7 +3,8 @@
 // CandleChart, so toggles work even before the EOD pipeline has run.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useParams, useSearchParams } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { supabase } from "@/integrations/supabase/client";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
@@ -13,8 +14,9 @@ import { ChartToolbar, DEFAULT_SETTINGS, isIntraday, type ChartSettings } from "
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
 import { NewAlertModal, StockAlertsPanel } from "@/components/market/StockAlerts";
 import { DEFAULT_STUDIES, makeStudy, normalizeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
-import { fmtNum, fmtInt, fmtPct } from "@/components/hud/DataTable";
+import { fmtNum, fmtInt, fmtPct, Return1DCell, deriveChangeAbs } from "@/components/hud/DataTable";
 import { useBreadth, useCandles, useCorporateActions, useDepth, useFundamentals, useMarketNews, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores, useSyncNewsAndActions } from "@/lib/market/hooks";
+import { MarketDepthLadder } from "@/components/market/MarketDepthLadder";
 import { computeLiveScore } from "@/lib/market/liveSnapshot";
 import { usePreferLiveTick } from "@/lib/market/useRealtimeTicks";
 import { getTrustedDayChange } from "@/lib/market/pnl";
@@ -226,6 +228,35 @@ export default function Analysis() {
     [sectors, score],
   );
 
+  // Count of active alerts on this symbol, sourced from the same query key
+  // StockAlertsPanel writes to so the toolbar badge stays in sync without
+  // an extra network round-trip.
+  const { data: alertsForBadge = [] } = useQuery({
+    queryKey: ["market", "alerts", sym, exchange],
+    queryFn: async () => {
+      const { data, error } = await supabase.from("market_alerts")
+        .select("id,is_active")
+        .eq("symbol", sym!).eq("exchange", exchange);
+      if (error) throw error;
+      return data ?? [];
+    },
+    enabled: !!sym,
+  });
+  const alertCount = (alertsForBadge as Array<{ is_active: boolean }>).filter((a) => a.is_active).length;
+
+  // Auto-sync news on first open for a symbol that has none cached. Guarded
+  // by a ref keyed on symbol|exchange so revisits or React StrictMode
+  // double-mount don't spam Yahoo.
+  const autoSyncedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!sym) return;
+    const key = `${sym}:${exchange}`;
+    if (autoSyncedRef.current === key) return;
+    if (news.length > 0 || syncNews.isPending) return;
+    autoSyncedRef.current = key;
+    syncNews.mutate({ symbol: sym, exchange });
+  }, [sym, exchange, news.length, syncNews]);
+
   const priceLines = useMemo(() => {
     const lines: Array<{ price: number; label: string; color: string }> = [];
     const r = liveScore?.snapshot.resistance ?? score?.resistance_level ?? null;
@@ -244,11 +275,12 @@ export default function Analysis() {
     return <Navigate to="/market/screener" replace />;
   }
 
-  // `|| score.close`: a quote ltp of 0 means "no live quote" (Yahoo/Kotak
-  // unavailable) — fall back to the EOD close from the score row so the panel
-  // never shows ₹0. Change % falls back to the EOD change from the score.
-  const ltp = quote?.ltp || score?.close || null;
-  const chgPct = quote?.change_pct ?? score?.change_pct ?? null;
+  // Prefer EOD close when the live quote is stale (Yahoo timeout / Kotak
+  // disconnect) — a stale quote was silently overriding the fresh EOD close
+  // and turning the header green with a phantom 0% change.
+  const staleLive = !!quote?.stale;
+  const ltp = (!staleLive && quote?.ltp) || score?.close || null;
+  const chgPct = (!staleLive ? quote?.change_pct : null) ?? score?.change_pct ?? null;
   const dayChange = getTrustedDayChange(quote);
 
   return (
@@ -261,7 +293,12 @@ export default function Analysis() {
           live={isLoading ? "warn" : "ok"}
           style={{ flex: 1, minHeight: 0 }}
           actions={
-            <div style={{ display: "flex", gap: 4 }}>
+            <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+              {candleData?.provider && (
+                <Chip tone={candleData.provider === "kotak_neo" ? "ok" : "accent"}>
+                  {candleData.provider === "kotak_neo" ? "kotak" : "yahoo"}
+                </Chip>
+              )}
               {(["NSE", "BSE"] as const).map((ex) => (
                 <Btn key={ex} size="sm" variant={exchange === ex ? "primary" : "ghost"} onClick={() => setExchange(ex)}>
                   {ex}
@@ -288,6 +325,7 @@ export default function Analysis() {
               onTvMode={setTvMode}
               onFullscreen={() => setFs(true)}
               onAlert={() => setAlertModalOpen(true)}
+              alertCount={alertCount}
               onScreenshot={handleScreenshot}
               onSaveLayout={saveLayout}
               onLoadLayout={loadLayout}
@@ -318,7 +356,9 @@ export default function Analysis() {
                   onToggleStudy={toggleStudy}
                   onEditStudy={setEditingId}
                   onRemoveStudy={removeStudy}
+                  source={candleData.provider ?? null}
                 />
+
 
               )}
             </div>
@@ -334,9 +374,8 @@ export default function Analysis() {
           <div style={{ fontFamily: "var(--font-display)", fontSize: 26, color: "var(--accent)" }}>
             {ltp != null ? `₹${fmtNum(ltp)}` : "—"}
           </div>
-          <div style={{ fontSize: 13, color: (chgPct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
-            {chgPct != null ? fmtPct(chgPct) : "—"}
-            {dayChange != null && <span style={{ marginLeft: 8 }}>({fmtNum(dayChange)})</span>}
+          <div style={{ fontSize: 13 }}>
+            <Return1DCell abs={dayChange ?? deriveChangeAbs(ltp, chgPct)} pct={chgPct} />
           </div>
           <div style={{ display: "flex", gap: 6, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
             {score?.sector && <Chip tone="accent">{score.sector}</Chip>}
@@ -351,30 +390,7 @@ export default function Analysis() {
 
         <StockAlertsPanel symbol={sym} exchange={exchange} />
 
-        {depth && (depth.bids.length > 0 || depth.asks.length > 0) && (
-          <HudPanel flow title="Market Depth" index="A2">
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
-              <div>
-                <div className="hud-label" style={{ color: "var(--ok)", marginBottom: 4 }}>Bids</div>
-                {depth.bids.map((b, i) => (
-                  <div key={i} style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 6, padding: "2px 0", borderBottom: "1px solid var(--edge)" }}>
-                    <span style={{ color: "var(--ok)" }}>{b.price.toFixed(2)}</span>
-                    <span style={{ color: "var(--text-dim)", textAlign: "right" }}>{b.qty.toLocaleString("en-IN")}</span>
-                  </div>
-                ))}
-              </div>
-              <div>
-                <div className="hud-label" style={{ color: "var(--danger)", marginBottom: 4 }}>Asks</div>
-                {depth.asks.map((a, i) => (
-                  <div key={i} style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 6, padding: "2px 0", borderBottom: "1px solid var(--edge)" }}>
-                    <span style={{ color: "var(--danger)" }}>{a.price.toFixed(2)}</span>
-                    <span style={{ color: "var(--text-dim)", textAlign: "right" }}>{a.qty.toLocaleString("en-IN")}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </HudPanel>
-        )}
+        <MarketDepthLadder depth={depth} />
 
         {!score ? (
           <HudPanel flow title="Coverage" index="A3">
@@ -445,7 +461,7 @@ export default function Analysis() {
           <Row label="52w Low" mono>{fmtNum(liveScore?.snapshot.low52w ?? score?.low_52w)}</Row>
           <Row label="From 52w High" mono>
             <span style={{ color: (liveScore?.snapshot.pctFrom52wHigh ?? score?.pct_from_52w_high ?? 0) > -5 ? "var(--ok)" : "var(--text)" }}>
-              {fmtPct(liveScore?.snapshot.pctFrom52wHigh ?? score?.pct_from_52w_high)}
+              {fmtPct(liveScore?.snapshot.pctFrom52wHigh ?? score?.pct_from_52w_high, 2, false)}
             </span>
           </Row>
           <Row label="RS vs NIFTY" mono>{fmtNum(score?.rel_strength_nifty, 1)}</Row>
@@ -524,9 +540,19 @@ export default function Analysis() {
             <Row label="P/E (TTM)" mono>{fmtNum(fund.pe_ttm, 2)}</Row>
             <Row label="P/B" mono>{fmtNum(fund.price_to_book, 2)}</Row>
             <Row label="EPS (TTM)" mono>{fmtNum(fund.eps_ttm, 2)}</Row>
-            <Row label="ROE" mono>{fund.roe != null ? fmtPct(fund.roe * 100) : "—"}</Row>
+            <Row label="ROE" mono>{fund.roe != null ? fmtPct(fund.roe * 100, 2, false) : "—"}</Row>
             <Row label="Debt/Equity" mono>{fmtNum(fund.debt_to_equity, 2)}</Row>
-            <Row label="Div Yield" mono>{fund.dividend_yield != null ? fmtPct(fund.dividend_yield * 100) : "—"}</Row>
+            <Row label="Div Yield" mono>{(() => {
+              const raw = fund.dividend_yield;
+              if (raw == null) return "—";
+              // Belt-and-braces guard against the FMP-percent-vs-Yahoo-decimal
+              // unit clash — anything > 0.5 (i.e. >50% yield) is unrealistic
+              // and must already be in percent; scale it back to decimal so
+              // the display *100 lands correctly. The edge fn does the same
+              // fix at write time; this catches any stale rows already cached.
+              const dec = raw > 0.5 ? raw / 100 : raw;
+              return fmtPct(dec * 100, 2, false);
+            })()}</Row>
             <Row label="Beta" mono>{fmtNum(fund.beta, 2)}</Row>
             {fund.sector && <Row label="Sector">{fund.sector}</Row>}
             {fund.industry && <Row label="Industry">{fund.industry}</Row>}

@@ -180,6 +180,80 @@ export function usePositions() {
       if (error) throw error;
       return (data ?? []) as Position[];
     },
+    refetchInterval: marketOpen() ? 10_000 : justClosedWindow() ? 30_000 : 5 * 60_000,
+    refetchIntervalInBackground: false,
+  });
+}
+
+// Shared holdings hook — pages used to roll their own supabase.from().select()
+// which meant a mutation on Holdings wouldn't reflect in PortfolioOverview
+// until remount. Central hook + query-key means invalidations propagate.
+export interface HoldingRow {
+  id: string;
+  symbol: string;
+  exchange: string;
+  quantity: number;
+  avg_price: number;
+  buy_date: string | null;
+  investment_type: string | null;
+  notes: string | null;
+  source: string;
+  settled_qty: number | null;
+  t1_qty: number | null;
+  pledged_qty: number | null;
+}
+
+export function usePortfolioLastSync() {
+  return useQuery({
+    queryKey: ["market", "portfolio-last-sync"],
+    queryFn: async (): Promise<string | null> => {
+      const { data, error } = await supabase
+        .from("market_api_settings")
+        .select("last_sync_at")
+        .eq("active_provider", "kotak_neo")
+        .maybeSingle();
+      if (error) throw error;
+      return (data as any)?.last_sync_at ?? null;
+    },
+    staleTime: 30_000,
+  });
+}
+export function useHoldings() {
+  return useQuery({
+    queryKey: ["market", "holdings"],
+    queryFn: async (): Promise<HoldingRow[]> => {
+      const { data, error } = await supabase
+        .from("market_holdings").select("*").order("created_at", { ascending: false });
+      if (error) throw error;
+      return (data ?? []) as HoldingRow[];
+    },
+    refetchInterval: marketOpen() ? 30_000 : 5 * 60_000,
+    refetchIntervalInBackground: false,
+  });
+}
+
+// Today's intraday realized P&L (per-symbol, from market_realized_pnl_daily).
+// Kite/Groww's "Today's P&L" = open-positions day + realized-today; without
+// this, closing a scalp during the session would make today's P&L drop back
+// to whatever the open book shows.
+export interface TodayRealizedRow {
+  symbol: string; exchange: string; quantity: number; realized: number;
+}
+export function useTodayRealized() {
+  return useQuery({
+    queryKey: ["market", "realized-daily"],
+    queryFn: async (): Promise<TodayRealizedRow[]> => {
+      const day = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+      const { data, error } = await supabase
+        .from("market_realized_pnl_daily")
+        .select("symbol,exchange,quantity,realized")
+        .eq("day", day);
+      if (error) throw error;
+      return (data ?? []) as TodayRealizedRow[];
+    },
+    refetchInterval: marketOpen() ? 30_000 : justClosedWindow() ? 60_000 : false,
+    refetchIntervalInBackground: false,
+    staleTime: 20_000,
   });
 }
 
@@ -187,7 +261,26 @@ export function useSyncPositions() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => callMarketFn("market-sync-positions"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["market", "positions"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["market", "positions"] });
+      qc.invalidateQueries({ queryKey: ["market", "funds"] });
+      qc.invalidateQueries({ queryKey: ["market", "realized-daily"] });
+      qc.invalidateQueries({ queryKey: ["market", "holdings"] });
+      qc.invalidateQueries({ queryKey: ["market", "portfolio-last-sync"] });
+    },
+  });
+}
+
+export function useSyncHoldings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => callMarketFn<{ ok: boolean; inserted?: number; updated?: number; removed?: number }>("market-sync-holdings"),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["market", "holdings"] });
+      qc.invalidateQueries({ queryKey: ["market", "funds"] });
+      qc.invalidateQueries({ queryKey: ["market", "settings"] });
+      qc.invalidateQueries({ queryKey: ["market", "portfolio-last-sync"] });
+    },
   });
 }
 
@@ -258,6 +351,33 @@ export function useBreadth() {
   });
 }
 
+export interface FiiDiiRow {
+  activity_date: string;
+  segment: string;
+  fii_net: number | null;
+  dii_net: number | null;
+  net_buy_inr_cr: number | null;
+  source: string | null;
+}
+
+// Recent FII/DII activity (defaults to CASH segment, last 10 sessions).
+export function useFiiDiiHistory(limit = 10, segment = "CASH") {
+  return useQuery({
+    queryKey: ["market", "fii-dii-history", segment, limit],
+    queryFn: async (): Promise<FiiDiiRow[]> => {
+      const { data, error } = await supabase
+        .from("fii_dii_activity")
+        .select("activity_date,segment,fii_net,dii_net,net_buy_inr_cr,source")
+        .eq("segment", segment)
+        .order("activity_date", { ascending: false })
+        .limit(limit);
+      if (error) throw error;
+      return (data ?? []) as FiiDiiRow[];
+    },
+    staleTime: 5 * 60_000,
+  });
+}
+
 export function useSectorStrength() {
   return useQuery({
     queryKey: ["market", "sectors"],
@@ -277,11 +397,17 @@ export function useSectorStrength() {
 }
 
 export function useCandles(symbol: string | undefined, timeframe: string, exchange = "NSE") {
+  // Intraday timeframes need to pick up new completed bars while the market
+  // is open. Live LTP nudges the last bar via the tick store, but the full
+  // series stays 5 min stale without a refetch loop.
+  const intraday = /^(?:\d+m|\d+h)$/.test(timeframe);
   return useQuery({
     queryKey: ["market", "candles", symbol ?? "", timeframe, exchange],
     queryFn: () => callMarketFn<CandlesResponse>("market-candles", { symbol, timeframe, exchange }),
     enabled: !!symbol,
-    staleTime: 5 * 60_000,
+    staleTime: intraday ? 60_000 : 5 * 60_000,
+    refetchInterval: intraday && marketOpen() ? 60_000 : false,
+    refetchIntervalInBackground: false,
   });
 }
 

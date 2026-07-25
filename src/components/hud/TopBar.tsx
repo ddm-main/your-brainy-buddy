@@ -259,7 +259,7 @@ export default function TopBar() {
                       onClick={() => { setUserOpen(false); navigate("/config"); }}
                       style={menuItem}
                     >
-                      <SlidersHorizontal size={13} /> Configuration
+                      <SlidersHorizontal size={13} /> Admin Panel
                     </button>
                   )}
                   <button

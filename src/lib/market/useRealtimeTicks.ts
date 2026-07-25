@@ -27,14 +27,23 @@ interface TickPayload {
 // another Realtime connection.
 let sharedChannel: RealtimeChannel | null = null;
 
-const MAX_SUBSCRIBE_SYMBOLS = 100;
+export const MAX_SUBSCRIBE_SYMBOLS = 100;
 let pendingSymbols: Set<string> | null = null;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let truncationWarned = false;
 
 function flushSubscribe() {
   flushTimer = null;
   if (!sharedChannel || !pendingSymbols) return;
-  const symbols = Array.from(pendingSymbols).slice(0, MAX_SUBSCRIBE_SYMBOLS);
+  const all = Array.from(pendingSymbols);
+  const symbols = all.slice(0, MAX_SUBSCRIBE_SYMBOLS);
+  if (all.length > MAX_SUBSCRIBE_SYMBOLS && !truncationWarned) {
+    truncationWarned = true;
+    // Fire-and-forget: user sees they're at the cap so a missing tick
+    // doesn't look like a bug. Guarded once per session to avoid spam.
+    // eslint-disable-next-line no-console
+    console.warn(`[market] Push-tick subscription capped at ${MAX_SUBSCRIBE_SYMBOLS}; ${all.length - MAX_SUBSCRIBE_SYMBOLS} symbol(s) will use REST polling instead.`);
+  }
   pendingSymbols = null;
   sharedChannel.send({ type: "broadcast", event: "subscribe", payload: { symbols } })
     .catch(() => { /* relay may not be running — ignore */ });
@@ -42,13 +51,17 @@ function flushSubscribe() {
 
 // Public API: any panel showing rotating symbols (Top Breakouts, Screener
 // preview, Watchlist) can call this to expand the relay's push coverage.
-// Debounced 500ms so filter toggles don't spam the channel.
+// Debounced 500ms — MERGES successive calls (previously the last call
+// overwrote earlier symbol sets so two panels racing lost coverage).
 export function subscribeSymbolsForTicks(keys: string[]): void {
   if (!keys.length) return;
-  pendingSymbols = new Set(keys.map((k) => k.toUpperCase()));
+  const upper = keys.map((k) => k.toUpperCase());
+  if (pendingSymbols) upper.forEach((k) => pendingSymbols!.add(k));
+  else pendingSymbols = new Set(upper);
   if (flushTimer) clearTimeout(flushTimer);
   flushTimer = setTimeout(flushSubscribe, 500);
 }
+
 
 export function useRealtimeTicks() {
   const { session } = useSession();

@@ -138,6 +138,7 @@ export function CandleChart({
   onToggleStudy,
   onEditStudy,
   onRemoveStudy,
+  source,
 }: {
   candles: CandleDto[];
   priceLines?: Array<{ price: number; label: string; color: string }>;
@@ -157,6 +158,8 @@ export function CandleChart({
   onToggleStudy?: (id: string) => void;
   onEditStudy?: (id: string) => void;
   onRemoveStudy?: (id: string) => void;
+  /** Primary data provider that served the candles ("kotak_neo" | "yahoo"). Renders a small provenance chip in the header. */
+  source?: "kotak_neo" | "yahoo" | null;
 }) {
 
   const ref = useRef<HTMLDivElement>(null);
@@ -170,6 +173,10 @@ export function CandleChart({
   const priceSeriesRef = useRef<ISeriesApi<any> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<any> | null>(null);
   const liveBarRef = useRef<{ seriesTime: any; rawTime: string | number; open: number; high: number; low: number; close: number; volume: number } | null>(null);
+  // Median inter-bar gap (seconds) captured at last render; used by the live
+  // tick effect to detect when wall-clock has crossed a bar boundary so
+  // intraday charts roll to a fresh bar instead of stretching one monster bar.
+  const medianGapRef = useRef<number>(0);
   const [liveBar, setLiveBar] = useState<CandleDto | null>(null);
   const s = settings ?? { grid: true, logScale: false, priceLine: true, sessionBreaks: false };
   // Deconstructed so effect dep can be primitive and stable across parent
@@ -177,10 +184,19 @@ export function CandleChart({
   const { grid: sGrid, logScale: sLog, priceLine: sPriceLine, sessionBreaks: sSessionBreaks } = s;
 
 
-  const computed = useMemo(
-    () => studies.map((s) => ({ study: s, data: computeStudy(candles, s) })),
-    [candles, studies],
-  );
+  // Memoize per-study compute keyed by (candles reference, study JSON) so
+  // toggling one study's param doesn't recompute every other study.
+  const studyCache = useRef<WeakMap<CandleDto[], Map<string, Computed>>>(new WeakMap());
+  const computed = useMemo(() => {
+    let bucket = studyCache.current.get(candles);
+    if (!bucket) { bucket = new Map(); studyCache.current.set(candles, bucket); }
+    return studies.map((st) => {
+      const key = `${st.type}|${st.source ?? "close"}|${JSON.stringify(st.params)}`;
+      let data = bucket!.get(key);
+      if (!data) { data = computeStudy(candles, st); bucket!.set(key, data); }
+      return { study: st, data };
+    });
+  }, [candles, studies]);
 
   useEffect(() => {
     const el = ref.current;
@@ -202,6 +218,11 @@ export function CandleChart({
       _seen.add(k);
       return true;
     });
+    // Surface upstream cache bugs — silently dropping duplicates hides them.
+    if (import.meta.env?.DEV && cleaned.length !== candles.length) {
+      // eslint-disable-next-line no-console
+      console.warn(`[CandleChart] dropped ${candles.length - cleaned.length} duplicate/out-of-order bars`);
+    }
     const data = cleaned;
 
     // NSE session is 09:15–15:30 IST. Lightweight-charts defaults to UTC, so
@@ -234,16 +255,28 @@ export function CandleChart({
       const dd = parts.find((p) => p.type === "day")?.value ?? "";
       return `${y}-${m}-${dd}`;
     };
-    // Detect intraday by the median gap between the first few numeric bars
-    // (< 1 day = intraday). Falls back to intraday if unknown.
+    // Detect intraday: caller-supplied prop is the source of truth (known at
+    // fetch time). Median-gap detection is a fallback for legacy callers that
+    // don't pass `intraday` — it's fragile at market open when only 1–2 bars
+    // exist for the day.
     const _nums = data.map((c) => c.time).filter((t): t is number => typeof t === "number").slice(0, 8);
     let _medianGap = 0;
     if (_nums.length >= 2) {
       const gaps = _nums.slice(1).map((t, i) => t - _nums[i]).sort((a, b) => a - b);
       _medianGap = gaps[Math.floor(gaps.length / 2)] || 0;
     }
-    const isIntraday = _medianGap > 0 ? _medianGap < 86_400 : true;
+    medianGapRef.current = _medianGap;
+    const isIntraday = intraday || (_medianGap > 0 ? _medianGap < 86_400 : false);
     const isMonthly = _medianGap >= 86_400 * 27;
+    // Log-scale safety: LWC's logarithmic price mode blows up on values <= 0
+    // (VIX-like series with a 0 print, or overlays). Force Normal when any
+    // low is non-positive so the whole chart doesn't disappear silently.
+    const hasNonPositivePrice = data.some((c) => c.low <= 0 || c.close <= 0);
+    const useLog = sLog && !hasNonPositivePrice;
+    if (sLog && hasNonPositivePrice && import.meta.env?.DEV) {
+      // eslint-disable-next-line no-console
+      console.warn("[CandleChart] log scale disabled — series contains value <= 0");
+    }
     // Track last-seen day/month across tick formatter calls so we can print
     // the date on the first tick of a new session (industry standard: TV,
     // Kite, Tickertape all switch label style at day boundaries).
@@ -303,7 +336,7 @@ export function CandleChart({
       },
       rightPriceScale: {
         borderColor: "rgba(53,214,237,0.15)",
-        mode: sLog ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal,
+        mode: useLog ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal,
       },
       timeScale: {
         borderColor: "rgba(53,214,237,0.15)",
@@ -528,11 +561,17 @@ export function CandleChart({
         priceLineVisible: false,
         lastValueVisible: true,
       }, pane);
-      vol.setData(data.map((cc) => ({
-        time: toTime(cc.time),
-        value: cc.volume,
-        color: cc.close >= cc.open ? "rgba(107,255,176,0.55)" : "rgba(255,95,109,0.55)",
-      })));
+      vol.setData(data.map((cc, i) => {
+        // Industry-standard (TV/Kite): color volume by close vs previous close,
+        // not close vs open. First bar has no prior — use open as the fallback.
+        const prev = i > 0 ? data[i - 1].close : cc.open;
+        const up = cc.close >= prev;
+        return {
+          time: toTime(cc.time),
+          value: cc.volume,
+          color: up ? "rgba(107,255,176,0.55)" : "rgba(255,95,109,0.55)",
+        };
+      }));
       volumeSeriesRef.current = vol;
       pane++;
       break;
@@ -631,6 +670,32 @@ export function CandleChart({
     if (!series || !base) return;
     if (livePrice == null && liveVolume == null) return;
     const close = livePrice != null && Number.isFinite(livePrice) ? livePrice : base.close;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const gap = medianGapRef.current;
+    const baseTime = typeof base.rawTime === "number" ? base.rawTime : 0;
+    // Bar-boundary roll: if wall-clock has crossed one full `gap` past the
+    // current bar's open time, emit a fresh bar (open=prev close) instead of
+    // stretching a monster bar. Guards: only for intraday (gap < 1 day) and
+    // when we actually have a numeric base time.
+    if (gap > 0 && gap < 86_400 && baseTime > 0 && nowSec >= baseTime + gap && livePrice != null) {
+      const newTime = baseTime + Math.floor((nowSec - baseTime) / gap) * gap;
+      const fresh = {
+        seriesTime: newTime as UTCTimestamp,
+        rawTime: newTime,
+        open: base.close, high: Math.max(base.close, close), low: Math.min(base.close, close),
+        close, volume: 0,
+      };
+      liveBarRef.current = fresh;
+      try {
+        if (chartType === "line" || chartType === "area") {
+          series.update({ time: fresh.seriesTime, value: close });
+        } else {
+          series.update({ time: fresh.seriesTime, open: fresh.open, high: fresh.high, low: fresh.low, close: fresh.close });
+        }
+      } catch { /* noop */ }
+      setLiveBar({ time: fresh.rawTime, open: fresh.open, high: fresh.high, low: fresh.low, close: fresh.close, volume: fresh.volume });
+      return;
+    }
     const nextVol = liveVolume != null && Number.isFinite(liveVolume) ? Math.max(base.volume, liveVolume) : base.volume;
     const updated = { ...base, high: Math.max(base.high, close), low: Math.min(base.low, close), close, volume: nextVol };
     liveBarRef.current = updated;
@@ -697,11 +762,81 @@ export function CandleChart({
   }, [computed, hoverIdx, candles.length, candles, intraday]);
 
   const last = liveBar ?? candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
   const l = legend ?? last;
-  const chg = l && candles.length > 1 ? ((l.close - l.open) / l.open) * 100 : null;
+  // Δ vs previous bar (crosshair-aware): when hovering, compare to the bar
+  // just before the hovered one; otherwise compare last bar to the one prior.
+  // This is the only "change" we show in the legend — the old same-bar
+  // (close-open)/open readout showed +0.00% on a fresh live bar and
+  // contradicted the Quote panel's prev-close-anchored change.
+  const refPrev = hoverIdx != null && hoverIdx > 0 ? candles[hoverIdx - 1] : prev;
+  const deltaVsPrev = l && refPrev ? l.close - refPrev.close : null;
+  const deltaPctVsPrev = l && refPrev && refPrev.close ? ((l.close - refPrev.close) / refPrev.close) * 100 : null;
+  const chg = deltaPctVsPrev;
+
+  // Keyboard shortcuts: +/− zoom, ←/→ pan, Alt+H fit, Alt+L toggle log.
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const ts = chart.timeScale();
+    const range = ts.getVisibleLogicalRange();
+    if (e.altKey && (e.key === "h" || e.key === "H")) { ts.fitContent(); e.preventDefault(); return; }
+    if (!range) return;
+    const span = (range.to as number) - (range.from as number);
+    if (e.key === "+" || e.key === "=") {
+      ts.setVisibleLogicalRange({ from: (range.from as number) + span * 0.15, to: range.to });
+      e.preventDefault();
+    } else if (e.key === "-" || e.key === "_") {
+      ts.setVisibleLogicalRange({ from: (range.from as number) - span * 0.15, to: range.to });
+      e.preventDefault();
+    } else if (e.key === "ArrowLeft") {
+      const d = span * 0.1;
+      ts.setVisibleLogicalRange({ from: (range.from as number) - d, to: (range.to as number) - d });
+      e.preventDefault();
+    } else if (e.key === "ArrowRight") {
+      const d = span * 0.1;
+      ts.setVisibleLogicalRange({ from: (range.from as number) + d, to: (range.to as number) + d });
+      e.preventDefault();
+    }
+  };
+
+  const ariaLabel = last
+    ? `Price chart. Last ${last.close.toFixed(2)}, change ${(chg ?? 0).toFixed(2)} percent, ${candles.length} bars.`
+    : "Price chart. No data.";
 
   return (
-    <div style={{ position: "relative", width: "100%", ...(fill ? { height: "100%", minHeight: 260 } : { minHeight: height }) }}>
+    <div
+      role="img"
+      aria-label={ariaLabel}
+      tabIndex={0}
+      onKeyDown={onKeyDown}
+      style={{ position: "relative", width: "100%", outline: "none", ...(fill ? { height: "100%", minHeight: 260 } : { minHeight: height }) }}
+    >
+      {candles.length === 0 && (
+        <div style={{
+          position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
+          fontFamily: "var(--font-hud)", fontSize: 11, letterSpacing: "0.1em",
+          color: "var(--text-dim)", textTransform: "uppercase", pointerEvents: "none",
+        }}>
+          No data for this range
+        </div>
+      )}
+      {source && (
+        <div
+          title={source === "kotak_neo" ? "Kotak Neo — live" : "Yahoo Finance — delayed ~15m"}
+          style={{
+            position: "absolute", top: 4, right: 8, zIndex: 3, pointerEvents: "none",
+            fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.12em",
+            textTransform: "uppercase",
+            color: source === "kotak_neo" ? "#6bffb0" : "#f7c948",
+            background: "rgba(4,16,22,0.6)",
+            border: `1px solid ${source === "kotak_neo" ? "rgba(107,255,176,0.35)" : "rgba(247,201,72,0.35)"}`,
+            padding: "1px 6px", borderRadius: 2,
+          }}
+        >
+          {source === "kotak_neo" ? "kotak · live" : "yahoo · delayed"}
+        </div>
+      )}
       {l && (
         <div style={{
           position: "absolute", top: 4, left: 6, zIndex: 3, pointerEvents: "none",
@@ -713,7 +848,11 @@ export function CandleChart({
           <span>H <b style={{ color: "var(--text)" }}>{l.high.toFixed(2)}</b></span>
           <span>L <b style={{ color: "var(--text)" }}>{l.low.toFixed(2)}</b></span>
           <span>C <b style={{ color: l.close >= l.open ? UP : DOWN }}>{l.close.toFixed(2)}</b></span>
-          {chg != null && <span style={{ color: chg >= 0 ? UP : DOWN }}>{chg >= 0 ? "+" : ""}{chg.toFixed(2)}%</span>}
+          {deltaVsPrev != null && deltaPctVsPrev != null && (
+            <span style={{ color: deltaVsPrev >= 0 ? UP : DOWN }}>
+              {deltaPctVsPrev >= 0 ? "+" : ""}{deltaPctVsPrev.toFixed(2)}% ({deltaVsPrev >= 0 ? "+" : ""}{deltaVsPrev.toFixed(2)}) <span style={{ opacity: 0.6 }}>vs prev close</span>
+            </span>
+          )}
           {/* Volume intentionally omitted here — shown in the volume pane's right axis and legend row to avoid a triple readout. */}
         </div>
       )}

@@ -9,7 +9,7 @@ import type { ColumnDef, SortingState } from "@tanstack/react-table";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { HudModal } from "@/components/hud/HudModal";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
-import { DataTable, fmtInt, fmtNum, PctCell } from "@/components/hud/DataTable";
+import { DataTable, deriveChangeAbs, fmtInt, fmtNum, PctCell, Return1DCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { AddToWatchlistButton } from "@/components/market/AddToWatchlistButton";
 
@@ -23,7 +23,7 @@ import { Link } from "react-router-dom";
 import { useUi } from "@/store/uiStore";
 import { supabase } from "@/integrations/supabase/client";
 import type { SavedScreener } from "@/lib/market/types";
-import { COLUMN_PRESETS } from "@/lib/market/columnPresets";
+
 import {
   CATEGORIES,
   FILTERS,
@@ -51,7 +51,7 @@ const COLUMNS: ColSpec[] = [
   { id: "industry",           label: "Industry" },
   { id: "market_cap",         label: "Mcap (₹Cr)",   align: "right", default: true },
   { id: "close",              label: "LTP (₹)",      align: "right", default: true },
-  { id: "change_pct",         label: "1D Return (%)",align: "right", default: true },
+  { id: "change_pct",         label: "1D Return (₹ / %)",align: "right", default: true },
   { id: "volume",             label: "Volume",       align: "right" },
   { id: "vol_avg30",          label: "30D Avg Vol",  align: "right" },
   { id: "vol_gt_avg30",       label: "Vol > 30D",    align: "right" },
@@ -649,13 +649,22 @@ function ScreenerInner() {
         cell: ({ getValue }) => fmtNum(getValue() as number | null),
       },
       change_pct: {
-        header: "1D Return (%)", id: "liveChangePct", meta: { align: "right" },
+        header: "1D Return", id: "liveChangePct", meta: { align: "right" },
         accessorFn: (r) => {
           const live = liveByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
           if (live && live.provider === "kotak" && live.change_pct != null) return live.change_pct;
           return r.change_pct;
         },
-        cell: ({ getValue }) => <PctCell value={getValue() as number | null} />,
+        cell: ({ row }) => {
+          const r = row.original;
+          const live = liveByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
+          const livePct = live && live.provider === "kotak" && live.change_pct != null ? live.change_pct : null;
+          const pct = livePct ?? r.change_pct ?? null;
+          const abs = live && live.provider === "kotak" && live.ltp != null && live.change_pct != null
+            ? deriveChangeAbs(live.ltp, live.change_pct)
+            : (r.change_abs ?? null);
+          return <Return1DCell abs={abs} pct={pct} />;
+        },
       },
       volume: {
         header: "Volume", accessorKey: "volume", meta: { align: "right" },
@@ -846,7 +855,7 @@ function ScreenerInner() {
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0, minHeight: 0 }}>
-          <HudPanel flow title={`Results · ${filtered.length}${filtered.length !== rows.length ? ` of ${rows.length}` : ""}`}
+          <HudPanel flow title={`Results · ${filtered.length}${filtered.length !== rows.length ? ` of ${rows.length}` : ""}`} style={{ flex: 1, minHeight: 0 }}
             live={isFetching ? "warn" : error ? "err" : "ok"}
             actions={
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
@@ -910,9 +919,8 @@ function ScreenerInner() {
                   title="Rows per page">
                   {[25, 50, 100, 200].map((n) => <option key={n} value={n}>{n}/page</option>)}
                 </select>
-                {/* View · Columns · CSV grouped together as one cluster */}
+                {/* Columns · CSV grouped together as one cluster */}
                 <div style={{ display: "inline-flex", gap: 4, padding: 2, border: "1px solid var(--edge)", borderRadius: 2 }}>
-                  <ColumnPresetPicker onPick={setVisibleCols} />
                   <ColumnPicker value={visibleCols} onChange={setVisibleCols} />
                   <Btn size="sm" onClick={exportCsv} disabled={filtered.length === 0} title="Export as CSV" aria-label="Export CSV">
                     <Download size={11} />
@@ -933,6 +941,7 @@ function ScreenerInner() {
                   onRowClick={(r) => nav(`/market/analysis/${r.symbol}`)}
                   numbered
                   startIndex={pageStart}
+                  maxHeight="100%"
                   emptyLabel={rows.length === 0 && !isFetching ? "market pipeline is warming up" : "no matches"}
                   emptyHint={rows.length === 0 && !isFetching ? "automatic sync is enabled; refresh shortly" : "loosen the filters or change the universe"}
                 />
@@ -1405,40 +1414,6 @@ function useAnchoredPos(
     };
   }, [open, triggerRef, align, estHeight]);
   return pos;
-}
-
-// ============================================================================
-// Column preset picker — one-click column-set swap (Screener.in style)
-// ============================================================================
-function ColumnPresetPicker({ onPick }: { onPick: (cols: string[]) => void }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
-  return (
-    <div ref={ref} style={{ position: "relative" }}>
-      <Btn size="sm" onClick={() => setOpen((o) => !o)} title="Swap the visible columns to a curated preset">
-        View
-      </Btn>
-      {open && (
-        <div style={{ ...popoverStyle, width: 240 }}>
-          {COLUMN_PRESETS.map((p) => (
-            <button key={p.id} onClick={() => { onPick(p.cols); setOpen(false); }}
-              style={{ ...popoverItem, padding: "6px 8px" }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(53,214,237,0.08)")}
-              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-              <div style={{ color: "var(--accent)", fontFamily: "var(--font-hud)", fontSize: 11, letterSpacing: "0.12em" }}>{p.label}</div>
-              <div style={{ color: "var(--text-muted)", fontSize: 10, marginTop: 2 }}>{p.desc}</div>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
 }
 
 // ============================================================================
