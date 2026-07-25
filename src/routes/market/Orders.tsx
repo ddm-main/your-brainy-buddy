@@ -8,8 +8,25 @@ import { OrderTicket } from "@/components/market/OrderTicket";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 
-const OPEN_STATUSES = new Set(["OPEN", "PENDING", "TRIGGER_PENDING", "OPEN_PENDING", "PUT ORDER REQ RECEIVED"]);
-const isOpen = (s: string) => OPEN_STATUSES.has(s.toUpperCase());
+// Broker status strings vary widely (Kotak Neo, Kite-style, AMO variants).
+// Match by keyword instead of an exact-set membership so we don't misclassify
+// a live pending order as "completed" just because the broker returned a
+// slightly different phrasing (e.g. "AFTER MARKET ORDER REQ RECEIVED").
+const CLOSED_TOKENS = ["COMPLETE", "EXECUTED", "FILLED", "CANCEL", "REJECT", "EXPIR"];
+const isOpen = (s: string) => {
+  const up = (s ?? "").toUpperCase();
+  if (!up) return false;
+  if (CLOSED_TOKENS.some((t) => up.includes(t))) return false;
+  return (
+    up.includes("PENDING") || up.includes("OPEN") || up.includes("TRIGGER") ||
+    up.includes("RECEIVED") || up.includes("VALIDATION") || up.includes("MODIFY") ||
+    up.includes("AMO") || up.includes("PUT ORDER")
+  );
+};
+const fmtInr = (n: number | null | undefined, dp = 2) =>
+  n == null || !Number.isFinite(n) ? "—" : `₹${n.toFixed(dp)}`;
+const fmtNum = (n: number | null | undefined) =>
+  n == null || !Number.isFinite(n) ? "—" : String(n);
 
 export default function Orders() {
   const push = useUi((s) => s.push);
