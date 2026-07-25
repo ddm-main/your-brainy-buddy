@@ -1,21 +1,27 @@
 // Market Positions — active trades: broker sync + manual journal + live P&L.
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import type { ColumnDef } from "@tanstack/react-table";
 import { HudPanel } from "@/components/hud/HudPanel";
+import { HudModal } from "@/components/hud/HudModal";
 import { Btn, Chip, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { DataTable, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 import { supabase } from "@/integrations/supabase/client";
-import { useMarketSettings, usePositions, useQuotes, useSyncPositions } from "@/lib/market/hooks";
+import { useMarketSettings, usePortfolioLastSync, usePositions, useQuotes, useSyncPositions, useTodayRealized } from "@/lib/market/hooks";
+import { useMarketOrderMutations } from "@/lib/market/orderHooks";
 import { useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { Download, Plus, ShoppingCart, Trash2, X } from "lucide-react";
+import { Download, Plus, Repeat, ShoppingCart, Trash2, X } from "lucide-react";
 import type { Position, Quote } from "@/lib/market/types";
 import { positionPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
+import { PriceSourceChip } from "@/components/market/PriceSourceChip";
 import { OrderTicket } from "@/components/market/OrderTicket";
+import { ClosePositionModal } from "@/components/market/ClosePositionModal";
+import { useMisSquareOffWarning } from "@/lib/market/useMisSquareOffWarning";
 
 const emptyForm = { symbol: "", exchange: "NSE", side: "long", quantity: "", entry_price: "", stop_loss: "", target: "", journal_notes: "" };
 
@@ -24,14 +30,22 @@ export default function Positions() {
   const qc = useQueryClient();
   const { data: positions = [], isLoading } = usePositions();
   const { data: settings = [] } = useMarketSettings();
+  const { data: lastSyncAt } = usePortfolioLastSync();
   const syncMut = useSyncPositions();
+  const { data: realizedToday = [] } = useTodayRealized();
+  const { convertPosition } = useMarketOrderMutations();
   const [showForm, setShowForm] = useState(false);
   const [ticket, setTicket] = useState<{ symbol: string; exchange: "NSE" | "BSE"; side: "BUY" | "SELL"; qty?: number } | null>(null);
+  const [closingPos, setClosingPos] = useState<Position | null>(null);
+  const [convertPos, setConvertPos] = useState<Position | null>(null);
+  const [deletePos, setDeletePos] = useState<Position | null>(null);
   const [form, setForm] = useState({ ...emptyForm });
 
   const open = useMemo(() => positions.filter((p) => !p.closed_at), [positions]);
   const closed = useMemo(() => positions.filter((p) => p.closed_at), [positions]);
+  const misWarn = useMisSquareOffWarning(open);
   const keys = useMemo(() => [...new Set(open.map((p) => `${p.exchange}:${p.symbol}`))], [open]);
+  useEffect(() => { subscribeSymbolsForTicks(keys); }, [keys]);
   const { data: quotesData } = useQuotes(keys);
   const liveTicks = useLiveTickStore((s) => s.ticks);
   const quoteMap = useMemo(() => {
@@ -54,6 +68,20 @@ export default function Positions() {
       push("Symbol, quantity, entry price required", "warn");
       return;
     }
+    // R:R direction guard — protects the journal from typos that would
+    // otherwise render a nonsensical "1:N" (e.g. stop above entry on a long).
+    const entry = Number(form.entry_price);
+    const stop = form.stop_loss ? Number(form.stop_loss) : null;
+    const tgt = form.target ? Number(form.target) : null;
+    if (stop != null && tgt != null) {
+      const bad = form.side === "long"
+        ? !(stop < entry && tgt > entry)
+        : !(stop > entry && tgt < entry);
+      if (bad) {
+        push(`Check stop/target: on a ${form.side} the stop must be ${form.side === "long" ? "below" : "above"} entry and target ${form.side === "long" ? "above" : "below"}.`, "warn");
+        return;
+      }
+    }
     const { data: session } = await supabase.auth.getSession();
     const userId = session.session?.user.id;
     if (!userId) { push("Sign in required", "err"); return; }
@@ -63,9 +91,9 @@ export default function Positions() {
       exchange: form.exchange,
       side: form.side,
       quantity: Number(form.quantity),
-      entry_price: Number(form.entry_price),
-      stop_loss: form.stop_loss ? Number(form.stop_loss) : null,
-      target: form.target ? Number(form.target) : null,
+      entry_price: entry,
+      stop_loss: stop,
+      target: tgt,
       journal_notes: form.journal_notes || null,
     } as any);
     if (error) { push(error.message, "err"); return; }
@@ -75,42 +103,38 @@ export default function Positions() {
     invalidate();
   };
 
-  const closePosition = async (p: Position) => {
-    const q = quoteMap.get(quoteKey(p.exchange, p.symbol));
-    const exitStr = prompt(`Exit price for ${p.symbol}?`, q?.ltp ? String(q.ltp) : "");
-    if (exitStr == null) return;
-    const exit = Number(exitStr);
-    if (!Number.isFinite(exit) || exit <= 0) { push("Invalid exit price", "warn"); return; }
+  const doCloseWithPrice = async (p: Position, exit: number) => {
     const gross = p.side === "long" ? (exit - p.entry_price) * p.quantity : (p.entry_price - exit) * p.quantity;
     const { error } = await supabase.from("market_positions")
-      .update({ closed_at: new Date().toISOString(), exit_price: exit, pnl: gross })
+      .update({ closed_at: new Date().toISOString(), exit_price: exit, pnl: gross, exit_source: "manual" } as any)
       .eq("id", p.id);
     if (error) { push(error.message, "err"); return; }
     push(`Closed ${p.symbol} · P&L ${inr(gross)}`, gross >= 0 ? "ok" : "warn");
+    setClosingPos(null);
     invalidate();
   };
 
   const remove = async (p: Position) => {
-    if (!confirm(`Delete position ${p.symbol}?`)) return;
     const { error } = await supabase.from("market_positions").delete().eq("id", p.id);
     if (error) { push(error.message, "err"); return; }
+    push(`Deleted ${p.symbol}`, "ok");
+    setDeletePos(null);
     invalidate();
   };
 
   const sync = () => {
     syncMut.mutate(undefined, {
-      onSuccess: (r: any) => push(`Synced ${r?.inserted ?? 0} positions from Kotak`, "ok"),
-      onError: (e) => push(toSafeError(e, "Sync failed").message, "err"),
+      onSuccess: (r: any) => push(`Kotak sync: ${r?.inserted ?? 0} new, ${r?.updated ?? 0} updated${r?.removed ? `, ${r.removed} removed` : ""}`, "ok"),
+      onError: (e) => {
+        const msg = toSafeError(e, "Sync failed").message;
+        push(msg, msg.toLowerCase().includes("session") ? "warn" : "err");
+      },
     });
   };
 
   const totals = useMemo(() => {
-    // A position with no resolvable live quote contributes "unknown," not
-    // "zero," to the total — matching holdingPnl's contract (pnl.ts:22-25).
-    // Previously `unrealized` started at 0 and only ever incremented on a
-    // resolved quote, so a page-load-before-quotes-arrive (or a
-    // market-quotes failure) rendered "₹0" in green, implying a flat book
-    // when the true P&L was simply unknown.
+    // A position with no resolvable live quote contributes "unknown," not "zero,"
+    // to the total — matching pnl.ts semantics.
     let unrealized = 0, unresolved = 0;
     const dayPnls: Array<number | null> = [];
     for (const p of open) {
@@ -120,10 +144,14 @@ export default function Positions() {
       dayPnls.push(calc.todayPnl);
     }
     const allUnresolved = open.length > 0 && unresolved === open.length;
-    const day = sumNullable(dayPnls);
+    const dayOpen = sumNullable(dayPnls);
+    const realizedDay = realizedToday.reduce((a, r) => a + (Number(r.realized) || 0), 0);
+    // Today = open-MTM + intraday realized (Kite/Groww parity). If neither is
+    // available (unresolved + no closes), stay null instead of showing "0".
+    const day = dayOpen == null && realizedDay === 0 ? null : (dayOpen ?? 0) + realizedDay;
     const realized = closed.reduce((a, p) => a + (p.pnl ?? 0), 0);
-    return { unrealized: allUnresolved ? null : unrealized, day, realized, unresolved };
-  }, [open, closed, quoteMap]);
+    return { unrealized: allUnresolved ? null : unrealized, day, realized, unresolved, realizedDay };
+  }, [open, closed, quoteMap, realizedToday]);
 
   const columns = useMemo<ColumnDef<Position, any>[]>(() => [
     {
@@ -168,7 +196,11 @@ export default function Positions() {
     {
       header: "R:R", id: "rr", meta: { align: "right" },
       accessorFn: (p) => {
-        if (p.stop_loss == null || p.target == null) return null;
+          if (p.stop_loss == null || p.target == null) return null;
+          const valid = p.side === "long"
+            ? p.stop_loss < p.entry_price && p.target > p.entry_price
+            : p.stop_loss > p.entry_price && p.target < p.entry_price;
+          if (!valid) return null;
         const risk = Math.abs(p.entry_price - p.stop_loss);
         const reward = Math.abs(p.target - p.entry_price);
         return risk > 0 ? reward / risk : null;
@@ -190,10 +222,11 @@ export default function Positions() {
             <>
               <button onClick={(e) => { e.stopPropagation(); setTicket({ symbol: row.original.symbol, exchange: row.original.exchange as "NSE" | "BSE", side: row.original.side === "long" ? "BUY" : "SELL", qty: row.original.quantity }); }} className="hud-btn" data-variant="ghost" data-size="sm" title="Add to position"><ShoppingCart size={11} /></button>
               <button onClick={(e) => { e.stopPropagation(); setTicket({ symbol: row.original.symbol, exchange: row.original.exchange as "NSE" | "BSE", side: row.original.side === "long" ? "SELL" : "BUY", qty: row.original.quantity }); }} className="hud-btn" data-variant="ghost" data-size="sm" title="Exit via broker" style={{ color: "var(--danger)" }}>E</button>
+              <button onClick={(e) => { e.stopPropagation(); setConvertPos(row.original); }} className="hud-btn" data-variant="ghost" data-size="sm" title="Convert product (MIS ↔ CNC ↔ NRML)"><Repeat size={11} /></button>
             </>
           )}
-          <button onClick={(e) => { e.stopPropagation(); closePosition(row.original); }} className="hud-btn" data-variant="ghost" data-size="sm" title="Close (journal only)"><X size={11} /></button>
-          <button onClick={(e) => { e.stopPropagation(); remove(row.original); }} className="hud-btn" data-variant="ghost" data-size="sm" title="Delete"><Trash2 size={11} /></button>
+          <button onClick={(e) => { e.stopPropagation(); setClosingPos(row.original); }} className="hud-btn" data-variant="ghost" data-size="sm" title="Close (journal only)"><X size={11} /></button>
+          <button onClick={(e) => { e.stopPropagation(); setDeletePos(row.original); }} className="hud-btn" data-variant="ghost" data-size="sm" title="Delete"><Trash2 size={11} /></button>
         </span>
       ),
     },
@@ -202,6 +235,21 @@ export default function Positions() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {misWarn.active && (
+        <div style={{
+          padding: "8px 12px",
+          border: "1px solid var(--warn)",
+          background: "color-mix(in oklab, var(--warn) 10%, transparent)",
+          color: "var(--warn)",
+          fontSize: 12,
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+        }}>
+          <span>
+            ⚠ MIS square-off in {misWarn.minutesToCutoff} min — broker will auto-close {misWarn.misOpen} intraday
+            position{misWarn.misOpen === 1 ? "" : "s"} at 15:15 IST. Exit or convert to CNC/NRML now.
+          </span>
+        </div>
+      )}
       <HudPanel flow title="Positions Summary" index="MK.P1" actions={
         <div style={{ display: "flex", gap: 6 }}>
           {connected && (
@@ -214,11 +262,19 @@ export default function Positions() {
           </Btn>
         </div>
       }>
+        {syncMut.isError && (
+          <div className="hud-label" style={{ color: "var(--warn)", marginBottom: 8, display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+            <span>{toSafeError(syncMut.error, "Sync failed").message}</span>
+            {toSafeError(syncMut.error, "").message.toLowerCase().includes("session") && <Link to="/market/settings" style={{ color: "var(--accent)" }}>Reconnect →</Link>}
+          </div>
+        )}
+        {lastSyncAt && <div className="hud-label" style={{ color: "var(--text-dim)", marginBottom: 8 }}>Last synced {new Date(lastSyncAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 8 }}>
           <Stat label="Open Positions" value={String(open.length)} />
           <Stat label="Unrealized P&L" value={totals.unrealized == null ? "—" : inr(totals.unrealized)} tone={totals.unrealized == null ? undefined : totals.unrealized >= 0 ? "ok" : "err"} />
           <Stat label="Today" value={totals.day == null ? "—" : inr(totals.day)} tone={totals.day == null ? undefined : totals.day >= 0 ? "ok" : "err"} />
-          <Stat label="Realized (closed)" value={inr(totals.realized)} tone={totals.realized >= 0 ? "ok" : "err"} />
+          <Stat label="Today realized" value={inr(totals.realizedDay)} tone={totals.realizedDay === 0 ? undefined : totals.realizedDay >= 0 ? "ok" : "err"} />
+          <Stat label="All-time realized" value={inr(totals.realized)} tone={totals.realized >= 0 ? "ok" : "err"} />
         </div>
       </HudPanel>
 
@@ -286,6 +342,97 @@ export default function Positions() {
         <OrderTicket open={ticket !== null} onClose={() => setTicket(null)}
           symbol={ticket.symbol} exchange={ticket.exchange} side={ticket.side} defaultQty={ticket.qty} />
       )}
+      {closingPos && (
+        <ClosePositionModal
+          open={closingPos !== null}
+          onClose={() => setClosingPos(null)}
+          symbol={closingPos.symbol}
+          side={closingPos.side}
+          quantity={closingPos.quantity}
+          entryPrice={closingPos.entry_price}
+          ltp={quoteMap.get(quoteKey(closingPos.exchange, closingPos.symbol))?.ltp ?? null}
+          onConfirm={(exit) => doCloseWithPrice(closingPos, exit)}
+        />
+      )}
+      {convertPos && (
+        <ConvertPositionModal
+          open={convertPos !== null}
+          onClose={() => setConvertPos(null)}
+          position={convertPos}
+          pending={convertPosition.isPending}
+          onConfirm={(fromProduct, toProduct) => {
+            convertPosition.mutate(
+              { symbol: convertPos.symbol, exchange: convertPos.exchange as "NSE" | "BSE", side: convertPos.side === "long" ? "BUY" : "SELL", quantity: convertPos.quantity, fromProduct, toProduct },
+              {
+                onSuccess: () => { push(`Converted ${convertPos.symbol} ${fromProduct} → ${toProduct}`, "ok"); setConvertPos(null); syncMut.mutate(undefined); },
+                onError: (e) => push(toSafeError(e, "Convert failed").message, "err"),
+              },
+            );
+          }}
+        />
+      )}
+      {deletePos && (
+        <HudModal
+          open={deletePos !== null}
+          onClose={() => setDeletePos(null)}
+          title="Delete position"
+          footer={<><Btn onClick={() => setDeletePos(null)}>cancel</Btn><Btn variant="danger" onClick={() => remove(deletePos)}>delete</Btn></>}
+        >
+          <div style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.5 }}>
+            Delete {deletePos.symbol} from the journal? Broker-synced rows can return on the next sync if still open.
+          </div>
+        </HudModal>
+      )}
+    </div>
+  );
+}
+
+function ConvertPositionModal({ open, onClose, position, pending, onConfirm }: {
+  open: boolean;
+  onClose: () => void;
+  position: Position;
+  pending: boolean;
+  onConfirm: (fromProduct: "MIS" | "CNC" | "NRML", toProduct: "MIS" | "CNC" | "NRML") => void;
+}) {
+  const [fromProduct, setFromProduct] = useState<"MIS" | "CNC" | "NRML">("MIS");
+  const [toProduct, setToProduct] = useState<"MIS" | "CNC" | "NRML">("CNC");
+  if (!open) return null;
+  const same = fromProduct === toProduct;
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "min(460px, 96vw)", background: "var(--bg)", border: "1px solid var(--edge-strong)", padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+        <div className="hud-label" style={{ color: "var(--accent)", letterSpacing: "0.2em" }}>Convert Product</div>
+        <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+          {position.symbol} × {position.quantity} ({position.exchange}, {position.side})
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <div>
+            <div style={labelStyle}>From</div>
+            <div style={{ display: "flex", gap: 4 }}>
+              {(["MIS", "CNC", "NRML"] as const).map((p) => (
+                <Btn key={p} size="sm" variant={fromProduct === p ? "primary" : "ghost"} onClick={() => setFromProduct(p)}>{p}</Btn>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div style={labelStyle}>To</div>
+            <div style={{ display: "flex", gap: 4 }}>
+              {(["MIS", "CNC", "NRML"] as const).map((p) => (
+                <Btn key={p} size="sm" variant={toProduct === p ? "primary" : "ghost"} onClick={() => setToProduct(p)}>{p}</Btn>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>
+          Broker will convert without exit + re-buy. MIS → CNC/NRML avoids the 15:15 IST auto square-off. Requires available margin for CNC/NRML.
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <Btn onClick={onClose}>cancel</Btn>
+          <Btn variant="primary" disabled={same || pending} onClick={() => onConfirm(fromProduct, toProduct)}>
+            {pending ? "converting…" : "convert"}
+          </Btn>
+        </div>
+      </div>
     </div>
   );
 }

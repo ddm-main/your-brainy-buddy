@@ -1,4 +1,5 @@
 // React Query hooks for the Market section. Query keys live under ["market", ...].
+import { useEffect, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "./api";
@@ -15,6 +16,7 @@ import type {
   ScreenerGroup,
   SectorStrength,
   StockScore,
+  TopMoverRow,
 } from "./types";
 
 // NSE market hours (IST 09:15–15:30) ≈ UTC 03:45–10:00 — poll faster during them.
@@ -51,18 +53,87 @@ export function useIndices() {
     queryFn: () =>
       callMarketFn<{ quotes: IndexQuote[]; breadth: BreadthDaily | null }>("market-indices"),
     refetchInterval: marketOpen() ? 2_000 : 120_000,
+    refetchIntervalInBackground: false,
   });
 }
 
-export function useQuotes(keys: string[]) {
+export function useTopMovers() {
+  return useQuery({
+    queryKey: ["market", "top-movers"],
+    queryFn: async (): Promise<TopMoverRow[]> => {
+      const { data, error } = await supabase
+        .from("market_top_movers" as any).select("*").order("rn", { ascending: true });
+      if (error) throw error;
+      return (data ?? []) as unknown as TopMoverRow[];
+    },
+    staleTime: 60_000,
+    refetchInterval: marketOpen() ? 60_000 : false,
+    refetchIntervalInBackground: false,
+  });
+}
+
+// Shared IST market status ticker. Recomputes every second when the market is
+// open and every 30 s when closed, so the strip / dashboard header don't
+// re-render 24/7 for a status that only flips at 09:15 / 15:30.
+export function useMarketStatus() {
+  const compute = () => {
+    const now = new Date();
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata",
+      weekday: "short", hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hour12: false,
+    }).formatToParts(now);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+    const day = get("weekday");
+    const hh = Number(get("hour")); const mm = Number(get("minute")); const ss = Number(get("second"));
+    const secs = hh * 3600 + mm * 60 + ss;
+    const openSecs = 9 * 3600 + 15 * 60;
+    const closeSecs = 15 * 3600 + 30 * 60;
+    const istClock = `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")} IST`;
+    if (day === "Sat" || day === "Sun") return { open: false, label: "closed · weekend", istClock };
+    if (secs < openSecs) {
+      const d = openSecs - secs;
+      const h = Math.floor(d / 3600); const m = Math.floor((d % 3600) / 60); const s = d % 60;
+      return { open: false, label: `opens in ${h ? h + "h " : ""}${m}m ${String(s).padStart(2, "0")}s`, istClock };
+    }
+    if (secs > closeSecs) return { open: false, label: "closed", istClock };
+    const d = closeSecs - secs;
+    const h = Math.floor(d / 3600); const m = Math.floor((d % 3600) / 60); const s = d % 60;
+    return { open: true, label: `open · closes in ${h ? h + "h " : ""}${m}m ${String(s).padStart(2, "0")}s`, istClock };
+  };
+  const [status, setStatus] = useState(compute);
+  useEffect(() => {
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+    const tick = () => setStatus(compute());
+    const interval = status.open ? 1_000 : 30_000;
+    const t = setInterval(tick, interval);
+    return () => clearInterval(t);
+  }, [status.open]);
+  return status;
+}
+
+export function useQuotes(keys: string[], opts?: { intervalMs?: number }) {
+  // Callers can override the market-hours REST poll interval — e.g. Top
+  // Breakouts symbols that aren't in the Kotak WS relay's subscription set
+  // need a faster REST poll (~3s) to feel "live" instead of updating once
+  // a minute. Off-hours we keep the just-closed short window then stop.
+  const openInterval = opts?.intervalMs ?? 1_000;
+  const open = marketOpen();
   return useQuery({
     queryKey: ["market", "quotes", [...keys].sort().join(",")],
     queryFn: () => callMarketFn<{ quotes: Quote[]; source: string }>("market-quotes", { symbols: keys }),
     enabled: keys.length > 0,
-    // On-screen symbols only (caller scopes `keys`) — near-second refresh.
-    // Keep short-polling for a few minutes after close to land the settled
-    // EOD tick, rather than freezing on whichever LTP raced in at 15:30.
-    refetchInterval: marketOpen() ? 1_000 : justClosedWindow() ? 15_000 : false,
+    refetchInterval: open ? openInterval : justClosedWindow() ? 15_000 : false,
+    // During market hours the poll itself keeps the data fresh — a short
+    // stale window prevents duplicate parallel fetches when many components
+    // subscribe. Off-hours the value can't move, so cache it and stop firing
+    // refetches on remount/focus.
+    staleTime: open ? Math.max(500, openInterval - 200) : Infinity,
+    refetchOnWindowFocus: open,
+    refetchOnReconnect: open,
+    // Keep the last successful batch visible while a new fetch is in flight
+    // so subscribing new symbols (paging/filtering) doesn't blank the table.
+    placeholderData: (prev: unknown) => prev as any,
   });
 }
 
@@ -109,6 +180,80 @@ export function usePositions() {
       if (error) throw error;
       return (data ?? []) as Position[];
     },
+    refetchInterval: marketOpen() ? 10_000 : justClosedWindow() ? 30_000 : 5 * 60_000,
+    refetchIntervalInBackground: false,
+  });
+}
+
+// Shared holdings hook — pages used to roll their own supabase.from().select()
+// which meant a mutation on Holdings wouldn't reflect in PortfolioOverview
+// until remount. Central hook + query-key means invalidations propagate.
+export interface HoldingRow {
+  id: string;
+  symbol: string;
+  exchange: string;
+  quantity: number;
+  avg_price: number;
+  buy_date: string | null;
+  investment_type: string | null;
+  notes: string | null;
+  source: string;
+  settled_qty: number | null;
+  t1_qty: number | null;
+  pledged_qty: number | null;
+}
+
+export function usePortfolioLastSync() {
+  return useQuery({
+    queryKey: ["market", "portfolio-last-sync"],
+    queryFn: async (): Promise<string | null> => {
+      const { data, error } = await supabase
+        .from("market_api_settings")
+        .select("last_sync_at")
+        .eq("active_provider", "kotak_neo")
+        .maybeSingle();
+      if (error) throw error;
+      return (data as any)?.last_sync_at ?? null;
+    },
+    staleTime: 30_000,
+  });
+}
+export function useHoldings() {
+  return useQuery({
+    queryKey: ["market", "holdings"],
+    queryFn: async (): Promise<HoldingRow[]> => {
+      const { data, error } = await supabase
+        .from("market_holdings").select("*").order("created_at", { ascending: false });
+      if (error) throw error;
+      return (data ?? []) as HoldingRow[];
+    },
+    refetchInterval: marketOpen() ? 30_000 : 5 * 60_000,
+    refetchIntervalInBackground: false,
+  });
+}
+
+// Today's intraday realized P&L (per-symbol, from market_realized_pnl_daily).
+// Kite/Groww's "Today's P&L" = open-positions day + realized-today; without
+// this, closing a scalp during the session would make today's P&L drop back
+// to whatever the open book shows.
+export interface TodayRealizedRow {
+  symbol: string; exchange: string; quantity: number; realized: number;
+}
+export function useTodayRealized() {
+  return useQuery({
+    queryKey: ["market", "realized-daily"],
+    queryFn: async (): Promise<TodayRealizedRow[]> => {
+      const day = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+      const { data, error } = await supabase
+        .from("market_realized_pnl_daily")
+        .select("symbol,exchange,quantity,realized")
+        .eq("day", day);
+      if (error) throw error;
+      return (data ?? []) as TodayRealizedRow[];
+    },
+    refetchInterval: marketOpen() ? 30_000 : justClosedWindow() ? 60_000 : false,
+    refetchIntervalInBackground: false,
+    staleTime: 20_000,
   });
 }
 
@@ -116,7 +261,26 @@ export function useSyncPositions() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () => callMarketFn("market-sync-positions"),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["market", "positions"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["market", "positions"] });
+      qc.invalidateQueries({ queryKey: ["market", "funds"] });
+      qc.invalidateQueries({ queryKey: ["market", "realized-daily"] });
+      qc.invalidateQueries({ queryKey: ["market", "holdings"] });
+      qc.invalidateQueries({ queryKey: ["market", "portfolio-last-sync"] });
+    },
+  });
+}
+
+export function useSyncHoldings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => callMarketFn<{ ok: boolean; inserted?: number; updated?: number; removed?: number }>("market-sync-holdings"),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["market", "holdings"] });
+      qc.invalidateQueries({ queryKey: ["market", "funds"] });
+      qc.invalidateQueries({ queryKey: ["market", "settings"] });
+      qc.invalidateQueries({ queryKey: ["market", "portfolio-last-sync"] });
+    },
   });
 }
 
@@ -177,11 +341,40 @@ export function useBreadth() {
     queryKey: ["market", "breadth"],
     queryFn: async (): Promise<BreadthDaily | null> => {
       const { data, error } = await supabase
-        .from("market_breadth_daily").select("*")
-        .order("trade_date", { ascending: false }).limit(1).maybeSingle();
+        .from("market_breadth_latest" as any).select("*").maybeSingle();
       if (error) throw error;
       return data as BreadthDaily | null;
     },
+    staleTime: 60_000,
+    refetchInterval: marketOpen() ? 60_000 : false,
+    refetchIntervalInBackground: false,
+  });
+}
+
+export interface FiiDiiRow {
+  activity_date: string;
+  segment: string;
+  fii_net: number | null;
+  dii_net: number | null;
+  net_buy_inr_cr: number | null;
+  source: string | null;
+}
+
+// Recent FII/DII activity (defaults to CASH segment, last 10 sessions).
+export function useFiiDiiHistory(limit = 10, segment = "CASH") {
+  return useQuery({
+    queryKey: ["market", "fii-dii-history", segment, limit],
+    queryFn: async (): Promise<FiiDiiRow[]> => {
+      const { data, error } = await supabase
+        .from("fii_dii_activity")
+        .select("activity_date,segment,fii_net,dii_net,net_buy_inr_cr,source")
+        .eq("segment", segment)
+        .order("activity_date", { ascending: false })
+        .limit(limit);
+      if (error) throw error;
+      return (data ?? []) as FiiDiiRow[];
+    },
+    staleTime: 5 * 60_000,
   });
 }
 
@@ -204,11 +397,17 @@ export function useSectorStrength() {
 }
 
 export function useCandles(symbol: string | undefined, timeframe: string, exchange = "NSE") {
+  // Intraday timeframes need to pick up new completed bars while the market
+  // is open. Live LTP nudges the last bar via the tick store, but the full
+  // series stays 5 min stale without a refetch loop.
+  const intraday = /^(?:\d+m|\d+h)$/.test(timeframe);
   return useQuery({
     queryKey: ["market", "candles", symbol ?? "", timeframe, exchange],
     queryFn: () => callMarketFn<CandlesResponse>("market-candles", { symbol, timeframe, exchange }),
     enabled: !!symbol,
-    staleTime: 5 * 60_000,
+    staleTime: intraday ? 60_000 : 5 * 60_000,
+    refetchInterval: intraday && marketOpen() ? 60_000 : false,
+    refetchIntervalInBackground: false,
   });
 }
 

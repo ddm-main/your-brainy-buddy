@@ -5,23 +5,33 @@ import { useEffect, useRef } from "react";
 
 const EMBED_SRC = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
 
-// Map the app's timeframe labels to TradingView interval codes.
+// Map the app's timeframe labels to TradingView interval codes. Covers every
+// TF the native toolbar (or a saved layout) can throw at us so switching to
+// TV mode never silently drops the user back to daily.
 export function tvInterval(tf: string): string {
   switch (tf) {
-    case "1D": return "D";
-    case "1h": return "60";
-    case "15m": return "15";
+    case "1m": return "1";
+    case "3m": return "3";
     case "5m": return "5";
+    case "15m": return "15";
+    case "30m": return "30";
+    case "1h": return "60";
+    case "2h": return "120";
+    case "4h": return "240";
+    case "1D": return "D";
+    case "1W": return "W";
+    case "1M": return "M";
     default: return "D";
   }
 }
 
 export function TradingViewChart({
   symbol,
-  // BSE, not NSE: NSE is not licensed for TradingView widgets (renders
-  // "symbol doesn't exist"), while BSE is available at EOD level. Large-cap
-  // tickers are dual-listed on BSE with the same symbol.
-  exchange = "BSE",
+  // Respect the caller's exchange. Analysis.tsx passes the exchange from the
+  // NSE/BSE toggle — the old `"BSE"` default silently overrode that whenever
+  // a caller forgot to pass it, so switching to NSE still rendered a BSE
+  // widget. TV supports `NSE:<sym>` for equities.
+  exchange = "NSE",
   interval,
 }: {
   symbol: string;

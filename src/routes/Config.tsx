@@ -1,19 +1,23 @@
 import { NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { lazy, Suspense } from "react";
+import { useAccessStore } from "@/store/accessStore";
 
 const EmailConfig = lazy(() => import("@/routes/config/EmailConfig"));
 const ConfigHome = lazy(() => import("@/routes/config/ConfigHome"));
 const FinanceConfig = lazy(() => import("@/routes/config/FinanceConfig"));
 const ProjectsConfig = lazy(() => import("@/routes/config/ProjectsConfig"));
-const MarketConfig = lazy(() => import("@/routes/config/MarketConfig"));
+
+const SystemDataConfig = lazy(() => import("@/routes/config/SystemDataConfig"));
+const AdminConfig = lazy(() => import("@/routes/config/AdminConfig"));
 
 const TABS = [
-  { to: "/config", label: "Home", exact: true },
-  { to: "/config/email", label: "Email" },
-  { to: "/config/finance", label: "Finance" },
-  { to: "/config/projects", label: "Projects" },
-  { to: "/config/market", label: "Market" },
-] as { to: string; label: string; exact?: boolean }[];
+  { to: "/config", label: "Home", exact: true, adminOnly: false },
+  { to: "/config/email", label: "Email", adminOnly: false },
+  { to: "/config/finance", label: "Finance", adminOnly: false },
+  { to: "/config/projects", label: "Projects", adminOnly: false },
+  { to: "/config/system-data", label: "System Data", adminOnly: true },
+  { to: "/config/admin", label: "Admin", adminOnly: true },
+] as { to: string; label: string; exact?: boolean; adminOnly: boolean }[];
 
 const tabBase: React.CSSProperties = {
   padding: "6px 12px", fontFamily: "var(--font-hud)", fontSize: 10,
@@ -23,10 +27,12 @@ const tabBase: React.CSSProperties = {
 
 export default function Config() {
   const loc = useLocation();
+  const isAdmin = useAccessStore((s) => s.role === "admin");
+  const tabs = TABS.filter((t) => !t.adminOnly || isAdmin);
   return (
     <div style={{ padding: 12, height: "100%", display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
       <div role="tablist" aria-label="Config sections" style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-        {TABS.map((t) => {
+        {tabs.map((t) => {
           const active = t.exact
             ? loc.pathname === t.to || loc.pathname === t.to + "/"
             : loc.pathname === t.to || loc.pathname.startsWith(t.to + "/");
@@ -48,7 +54,9 @@ export default function Config() {
             <Route path="email/*" element={<EmailConfig />} />
             <Route path="finance/*" element={<FinanceConfig />} />
             <Route path="projects" element={<ProjectsConfig />} />
-            <Route path="market" element={<MarketConfig />} />
+            
+            {isAdmin && <Route path="system-data" element={<SystemDataConfig />} />}
+            {isAdmin && <Route path="admin" element={<AdminConfig />} />}
           </Routes>
         </Suspense>
       </div>

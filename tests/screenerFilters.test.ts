@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { filterMatches, excludedByMissingData, coverageOf, latestTradeDateOf, type ActiveFilter } from "../src/lib/market/screenerCatalog";
+import { colsFromActiveFilters } from "../src/lib/market/screenerColumnModel";
 
 // A row with a full EOD triple (ltp/change_pct/volume via trade_date) but no
 // technical indicators synced yet — the exact shape that used to get dropped
@@ -20,6 +21,17 @@ const rowWithNoEod = {
 };
 
 describe("filterMatches — scope-aware applicability", () => {
+  it("an enum filter excludes a non-equity row that cannot prove a match", () => {
+    const etf = { symbol: "ETF", instrument_type: "ETF", sector: null };
+    expect(filterMatches(etf, { id: "sector", values: ["Technology"] })).toBe(false);
+  });
+
+  it("the volume-above-average boolean uses a strict comparison", () => {
+    const equal = { symbol: "EQ", instrument_type: "EQ", trade_date: "2026-07-23", vol_gt_avg30: false };
+    const above = { ...equal, vol_gt_avg30: true };
+    expect(filterMatches(equal, { id: "vol_gt_avg30", bool: true }, "2026-07-23")).toBe(false);
+    expect(filterMatches(above, { id: "vol_gt_avg30", bool: true }, "2026-07-23")).toBe(true);
+  });
   it("a filter on an unrelated field still matches a row missing technicals", () => {
     const af: ActiveFilter = { id: "market_cap", min: 1000 };
     expect(filterMatches(rowWithEodNoTech, af)).toBe(true);
@@ -39,6 +51,24 @@ describe("filterMatches — scope-aware applicability", () => {
     const etfRow = { symbol: "ETF1", exchange: "NSE", instrument_type: "ETF", trade_date: "2026-07-21", pe: null };
     const af: ActiveFilter = { id: "pe", min: 10 };
     expect(filterMatches(etfRow, af)).toBe(true);
+  });
+});
+
+describe("saved screener column parity", () => {
+  it("derives the same result columns for the Deep screeners filter in Screener and Overview", () => {
+    const active: ActiveFilter[] = [
+      { id: "market_cap", min: 1000, max: 100000 },
+      { id: "ltp", min: 100, max: 10000 },
+      { id: "change_pct", min: 5, max: 10 },
+      { id: "vol_gt_avg30", bool: true },
+    ];
+
+    expect(colsFromActiveFilters(active, { skipBooleans: true })).toEqual([
+      "symbol",
+      "market_cap",
+      "close",
+      "change_pct",
+    ]);
   });
 });
 
@@ -95,29 +125,53 @@ describe("latestTradeDateOf + stale-trade_date gating", () => {
     expect(excludedByMissingData(rows, af, latestTradeDateOf(rows))).toBe(1);
   });
 
-  it("a row lagging the latest by 1-3 days is still accepted — a symbol Yahoo skipped for a session, not a stale-forever row", () => {
+  it("requires the exact latest session for price and return predicates", () => {
     const lag1 = { symbol: "LAG1", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-20", change_pct: 6, volume: 500000 };
     const lag3 = { symbol: "LAG3", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-18", change_pct: 6, volume: 500000 };
     const lag4 = { symbol: "LAG4", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-17", change_pct: 6, volume: 500000 };
     const af: ActiveFilter = { id: "change_pct", min: 5, max: 10 };
-    expect(filterMatches(lag1, af, "2026-07-21")).toBe(true);
-    expect(filterMatches(lag3, af, "2026-07-21")).toBe(true);
+    expect(filterMatches(lag1, af, "2026-07-21")).toBe(false);
+    expect(filterMatches(lag3, af, "2026-07-21")).toBe(false);
     expect(filterMatches(lag4, af, "2026-07-21")).toBe(false);
   });
 
-  it("a Price filter uses the same fresh-enough EOD gate as Volume and 1D Return", () => {
+  it("still permits a one-session lag for slower technical indicators", () => {
+    const row = { symbol: "LAG", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-20", rsi: 60 };
+    expect(filterMatches(row, { id: "rsi", min: 50 }, "2026-07-21")).toBe(true);
+  });
+
+  it("a Price filter uses the same exact-session gate as Volume and 1D Return", () => {
     const freshEnough = { symbol: "OK", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-20", ltp: 250 };
     const stale = { symbol: "OLD", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-16", ltp: 250 };
     const af: ActiveFilter = { id: "ltp", min: 100, max: 1000 };
-    expect(filterMatches(freshEnough, af, "2026-07-22")).toBe(true);
+    expect(filterMatches(freshEnough, af, "2026-07-22")).toBe(false);
     expect(filterMatches(stale, af, "2026-07-22")).toBe(false);
   });
 
-  it("treats the catalogue Volume max as open-ended, matching Tickertape's 1M+ cap", () => {
+  it("applies an explicit Volume maximum as a real upper bound", () => {
     const highVolume = { symbol: "MARKSANS", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", volume: 4_278_354 };
     const af: ActiveFilter = { id: "volume", min: 100_000, max: 1_000_000 };
-    expect(filterMatches(highVolume, af, "2026-07-22")).toBe(true);
+    expect(filterMatches(highVolume, af, "2026-07-22")).toBe(false);
   });
+
+  it("Volume > 30D Avg Volume boolean matches when the view flag is true and the row is fresh", () => {
+    const row = { symbol: "X", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", volume: 5_000_000, vol_avg30: 1_000_000, vol_gt_avg30: true };
+    const af: ActiveFilter = { id: "vol_gt_avg30", bool: true };
+    expect(filterMatches(row, af, "2026-07-22")).toBe(true);
+  });
+
+  it("Volume > 30D Avg Volume boolean excludes rows when the flag is false", () => {
+    const row = { symbol: "Y", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", volume: 500_000, vol_avg30: 1_000_000, vol_gt_avg30: false };
+    const af: ActiveFilter = { id: "vol_gt_avg30", bool: true };
+    expect(filterMatches(row, af, "2026-07-22")).toBe(false);
+  });
+
+  it("Volume > 30D Avg Volume boolean respects the tech freshness gate", () => {
+    const stale = { symbol: "Z", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-10", volume: 5_000_000, vol_avg30: 1_000_000, vol_gt_avg30: true };
+    const af: ActiveFilter = { id: "vol_gt_avg30", bool: true };
+    expect(filterMatches(stale, af, "2026-07-22")).toBe(false);
+  });
+
 
   it("uses raw 1D return for boundary comparisons while display can remain rounded", () => {
     const roundedBoundary = {
@@ -129,7 +183,7 @@ describe("latestTradeDateOf + stale-trade_date gating", () => {
     expect(filterMatches(roundedBoundary, af, "2026-07-22")).toBe(false);
   });
 
-  it("matches the Tickertape-like 10-stock negative-return fixture", () => {
+  it("matches only rows inside the requested raw-share volume range", () => {
     const rows = [
       { symbol: "MARKSANS", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", market_cap: 11118.37, ltp: 241.10, change_pct_raw: -7.38, volume: 4_278_354 },
       { symbol: "MEDPLUS", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", market_cap: 8309.34, ltp: 691.95, change_pct_raw: -12.80, volume: 2_431_192 },
@@ -150,7 +204,7 @@ describe("latestTradeDateOf + stale-trade_date gating", () => {
       { id: "change_pct", min: -15, max: -7 },
     ];
     const matches = rows.filter((row) => filters.every((af) => filterMatches(row, af, "2026-07-22"))).map((row) => row.symbol);
-    expect(matches).toEqual(["MARKSANS", "MEDPLUS", "TIPSMUSIC", "MHRIL", "SUNTECK", "OSWALPUMPS", "UNICHEMLAB", "ORIENTHOT", "INDOBORAX", "BAJAJHCARE"]);
+    expect(matches).toEqual(["SUNTECK", "UNICHEMLAB", "INDOBORAX"]);
   });
 });
 

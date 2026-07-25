@@ -34,6 +34,7 @@ export function Btn({
   type = "button",
   style,
   title,
+  ariaLabel,
 }: {
   children: ReactNode;
   onClick?: (e: React.MouseEvent) => void;
@@ -43,6 +44,7 @@ export function Btn({
   type?: "button" | "submit";
   style?: CSSProperties;
   title?: string;
+  ariaLabel?: string;
 }) {
   return (
     <button
@@ -50,6 +52,7 @@ export function Btn({
       disabled={disabled}
       onClick={onClick}
       title={title}
+      aria-label={ariaLabel ?? title}
       className="hud-btn focus-outline"
       data-variant={variant}
       data-size={size}

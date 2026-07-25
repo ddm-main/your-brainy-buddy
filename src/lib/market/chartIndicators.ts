@@ -226,15 +226,18 @@ export function supertrend(candles: CandleDto[], atrPeriod = 10, mult = 3): { li
   return { line, dir };
 }
 
-// Parabolic SAR (Wilder). Returns the dot value per bar.
-export function psar(candles: CandleDto[], step = 0.02, max = 0.2): Num[] {
-  const out: Num[] = new Array(candles.length).fill(null);
-  if (candles.length < 2) return out;
+// Parabolic SAR (Wilder). Returns SAR dot + trend direction per bar so
+// consumers can colour the dots by trend (industry standard) instead of
+// guessing from the price relationship.
+export function psar(candles: CandleDto[], step = 0.02, max = 0.2): { sar: Num[]; dir: Array<1 | -1 | null> } {
+  const sarOut: Num[] = new Array(candles.length).fill(null);
+  const dirOut: Array<1 | -1 | null> = new Array(candles.length).fill(null);
+  if (candles.length < 2) return { sar: sarOut, dir: dirOut };
   let bull = candles[1].close >= candles[0].close;
   let af = step;
   let ep = bull ? candles[0].high : candles[0].low;
   let sar = bull ? candles[0].low : candles[0].high;
-  out[0] = sar;
+  sarOut[0] = sar; dirOut[0] = bull ? 1 : -1;
   for (let i = 1; i < candles.length; i++) {
     const h = candles[i].high, l = candles[i].low;
     sar = sar + af * (ep - sar);
@@ -249,9 +252,9 @@ export function psar(candles: CandleDto[], step = 0.02, max = 0.2): Num[] {
       if (h > sar) { bull = true; sar = ep; ep = h; af = step; }
       else if (l < ep) { ep = l; af = Math.min(af + step, max); }
     }
-    out[i] = sar;
+    sarOut[i] = sar; dirOut[i] = bull ? 1 : -1;
   }
-  return out;
+  return { sar: sarOut, dir: dirOut };
 }
 
 // Ichimoku Kinko Hyo — lines only (no forward/backward displacement).
@@ -615,14 +618,15 @@ export function ad(candles: CandleDto[]): Num[] {
 export function aroon(candles: CandleDto[], period = 14): { up: Num[]; down: Num[] } {
   const n = candles.length;
   const up: Num[] = new Array(n).fill(null), down: Num[] = new Array(n).fill(null);
-  for (let i = period; i < n; i++) {
+  // Window is exactly `period` bars (TradingView convention).
+  for (let i = period - 1; i < n; i++) {
     let hi = -Infinity, lo = Infinity, hIdx = i, lIdx = i;
-    for (let j = i - period; j <= i; j++) {
+    for (let j = i - period + 1; j <= i; j++) {
       if (candles[j].high >= hi) { hi = candles[j].high; hIdx = j; }
       if (candles[j].low <= lo) { lo = candles[j].low; lIdx = j; }
     }
-    up[i] = (100 * (period - (i - hIdx))) / period;
-    down[i] = (100 * (period - (i - lIdx))) / period;
+    up[i] = (100 * (period - 1 - (i - hIdx))) / (period - 1);
+    down[i] = (100 * (period - 1 - (i - lIdx))) / (period - 1);
   }
   return { up, down };
 }

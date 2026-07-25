@@ -1,0 +1,56 @@
+{
+  "custom_components_and_routes": [
+    {
+      "path": "src/components/market/FundsCard.tsx",
+      "purpose": "Kite-style funds breakdown with cooldown/no-snapshot handling."
+    },
+    {
+      "path": "src/lib/market/hooks.ts",
+      "purpose": "Shared market query hooks for holdings, positions, sync invalidation, and portfolio last-sync metadata."
+    },
+    {
+      "path": "src/lib/market/orderHooks.ts",
+      "purpose": "Funds query/mutation hook with broker retry cooldown metadata."
+    },
+    {
+      "path": "src/lib/market/types.ts",
+      "purpose": "Market DTO types for settings, quotes, holdings, and positions."
+    },
+    {
+      "path": "src/routes/market/Holdings.tsx",
+      "purpose": "Holdings portfolio view using shared hooks, T1/pledged details, and HUD delete confirmation."
+    },
+    {
+      "path": "src/routes/market/Positions.tsx",
+      "purpose": "Positions view with today/all-time realized split, R:R validation, and HUD delete confirmation."
+    },
+    {
+      "path": "src/routes/market/PortfolioOverview.tsx",
+      "purpose": "Groww/Kite-style portfolio overview and connected-only broker sync."
+    },
+    {
+      "path": "supabase/functions/_shared/market/funds.ts",
+      "purpose": "Shared Kotak funds snapshot helper with cached fallback and retry cooldown."
+    },
+    {
+      "path": "supabase/functions/_shared/market/kotakClient.ts",
+      "purpose": "Kotak Neo REST client with bounded limits endpoint retries."
+    },
+    {
+      "path": "supabase/functions/_shared/market/provider.ts",
+      "purpose": "Market provider abstraction for Kotak/Yahoo data paths."
+    },
+    {
+      "path": "supabase/functions/market-funds/index.ts",
+      "purpose": "Authenticated funds endpoint using shared cooldown-aware Kotak snapshot helper."
+    },
+    {
+      "path": "supabase/functions/market-sync-holdings/index.ts",
+      "purpose": "Kotak holdings sync with shared funds refresh fallback."
+    },
+    {
+      "path": "supabase/functions/market-sync-positions/index.ts",
+      "purpose": "Kotak positions sync using keyed updates to avoid row churn."
+    }
+  ]
+}

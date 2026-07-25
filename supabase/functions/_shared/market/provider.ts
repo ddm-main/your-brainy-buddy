@@ -7,13 +7,17 @@ import {
   KOTAK_SETTINGS_COLS,
   type KotakSettings,
   kotakCancelOrder,
+  kotakConvertPosition,
   kotakCandles,
   kotakDepth,
   kotakHoldings,
+  kotakHoldingsEnvelope,
   kotakLimits,
+  kotakUserMargin,
   kotakModifyOrder,
   kotakPlaceOrder,
   kotakPositions,
+  kotakPositionsEnvelope,
   kotakQuotes,
   parseKotakLimits,
   type KotakFundsSnapshot,
@@ -39,13 +43,19 @@ export interface QuoteRow {
   source: "kotak" | "yahoo" | "cache";
   as_of?: string | null;
   previous_close_as_of?: string | null;
+  high_52w?: number | null;
+  low_52w?: number | null;
 }
 
 export interface HoldingRow {
   symbol: string;
   exchange: string;
-  quantity: number;
+  quantity: number;      // effective total = settled + t1 + pledged
   avg_price: number;
+  settled_qty?: number | null;
+  t1_qty?: number | null;
+  pledged_qty?: number | null;
+  buy_date?: string | null; // ISO date (YYYY-MM-DD) — earliest known lot
 }
 
 export interface PositionRow {
@@ -54,6 +64,15 @@ export interface PositionRow {
   side: "long" | "short";
   quantity: number;
   entry_price: number;
+}
+
+// Fully-closed intraday trade — buyQty == sellQty, net = 0. Kept for realized
+// P&L reporting even though it doesn't survive as an open position.
+export interface RealizedTradeRow {
+  symbol: string;
+  exchange: string;
+  quantity: number;
+  realized: number;
 }
 
 export interface PlaceOrderInput {
@@ -77,8 +96,30 @@ export interface FundsSnapshot {
   used_margin: number | null;
   collateral: number | null;
   payin_amount: number | null;
+  // Extended richer breakdown — nullable, backward compatible with the
+  // existing market_funds columns (surfaced via payload.extended).
+  cash_balance?: number | null;
+  payout_amount?: number | null;
+  span_margin?: number | null;
+  exposure_margin?: number | null;
+  realized_mtm?: number | null;
+  unrealized_mtm?: number | null;
   source: "kotak" | "unavailable";
   raw?: unknown;
+}
+
+export interface HoldingsResult {
+  rows: HoldingRow[];
+  // True when the broker responded with a well-formed OK payload — even if
+  // it happened to be empty (a genuine empty book). Sync uses this to
+  // distinguish "user sold everything" from "upstream returned garbage".
+  complete: boolean;
+}
+
+export interface PositionsResult {
+  rows: PositionRow[];
+  realized: RealizedTradeRow[];
+  complete: boolean;
 }
 
 export interface MarketProvider {
@@ -87,10 +128,13 @@ export interface MarketProvider {
   getOHLCV(symbol: string, exchange: string, range: string, interval: string): Promise<Candle[]>;
   getDepth(symbol: string, exchange: string): Promise<DepthLadder>;
   getHoldings(): Promise<HoldingRow[]>;
+  getHoldingsDetailed?(): Promise<HoldingsResult>;
   getPositions(): Promise<PositionRow[]>;
+  getPositionsDetailed?(): Promise<PositionsResult>;
   placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResult>;
   modifyOrder(orderId: string, changes: Partial<Pick<PlaceOrderInput, "quantity" | "price" | "orderType" | "triggerPrice" | "validity">>): Promise<PlaceOrderResult>;
   cancelOrder(orderId: string): Promise<PlaceOrderResult>;
+  convertPosition(input: { symbol: string; exchange: string; side: "BUY" | "SELL"; quantity: number; fromProduct: "MIS" | "CNC" | "NRML"; toProduct: "MIS" | "CNC" | "NRML" }): Promise<{ ok: true }>;
   getFunds(): Promise<FundsSnapshot>;
   testAuth(): Promise<{ ok: boolean; detail?: string }>;
 }
@@ -126,19 +170,28 @@ async function getSettingsRows(svc: SupabaseClient, userId: string): Promise<Set
   return rows;
 }
 
-let tokenMapCache: { map: Map<string, string>; expiresAt: number } | null = null;
+let tokenMapCache: { map: Map<string, TokenEntry>; expiresAt: number } | null = null;
 const TOKEN_MAP_TTL_MS = 60_000;
 
 // "EXCHANGE:SYMBOL" -> instrument token, cached whole (market_stocks is a
 // shared reference table that only changes via the weekly scrip sync).
 // Keyed by exchange since the same symbol can carry different tokens on NSE
 // vs BSE.
-async function getTokenMap(svc: SupabaseClient): Promise<Map<string, string>> {
+type TokenEntry = { token: string; segment: string };
+async function getTokenMap(svc: SupabaseClient): Promise<Map<string, TokenEntry>> {
   if (tokenMapCache && tokenMapCache.expiresAt > Date.now()) return tokenMapCache.map;
   const { data } = await svc
-    .from("market_stocks").select("symbol,exchange,token")
+    .from("market_stocks").select("symbol,exchange,token,kotak_segment")
     .in("exchange", ["NSE", "BSE"]).not("token", "is", null);
-  const map = new Map<string, string>((data ?? []).map((r: any) => [`${r.exchange}:${r.symbol}`, r.token]));
+  const map = new Map<string, TokenEntry>(
+    (data ?? []).map((r: any) => [
+      `${r.exchange}:${r.symbol}`,
+      {
+        token: String(r.token),
+        segment: r.kotak_segment || (r.exchange === "BSE" ? "bse_cm" : "nse_cm"),
+      },
+    ]),
+  );
   tokenMapCache = { map, expiresAt: Date.now() + TOKEN_MAP_TTL_MS };
   return map;
 }
@@ -218,6 +271,9 @@ function yahooProvider(svc: SupabaseClient): MarketProvider {
     cancelOrder() {
       return Promise.reject(new Error("Order cancellation requires a broker provider (Kotak Neo)."));
     },
+    convertPosition() {
+      return Promise.reject(new Error("Position conversion requires a broker provider (Kotak Neo)."));
+    },
     async getFunds(): Promise<FundsSnapshot> {
       return { net_cash: null, available_margin: null, used_margin: null, collateral: null, payin_amount: null, source: "unavailable" };
     },
@@ -270,21 +326,26 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       if (withToken.length > 0) {
         const t0 = Date.now();
         try {
-          const segFor = (exchange: string) => (exchange === "BSE" ? "bse_cm" : "nse_cm");
-          const neoSymbols = withToken.map((p) => `${segFor(p.exchange)}|${tokenBySymbol.get(`${p.exchange}:${p.symbol}`)}`);
+          const entryFor = (p: { exchange: string; symbol: string }) =>
+            tokenBySymbol.get(`${p.exchange}:${p.symbol}`)!;
+          const neoSymbols = withToken.map((p) => {
+            const e = entryFor(p);
+            return `${e.segment}|${e.token}`;
+          });
           // Wrapped in withKotakSession so a mid-day expired token auto-relogs-in
           // and retries once, instead of silently falling the whole batch to Yahoo.
           const rows = await withKotakSession(svc, s, encryptValue, (ss) => kotakQuotes(ss, neoSymbols, "all"));
           logProviderHealth(svc, "kotak_neo", "getQuotes", true, Date.now() - t0);
           // Keyed by "segment|token" — bare token numbers aren't unique across
-          // NSE/BSE's separate instrument-token namespaces.
+          // segments (nse_cm vs bse_cm vs nse_indices each have their own namespace).
           const byToken = new Map<string, any>();
           for (const r of rows) {
-            const segTok = String(r?.symbol ?? r?.tk ?? r?.instrumentToken ?? "").match(/^(nse|bse)_cm\|(.+)$/);
-            if (segTok) byToken.set(`${segTok[1]}_cm|${segTok[2]}`, r);
+            const segTok = String(r?.symbol ?? r?.tk ?? r?.instrumentToken ?? "").match(/^([a-z]+_[a-z]+)\|(.+)$/);
+            if (segTok) byToken.set(`${segTok[1]}|${segTok[2]}`, r);
           }
           for (const p of withToken) {
-            const r = byToken.get(`${segFor(p.exchange)}|${tokenBySymbol.get(`${p.exchange}:${p.symbol}`)}`);
+            const e = entryFor(p);
+            const r = byToken.get(`${e.segment}|${e.token}`);
             if (!r) continue;
             const price = firstNum(r, ["last_traded_price", "ltp", "lastPrice", "last_price", "lp"]);
             const prevClose = firstNum(r, [
@@ -309,6 +370,8 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
               source: "kotak",
               as_of: parseKotakDate(r),
               previous_close_as_of: null,
+              high_52w: firstNum(r, ["hgh_52w_val", "high_52w", "52wkHigh", "yearHigh", "year_high"]),
+              low_52w: firstNum(r, ["lw_52w_val", "low_52w", "52wkLow", "yearLow", "year_low"]),
             });
           }
         } catch (err) {
@@ -325,33 +388,42 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
     },
     // Kotak historical candles when we have an instrument token; else Yahoo.
     async getOHLCV(symbol, exchange, range, interval) {
-      const seg = exchange === "BSE" ? "bse_cm" : "nse_cm";
       const { data: stock } = await svc
-        .from("market_stocks").select("token")
+        .from("market_stocks").select("token,kotak_segment")
         .eq("symbol", symbol).eq("exchange", exchange)
         .not("token", "is", null).maybeSingle();
       const token = stock?.token as string | undefined;
-      if (!token) return yahoo.getOHLCV(symbol, exchange, range, interval);
+      const seg = (stock?.kotak_segment as string | undefined) || (exchange === "BSE" ? "bse_cm" : "nse_cm");
+      if (!token) {
+        logProviderHealth(svc, "kotak_neo", "getOHLCV", false, 0, `no token for ${exchange}:${symbol} — using yahoo`);
+        return yahoo.getOHLCV(symbol, exchange, range, interval);
+      }
       // range like "2y","60d","30d"; interval like "1d","1h","15m"
       const now = Math.floor(Date.now() / 1000);
       const rangeSec: Record<string, number> = { "1d": 86400, "5d": 5 * 86400, "30d": 30 * 86400, "60d": 60 * 86400, "1y": 365 * 86400, "2y": 730 * 86400 };
       const fromEpoch = now - (rangeSec[range] ?? 730 * 86400);
       const kotakInterval = interval === "1d" ? "D" : interval === "1h" ? "60" : interval === "15m" ? "15" : interval === "5m" ? "5" : "D";
+      const t0 = Date.now();
       try {
         const c = await withKotakSession(svc, s, encryptValue, (ss) => kotakCandles(ss, token, seg, fromEpoch, now, kotakInterval));
-        if (c.length === 0) return yahoo.getOHLCV(symbol, exchange, range, interval);
+        if (c.length === 0) {
+          logProviderHealth(svc, "kotak_neo", "getOHLCV", false, Date.now() - t0, `empty candles for ${exchange}:${symbol} — using yahoo`);
+          return yahoo.getOHLCV(symbol, exchange, range, interval);
+        }
+        logProviderHealth(svc, "kotak_neo", "getOHLCV", true, Date.now() - t0);
         return c;
-      } catch {
+      } catch (e) {
+        logProviderHealth(svc, "kotak_neo", "getOHLCV", false, Date.now() - t0, e instanceof Error ? e.message : String(e));
         return yahoo.getOHLCV(symbol, exchange, range, interval);
       }
     },
     async getDepth(symbol, exchange) {
-      const seg = exchange === "BSE" ? "bse_cm" : "nse_cm";
       const { data: stock } = await svc
-        .from("market_stocks").select("token")
+        .from("market_stocks").select("token,kotak_segment")
         .eq("symbol", symbol).eq("exchange", exchange)
         .not("token", "is", null).maybeSingle();
       const token = stock?.token as string | undefined;
+      const seg = (stock?.kotak_segment as string | undefined) || (exchange === "BSE" ? "bse_cm" : "nse_cm");
       if (!token) return { bids: [], asks: [], ltp: null, source: "unavailable" };
       try {
         const d = await withKotakSession(svc, s, encryptValue, (ss) => kotakDepth(ss, token, seg));
@@ -362,35 +434,101 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       }
     },
     async getHoldings() {
-      const raw = await withKotakSession(svc, s, encryptValue, (ss) => kotakHoldings(ss));
-      return raw
-        .map((h: any) => ({
+      const detailed = await this.getHoldingsDetailed!();
+      return detailed.rows;
+    },
+    async getHoldingsDetailed(): Promise<HoldingsResult> {
+      const env = await withKotakSession(svc, s, encryptValue, (ss) => kotakHoldingsEnvelope(ss));
+      const rows = env.rows.map((h: any) => {
+        // Kotak splits equity qty across settled / T1 / pledged. Missing
+        // any of these silently understates the portfolio.
+        const settled = num(h.quantity ?? h.qty ?? h.holdingQty ?? h.sellableQuantity);
+        const t1 = num(h.t1Quantity ?? h.t1Qty ?? h.holdingT1Qty ?? h.usedQuantity);
+        const pledged = num(h.collateralQty ?? h.pledgeQty ?? h.pledgedQty ?? h.collateralQuantity);
+        const total = settled + t1 + pledged;
+        // Prefer costPrice (corp-action-adjusted) over averagePrice when both present.
+        const avg = num(h.costPrice ?? h.averagePrice ?? h.avgPrice ?? h.avgPrc);
+        // Earliest lot date, when Kotak surfaces one.
+        const buyRaw = h.purchaseDate ?? h.buyDate ?? h.holdingPurchaseDate ?? null;
+        let buyDate: string | null = null;
+        if (buyRaw) {
+          const d = new Date(String(buyRaw).replace(/(\d{2})-(\d{2})-(\d{4})/, "$3-$2-$1"));
+          if (!Number.isNaN(d.getTime())) {
+            buyDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+          }
+        }
+        return {
           symbol: String(h.displaySymbol ?? h.symbol ?? h.trdSym ?? "").replace(/-EQ$/, ""),
           exchange: String(h.exchangeSegment ?? "nse_cm").startsWith("bse") ? "BSE" : "NSE",
-          quantity: num(h.quantity ?? h.qty ?? h.holdingQty),
-          avg_price: num(h.averagePrice ?? h.avgPrice ?? h.avgPrc),
-        }))
-        .filter((h: HoldingRow) => h.symbol && h.quantity > 0);
+          quantity: total,
+          avg_price: avg,
+          settled_qty: settled || null,
+          t1_qty: t1 || null,
+          pledged_qty: pledged || null,
+          buy_date: buyDate,
+        } as HoldingRow;
+      }).filter((h: HoldingRow) => h.symbol && h.quantity > 0);
+      return { rows, complete: env.ok };
     },
     async getPositions() {
-      const raw = await withKotakSession(svc, s, encryptValue, (ss) => kotakPositions(ss));
-      return raw
-        .map((p: any) => {
-          const buyQty = num(p.flBuyQty ?? p.buyQty) + num(p.cfBuyQty);
-          const sellQty = num(p.flSellQty ?? p.sellQty) + num(p.cfSellQty);
-          const netQty = buyQty - sellQty;
-          const buyAmt = num(p.buyAmt) + num(p.cfBuyAmt);
-          const sellAmt = num(p.sellAmt) + num(p.cfSellAmt);
-          const entry = netQty > 0 && buyQty > 0 ? buyAmt / buyQty : netQty < 0 && sellQty > 0 ? sellAmt / sellQty : 0;
-          return {
-            symbol: String(p.trdSym ?? p.sym ?? "").replace(/-EQ$/, ""),
-            exchange: String(p.exSeg ?? "nse_cm").startsWith("bse") ? "BSE" : "NSE",
-            side: (netQty >= 0 ? "long" : "short") as "long" | "short",
-            quantity: Math.abs(netQty),
-            entry_price: entry,
-          };
-        })
-        .filter((p: PositionRow) => p.symbol && p.quantity > 0);
+      const detailed = await this.getPositionsDetailed!();
+      return detailed.rows;
+    },
+    async getPositionsDetailed(): Promise<PositionsResult> {
+      const env = await withKotakSession(svc, s, encryptValue, (ss) => kotakPositionsEnvelope(ss));
+      const rows: PositionRow[] = [];
+      const realized: RealizedTradeRow[] = [];
+      for (const p of env.rows) {
+        const flBuyQty = num(p.flBuyQty ?? p.buyQty);
+        const flSellQty = num(p.flSellQty ?? p.sellQty);
+        const cfBuyQty = num(p.cfBuyQty);
+        const cfSellQty = num(p.cfSellQty);
+        const buyQty = flBuyQty + cfBuyQty;
+        const sellQty = flSellQty + cfSellQty;
+        const netQty = buyQty - sellQty;
+        const symbol = String(p.trdSym ?? p.sym ?? "").replace(/-EQ$/, "");
+        const exchange = String(p.exSeg ?? "nse_cm").startsWith("bse") ? "BSE" : "NSE";
+        if (!symbol) continue;
+        // Intraday realized — buy exactly cancels sell, no carry. Kotak reports
+        // `flBuyAmt`/`flSellAmt` for today's fills.
+        const flBuyAmt = num(p.flBuyAmt ?? (p.buyAmt != null && !p.cfBuyAmt ? p.buyAmt : 0));
+        const flSellAmt = num(p.flSellAmt ?? (p.sellAmt != null && !p.cfSellAmt ? p.sellAmt : 0));
+        if (netQty === 0 && flBuyQty > 0 && flBuyQty === flSellQty) {
+          realized.push({ symbol, exchange, quantity: flBuyQty, realized: flSellAmt - flBuyAmt });
+          continue;
+        }
+        if (netQty === 0) continue;
+        // Entry price:
+        //  - if there is a carry-forward leg, trust Kotak's carry avg
+        //    (`netUploadPrice` / `cfAvgPrice` / prior settlement); blending
+        //    it with today's `buyAmt/sellAmt` drifts entry each night.
+        //  - purely intraday (no cf leg): today's own average is correct.
+        const hasCarry = cfBuyQty > 0 || cfSellQty > 0;
+        let entry = 0;
+        if (hasCarry) {
+          entry = num(p.netUploadPrice ?? p.cfAvgPrice ?? p.upldPrc ?? p.uploadPrice);
+          if (!entry) {
+            // Fallback: reconstruct from carry side only.
+            const cfBuyAmt = num(p.cfBuyAmt);
+            const cfSellAmt = num(p.cfSellAmt);
+            entry = netQty > 0 && cfBuyQty > 0 ? cfBuyAmt / cfBuyQty
+                  : netQty < 0 && cfSellQty > 0 ? cfSellAmt / cfSellQty : 0;
+          }
+        } else {
+          const buyAmt = num(p.buyAmt);
+          const sellAmt = num(p.sellAmt);
+          entry = netQty > 0 && flBuyQty > 0 ? buyAmt / flBuyQty
+                : netQty < 0 && flSellQty > 0 ? sellAmt / flSellQty : 0;
+        }
+        rows.push({
+          symbol,
+          exchange,
+          side: (netQty >= 0 ? "long" : "short"),
+          quantity: Math.abs(netQty),
+          entry_price: entry,
+        });
+      }
+      return { rows, realized, complete: env.ok };
     },
     async placeOrder(input) {
       const seg = input.exchange === "BSE" ? "bse_cm" : "nse_cm";
@@ -423,22 +561,69 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       const r = await withKotakSession(svc, s, encryptValue, (ss) => kotakCancelOrder(ss, orderId));
       return { orderId: r.orderId, status: r.status };
     },
+    async convertPosition(input) {
+      const seg = input.exchange === "BSE" ? "bse_cm" : "nse_cm";
+      const { data: stock } = await svc
+        .from("market_stocks").select("token")
+        .eq("symbol", input.symbol).eq("exchange", input.exchange)
+        .not("token", "is", null).maybeSingle();
+      const token = stock?.token as string | undefined;
+      await withKotakSession(svc, s, encryptValue, (ss) => kotakConvertPosition(ss, {
+        exchangeSegment: seg,
+        tradingSymbol: `${input.symbol}-EQ`,
+        instrumentToken: token,
+        transactionType: input.side,
+        quantity: input.quantity,
+        fromProduct: input.fromProduct,
+        toProduct: input.toProduct,
+      }));
+      return { ok: true };
+    },
     async getFunds(): Promise<FundsSnapshot> {
       const t0 = Date.now();
+      // Kotak's /quick/user/limits is flaky for cash-only accounts. Try it
+      // first; on failure, fall back to /quick/user/margin (used by Neo web)
+      // before surfacing an error. The shared funds helper owns cooldown/
+      // cached fallback so we don't multiply calls across Funds + syncs.
+      let lastErr: unknown = null;
       try {
         const j = await withKotakSession(svc, s, encryptValue, (ss) => kotakLimits(ss));
-        logProviderHealth(svc, "kotak_neo", "getFunds", true, Date.now() - t0);
         const parsed = parseKotakLimits(j);
+        logProviderHealth(svc, "kotak_neo", "getFunds:limits", true, Date.now() - t0);
         return { ...parsed, source: "kotak" };
       } catch (e) {
-        logProviderHealth(svc, "kotak_neo", "getFunds", false, Date.now() - t0, e instanceof Error ? e.message : String(e));
-        throw e;
+        lastErr = e;
+        const status = (e as any)?.status;
+        // Don't try /margin when the session itself is dead.
+        if (status !== 401 && status !== 403) {
+          try {
+            const j2 = await withKotakSession(svc, s, encryptValue, (ss) => kotakUserMargin(ss));
+            const parsed = parseKotakLimits(j2);
+            logProviderHealth(svc, "kotak_neo", "getFunds:margin", true, Date.now() - t0);
+            return { ...parsed, source: "kotak" };
+          } catch (e2) {
+            lastErr = e2;
+          }
+        }
       }
+      logProviderHealth(svc, "kotak_neo", "getFunds", false, Date.now() - t0, lastErr instanceof Error ? lastErr.message : String(lastErr));
+      throw lastErr;
     },
+
     async testAuth() {
-      const j = await withKotakSession(svc, s, encryptValue, (ss) => kotakLimits(ss));
-      const ok = !!j && !j.errMsg;
-      return { ok, detail: ok ? "Kotak session valid" : String(j?.errMsg ?? "limits call failed") };
+      // Holdings is a lightweight GET that succeeds whenever the session is
+      // valid (even for a brand-new account with zero holdings — the payload
+      // is just `{data: []}`). It's what the app actually uses in production,
+      // so if this passes the connection is genuinely usable.
+      // /quick/user/limits (what we used to probe) frequently returns 500 with
+      // an empty body from Kotak even on valid sessions, giving false negatives.
+      try {
+        await withKotakSession(svc, s, encryptValue, (ss) => kotakHoldings(ss));
+        return { ok: true, detail: "Kotak session valid" };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { ok: false, detail: msg };
+      }
     },
   };
 }

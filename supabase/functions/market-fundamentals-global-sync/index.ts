@@ -1,7 +1,12 @@
+// Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
 // market-fundamentals-global-sync — chunked, resumable fundamentals sync.
 // Fetches Yahoo quoteSummary first (with rename-map + Yahoo search fallback),
 // merges NSE public metadata, derives PB/PEG/dividend_yield when Yahoo omits them,
 // and records per-symbol sync status.
+// Kotak Neo isn't in the chain: its /quote payload has no P&L / balance /
+// ratios / ownership fields, so fundamentals stay vendor-only regardless
+// of whether the user is connected to a broker.
+
 import { preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
 import { requireUserId } from "../_shared/auth.ts";
@@ -205,12 +210,21 @@ Deno.serve(async (req) => {
           const roa = r?.financialData?.returnOnAssets?.raw as number | undefined;
           const roce = roa != null ? (Math.abs(roa) <= 5 ? roa * 100 : roa) : null;
 
+          // Sector fallback: for ETFs/funds label passively; keeps the Sector
+          // chip honest instead of counting them as gaps.
+          let sectorFinal = str(nse?.sector, r?.assetProfile?.sector);
+          let industryFinal = str(nse?.industry, r?.assetProfile?.industry);
+          if (!sectorFinal && instrumentType !== "EQ") {
+            sectorFinal = "ETF / Index Fund";
+            industryFinal = industryFinal ?? "Passive Fund";
+          }
+
           const row = {
             symbol: s.symbol,
             exchange: s.exchange,
             company_name: str(r?.assetProfile?.longName, nse?.companyName, s.company_name),
-            sector: str(nse?.sector, r?.assetProfile?.sector),
-            industry: str(nse?.industry, r?.assetProfile?.industry),
+            sector: sectorFinal,
+            industry: industryFinal,
             market_cap_cr: marketCapCr,
             price,
             pe_ttm: pe,
@@ -245,10 +259,16 @@ Deno.serve(async (req) => {
           if (useful === 0) {
             throw new Error("no usable fundamentals returned from Yahoo or NSE");
           }
-          // For non-equity instruments, sector/industry/PE are expected to be
-          // missing — don't downgrade them to "partial" just for that.
+          // Core-5 completeness promotion: if sector + mcap + (pe|eps) + price
+          // are all present, the row is complete regardless of the useful count.
+          // This drains legacy `partial` rows automatically once the missing
+          // sector/mcap arrives on a later run.
+          const coreComplete = row.sector != null
+            && row.market_cap_cr != null
+            && (row.pe_ttm != null || row.eps_ttm != null)
+            && row.price != null;
           const threshold = instrumentType === "EQ" ? 4 : 2;
-          const status = useful >= threshold ? "ok" : "partial";
+          const status: "ok" | "partial" = coreComplete || useful >= threshold ? "ok" : "partial";
           await svc.from("market_fundamentals_global").upsert({
             ...row,
             sync_status: status,

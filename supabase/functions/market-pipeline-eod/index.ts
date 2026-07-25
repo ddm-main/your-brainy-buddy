@@ -8,7 +8,7 @@ import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from
 import { istTradeDate, requireCronSecret } from "../_shared/market/cron.ts";
 import { computeSnapshot } from "../_shared/market/indicators.ts";
 import { breakoutScore, preBreakoutScore } from "../_shared/market/scoring.ts";
-import { yahooChartRetry } from "../_shared/market/yahooClient.ts";
+import { getServiceProvider } from "../_shared/market/provider.ts";
 
 const CHUNK = 100;
 const CONCURRENCY = 5;
@@ -17,6 +17,11 @@ Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
   try {
     const svc = svcClient();
+    // Resolve the service-level provider once per invocation — this is
+    // Kotak Neo whenever a connected account exists (falls back to Yahoo
+    // transparently). Per-symbol getOHLCV then prefers Kotak candles for any
+    // stock with an instrument token, and only spills to Yahoo when it can't.
+    const { provider } = await getServiceProvider(svc);
     if (req.headers.get("x-cron-secret") != null) {
       const guard = await requireCronSecret(req);
       if (guard) return guard;
@@ -31,6 +36,7 @@ Deno.serve(async (req) => {
     const { data: stocks, error } = await svc.from("market_stocks")
       .select("symbol,exchange,yahoo_symbol,sector,last_price_sync_at,price_sync_attempts,price_sync_attempts_day")
       .eq("is_active", true)
+      .eq("exchange", "NSE")
       .or(`last_price_sync_at.is.null,last_price_sync_at.lt.${cutoff}`)
       // Cap same-day retries at 3 per symbol so a permanently-broken symbol
       // (renamed, delisted, thin Yahoo data) can't wedge the chunk — but a
@@ -54,7 +60,7 @@ Deno.serve(async (req) => {
         if (!stock) break;
         let success = false;
         try {
-          const candles = await yahooChartRetry(stock.yahoo_symbol ?? `${stock.symbol}.NS`, "2y", "1d");
+          const candles = await provider.getOHLCV(stock.symbol, stock.exchange ?? "NSE", "2y", "1d");
           if (candles.length < 30) throw new Error("insufficient candles");
 
           const snap = computeSnapshot(candles);
@@ -68,27 +74,13 @@ Deno.serve(async (req) => {
           // silently corrupting the stored series.
           if (snap.changePct != null && Math.abs(snap.changePct) > 40) {
             await svc.from("market_provider_health").insert({
-              provider: "yahoo", endpoint: "market-pipeline-eod", ok: false,
+              provider: (provider as any).name ?? "unknown", endpoint: "market-pipeline-eod", ok: false,
               error: `outlier rejected: ${stock.symbol} close ${snap.close} is ${snap.changePct.toFixed(1)}% from prior close — not written`,
             });
             throw new Error("price outlier rejected");
           }
 
-          // BSE volume for the same session — Tickertape's "Daily Volume"
-          // sums NSE + BSE traded quantity. Yahoo's `.BO` chart exposes the
-          // BSE session bar; treat any fetch failure as "no BSE listing" and
-          // fall back to NSE-only volume rather than failing the whole row.
           const nseTradeDate = new Date(candles[candles.length - 1].time * 1000).toISOString().slice(0, 10);
-          let bseVolume: number | null = null;
-          try {
-            const bseCandles = await yahooChartRetry(`${stock.symbol}.BO`, "5d", "1d", 1);
-            const bseLast = bseCandles[bseCandles.length - 1];
-            if (bseLast) {
-              const bseDate = new Date(bseLast.time * 1000).toISOString().slice(0, 10);
-              if (bseDate === nseTradeDate) bseVolume = Number(bseLast.volume) || 0;
-            }
-          } catch { /* no BSE listing — fine */ }
-          const combinedVolume = bseVolume != null ? (snap.volume ?? 0) + bseVolume : snap.volume;
 
           // Last ~30 sessions into market_daily_prices
           const priceRows = candles.slice(-30).map((c) => ({
@@ -114,10 +106,13 @@ Deno.serve(async (req) => {
             trade_date: nseTradeDate,
             close: snap.close,
             change_pct: snap.changePct,
-            volume: combinedVolume,
+            // The screener universe is NSE. Keep this value NSE-only so price,
+            // return, current volume and the 30-session baseline share a source.
+            volume: snap.volume,
             volume_nse: snap.volume,
-            volume_bse: bseVolume,
+            volume_bse: null,
             vol_avg20: snap.volAvg20,
+            vol_avg30: snap.volAvg30,
             rel_volume: snap.relVolume,
             ema20: snap.ema20,
             ema50: snap.ema50,
@@ -143,6 +138,14 @@ Deno.serve(async (req) => {
             resistance_level: snap.resistance,
             support_level: snap.support,
             sector: stock.sector ?? null,
+            rolling_high_20: snap.rollingHigh20 ?? null,
+            rolling_high_55: snap.rollingHigh55 ?? null,
+            obv_slope_20: snap.obvSlope20 ?? null,
+            base_tightness: snap.baseTightness ?? null,
+            base_depth_pct: snap.baseDepthPct ?? null,
+            base_duration_days: snap.baseDurationDays ?? null,
+            close_in_range_pct: snap.closeInRangePct ?? null,
+            breakout_freshness_days: snap.breakoutFreshnessDays ?? null,
             breakout_score: bs.score,
             prebreakout_score: ps.score,
             score_components: { breakout: bs.components, prebreakout: ps.components },
@@ -165,7 +168,7 @@ Deno.serve(async (req) => {
         } catch (err) {
           failCount++;
           await svc.from("market_provider_health").insert({
-            provider: "yahoo", endpoint: "market-pipeline-eod", ok: false,
+            provider: (provider as any).name ?? "unknown", endpoint: "market-pipeline-eod", ok: false,
             error: `${stock.symbol}: ${err instanceof Error ? err.message : String(err)}`,
           });
         } finally {

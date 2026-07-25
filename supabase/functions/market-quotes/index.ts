@@ -175,14 +175,34 @@ Deno.serve(async (req) => {
         previous_close: stale || dayUnavailable ? null : q.previous_close ?? null,
         change_pct: stale || dayUnavailable ? null : q.change_pct ?? null,
         day_change: stale || dayUnavailable ? null : q.change_abs ?? null,
+        // Today's cumulative traded volume from the provider — used by the
+        // chart's live-bar volume overlay and the Analysis right-rail
+        // "Volume" readout. Kotak surfaces `vol_traded_today`; Yahoo
+        // surfaces `regularMarketVolume`. Null when neither has coverage.
+        volume: (q as any).volume ?? null,
         source: q.source,
+        provider: (q.source === "cache" ? "cache" : String(q.source ?? provider.name)) as string,
         as_of: q.as_of ?? null,
         previous_close_as_of: q.previous_close_as_of ?? null,
         stale,
       }];
     });
 
-    return jsonResponse(req, { quotes: out, source: provider.name });
+    // Top-level provider summary — tells the UI whether the batch was fully
+    // Kotak (real-time), fully Yahoo (~15m delayed), mixed, or just cache.
+    // Used to render an honest "live · kotak" / "delayed · yahoo" chip rather
+    // than the previous "any-stale-row → delayed" heuristic that lied when
+    // Kotak fulfilled most symbols and Yahoo backfilled a few.
+    const provSet = new Set(out.map((r) => r.provider).filter(Boolean));
+    let providerSummary: "kotak" | "yahoo" | "cache" | "mixed" | "none" = "none";
+    if (provSet.size === 1) {
+      const only = [...provSet][0];
+      providerSummary = only === "kotak" || only === "yahoo" || only === "cache" ? only : "mixed";
+    } else if (provSet.size > 1) {
+      providerSummary = "mixed";
+    }
+
+    return jsonResponse(req, { quotes: out, source: provider.name, provider: providerSummary });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }

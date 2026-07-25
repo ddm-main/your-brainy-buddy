@@ -6,26 +6,46 @@ import { Link, useNavigate } from "react-router-dom";
 import type { ColumnDef } from "@tanstack/react-table";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip } from "@/components/hud/HudControls";
-import { DataTable, fmtNum, PctCell } from "@/components/hud/DataTable";
+import { DataTable, deriveChangeAbs, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { WatchlistPanel } from "@/components/market/WatchlistPanel";
-import { FundsCard } from "@/components/market/FundsCard";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "@/lib/market/api";
-import { useIndices, useIndexWatch, useIndexWatchMutations, useMarketSettings, useQuotes, useSavedScreeners, useStockScores } from "@/lib/market/hooks";
-import { filterMatches, latestTradeDateOf, type ActiveFilter, type UniverseId } from "@/lib/market/screenerCatalog";
+import { useIndices, useIndexWatch, useIndexWatchMutations, useMarketSettings, usePositions, useQuotes, useSavedScreeners, useStockScores } from "@/lib/market/hooks";
+import { useBrokerOrders } from "@/lib/market/orderHooks";
+import { FILTER_BY_ID, canonicalFilterId, filterMatches, latestTradeDateOf, type ActiveFilter, type UniverseId } from "@/lib/market/screenerCatalog";
 import { useScreenerData, type ScreenerRow } from "@/lib/market/screenerRun";
+import { colsFromActiveFilters, overviewColumnMap, OVERVIEW_COL_IDS } from "@/lib/market/screenerColumns";
 import { ALL_PRESETS, GLOBAL_PRESETS, INDIAN_PRESETS, type IndexPreset } from "@/lib/market/indices";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { RefreshCw, Settings2, Sparkles, Trash2, X } from "lucide-react";
+import { Settings2, Trash2, X } from "lucide-react";
 import type { Quote, StockScore } from "@/lib/market/types";
-import { holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
+import { holdingPnl, quoteKey } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
+import { useEscapeClose } from "@/lib/useEscapeClose";
+import { MarketStrip } from "@/components/market/MarketStrip";
+// IST market hours check (Mon–Fri 09:15–15:30). Used to differentiate
+// "cached close" (intraday stale data — actionable) from "closed" (after
+// hours — expected). Uses Intl to avoid TZ drift on non-IST clients.
+function isNseOpen(now: Date = new Date()): boolean {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(now);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  const day = get("weekday");
+  if (day === "Sat" || day === "Sun") return false;
+  const hh = Number(get("hour")); const mm = Number(get("minute"));
+  const mins = hh * 60 + mm;
+  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+}
 
-const BREAKOUT_MIN_SCORE = 60;
-const BREAKOUT_ROWS = 12;
+const DEFAULT_BREAKOUT_KEY = "market.dash.breakoutScreen";
+const SCREENER_DEFAULT_SAVED_KEY = "market.screener.defaultSavedId";
+const EXPLICIT_CLEAR = "__cleared__";
 
 type BreakoutDisplayRow = StockScore | ScreenerRow;
 
@@ -39,8 +59,19 @@ function savedScreenerState(screen: { filters?: unknown } | undefined): { active
   const raw = screen?.filters;
   if (!raw || Array.isArray(raw) || typeof raw !== "object") return { active: [], universe: "all" };
   const payload = raw as { active?: unknown; universe?: unknown };
+  const seen = new Set<string>();
+  const active = Array.isArray(payload.active)
+    ? payload.active.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const filter = item as ActiveFilter;
+      const id = canonicalFilterId(filter.id);
+      if (!FILTER_BY_ID[id] || seen.has(id)) return [];
+      seen.add(id);
+      return [{ ...filter, id }];
+    })
+    : [];
   return {
-    active: Array.isArray(payload.active) ? payload.active as ActiveFilter[] : [],
+    active,
     universe: isUniverseId(payload.universe) ? payload.universe : "all",
   };
 }
@@ -54,27 +85,68 @@ function rowPrice(row: BreakoutDisplayRow): number | null {
   return r.ltp ?? r.close ?? null;
 }
 
-function rowRsi(row: BreakoutDisplayRow): number | null {
-  const r = row as any;
-  return r.rsi ?? r.rsi14 ?? null;
-}
 
 function byBreakoutDesc(a: BreakoutDisplayRow, b: BreakoutDisplayRow): number {
   return ((b.breakout_score ?? -1) - (a.breakout_score ?? -1)) || a.symbol.localeCompare(b.symbol);
+}
+
+function bySavedScreenerDefault(active: ActiveFilter[]): (a: BreakoutDisplayRow, b: BreakoutDisplayRow) => number {
+  const hasChangeFilter = active.some((filter) => canonicalFilterId(filter.id) === "change_pct");
+  if (!hasChangeFilter) return byBreakoutDesc;
+  return (a, b) => {
+    const av = (a as any).change_pct;
+    const bv = (b as any).change_pct;
+    if (av == null && bv == null) return byBreakoutDesc(a, b);
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return (Number(bv) - Number(av)) || byBreakoutDesc(a, b);
+  };
 }
 
 export default function MarketDashboard() {
   const push = useUi((s) => s.push);
   const nav = useNavigate();
   const qc = useQueryClient();
-  const [busy, setBusy] = useState<string | null>(null);
+  const [, setBusy] = useState<string | null>(null);
+  void setBusy;
   const [manageOpen, setManageOpen] = useState(false);
   const [breakoutScreenId, setBreakoutScreenId] = useState<string>(
-    () => localStorage.getItem("market.dash.breakoutScreen") ?? "default",
+    () => {
+      const v = localStorage.getItem(DEFAULT_BREAKOUT_KEY);
+      if (v === EXPLICIT_CLEAR) return "";
+      if (v && v !== "default") return v;
+      const screenerDefault = localStorage.getItem(SCREENER_DEFAULT_SAVED_KEY);
+      return screenerDefault && screenerDefault !== "default" ? screenerDefault : "";
+    },
   );
-  useEffect(() => { localStorage.setItem("market.dash.breakoutScreen", breakoutScreenId); }, [breakoutScreenId]);
+  useEffect(() => {
+    if (breakoutScreenId) localStorage.setItem(DEFAULT_BREAKOUT_KEY, breakoutScreenId);
+  }, [breakoutScreenId]);
   const { data: savedScreens = [] } = useSavedScreeners();
-  const selectedScreen = breakoutScreenId === "default" ? undefined : savedScreens.find((s) => s.id === breakoutScreenId);
+  // If nothing is chosen yet, fall back to the first saved screener.
+  // Distinguish "never chosen" (empty stored value) from "explicitly cleared"
+  // (EXPLICIT_CLEAR marker) — the latter must not auto-jump. If the current
+  // id no longer exists (screener deleted elsewhere), clear the stored key
+  // rather than silently switch to another screener.
+  useEffect(() => {
+    if (savedScreens.length === 0) return;
+    if (breakoutScreenId) {
+      const stillValid = savedScreens.some((s) => s.id === breakoutScreenId);
+      if (!stillValid) {
+        try { localStorage.removeItem(DEFAULT_BREAKOUT_KEY); } catch { /* noop */ }
+        setBreakoutScreenId("");
+      }
+      return;
+    }
+    const stored = (() => { try { return localStorage.getItem(DEFAULT_BREAKOUT_KEY); } catch { return null; } })();
+    if (stored === EXPLICIT_CLEAR) return; // user asked for "no filter"
+    const screenerDefault = (() => { try { return localStorage.getItem(SCREENER_DEFAULT_SAVED_KEY); } catch { return null; } })();
+    const preferred = screenerDefault && savedScreens.some((s) => s.id === screenerDefault)
+      ? screenerDefault
+      : savedScreens[0].id;
+    setBreakoutScreenId(preferred);
+  }, [savedScreens, breakoutScreenId]);
+  const selectedScreen = savedScreens.find((s) => s.id === breakoutScreenId);
   const selectedScreenState = useMemo(() => savedScreenerState(selectedScreen), [selectedScreen]);
 
   useEffect(() => {
@@ -84,63 +156,92 @@ export default function MarketDashboard() {
   }, [qc]);
 
 
-  const { data: indicesData, refetch: refetchIndices, isFetching: indicesFetching } = useIndices();
+  const { data: indicesData } = useIndices();
   const { data: settings = [] } = useMarketSettings();
   // Fetched pool is wider than what's shown (12) so the filter bar below has
   // something to narrow beyond the top-15-by-score slice.
   const { data: topBreakouts = [] } = useStockScores({ orderBy: "breakout_score", limit: 60 });
   const { data: preBreakouts = [] } = useStockScores({ orderBy: "prebreakout_score", limit: 10 });
-  const usingSavedScreen = breakoutScreenId !== "default" && Boolean(selectedScreen);
+  const usingSavedScreen = Boolean(selectedScreen);
   const { data: savedScreenerRows = [], isFetching: savedScreenerFetching } = useScreenerData(selectedScreenState.universe, usingSavedScreen);
 
+  const hasActiveFilters = selectedScreenState.active.length > 0;
   const matchingBreakouts = useMemo<BreakoutDisplayRow[]>(() => {
-    if (!usingSavedScreen) {
-      return topBreakouts.filter((s) => (s.breakout_score ?? 0) >= BREAKOUT_MIN_SCORE);
-    }
+    if (!usingSavedScreen || !hasActiveFilters) return [];
     const active = selectedScreenState.active;
     const latestDate = latestTradeDateOf(savedScreenerRows);
-    const source = active.length === 0
-      ? savedScreenerRows
-      : savedScreenerRows.filter((s) => active.every((af) => filterMatches(s as any, af, latestDate)));
-    return [...source].sort(byBreakoutDesc);
-  }, [savedScreenerRows, selectedScreenState.active, topBreakouts, usingSavedScreen]);
+    const source = savedScreenerRows.filter((s) => active.every((af) => filterMatches(s as any, af, latestDate)));
+    return [...source].sort(bySavedScreenerDefault(active));
+  }, [savedScreenerRows, selectedScreenState.active, usingSavedScreen, hasActiveFilters]);
 
-  const filteredBreakouts = useMemo(() => matchingBreakouts.slice(0, BREAKOUT_ROWS), [matchingBreakouts]);
+  const filteredBreakouts = matchingBreakouts;
 
-  const breakoutStatusLabel = usingSavedScreen
-    ? `filtered · ${selectedScreen?.name ?? "screener"}`
-    : `default ≥${BREAKOUT_MIN_SCORE}`;
-  const breakoutCountLabel = usingSavedScreen
-    ? (savedScreenerFetching ? "loading" : `${matchingBreakouts.length} matches`)
-    : `${filteredBreakouts.length} shown`;
+  // One chip only — the screener name is already visible in the <select>.
+  // Show the count when a screener with filters is active, otherwise a
+  // minimal hint about what's needed.
+  const breakoutCountLabel = !usingSavedScreen
+    ? (savedScreens.length === 0 ? "no screeners saved" : "select a screener")
+    : !hasActiveFilters
+    ? "screener has no filters"
+    : savedScreenerFetching
+    ? "loading…"
+    : `${matchingBreakouts.length} of ${savedScreenerRows.length}`;
+
+
 
   // The scores above are EOD (recomputed once a day by the evening pipeline —
   // RSI/EMA/breakout scoring is inherently a daily-bar concept, same as any
   // trading platform). But the displayed price/change% shouldn't sit frozen at
   // yesterday's close all session — overlay live quotes on top of them.
-  const scoreKeys = useMemo(
-    () => Array.from(new Set([...topBreakouts, ...preBreakouts, ...filteredBreakouts].map(rowKey))),
+  // Union key set for on-screen scored rows. Memoize by joined string so
+  // toggling filters that don't add new symbols doesn't refire useQuotes.
+  const scoreKeysJoined = useMemo(
+    () => Array.from(new Set([...topBreakouts, ...preBreakouts, ...filteredBreakouts].map(rowKey))).sort().join(","),
     [topBreakouts, preBreakouts, filteredBreakouts],
   );
-  const { data: scoreQuotes } = useQuotes(scoreKeys);
+  const scoreKeys = useMemo(() => (scoreKeysJoined ? scoreKeysJoined.split(",") : []), [scoreKeysJoined]);
+  // Top Breakouts symbols rotate with filter selection, so most of them are
+  // outside the Kotak WS relay's holdings/watchlist subscription set. Poll
+  // the REST batch every ~3s during market hours to make the panel feel live
+  // rather than updating once a minute.
+  const { data: scoreQuotes } = useQuotes(scoreKeys, { intervalMs: 3_000 });
   const pushTicks = useLiveTickStore((s) => s.ticks);
+  const relayAlive = useRelayAlive();
+  // Ask the Kotak WS relay to push ticks for whatever's on screen — filters
+  // rotate the symbol set constantly, so a static holdings/watchlist-only
+  // subscription would miss Top Breakouts entirely.
+  useEffect(() => { subscribeSymbolsForTicks(scoreKeys); }, [scoreKeysJoined]);
   const liveByKey = useMemo(() => {
     const m = new Map((scoreQuotes?.quotes ?? []).map((q) => [quoteKey(q.exchange, q.symbol), q]));
     for (const [key, tick] of Object.entries(pushTicks)) {
       if (!isFreshTick(tick)) continue;
       const base = m.get(key);
-      m.set(key, base ? { ...base, ltp: tick.ltp, change_pct: tick.change_pct } : ({ ltp: tick.ltp, change_pct: tick.change_pct } as any));
+      const abs = deriveChangeAbs(tick.ltp, tick.change_pct);
+      m.set(key, base
+        ? { ...base, ltp: tick.ltp, change_pct: tick.change_pct, day_change: abs }
+        : ({ ltp: tick.ltp, change_pct: tick.change_pct, day_change: abs } as any));
     }
     return m;
   }, [scoreQuotes, pushTicks]);
   const liveFor = (s: BreakoutDisplayRow) => liveByKey.get(rowKey(s));
   const anyPush = useMemo(() => scoreKeys.some((k) => isFreshTick(pushTicks[k])), [scoreKeys, pushTicks]);
-  const liveQuoteState = useMemo<"push" | "live" | "stale" | "none">(() => {
-    if (anyPush) return "push";
+  // Provider-aware live state — reads the batch-level `provider` summary the
+  // edge function now returns (kotak / yahoo / mixed / cache / none). This
+  // replaces the old "any stale row → delayed" heuristic that mislabeled
+  // Kotak-fulfilled batches when Yahoo backfilled a handful of symbols.
+  const quoteProvider = (scoreQuotes as any)?.provider as
+    | "kotak" | "yahoo" | "mixed" | "cache" | "none" | undefined;
+  const liveQuoteState = useMemo<"push" | "kotak" | "mixed" | "yahoo" | "cache" | "closed" | "none">(() => {
+    // Relay handshake OR any fresh push tick both prove the WS relay is up.
+    if (anyPush || relayAlive) return "push";
     const quotes = scoreQuotes?.quotes ?? [];
     if (quotes.length === 0) return "none";
-    return quotes.some((q) => q.stale) ? "stale" : "live";
-  }, [scoreQuotes, anyPush]);
+    if (quoteProvider === "kotak") return "kotak";
+    if (quoteProvider === "mixed") return "mixed";
+    if (quoteProvider === "cache") return isNseOpen() ? "cache" : "closed";
+    // Yahoo (or unknown) — during hours it's ~15m delayed, off-hours it's just the close.
+    return isNseOpen() ? "yahoo" : "closed";
+  }, [scoreQuotes, anyPush, scoreKeys, quoteProvider, relayAlive]);
 
   const { data: counts } = useQuery({
     queryKey: ["market", "dash-counts"],
@@ -175,8 +276,11 @@ export default function MarketDashboard() {
     const byKey = new Map((pfQuotes?.quotes ?? []).map((q) => [quoteKey(q.exchange, q.symbol), q]));
     // Rows with no resolvable live price are excluded from current/pnl
     // (unknown, not zero) — see holdingPnl's contract in lib/market/pnl.ts.
+    // Today % must use the SAME resolved-symbol set for numerator (day P&L)
+    // and denominator (prev value), otherwise the ratio is nonsense when even
+    // one symbol lacks a previous_close.
     let invested = 0, current = 0, knownInvested = 0, unresolved = 0;
-    const dayPnls: Array<number | null> = [];
+    let dayPnlWithPrev = 0;   // day P&L only for rows that also have prev_close
     let prevValue = 0;
     let prevValueKnown = false;
     for (const h of rows) {
@@ -186,17 +290,60 @@ export default function MarketDashboard() {
       if (calc.current == null) { unresolved++; continue; }
       knownInvested += calc.invested;
       current += calc.current;
-      dayPnls.push(calc.todayPnl);
       if (q?.previous_close != null && q.previous_close > 0) {
         prevValue += q.previous_close * h.quantity;
         prevValueKnown = true;
+        if (calc.todayPnl != null) dayPnlWithPrev += calc.todayPnl;
       }
     }
-    const day = sumNullable(dayPnls);
-    const dayPct = day != null && prevValueKnown && prevValue !== 0 ? (day / Math.abs(prevValue)) * 100 : null;
+    // ₹ and % now share the same resolved-with-prev_close set — no more
+    // "denominator from one subset, numerator from another" mismatch.
+    const day = prevValueKnown ? dayPnlWithPrev : null;
+    const dayPct = prevValueKnown && prevValue !== 0 ? (dayPnlWithPrev / prevValue) * 100 : null;
     const allUnresolved = unresolved === rows.length;
-    return { invested, current: allUnresolved ? null : current, pnl: allUnresolved ? null : current - knownInvested, day, dayPct };
+    return {
+      invested: allUnresolved ? null : invested,
+      current: allUnresolved ? null : current,
+      pnl: allUnresolved ? null : current - knownInvested,
+      day,
+      dayPct,
+      partial: unresolved > 0 && !allUnresolved,
+    };
   }, [counts, pfQuotes]);
+
+  // Positions summary
+  const { data: positions = [] } = usePositions();
+  const openPositions = useMemo(() => positions.filter((p) => !p.closed_at), [positions]);
+  const posKeys = useMemo(() => Array.from(new Set(openPositions.map((p) => `${p.exchange}:${p.symbol}`))), [openPositions]);
+  const { data: posQuotes } = useQuotes(posKeys);
+  const posSummary = useMemo(() => {
+    const byKey = new Map((posQuotes?.quotes ?? []).map((q) => [quoteKey(q.exchange, q.symbol), q]));
+    let exposure = 0, unrealized = 0, resolved = 0;
+    for (const p of openPositions) {
+      const q = byKey.get(quoteKey(p.exchange, p.symbol));
+      const ltp = q?.ltp;
+      if (ltp == null) continue;
+      resolved++;
+      const sign = p.side === "long" ? 1 : -1;
+      exposure += ltp * p.quantity;
+      unrealized += sign * (ltp - p.entry_price) * p.quantity;
+    }
+    return { count: openPositions.length, exposure, unrealized: resolved === 0 ? null : unrealized };
+  }, [openPositions, posQuotes]);
+
+  // Broker orders summary
+  const { data: brokerOrdersData } = useBrokerOrders();
+  const orderSummary = useMemo(() => {
+    const orders = brokerOrdersData?.orders ?? [];
+    const open = orders.filter((o) => /open|pending|trigger/i.test(o.status)).length;
+    const executed = orders.filter((o) => /complete|executed|filled/i.test(o.status)).length;
+    // Split cancelled (user-initiated) from rejected/failed (exchange or broker).
+    const cancelled = orders.filter((o) => /cancel/i.test(o.status)).length;
+    const rejected = orders.filter((o) => /reject|fail/i.test(o.status)).length;
+    return { total: orders.length, open, executed, cancelled, rejected };
+  }, [brokerOrdersData]);
+
+
 
 
   // Watchlist pulse — intersect with already-fetched top/pre breakout scores;
@@ -215,192 +362,197 @@ export default function MarketDashboard() {
 
   const connected = settings.find((s) => s.connection_status === "connected")?.active_provider ?? null;
 
-  // Bootstrap the data pipeline on demand so the dashboard fills without
-  // waiting for the evening cron. Runs the same steps cron would run.
-  const primeData = async () => {
-    setBusy("prime");
-    const steps: Array<{ label: string; fn: string }> = [
-      { label: "Syncing scrip master", fn: "market-scrips-sync" },
-      { label: "Running EOD pipeline", fn: "market-pipeline-eod" },
-      { label: "Computing aggregates", fn: "market-pipeline-aggregates" },
-      { label: "Refreshing indices", fn: "market-indices" },
-    ];
-    try {
-      for (const s of steps) {
-        push(`${s.label}…`, "info");
-        await callMarketFn(s.fn);
-      }
-      push("Market data primed", "ok");
-      await refetchIndices();
-      // Invalidate the react-query caches the dashboard reads from.
-      window.dispatchEvent(new Event("market:refresh"));
-    } catch (e) {
-      push(toSafeError(e, "Prime failed").message, "err");
-    } finally {
-      setBusy(null);
+  // Row 1 index panels were removed (duplicated MarketStrip). Region/tile helpers dropped.
+
+
+  // Prime-data pipeline is now hosted in Market Settings → Data Pipeline.
+
+
+  // Top Breakouts columns mirror /market/screener — derived from the saved
+  // screener's active filters, minus boolean filters (Yes/No values are
+  // already conveyed by the filter chip itself). With no active saved filter,
+  // fall back to a compact breakout table.
+  const breakoutColumns = useMemo<ColumnDef<BreakoutDisplayRow, any>[]>(() => {
+    const colMap = overviewColumnMap<BreakoutDisplayRow>();
+    const ids = hasActiveFilters
+      ? colsFromActiveFilters(selectedScreenState.active, {
+        skipBooleans: true,
+        allowedCols: OVERVIEW_COL_IDS,
+      })
+      : ["symbol", "market_cap", "close", "change_pct", "breakout_score"];
+    const seen = new Set<string>();
+    const out: ColumnDef<BreakoutDisplayRow, any>[] = [];
+    for (const id of ids) {
+      if (seen.has(id) || !colMap[id]) continue;
+      seen.add(id);
+      out.push(colMap[id]);
     }
-  };
-
-
-  const breakoutColumns = useMemo<ColumnDef<BreakoutDisplayRow, any>[]>(() => [
-    {
-      header: "Symbol", accessorKey: "symbol",
-      cell: ({ row }) => (
-        <span>
-          <span style={{ color: "var(--accent)" }}>{row.original.symbol}</span>
-          {row.original.sector && <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: 10 }}>{row.original.sector}</span>}
-        </span>
-      ),
-    },
-    {
-      header: "Price", id: "livePrice", meta: { align: "right" },
-      accessorFn: (s) => liveFor(s)?.ltp ?? rowPrice(s),
-      cell: ({ getValue }) => fmtNum(getValue()),
-    },
-    {
-      header: "Chg %", id: "liveChangePct", meta: { align: "right" },
-      accessorFn: (s) => liveFor(s)?.change_pct ?? s.change_pct,
-      cell: ({ getValue }) => <PctCell value={getValue()} />,
-    },
-    { header: "RVol", accessorKey: "rel_volume", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue(), 1) },
-    { header: "RSI", id: "rsi", meta: { align: "right" }, accessorFn: rowRsi, cell: ({ getValue }) => fmtNum(getValue(), 0) },
-    {
-      header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },
-      cell: ({ row }) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" />,
-    },
-    {
-      header: "Entry ≈", id: "entry", meta: { align: "right" },
-      accessorFn: (r) => r.resistance_level ?? rowPrice(r),
-      cell: ({ getValue }) => fmtNum(getValue()),
-    },
+    out.push(colMap["actions"]);
+    return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [liveByKey]);
+  }, [selectedScreenState.active, hasActiveFilters, liveByKey]);
+
+
+
+
+
+  const indexActions = (
+    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+      <Btn size="sm" onClick={() => setManageOpen(true)} title="Manage indices · advanced actions" ariaLabel="Manage indices"><Settings2 size={12} /></Btn>
+    </div>
+  );
+
+  // Kotak-connect banner: shown when the provider is Yahoo (~15m delayed)
+  // AND Kotak isn't connected, unless the user dismissed it this session.
+  const kotakConnected = connected === "kotak_neo";
+  const showKotakBanner =
+    !kotakConnected &&
+    (quoteProvider === "yahoo" || quoteProvider === "mixed" || quoteProvider === "cache") &&
+    !sessionStorage.getItem("mk.dash.kotak-banner.dismissed");
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10, height: "100%", minHeight: 0 }}>
-      <HudPanel flow title="Market Summary" live={indicesFetching ? "warn" : "ok"} actions={
-        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-          {!connected && (
-            <Link to="/market/settings" title="Using Yahoo Finance — connect Kotak Neo for live NSE" style={{ fontSize: 10, color: "var(--text-dim)", textDecoration: "none", padding: "2px 6px", border: "1px dashed var(--edge)", marginRight: 4 }}>
-              yahoo · connect kotak
-            </Link>
-          )}
-          <Btn size="sm" onClick={() => setManageOpen(true)} title="Manage indices"><Settings2 size={12} /></Btn>
-          <Btn size="sm" onClick={primeData} disabled={busy !== null} title={busy === "prime" ? "priming…" : "prime data pipeline"}><Sparkles size={12} /></Btn>
-          <Btn size="sm" onClick={() => refetchIndices()} disabled={indicesFetching} title="refresh"><RefreshCw size={12} /></Btn>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 0, height: "100%" }}>
+      <MarketStrip actions={indexActions} />
+      {showKotakBanner && (
+        <div role="status" style={{
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+          padding: "6px 10px", border: "1px dashed var(--edge-strong)", borderRadius: 3,
+          fontSize: 11, color: "var(--text-dim)", background: "rgba(255,180,60,0.04)", flexShrink: 0,
+        }}>
+          <span style={{ color: "var(--warn, #f5a524)" }}>●</span>
+          <span>Prices are <b>~15 minutes delayed</b> (Yahoo Finance). Connect Kotak Neo for real-time quotes across Overview, Screener, and Portfolio.</span>
+          <Link to="/market/settings" style={{
+            marginLeft: "auto", color: "var(--accent)", textDecoration: "none",
+            border: "1px solid var(--edge)", padding: "2px 8px", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
+          }}>Connect Kotak Neo</Link>
+          <button
+            onClick={() => { sessionStorage.setItem("mk.dash.kotak-banner.dismissed", "1"); qc.invalidateQueries({ queryKey: ["market"] }); }}
+            aria-label="Dismiss for this session"
+            className="hud-btn focus-outline" data-variant="ghost" data-size="sm"
+            title="Dismiss for this session"
+          ><X size={12} /></button>
         </div>
-      }>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 6 }}>
-          {(indicesData?.quotes ?? []).map((q) => (
-            <button
-              key={q.symbol}
-              onClick={() => nav(`/market/index/${encodeURIComponent(q.symbol)}`)}
-              title={`${q.name} — view details`}
+      )}
+
+      {/* Row 2 · Top Breakouts · Watchlist · Portfolio (right) */}
+      <div
+        className="mk-dash-row2"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "minmax(0, 2.4fr) minmax(0, 1.6fr) minmax(0, 1.1fr)",
+          gap: 8,
+          alignItems: "stretch",
+          flex: 1,
+          minHeight: 0,
+          gridAutoRows: "1fr",
+        }}
+      >
+
+      <HudPanel
+        flow
+        title="Top Breakouts"
+        actions={
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            <select
+              value={breakoutScreenId}
+              onChange={(e) => setBreakoutScreenId(e.target.value)}
+              title="Filter Top Breakouts using a saved screener"
               style={{
-                padding: "6px 8px", border: "1px solid var(--edge)", background: "transparent",
-                textAlign: "left", cursor: "pointer", borderRadius: 2,
+                fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
+                background: "transparent", color: "var(--text)", border: "1px solid var(--edge)",
+                padding: "3px 6px", cursor: "pointer",
               }}
-              onMouseEnter={(e) => { e.currentTarget.style.borderColor = "var(--edge-strong)"; e.currentTarget.style.background = "rgba(53,214,237,0.05)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.borderColor = "var(--edge)"; e.currentTarget.style.background = "transparent"; }}
             >
-              <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 9 }}>{q.name}</div>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6 }}>
-                <span style={{ fontFamily: "var(--font-display)", fontSize: 15, color: "var(--text)" }}>
-                  {Number(q.price).toLocaleString(undefined, { maximumFractionDigits: 2 })}
-                </span>
-                <span style={{ fontSize: 10, color: (q.change_pct ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>
-                  {q.change_pct == null ? "—" : `${q.change_pct >= 0 ? "+" : ""}${q.change_pct.toFixed(2)}%`}
-                </span>
-              </div>
-            </button>
-          ))}
-        </div>
+              {savedScreens.length === 0 && <option value="">No saved screeners</option>}
+              {savedScreens.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+            <Chip tone="neutral">{breakoutCountLabel}</Chip>
+            {/* Provider chip lives on the MarketStrip now — one source of truth. */}
+          </div>
+        }
+      >
+        <DataTable
+          columns={breakoutColumns}
+          data={filteredBreakouts}
+          onRowClick={(r) => nav(`/market/analysis/${r.symbol}`)}
+          numbered
+          maxHeight="100%"
+          emptyLabel={savedScreenerFetching ? "loading" : !usingSavedScreen ? "select a screener" : !hasActiveFilters ? "add filters to your screener" : "no matches"}
+        />
       </HudPanel>
-
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 2fr) minmax(260px, 1fr)", gap: 10, flex: "1 1 auto", minHeight: 0 }}>
-        <HudPanel
-          flow
-          title="Top Breakouts"
-          style={{ flex: 1, minHeight: 0 }}
-          actions={
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <select
-                value={breakoutScreenId}
-                onChange={(e) => setBreakoutScreenId(e.target.value)}
-                title="Filter Top Breakouts using a saved screener"
-                style={{
-                  fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
-                  background: "transparent", color: "var(--text)", border: "1px solid var(--edge)",
-                  padding: "3px 6px", cursor: "pointer",
-                }}
-              >
-                <option value="default">Default · Breakout ≥ 60</option>
-                {savedScreens.length > 0 && <option disabled>── my screeners ──</option>}
-                {savedScreens.map((s) => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
-                ))}
-              </select>
-              <Chip tone={usingSavedScreen ? "accent" : "neutral"}>{breakoutStatusLabel}</Chip>
-              <Chip tone={savedScreenerFetching ? "warn" : "neutral"}>{breakoutCountLabel}</Chip>
-              <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.1em", textTransform: "uppercase" }}>
-                {liveQuoteState === "push" && <Chip tone="ok">push · relay live</Chip>}
-                {liveQuoteState === "live" && <Chip tone="ok">price live</Chip>}
-                {liveQuoteState === "stale" && <Chip tone="warn">quotes degraded — cached close</Chip>}
-                {liveQuoteState === "none" && "price · yesterday's close"}
-              </span>
+        <WatchlistPanel
+          readyCount={watchPulse.ready}
+          nearCount={watchPulse.near}
+          weakCount={watchPulse.weak}
+          onSettings={() => nav("/market/settings")}
+        />
+        <HudPanel flow title="Portfolio">
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {/* Holdings */}
+            <PortfolioSection
+              label="Holdings"
+              to="/market/holdings"
+              meta={counts?.holdings ? `${counts.holdings} ${counts.holdings === 1 ? "stock" : "stocks"}` : ""}
+              tiles={pf ? [
+                { label: "Value", value: pf.current == null ? "—" : `₹${Math.round(pf.current).toLocaleString("en-IN")}` },
+                { label: "Total P&L", value: pf.pnl == null ? "—" : `${pf.pnl >= 0 ? "+" : ""}₹${Math.round(pf.pnl).toLocaleString("en-IN")}`, tone: pf.pnl == null ? undefined : pf.pnl >= 0 ? "ok" : "err" },
+                { label: "Today", value: pf.day == null ? "—" : `${pf.day >= 0 ? "+" : ""}₹${Math.round(pf.day).toLocaleString("en-IN")}${pf.dayPct != null ? ` (${pf.dayPct >= 0 ? "+" : ""}${pf.dayPct.toFixed(2)}%)` : ""}`, tone: pf.day == null ? undefined : pf.day >= 0 ? "ok" : "err" },
+              ] : []}
+              empty="No holdings yet"
+            />
+            {/* Positions */}
+            <PortfolioSection
+              label="Positions"
+              to="/market/positions"
+              meta={posSummary.count > 0 ? `${posSummary.count} open` : ""}
+              tiles={posSummary.count > 0 ? [
+                { label: "Exposure", value: `₹${Math.round(posSummary.exposure).toLocaleString("en-IN")}` },
+                { label: "Unrealized", value: posSummary.unrealized == null ? "—" : `${posSummary.unrealized >= 0 ? "+" : ""}₹${Math.round(posSummary.unrealized).toLocaleString("en-IN")}`, tone: posSummary.unrealized == null ? undefined : posSummary.unrealized >= 0 ? "ok" : "err" },
+              ] : []}
+              empty="No open positions"
+            />
+            {/* Orders — one-line summary instead of a mini order-book. Full
+                breakdown lives on /market/orders. */}
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                <Link to="/market/orders" style={{ color: "var(--text)", textDecoration: "none", fontSize: 12, letterSpacing: "0.04em" }}>Orders</Link>
+                <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                  {orderSummary.total > 0 ? `${orderSummary.total} today` : "No orders today"}
+                </span>
+              </div>
+              {orderSummary.total > 0 && (
+                <div style={{ fontSize: 11, color: "var(--text-dim)", display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <span><span style={{ color: "var(--accent)" }}>{orderSummary.open}</span> open</span>
+                  <span><span style={{ color: "var(--ok)" }}>{orderSummary.executed}</span> executed</span>
+                  {orderSummary.cancelled > 0 && <span><span style={{ color: "var(--text)" }}>{orderSummary.cancelled}</span> cancelled</span>}
+                  {orderSummary.rejected > 0 && <span><span style={{ color: "var(--danger)" }}>{orderSummary.rejected}</span> rejected</span>}
+                </div>
+              )}
             </div>
-          }
-        >
-          <DataTable
-            columns={breakoutColumns}
-            data={filteredBreakouts}
-            onRowClick={(r) => nav(`/market/analysis/${r.symbol}`)}
-            initialSort={[{ id: "breakout_score", desc: true }]}
-            maxHeight="100%"
-            emptyLabel={savedScreenerFetching ? "loading" : "no matches"}
-          />
+          </div>
         </HudPanel>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <HudPanel flow title="Portfolio">
-            {pf ? (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-                <StatTile label="Value" value={pf.current == null ? "—" : `₹${Math.round(pf.current).toLocaleString("en-IN")}`} to="/market/holdings" />
-                <StatTile label="Total P&L" value={pf.pnl == null ? "—" : `${pf.pnl >= 0 ? "+" : ""}₹${Math.round(pf.pnl).toLocaleString("en-IN")}`} tone={pf.pnl == null ? undefined : pf.pnl >= 0 ? "ok" : "err"} />
-                <StatTile
-                  label="Today"
-                  value={pf.day == null
-                    ? "—"
-                    : `${pf.day >= 0 ? "+" : ""}₹${Math.round(pf.day).toLocaleString("en-IN")}${pf.dayPct != null ? ` (${pf.dayPct >= 0 ? "+" : ""}${pf.dayPct.toFixed(2)}%)` : ""}`}
-                  tone={pf.day == null ? undefined : pf.day >= 0 ? "ok" : "err"}
-                />
-
-                <StatTile label={`${counts?.holdings ?? 0} held · ${counts?.watchlist ?? 0} watched`} value="" to="/market/holdings" />
-              </div>
-            ) : (
-              <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
-                <Link to="/market/holdings" style={{ color: "var(--accent)", textDecoration: "none" }}>+ add holdings</Link>
-              </div>
-            )}
-          </HudPanel>
-
-          <FundsCard compact />
-          <WatchlistPanel />
-        </div>
       </div>
 
-      {manageOpen && <ManageIndicesDialog onClose={() => setManageOpen(false)} />}
+      {manageOpen && (
+        <ManageIndicesDialog
+          onClose={() => setManageOpen(false)}
+        />
+      )}
     </div>
   );
 }
 
 function ManageIndicesDialog({ onClose }: { onClose: () => void }) {
+  const push = useUi((s) => s.push);
   const { data: rows = [] } = useIndexWatch();
   const { add, remove } = useIndexWatchMutations();
   const [tab, setTab] = useState<"IN" | "GLOBAL" | "custom">("IN");
   const [customSym, setCustomSym] = useState("");
   const [customName, setCustomName] = useState("");
   const existing = new Set(rows.map((r) => r.symbol));
+  useEscapeClose(true, onClose);
 
   const addPreset = (p: IndexPreset) => add.mutate({
     symbol: p.symbol, name: p.name, region: p.region,
@@ -413,6 +565,10 @@ function ManageIndicesDialog({ onClose }: { onClose: () => void }) {
     const sym = customSym.trim();
     const nm = customName.trim() || sym;
     if (!sym) return;
+    if (!/^[\^A-Z0-9._=-]+$/.test(sym)) {
+      push("Invalid Yahoo symbol. Use uppercase letters, digits and any of ^ . _ = - (e.g. ^GSPC, NIFTY_MIDCAP_50.NS)", "err");
+      return;
+    }
     add.mutate({ symbol: sym, name: nm, region: "GLOBAL", nse_symbol: null, fno_enabled: false, constituents_slug: null });
     setCustomSym(""); setCustomName("");
   };
@@ -422,14 +578,20 @@ function ManageIndicesDialog({ onClose }: { onClose: () => void }) {
       position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100,
       display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
     }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
-        width: "min(720px, 96vw)", maxHeight: "90vh", overflowY: "auto",
-        background: "var(--bg)", border: "1px solid var(--edge-strong)",
-        padding: 16, display: "flex", flexDirection: "column", gap: 12,
-      }}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="manage-indices-title"
+        style={{
+          width: "min(720px, 96vw)", maxHeight: "90vh", overflowY: "auto",
+          background: "var(--bg)", border: "1px solid var(--edge-strong)",
+          padding: 16, display: "flex", flexDirection: "column", gap: 12,
+        }}
+      >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div className="hud-label" style={{ color: "var(--accent)", letterSpacing: "0.2em" }}>Manage indices</div>
-          <button onClick={onClose} className="hud-btn focus-outline" data-variant="ghost" data-size="sm" title="Close"><X size={14} /></button>
+          <div id="manage-indices-title" className="hud-label" style={{ color: "var(--accent)", letterSpacing: "0.2em" }}>Manage indices</div>
+          <button onClick={onClose} className="hud-btn focus-outline" data-variant="ghost" data-size="sm" title="Close" aria-label="Close manage indices"><X size={14} /></button>
         </div>
 
         <div>
@@ -491,19 +653,41 @@ function ManageIndicesDialog({ onClose }: { onClose: () => void }) {
             <Btn size="sm" onClick={addCustom} disabled={!customSym.trim() || add.isPending}>add</Btn>
           </div>
         )}
+
+        {/* Prime-data pipeline moved to Market Settings → Data Pipeline. */}
       </div>
     </div>
   );
 }
 
-
-function StatTile({ label, value, to, tone }: { label: string; value: string; to?: string; tone?: "ok" | "err" | "accent" }) {
-  const color = tone === "ok" ? "var(--ok)" : tone === "err" ? "var(--danger)" : "var(--accent)";
-  const body = (
-    <div style={{ padding: 10, border: "1px solid var(--edge)", height: "100%" }}>
-      <div className="hud-label" style={{ color: "var(--text-dim)" }}>{label}</div>
-      <div style={{ fontFamily: "var(--font-display)", fontSize: 22, color }}>{value}</div>
+type Tile = { label: string; value: string; tone?: "ok" | "err" | "accent" };
+function PortfolioSection({
+  label, to, meta, tiles, empty,
+}: { label: string; to: string; meta: string; tiles: Tile[]; empty: string }) {
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+        <span className="hud-label" style={{ color: "var(--text-dim)", fontSize: 10 }}>
+          {label}
+          {meta ? <span style={{ color: "var(--text-muted)" }}> · {meta}</span> : null}
+        </span>
+        <Link to={to} style={{ color: "var(--accent)", textDecoration: "none", fontSize: 10 }}>view →</Link>
+      </div>
+      {tiles.length === 0 ? (
+        <div style={{ fontSize: 11, color: "var(--text-muted)", padding: "6px 2px" }}>{empty}</div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${tiles.length}, 1fr)`, gap: 4 }}>
+          {tiles.map((t) => {
+            const color = t.tone === "ok" ? "var(--ok)" : t.tone === "err" ? "var(--danger)" : t.tone === "accent" ? "var(--accent)" : "var(--text)";
+            return (
+              <div key={t.label} style={{ padding: "6px 8px", border: "1px solid var(--edge)", borderRadius: 2 }}>
+                <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 9 }}>{t.label}</div>
+                <div style={{ fontFamily: "var(--font-display)", fontSize: 15, color, fontVariantNumeric: "tabular-nums" }}>{t.value}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
-  return to ? <Link to={to} style={{ textDecoration: "none" }}>{body}</Link> : body;
 }

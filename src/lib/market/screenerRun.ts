@@ -17,9 +17,11 @@ export interface ScreenerRow {
   trade_date: string | null;
   company_name: string | null;
   sector: string | null;
+  sub_sector: string | null;
   industry: string | null;
   instrument_type?: string | null;
   market_cap: number | null; // ₹ Cr
+  data_provenance?: Record<string, unknown> | null;
   is_nifty500: boolean;
   in_nifty50: boolean;
   in_banknifty: boolean;
@@ -58,7 +60,9 @@ export interface ScreenerRow {
 
   // technicals (unified schema)
   volume: number | null;
+  vol_avg30: number | null;
   rel_volume: number | null;
+  vol_gt_avg30: boolean | null;
   ema_20: number | null;
   ema_50: number | null;
   ema_100: number | null;
@@ -115,9 +119,9 @@ async function fetchIndexMemberSet(indexKey: string): Promise<Set<string>> {
 // Explicit projection — drops ~15 unused fundamental_* duplicates and metadata
 // columns from the wire, ~30% smaller responses than the previous `select("*")`.
 const SCREENER_COLUMNS = [
-  "symbol","exchange","company_name","sector","industry","market_cap",
-  "is_nifty500","instrument_type","trade_date","close","previous_close","change_pct","volume",
-  "rel_volume","ema20","ema50","ema100","ema200","rsi14","macd","macd_signal",
+  "symbol","exchange","company_name","sector","sub_sector","industry","market_cap",
+  "is_nifty500","instrument_type","trade_date","close","previous_close","change_abs","change_pct","volume",
+  "rel_volume","vol_avg30","vol_gt_avg30","ema20","ema50","ema100","ema200","rsi14","macd","macd_signal",
   "macd_hist","adx14","atr14","atr_pct","bb_upper","bb_lower","bb_width",
   "bb_squeeze","high_52w","low_52w","pct_from_52w_high","above_ema200",
   "higher_lows","near_resistance","resistance_level","support_level",
@@ -126,8 +130,9 @@ const SCREENER_COLUMNS = [
   "roe","roce","debt_to_equity","current_ratio","quick_ratio","revenue_ttm_cr",
   "profit_ttm_cr","revenue_growth_yoy","profit_growth_yoy","eps_growth_yoy",
   "promoter_holding","fii_holding","dii_holding",
-  "ret_5d","ret_21d","ret_ytd","fno_enabled","sme",
+  "ret_5d","ret_21d","ret_ytd","fno_enabled","sme","data_provenance",
 ].join(",");
+
 
 async function fetchScreenerRows(): Promise<any[]> {
   const rows: any[] = [];
@@ -136,6 +141,7 @@ async function fetchScreenerRows(): Promise<any[]> {
       .from("market_screener_rows")
       .select(SCREENER_COLUMNS)
       .eq("is_active", true)
+      .eq("exchange", "NSE")
       .order("breakout_score", { ascending: false, nullsFirst: false })
       .order("symbol", { ascending: true })
       .range(from, from + 999);
@@ -156,11 +162,11 @@ function applyUniverseFilter(
   rows: any[],
   universeSet: Set<string> | "nifty500" | "fno" | "sme" | null,
 ): any[] {
-  if (universeSet === null) return rows;
-  if (universeSet === "nifty500") return rows.filter((r) => Boolean(r.is_nifty500));
-  if (universeSet === "fno")      return rows.filter((r) => Boolean(r.fno_enabled));
+  if (universeSet === null) return rows.filter((r) => r.instrument_type === "EQ");
+  if (universeSet === "nifty500") return rows.filter((r) => r.instrument_type === "EQ" && Boolean(r.is_nifty500));
+  if (universeSet === "fno")      return rows.filter((r) => r.instrument_type === "EQ" && Boolean(r.fno_enabled));
   if (universeSet === "sme")      return rows.filter((r) => Boolean(r.sme));
-  return rows.filter((r) => universeSet.has(r.symbol));
+  return rows.filter((r) => r.instrument_type === "EQ" && universeSet.has(r.symbol));
 }
 
 async function resolveUniverseFilter(
@@ -210,10 +216,12 @@ export function useScreenerData(universe: UniverseId, enabled = true) {
         exchange: s.exchange,
         trade_date: s.trade_date ?? null,
         sector:       s.sector ?? null,
+        sub_sector:   s.sub_sector ?? s.industry ?? s.sector ?? null,
         company_name: s.company_name ?? null,
         market_cap:   num(s.market_cap),
         is_nifty500:  Boolean(s.is_nifty500),
         industry:     s.industry ?? null,
+        data_provenance: s.data_provenance ?? null,
         in_nifty50:   idxSets.NIFTY50.has(s.symbol),
         in_banknifty: idxSets.BANKNIFTY.has(s.symbol),
         in_finnifty:  idxSets.FINNIFTY.has(s.symbol),
@@ -273,6 +281,14 @@ export function useScreenerData(universe: UniverseId, enabled = true) {
         // view uses `rsi14`, `adx14`, `atr14`, `ema20`..`ema200`
         volume:            num(s.volume),
         rel_volume:        num(s.rel_volume),
+        vol_avg30:         num(s.vol_avg30),
+        vol_gt_avg30:      (() => {
+          const vol = num(s.volume);
+          const avg = num(s.vol_avg30);
+          if (vol == null || avg == null || avg <= 0) return null;
+          return vol > avg;
+        })(),
+
         ema_20:            num(s.ema20 ?? s.ema_20),
         ema_50:            num(s.ema50 ?? s.ema_50),
         ema_100:           num(s.ema100 ?? s.ema_100),

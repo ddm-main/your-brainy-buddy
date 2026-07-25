@@ -6,6 +6,7 @@ import ErrorBoundary from "@/components/hud/ErrorBoundary";
 import { useMarketAutoSync } from "@/lib/market/useAutoSync";
 import { useRealtimeTicks } from "@/lib/market/useRealtimeTicks";
 import { KotakReconnectModal } from "@/components/market/KotakReconnectModal";
+import { useAccessStore } from "@/store/accessStore";
 
 const Dashboard = lazy(() => import("@/routes/market/Dashboard"));
 const Holdings = lazy(() => import("@/routes/market/Holdings"));
@@ -20,6 +21,7 @@ const IndexDetail = lazy(() => import("@/routes/market/IndexDetail"));
 const AutoTrade = lazy(() => import("@/routes/market/AutoTrade"));
 const PortfolioOverview = lazy(() => import("@/routes/market/PortfolioOverview"));
 const Orders = lazy(() => import("@/routes/market/Orders"));
+const GTT = lazy(() => import("@/routes/market/GTT"));
 
 
 type Sub = { to: string; label: string };
@@ -35,12 +37,13 @@ const GROUPS: Group[] = [
   { key: "screener", label: "Screener", to: "/market/screener",
     match: (p) => /^\/market\/screener/.test(p), subs: [] },
   { key: "portfolio", label: "Portfolio", to: "/market/portfolio",
-    match: (p) => /^\/market\/(portfolio|holdings|positions|orders)/.test(p),
+    match: (p) => /^\/market\/(portfolio|holdings|positions|orders|gtt)/.test(p),
     subs: [
       { to: "/market/portfolio", label: "Overview" },
       { to: "/market/holdings", label: "Holdings" },
       { to: "/market/positions", label: "Positions" },
       { to: "/market/orders", label: "Orders" },
+      { to: "/market/gtt", label: "GTT" },
     ] },
   { key: "autotrade", label: "AutoTrade", to: "/market/autotrade",
     match: (p) => /^\/market\/autotrade/.test(p), subs: [] },
@@ -82,7 +85,7 @@ function SubTabStrip({ subs, currentPath }: { subs: Sub[]; currentPath: string }
         return (
           <NavLink key={s.to} to={s.to} role="tab" aria-selected={active}
             tabIndex={active ? 0 : -1}
-            ref={(el) => (refs.current[i] = el)}
+            ref={(el) => { refs.current[i] = el; }}
             onKeyDown={(e) => onKey(e, i)}
             style={{
               ...tabBase, padding: "5px 10px",
@@ -98,17 +101,21 @@ function SubTabStrip({ subs, currentPath }: { subs: Sub[]; currentPath: string }
 
 export default function Market() {
   const loc = useLocation();
-  const activeGroup = GROUPS.find((g) => g.match(loc.pathname)) ?? GROUPS[0];
+  const isAdmin = useAccessStore((s) => s.role === "admin");
+  // Market → Config is per-user (broker connection); everyone sees it.
+  const groups = GROUPS;
+  const activeGroup = groups.find((g) => g.match(loc.pathname)) ?? groups[0];
   useEffect(() => { document.title = `Market · ${activeGroup.label}`; }, [activeGroup.key]);
   useMarketAutoSync();
   useRealtimeTicks();
+  void isAdmin;
 
 
   return (
     <div style={{ padding: 12, height: "100%", display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
       <KotakReconnectModal />
       <div role="tablist" aria-label="Market sections" style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-        {GROUPS.map((g) => {
+        {groups.map((g) => {
           const active = g.key === activeGroup.key;
           return (
             <NavLink key={g.key} to={g.to} end={g.to === "/market"} role="tab" aria-selected={active}
@@ -133,6 +140,7 @@ export default function Market() {
               <Route path="holdings" element={<Holdings />} />
               <Route path="positions" element={<Positions />} />
               <Route path="orders" element={<Orders />} />
+              <Route path="gtt" element={<GTT />} />
               <Route path="screener" element={<Screener />} />
               <Route path="analysis" element={<Navigate to="/market/screener" replace />} />
               <Route path="analysis/:symbol" element={<Analysis />} />

@@ -146,7 +146,23 @@ class Supervisor {
 
     if (!this.channel) {
       this.channel = svc.channel(`market-ticks-${session.userId}`, { config: { private: true } });
-      await this.channel.subscribe((status) => log("broadcast channel:", status));
+      await this.channel.subscribe((status) => {
+        log("broadcast channel:", status);
+        // Handshake so the UI can flip the chip to "push · kotak" immediately,
+        // without waiting for the first tick on a thin symbol.
+        if (status === "SUBSCRIBED") {
+          this.channel?.send({ type: "broadcast", event: "hello", payload: { relay: "kotak-ws", ts: Date.now() } })
+            .catch((e) => log("hello broadcast failed:", e?.message ?? e));
+        }
+      });
+      // Clients (Dashboard, screener, watchlist) broadcast the union of
+      // on-screen symbols on `subscribe`. We're already SCRIP_SUBSed to the
+      // full universe on connect, so we just re-emit hello to confirm the
+      // relay is up and the caller can expect push ticks.
+      this.channel.on("broadcast", { event: "subscribe" }, () => {
+        this.channel?.send({ type: "broadcast", event: "hello", payload: { relay: "kotak-ws", ts: Date.now() } })
+          .catch(() => { /* channel closing */ });
+      });
     }
 
     return new Promise((resolve, reject) => {

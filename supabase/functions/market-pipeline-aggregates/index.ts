@@ -6,14 +6,25 @@ import { istTradeDate, requireCronSecret } from "../_shared/market/cron.ts";
 import { classifyRegime, breakoutScore, preBreakoutScore } from "../_shared/market/scoring.ts";
 import type { IndicatorSnapshot } from "../_shared/market/indicators.ts";
 import { yahooChartRetry } from "../_shared/market/yahooClient.ts";
+import { getServiceProvider } from "../_shared/market/provider.ts";
 
 // Rebuild the scorer's input from a market_stock_scores row (joined with stocks).
+// v2 fix: `atrContracting` and `macdHistRising` used to be read from yesterday's
+// `score_components`, which is circular (score → components → tomorrow's score).
+// Derive them from raw indicator columns instead so today's score reflects
+// today's tape.
 function snapFromRow(r: any): IndicatorSnapshot {
+  // bb_width < 0.06 (~6% of price) is a reasonable "squeeze / contracting"
+  // proxy when a rolling bbWidth history isn't in the row.
+  const bbw = typeof r.bb_width === "number" ? r.bb_width : null;
+  const atrContracting = bbw != null ? bbw < 0.06 : false;
+  const macdHistRising = typeof r.macd_hist === "number" && r.macd_hist > 0;
   return {
     close: r.close ?? 0,
     changePct: r.change_pct,
     volume: r.volume ?? 0,
     volAvg20: r.vol_avg20,
+    volAvg30: r.vol_avg30 ?? null,
     relVolume: r.rel_volume,
     ema20: r.ema20,
     ema50: r.ema50,
@@ -30,7 +41,7 @@ function snapFromRow(r: any): IndicatorSnapshot {
     bbLower: r.bb_lower,
     bbWidth: r.bb_width,
     bbSqueeze: !!r.bb_squeeze,
-    atrContracting: !!(r.score_components?.prebreakout?.atr_contraction > 0),
+    atrContracting,
     high52w: r.high_52w,
     low52w: r.low_52w,
     pctFrom52wHigh: r.pct_from_52w_high,
@@ -40,7 +51,16 @@ function snapFromRow(r: any): IndicatorSnapshot {
     support: r.support_level,
     resistance: r.resistance_level,
     nearResistance: !!r.near_resistance,
-    macdHistRising: !!(r.score_components?.breakout?.macd >= 10),
+    macdHistRising,
+    rollingHigh20: r.rolling_high_20 ?? null,
+    rollingHigh55: r.rolling_high_55 ?? null,
+    obvSlope20: r.obv_slope_20 ?? null,
+    baseTightness: r.base_tightness ?? null,
+    baseDepthPct: r.base_depth_pct ?? null,
+    baseDurationDays: r.base_duration_days ?? null,
+    rsPercentile: r.rs_percentile ?? null,
+    closeInRangePct: r.close_in_range_pct ?? null,
+    breakoutFreshnessDays: r.breakout_freshness_days ?? null,
     ema20Series: [],
     ema50Series: [],
     ema200Series: [],
@@ -61,19 +81,31 @@ Deno.serve(async (req) => {
 
     const today = istTradeDate();
 
-    // Pull all scored rows joined with their stock metadata (paged).
-    // Replaces the removed `market_data` monolith — reads live in
-    // `market_stock_scores`, sector/is_active live in `market_stocks`.
-    const rows: any[] = [];
+    // Pull all scored rows, then join sector/is_active from market_stocks
+    // in-memory (no FK between the two tables, so PostgREST embeds fail).
+    const stockMeta = new Map<string, { sector: string | null; is_active: boolean }>();
     for (let from = 0; ; from += 1000) {
-      const { data, error } = await svc.from("market_stock_scores")
-        .select("*, market_stocks!inner(sector,is_active)")
-        .not("trade_date", "is", null)
-        .eq("market_stocks.is_active", true)
+      const { data, error } = await svc.from("market_stocks")
+        .select("symbol,exchange,sector,is_active")
         .range(from, from + 999);
       if (error) return errorResponse(req, error.message, 500);
       for (const d of data ?? []) {
-        rows.push({ ...d, sector: d.sector ?? d.market_stocks?.sector ?? null });
+        stockMeta.set(`${d.symbol}|${d.exchange}`, { sector: d.sector ?? null, is_active: !!d.is_active });
+      }
+      if (!data || data.length < 1000) break;
+    }
+
+    const rows: any[] = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await svc.from("market_stock_scores")
+        .select("*")
+        .not("trade_date", "is", null)
+        .range(from, from + 999);
+      if (error) return errorResponse(req, error.message, 500);
+      for (const d of data ?? []) {
+        const meta = stockMeta.get(`${d.symbol}|${d.exchange}`);
+        if (!meta || !meta.is_active) continue;
+        rows.push({ ...d, sector: d.sector ?? meta.sector ?? null });
       }
       if (!data || data.length < 1000) break;
     }
@@ -92,12 +124,36 @@ Deno.serve(async (req) => {
     const avgRsi = rsiVals.length ? rsiVals.reduce((a: number, b: number) => a + b, 0) / rsiVals.length : null;
     const regime = classifyRegime(pctAboveEma50, avgRsi);
 
-    // NIFTY context (also used for relative strength)
+    // NIFTY context (also used for relative strength).
+    // Prefer Kotak Neo daily candles when any user has an active session
+    // (getServiceProvider picks the most-recently-updated connected Kotak
+    // row). Falls back to Yahoo when no Kotak session is available — this
+    // is a cron path with no user context, so Kotak may legitimately not
+    // be reachable and Yahoo's daily NIFTY close is fine for breadth.
     let niftyClose: number | null = null;
     let niftyChangePct: number | null = null;
     let niftyReturn55: number | null = null;
     try {
-      const nifty = await yahooChartRetry("^NSEI", "6mo", "1d");
+      const { provider } = await getServiceProvider(svc);
+      let nifty: Array<{ close: number }> = [];
+      let providerErr: string | null = null;
+      try {
+        nifty = await provider.getOHLCV("NIFTY", "NSE", "6mo", "1d");
+      } catch (e) {
+        providerErr = e instanceof Error ? e.message : String(e);
+      }
+      if (nifty.length < 2) {
+        // Kotak branch failed or returned nothing — log the true origin
+        // (provider name) before falling back to Yahoo so provenance is visible.
+        await svc.from("market_provider_health").insert({
+          provider: (provider as any).name ?? "unknown",
+          endpoint: "market-pipeline-aggregates",
+          ok: false,
+          latency_ms: 0,
+          error: (providerErr ?? "empty candles from primary — falling back to yahoo").slice(0, 500),
+        }).then(() => {}, () => {});
+        nifty = await yahooChartRetry("^NSEI", "6mo", "1d");
+      }
       const last = nifty[nifty.length - 1];
       const prev = nifty[nifty.length - 2];
       niftyClose = last?.close ?? null;
@@ -105,6 +161,7 @@ Deno.serve(async (req) => {
       const base = nifty[Math.max(0, nifty.length - 56)];
       niftyReturn55 = last && base ? ((last.close - base.close) / base.close) * 100 : null;
     } catch { /* breadth still useful without NIFTY */ }
+
 
     await svc.from("market_breadth_daily").upsert({
       trade_date: today,
@@ -151,6 +208,22 @@ Deno.serve(async (req) => {
     }
     const nSectors = sectorStats.length || 1;
 
+    // ---- RS percentile ranks over universe (based on ema50-anchored return) ----
+    const rsInputs: { key: string; rs: number }[] = [];
+    for (const r of rows) {
+      if (r.close != null && r.ema50 != null && r.ema50 !== 0) {
+        const base = r.ema100 ?? r.ema50;
+        const stockTrendPct = ((r.close - base) / base) * 100;
+        rsInputs.push({ key: `${r.symbol}|${r.exchange}`, rs: stockTrendPct });
+      }
+    }
+    rsInputs.sort((a, b) => a.rs - b.rs);
+    const rsPct = new Map<string, number>();
+    const n = rsInputs.length;
+    rsInputs.forEach((it, idx) => {
+      rsPct.set(it.key, n > 1 ? Math.round((idx / (n - 1)) * 1000) / 10 : 50);
+    });
+
     // ---- Final scoring with market context ----
     let updated = 0;
     for (let i = 0; i < rows.length; i += 50) {
@@ -164,7 +237,8 @@ Deno.serve(async (req) => {
           const stockTrendPct = ((r.close - base) / base) * 100;
           relStrength = stockTrendPct - (niftyClose != null && niftyReturn55 != null ? niftyReturn55 * 0.5 : 0);
         }
-        const snap = snapFromRow(r);
+        const rsPercentile = rsPct.get(`${r.symbol}|${r.exchange}`) ?? null;
+        const snap = { ...snapFromRow(r), rsPercentile };
         const ctx = { sectorStrength, regime, relStrengthNifty: relStrength, deliveryPct: null };
         const bs = breakoutScore(snap, ctx);
         const ps = preBreakoutScore(snap, ctx);
@@ -173,6 +247,7 @@ Deno.serve(async (req) => {
         const { error } = await svc.from("market_stock_scores").update({
           sector_strength: Math.round(sectorStrength * 100) / 100,
           rel_strength_nifty: relStrength != null ? Math.round(relStrength * 100) / 100 : null,
+          rs_percentile: rsPercentile,
           breakout_score: bs.score,
           prebreakout_score: ps.score,
           score_components: scoreComponents,

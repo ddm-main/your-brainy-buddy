@@ -33,6 +33,11 @@ export type ApplicabilityScope = "all" | "eq" | "eq_profit" | "eq_profit_pe" | "
 // 3 days covers the normal Fri→Mon weekend gap plus one skipped Yahoo session
 // while still excluding stale-forever rows the pipeline never re-fetches.
 export const TECH_FRESHNESS_LAG_DAYS = 3;
+const EXACT_SESSION_FILTERS = new Set(["ltp", "change_pct", "volume", "vol_gt_avg30", "rel_volume"]);
+
+export function isEquityRow(row: { instrument_type?: string | null }): boolean {
+  return row.instrument_type === "EQ";
+}
 
 // market-pipeline-eod stamps a symbol's sync cursor even when the fetch
 // fails (so one bad symbol can't wedge the whole pipeline) — the side effect
@@ -46,8 +51,7 @@ export function rowIsApplicable(row: Record<string, any>, scope: ApplicabilitySc
   // Unknown instrument_type is treated as "not an equity" — safer than assuming EQ.
   // Only the `all` scope keeps such rows; every equity-scoped filter/coverage check
   // excludes them until the pipeline classifies them.
-  const type = row.instrument_type;
-  const isEq = type === "EQ";
+  const isEq = isEquityRow(row);
   switch (scope) {
     case "all":       return true;
     case "eq":        return isEq;
@@ -126,7 +130,7 @@ export const FILTERS: FilterDef[] = [
   { id: "sector",             label: "Sector",            category: "basics",     kind: "enum", scope: "eq" },
   { id: "industry",           label: "Industry",          category: "basics",     kind: "enum", scope: "eq" },
   { id: "ltp",                label: "Price",             category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "tech" },
-  { id: "volume",             label: "Volume",            category: "basics",     kind: "number", min: 0, max: 1_000_000, step: 100_000, scope: "tech", maxIsOpenEnded: true },
+  { id: "volume",             label: "Volume (shares)",   category: "basics",     kind: "number", min: 0, max: 100_000_000, step: 100_000, scope: "tech" },
   { id: "pct_from_52w_high",  label: "% from 52w High",   category: "basics",     kind: "number", unit: "%", min: -100, max: 20, step: 1, scope: "tech" },
 
   // Valuation — most require positive earnings to be meaningful.
@@ -175,6 +179,7 @@ export const FILTERS: FilterDef[] = [
   // Momentum & Volume
   { id: "change_pct",         label: "1D Return %",       category: "momentum",   kind: "number", unit: "%", min: -20, max: 20, step: 0.1, scope: "tech", valueKey: "change_pct_raw" },
   { id: "rel_volume",         label: "Rel Volume",        category: "momentum",   kind: "number", unit: "x", min: 0, max: 20, step: 0.1, scope: "tech" },
+  { id: "vol_gt_avg30",       label: "Volume > 30D Avg Volume", category: "momentum", kind: "boolean", scope: "tech" },
   { id: "rel_strength_nifty", label: "RS vs NIFTY",       category: "momentum",   kind: "number", unit: "%", min: -50, max: 50, step: 1, scope: "tech" },
   { id: "sector_strength",    label: "Sector Strength",   category: "momentum",   kind: "number", min: 0, max: 1, step: 0.05, scope: "tech" },
   { id: "ret_5d",             label: "5D Return",         category: "momentum",   kind: "number", unit: "%", min: -50, max: 50, step: 0.5, scope: "tech" },
@@ -247,7 +252,7 @@ export function filterMatches(row: Record<string, any>, af: ActiveFilter, latest
   if (def.kind === "enum" && (!af.values || af.values.length === 0)) return true;
   const minNum = af.min === undefined || af.min === "" || Number.isNaN(Number(af.min)) ? null : Number(af.min);
   const maxNum = af.max === undefined || af.max === "" || Number.isNaN(Number(af.max)) ? null : Number(af.max);
-  const effectiveMaxNum = def.kind === "number" && def.maxIsOpenEnded && maxNum !== null && def.max !== undefined && maxNum >= def.max
+  const effectiveMaxNum = def.kind === "number" && def.maxIsOpenEnded && maxNum !== null && def.max !== undefined && maxNum === def.max
     ? null
     : maxNum;
   if (def.kind === "number" && minNum === null && effectiveMaxNum === null) return true;
@@ -255,7 +260,14 @@ export function filterMatches(row: Record<string, any>, af: ActiveFilter, latest
   // untouched so that, e.g., an ETF is not dropped by a PE filter. Technical filters
   // are strict: if a row has no technical row/date, it cannot prove it matches.
   const scope: ApplicabilityScope = def.scope ?? (def.fundamental ? "eq" : "all");
-  if (!rowIsApplicable(row, scope, latestTradeDate)) return scope !== "tech";
+  if (scope === "tech" && latestTradeDate != null && EXACT_SESSION_FILTERS.has(filterId) && row.trade_date !== latestTradeDate) {
+    return false;
+  }
+  if (!rowIsApplicable(row, scope, latestTradeDate)) {
+    // Numeric fundamentals may legitimately be N/A for instruments outside
+    // their scope. Enum and boolean predicates, however, must prove a match.
+    return def.kind === "number" && scope !== "tech";
+  }
   const v = def.valueKey ? (row[def.valueKey] ?? row[filterId]) : row[filterId];
   if (def.kind === "boolean") {
     return Boolean(v) === af.bool;

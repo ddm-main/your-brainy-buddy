@@ -1,3 +1,4 @@
+// Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
 // market-fii-dii-sync — daily 18:30 IST. Fetches NSE provisional FII/DII cash
 // activity and upserts into fii_dii_activity keyed by (activity_date, segment).
 import { corsFor, preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
