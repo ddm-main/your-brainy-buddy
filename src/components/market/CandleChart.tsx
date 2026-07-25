@@ -218,7 +218,15 @@ export function CandleChart({
       timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "2-digit",
       hour: "2-digit", minute: "2-digit", hour12: false,
     });
-    const isIntraday = interval !== "1D" && interval !== "1W" && interval !== "1M";
+    // Detect intraday by the median gap between the first few numeric bars
+    // (< 1 day = intraday). Falls back to intraday if unknown.
+    const _nums = data.map((c) => c.time).filter((t): t is number => typeof t === "number").slice(0, 8);
+    let _medianGap = 0;
+    if (_nums.length >= 2) {
+      const gaps = _nums.slice(1).map((t, i) => t - _nums[i]).sort((a, b) => a - b);
+      _medianGap = gaps[Math.floor(gaps.length / 2)] || 0;
+    }
+    const isIntraday = _medianGap > 0 ? _medianGap < 86_400 : true;
     const fmtAxis = (t: any) => {
       if (typeof t !== "number") return String(t);
       const d = new Date(t * 1000);
