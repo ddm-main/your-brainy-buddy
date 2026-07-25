@@ -178,6 +178,13 @@ export function WatchlistPanel({
 
   return (
     <HudPanel flow title="Watchlist" actions={headerActions}>
+      {items.length > 100 && (
+        <div style={{ padding: "4px 8px", marginBottom: 6, fontSize: 11,
+          border: "1px solid var(--warn, #d97706)", color: "var(--warn, #d97706)",
+          background: "rgba(217,119,6,0.08)", borderRadius: 2 }}>
+          Live ticks are capped at 100 symbols · {items.length - 100} symbol{items.length - 100 === 1 ? "" : "s"} will fall back to REST polling.
+        </div>
+      )}
       {/* Tabs */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 8, borderBottom: "1px solid var(--edge)", paddingBottom: 6 }}>
         {lists.map((l) => {
