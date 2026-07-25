@@ -528,15 +528,22 @@ export async function kotakModifyOrder(
 }
 
 // Orders + trades (today).
+// Kotak Neo v2 exposes the order/trade books under the versioned `Orders/2.0`
+// prefix and requires the per-session hsServerId as an `sId` query param —
+// hitting `/quick/user/orders` bare returns "404 page not found".
+function sIdQuery(s: KotakSettings): string {
+  return s.hs_server_id ? `?sId=${encodeURIComponent(s.hs_server_id)}` : "";
+}
+
 export async function kotakOrders(s: KotakSettings): Promise<any[]> {
   const h = await sessionHeaders(s);
-  const j = await kotakFetch(`${apiBase(s)}/quick/user/orders`, { headers: { ...h, accept: "application/json" } });
+  const j = await kotakFetch(`${apiBase(s)}/Orders/2.0/quick/user/orders${sIdQuery(s)}`, { headers: { ...h, accept: "application/json" } });
   return j?.data ?? j?.orders ?? [];
 }
 
 export async function kotakTrades(s: KotakSettings): Promise<any[]> {
   const h = await sessionHeaders(s);
-  const j = await kotakFetch(`${apiBase(s)}/quick/user/trades`, { headers: { ...h, accept: "application/json" } });
+  const j = await kotakFetch(`${apiBase(s)}/Orders/2.0/quick/user/trades${sIdQuery(s)}`, { headers: { ...h, accept: "application/json" } });
   return j?.data ?? j?.trades ?? [];
 }
 
