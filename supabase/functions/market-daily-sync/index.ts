@@ -80,7 +80,8 @@ Deno.serve(async (req) => {
     iterations: number; last_response: unknown; error?: string; duration_ms: number;
   }> = [];
 
-  try {
+  const runChain = async () => {
+   try {
     for (const step of CHAIN) {
       const stepStart = Date.now();
       let iterations = 0;
