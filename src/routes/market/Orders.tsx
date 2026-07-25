@@ -1,8 +1,9 @@
 // Orders — today's broker order book + trades. Cancel/modify pending orders.
 import { useMemo, useState } from "react";
 import { HudPanel } from "@/components/hud/HudPanel";
-import { Btn } from "@/components/hud/HudControls";
-import { RefreshCw, X } from "lucide-react";
+import { Btn, inputStyle, labelStyle } from "@/components/hud/HudControls";
+import { HudModal } from "@/components/hud/HudModal";
+import { RefreshCw, X, Pencil } from "lucide-react";
 import { useBrokerOrders, useBrokerTrades, useMarketOrderMutations, type BrokerOrder } from "@/lib/market/orderHooks";
 import { OrderTicket } from "@/components/market/OrderTicket";
 import { useUi } from "@/store/uiStore";
