@@ -32,6 +32,9 @@ const CHAIN: Array<{ fn: StepFn; label: string; chunked: boolean }> = [
 
 const MAX_DRAIN_ITERATIONS = 40;
 
+// deno-lint-ignore no-explicit-any
+declare const EdgeRuntime: any;
+
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
   // Two accepted callers:
@@ -77,7 +80,8 @@ Deno.serve(async (req) => {
     iterations: number; last_response: unknown; error?: string; duration_ms: number;
   }> = [];
 
-  try {
+  const runChain = async () => {
+   try {
     for (const step of CHAIN) {
       const stepStart = Date.now();
       let iterations = 0;
@@ -147,12 +151,25 @@ Deno.serve(async (req) => {
       finished_at: new Date().toISOString(),
     });
 
-    return jsonResponse(req, {
-      ok: failedSteps.length === 0,
-      duration_ms: Date.now() - startedAt,
-      steps: summary,
-    });
-  } catch (e) {
-    return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
+   } catch (e) {
+     await svc.from("market_ingestion_runs").insert({
+       source: "daily_sync_orchestrator", stage: "summary", status: "failed",
+       rows_ingested: 0, duration_ms: Date.now() - startedAt,
+       metadata: { error: e instanceof Error ? e.message : String(e), steps: summary },
+       finished_at: new Date().toISOString(),
+     });
+   }
+  };
+
+  // Run the chain in the background — the orchestrator's total wall time
+  // (fundamentals + EOD drains) exceeds the per-request CPU/wall budget and
+  // triggers WORKER_RESOURCE_LIMIT. Return immediately and let waitUntil keep
+  // the worker alive for the chain. Progress is visible in market_ingestion_runs.
+  if (typeof EdgeRuntime !== "undefined" && EdgeRuntime?.waitUntil) {
+    EdgeRuntime.waitUntil(runChain());
+  } else {
+    // Local dev fallback — don't await, but catch to avoid unhandled rejections.
+    runChain().catch((e) => console.error("[daily-sync] background error", e));
   }
+  return jsonResponse(req, { ok: true, started: true, mode: "background" });
 });
