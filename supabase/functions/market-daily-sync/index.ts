@@ -32,6 +32,9 @@ const CHAIN: Array<{ fn: StepFn; label: string; chunked: boolean }> = [
 
 const MAX_DRAIN_ITERATIONS = 40;
 
+// deno-lint-ignore no-explicit-any
+declare const EdgeRuntime: any;
+
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
   // Two accepted callers:
