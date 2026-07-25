@@ -161,6 +161,19 @@ export function OrderTicket({
             <input style={inputStyle} type="number" step="0.05" value={trigger} onChange={(e) => setTrigger(e.target.value)} />
           </label>
         )}
+        {tickHint && (
+          <div className="hud-label" style={{ color: "var(--warn, #d97706)" }}>{tickHint}</div>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          <label>
+            <span style={labelStyle}>Disclosed qty (optional)</span>
+            <input style={inputStyle} type="number" min={0} value={disclosedQty} onChange={(e) => setDisclosedQty(e.target.value)} placeholder="0" />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 18, fontSize: 12 }}>
+            <input type="checkbox" checked={amo} onChange={(e) => setAmo(e.target.checked)} />
+            AMO (after-market)
+          </label>
+        </div>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: 8, border: "1px solid var(--edge)", borderRadius: 3 }}>
           <div>
             <div className="hud-label" style={{ color: "var(--text-dim)" }}>Notional</div>
