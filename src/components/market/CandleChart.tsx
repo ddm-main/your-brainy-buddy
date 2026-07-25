@@ -204,6 +204,40 @@ export function CandleChart({
     });
     const data = cleaned;
 
+    // NSE session is 09:15–15:30 IST. Lightweight-charts defaults to UTC, so
+    // without an IST formatter the market opens at "03:45" on every chart.
+    // Format epoch seconds through Asia/Kolkata for both axis ticks and the
+    // crosshair label; underlying data stays in UTC.
+    const istTime = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+    const istDate = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "2-digit",
+    });
+    const istDateTime = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "2-digit",
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+    // Detect intraday by the median gap between the first few numeric bars
+    // (< 1 day = intraday). Falls back to intraday if unknown.
+    const _nums = data.map((c) => c.time).filter((t): t is number => typeof t === "number").slice(0, 8);
+    let _medianGap = 0;
+    if (_nums.length >= 2) {
+      const gaps = _nums.slice(1).map((t, i) => t - _nums[i]).sort((a, b) => a - b);
+      _medianGap = gaps[Math.floor(gaps.length / 2)] || 0;
+    }
+    const isIntraday = _medianGap > 0 ? _medianGap < 86_400 : true;
+    const fmtAxis = (t: any) => {
+      if (typeof t !== "number") return String(t);
+      const d = new Date(t * 1000);
+      return isIntraday ? istTime.format(d) : istDate.format(d);
+    };
+    const fmtCrosshair = (t: any) => {
+      if (typeof t !== "number") return String(t);
+      const d = new Date(t * 1000);
+      return isIntraday ? istDateTime.format(d) : istDate.format(d);
+    };
+
     const chart = createChart(el, {
       height: fill ? el.clientHeight || height : height,
       width: el.clientWidth || 600,
@@ -214,6 +248,9 @@ export function CandleChart({
         fontSize: 11,
         attributionLogo: false,
         panes: { separatorColor: "rgba(53,214,237,0.15)", separatorHoverColor: "rgba(53,214,237,0.35)", enableResize: true },
+      },
+      localization: {
+        timeFormatter: fmtCrosshair,
       },
       grid: {
         vertLines: { color: "rgba(53,214,237,0.06)", visible: sGrid },
@@ -226,6 +263,7 @@ export function CandleChart({
       timeScale: {
         borderColor: "rgba(53,214,237,0.15)",
         timeVisible: data.some((c) => typeof c.time === "number"),
+        tickMarkFormatter: fmtAxis,
         // "Session breaks" hides the non-trading gaps by tightly packing bars
         // — LWC exposes this via `shiftVisibleRangeOnNewBar` + `barSpacing`;
         // the closest built-in is disabling `ticksVisible` on off-hours, but
