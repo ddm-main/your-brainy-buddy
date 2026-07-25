@@ -48,7 +48,6 @@ Deno.serve(async (req) => {
       const expectedStr = expected.toISOString().slice(0, 10);
       const latestCached = rows.length ? String((rows[rows.length - 1] as any).trade_date).slice(0, 10) : "";
       const stale = latestCached < expectedStr;
-      let providerName: "kotak_neo" | "yahoo" = "yahoo";
       if (rows.length < 100 || stale) {
         const range = rows.length < 100 ? "2y" : "30d";
         try {
@@ -56,10 +55,8 @@ Deno.serve(async (req) => {
           let candles;
           try {
             candles = await provider.getOHLCV(symbol, exchange, range, "1d");
-            providerName = provider.name === "kotak_neo" ? "kotak_neo" : "yahoo";
           } catch {
             candles = await yahooChartRetry(toYahooSymbol(symbol, exchange), range, "1d");
-            providerName = "yahoo";
           }
           const upserts = candles.map((c) => ({
             symbol, exchange,
@@ -97,7 +94,7 @@ Deno.serve(async (req) => {
       const emas: Record<string, Array<{ t: number; v: number | null }>> = {};
       for (const o of overlays ?? []) emas[o.indicator] = o.value;
 
-      return jsonResponse(req, { candles, emas, timeframe, provider: providerName });
+      return jsonResponse(req, { candles, emas, timeframe });
     }
 
     const cfg = INTRADAY[timeframe];
@@ -108,21 +105,18 @@ Deno.serve(async (req) => {
     // collided in one (symbol,exchange,ts) keyspace and reads returned a mix.
     // The client already caches responses for 5 minutes (react-query staleTime).
     let raw;
-    let providerName: "kotak_neo" | "yahoo" = "yahoo";
     try {
       const { provider } = await getActiveProvider(svc, auth.userId);
       raw = await provider.getOHLCV(symbol, exchange, cfg.range, cfg.interval);
-      providerName = provider.name === "kotak_neo" ? "kotak_neo" : "yahoo";
     } catch {
       raw = await yahooChartRetry(toYahooSymbol(symbol, exchange), cfg.range, cfg.interval);
-      providerName = "yahoo";
     }
     const candles = raw.map((c) => ({
       time: c.time,
       open: c.open, high: c.high, low: c.low, close: c.close,
       volume: c.volume ?? 0,
     }));
-    return jsonResponse(req, { candles, emas: {}, timeframe, provider: providerName });
+    return jsonResponse(req, { candles, emas: {}, timeframe });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 502);
   }

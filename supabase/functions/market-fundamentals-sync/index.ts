@@ -1,8 +1,5 @@
-// Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
 // market-fundamentals-sync — nightly cron. Pulls Yahoo quoteSummary for every
 // active in-universe stock (paged) and upserts typed columns into market_fundamentals.
-// Yahoo-only: Kotak Neo doesn't expose fundamentals; nothing to prefer.
-
 import { preflight, jsonResponse, errorResponse, svcClient, SHARED_CACHE_USER_ID } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
 import { toYahooSymbol } from "../_shared/market/yahooClient.ts";

@@ -1,1 +1,0 @@
-ALTER TABLE public.market_stock_scores DROP COLUMN IF EXISTS obv_slope20;

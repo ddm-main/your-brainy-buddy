@@ -59,14 +59,6 @@ export function IndicatorSettingsModal({
                       value={study.params[p.key]}
                       min={p.min} max={p.max} step={p.step}
                       onChange={(e) => { const v = Number(e.target.value); if (Number.isFinite(v)) setParam(p.key, v); }}
-                      onBlur={(e) => {
-                        const raw = Number(e.target.value);
-                        if (!Number.isFinite(raw)) { setParam(p.key, p.min); return; }
-                        const clamped = Math.min(p.max, Math.max(p.min, raw));
-                        // Snap to step
-                        const snapped = p.step >= 1 ? Math.round(clamped) : Math.round(clamped / p.step) * p.step;
-                        setParam(p.key, snapped);
-                      }}
                     />
                   </label>
                 ))}

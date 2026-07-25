@@ -20,24 +20,7 @@ interface ScripRow {
   instrument_type: string | null;
   yahoo_symbol: string;
   is_active: boolean;
-  kotak_segment: string;
 }
-
-// Aliases mapping Kotak index scrip names (canonicalized to alphanum-uppercase)
-// to our internal Yahoo-style index symbols. Extend as needed.
-const INDEX_ALIASES: Record<string, { symbol: string; yahoo_symbol: string; exchange: "NSE" | "BSE" }> = {
-  NIFTY50:            { symbol: "^NSEI",               yahoo_symbol: "^NSEI",               exchange: "NSE" },
-  NIFTY:              { symbol: "^NSEI",               yahoo_symbol: "^NSEI",               exchange: "NSE" },
-  NIFTYBANK:          { symbol: "^NSEBANK",            yahoo_symbol: "^NSEBANK",            exchange: "NSE" },
-  BANKNIFTY:          { symbol: "^NSEBANK",            yahoo_symbol: "^NSEBANK",            exchange: "NSE" },
-  INDIAVIX:           { symbol: "^INDIAVIX",           yahoo_symbol: "^INDIAVIX",           exchange: "NSE" },
-  NIFTYMIDCAP100:     { symbol: "NIFTY_MIDCAP_100.NS", yahoo_symbol: "NIFTY_MIDCAP_100.NS", exchange: "NSE" },
-  NIFTYSMLCAP100:     { symbol: "^CNXSC",              yahoo_symbol: "^CNXSC",              exchange: "NSE" },
-  NIFTYSMALLCAP100:   { symbol: "^CNXSC",              yahoo_symbol: "^CNXSC",              exchange: "NSE" },
-  SENSEX:             { symbol: "^BSESN",              yahoo_symbol: "^BSESN",              exchange: "BSE" },
-};
-
-const canon = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
 
 async function* lines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
   const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
@@ -107,66 +90,11 @@ async function syncScripFile(
       instrument_type: cells[col["pInstType"]]?.trim() || null,
       yahoo_symbol: `${symbol}${yahooSuffix}`,
       is_active: true,
-      kotak_segment: exchange === "BSE" ? "bse_cm" : "nse_cm",
     });
     if (batch.length >= 500) await flush();
   }
   await flush();
   return { parsed, upserted };
-}
-
-// Ingest a Kotak *_indices scrip master (nse_indices / bse_indices) and map
-// known index instruments to our internal Yahoo-style symbols so the price
-// provider can resolve indices to real Kotak tokens instead of Yahoo.
-async function syncIndicesFile(
-  svc: SupabaseClient,
-  url: string,
-  segment: "nse_indices" | "bse_indices",
-): Promise<{ parsed: number; upserted: number; mapped: string[] }> {
-  const r = await fetch(url);
-  if (!r.ok || !r.body) throw new Error(`${segment} scrip master fetch failed: HTTP ${r.status}`);
-
-  let header: string[] | null = null;
-  let col: Record<string, number> = {};
-  let parsed = 0;
-  let upserted = 0;
-  const mapped: string[] = [];
-
-  for await (const line of lines(r.body)) {
-    if (!line.trim()) continue;
-    const cells = line.split(",");
-    if (!header) {
-      header = cells.map((c) => c.trim());
-      col = Object.fromEntries(header.map((h, i) => [h, i]));
-      continue;
-    }
-    parsed++;
-    const trd  = cells[col["pTrdSymbol"] ?? -1]?.trim() ?? "";
-    const name = cells[col["pSymbolName"] ?? -1]?.trim() ?? "";
-    const desc = cells[col["pDesc"] ?? -1]?.trim() ?? "";
-    const token = cells[col["pSymbol"] ?? -1]?.trim();
-    if (!token) continue;
-    const alias =
-      INDEX_ALIASES[canon(trd)] ||
-      INDEX_ALIASES[canon(name)] ||
-      INDEX_ALIASES[canon(desc)];
-    if (!alias) continue;
-    const { error } = await svc.from("market_stocks").upsert({
-      symbol: alias.symbol,
-      exchange: alias.exchange,
-      token,
-      company_name: name || desc || null,
-      instrument_type: "INDEX",
-      yahoo_symbol: alias.yahoo_symbol,
-      is_active: true,
-      kotak_segment: segment,
-    }, { onConflict: "symbol,exchange" });
-    if (!error) {
-      upserted++;
-      mapped.push(`${alias.exchange}:${alias.symbol}`);
-    }
-  }
-  return { parsed, upserted, mapped };
 }
 
 Deno.serve(async (req) => {
@@ -194,9 +122,6 @@ Deno.serve(async (req) => {
     let bseParsed = 0;
     let bseUpserted = 0;
     let bseError: string | null = null;
-    let indicesUpserted = 0;
-    let indicesMapped: string[] = [];
-    let indicesError: string | null = null;
 
     if (settings) {
       const paths = await kotakScripFilePaths(settings);
@@ -221,22 +146,6 @@ Deno.serve(async (req) => {
         }
       } catch (e) {
         bseError = e instanceof Error ? e.message : String(e);
-      }
-
-      // Indices — best-effort. Ingest known broad indices (Nifty 50, Bank Nifty,
-      // India VIX, Nifty Midcap 100, Sensex, ...) so the price provider can
-      // resolve NSE:^NSEI etc. to real Kotak tokens on segment nse_indices /
-      // bse_indices instead of falling back to Yahoo (~15m delayed).
-      try {
-        const idxFiles = paths.filter((p) => /(nse_indices|bse_indices)/i.test(p) && p.endsWith(".csv"));
-        for (const path of idxFiles) {
-          const seg = /bse_indices/i.test(path) ? "bse_indices" : "nse_indices";
-          const res = await syncIndicesFile(svc, path, seg);
-          indicesUpserted += res.upserted;
-          indicesMapped.push(...res.mapped);
-        }
-      } catch (e) {
-        indicesError = e instanceof Error ? e.message : String(e);
       }
     }
 
@@ -284,9 +193,6 @@ Deno.serve(async (req) => {
       bse_scrips_parsed: bseParsed,
       bse_scrips_upserted: bseUpserted,
       bse_error: bseError,
-      indices_upserted: indicesUpserted,
-      indices_mapped: indicesMapped,
-      indices_error: indicesError,
       universe_size: universe.length,
       nifty500_source: n500.length > 50 ? "nse_archives" : "fallback_static",
       kotak_master_used: !!settings,

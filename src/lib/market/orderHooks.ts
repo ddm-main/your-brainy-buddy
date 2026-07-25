@@ -12,38 +12,9 @@ export interface FundsRow {
   used_margin: number | null;
   collateral: number | null;
   payin_amount: number | null;
-  // Extended breakdown (edge-function surfaces from payload.extended).
-  cash_balance?: number | null;
-  payout_amount?: number | null;
-  span_margin?: number | null;
-  exposure_margin?: number | null;
-  realized_mtm?: number | null;
-  unrealized_mtm?: number | null;
   synced_at: string;
 }
-export type FundsReasonCode = "not_connected" | "session_expired" | "rate_limited" | "upstream_down" | "unknown";
-export interface FundsResponse {
-  funds: FundsRow | null;
-  source: string;
-  reason?: string;
-  reason_code?: FundsReasonCode;
-  note?: string;
-  not_connected?: boolean;
-  stale_since?: string | null;
-  retry_after?: number;
-  retry_after_at?: string | null;
-  /** @deprecated superseded by `reason` */
-  error?: string;
-}
-
-function fundsRefetchInterval(data: FundsResponse | undefined): number | false {
-  const retryAt = data?.retry_after_at ? new Date(data.retry_after_at).getTime() : 0;
-  if (Number.isFinite(retryAt) && retryAt > Date.now()) {
-    return Math.max(1_000, retryAt - Date.now() + 1_000);
-  }
-  return marketOpen() ? 60_000 : 5 * 60_000;
-}
-
+export interface FundsResponse { funds: FundsRow | null; source: string; error?: string; note?: string }
 
 export interface BrokerOrder {
   order_id: string; symbol: string; exchange: string; side: "BUY" | "SELL";
@@ -74,19 +45,9 @@ export function useFunds() {
       if (!session.session) return { funds: null, source: "unauthenticated" };
       return callMarketFn<FundsResponse>("market-funds");
     },
-    refetchInterval: (q) => fundsRefetchInterval(q.state.data as FundsResponse | undefined),
-    staleTime: 60_000,
-    retry: false,
-    // Focus refetch bypassed the cooldown gate — a tab switch during an
-    // active retry window would burn another Kotak call and reset the
-    // cooldown. Only refetch on focus when there's no active cooldown.
-    refetchOnWindowFocus: (q) => {
-      const d = q.state.data as FundsResponse | undefined;
-      const retryAt = d?.retry_after_at ? new Date(d.retry_after_at).getTime() : 0;
-      return !(Number.isFinite(retryAt) && retryAt > Date.now());
-    },
+    refetchInterval: marketOpen() ? 60_000 : 5 * 60_000,
+    staleTime: 30_000,
   });
-
   const refresh = useMutation({
     mutationFn: () => callMarketFn<FundsResponse>("market-funds"),
     onSuccess: (d) => qc.setQueryData(["market", "funds"], d),
@@ -116,9 +77,6 @@ export function useMarketOrderMutations() {
     qc.invalidateQueries({ queryKey: ["market", "broker-orders"] });
     qc.invalidateQueries({ queryKey: ["market", "broker-trades"] });
     qc.invalidateQueries({ queryKey: ["market", "funds"] });
-    qc.invalidateQueries({ queryKey: ["market", "positions"] });
-    qc.invalidateQueries({ queryKey: ["market", "holdings"] });
-    qc.invalidateQueries({ queryKey: ["market", "realized-daily"] });
   };
   const place = useMutation({
     mutationFn: (input: PlaceOrderInput) =>
@@ -135,10 +93,5 @@ export function useMarketOrderMutations() {
       callMarketFn<{ ok: boolean; order_id: string; status: string }>("market-order-cancel", { order_id }),
     onSuccess: invalidate,
   });
-  const convertPosition = useMutation({
-    mutationFn: (input: { symbol: string; exchange: "NSE" | "BSE"; side: "BUY" | "SELL"; quantity: number; fromProduct: "MIS" | "CNC" | "NRML"; toProduct: "MIS" | "CNC" | "NRML" }) =>
-      callMarketFn<{ ok: true }>("market-position-convert", input as unknown as Record<string, unknown>),
-    onSuccess: invalidate,
-  });
-  return { place, modify, cancel, convertPosition };
+  return { place, modify, cancel };
 }

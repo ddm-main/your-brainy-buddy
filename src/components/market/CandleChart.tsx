@@ -5,20 +5,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createChart,
-  createSeriesMarkers,
   AreaSeries,
   BarSeries,
   CandlestickSeries,
   HistogramSeries,
   LineSeries,
   LineStyle,
-  PriceScaleMode,
   type IChartApi,
   type ISeriesApi,
-  type ISeriesMarkersPluginApi,
   type UTCTimestamp,
 } from "lightweight-charts";
-
 import type { CandleDto } from "@/lib/market/types";
 import {
   ad, adx, ao, atr, bollingerV, cci, chaikinOsc, cmf, demaV, donchian, emaV, envelopesV,
@@ -39,7 +35,7 @@ type Computed =
   | { g: "ma"; line: Num[] }
   | { g: "band"; upper: Num[]; mid: Num[]; lower: Num[] }
   | { g: "supertrend"; line: Num[]; dir: Array<1 | -1 | null> }
-  | { g: "psar"; sar: Num[]; dir: Array<1 | -1 | null> }
+  | { g: "psar"; dots: Num[] }
   | { g: "ichimoku"; tenkan: Num[]; kijun: Num[]; spanA: Num[]; spanB: Num[]; base: number }
   | { g: "volume" }
   | { g: "single"; line: Num[]; guides?: number[]; hist?: boolean }
@@ -48,16 +44,7 @@ type Computed =
   | { g: "adx"; adx: Num[]; plusDi: Num[]; minusDi: Num[]; guides?: number[] };
 
 function computeStudy(candles: CandleDto[], s: Study): Computed {
-  // Clamp any user param to a safe integer (period-like) so a bad -5 doesn't
-  // silently cascade into all-null output. Ratios (mult/step/pct) are clamped
-  // to a small positive floor but keep decimals.
-  const p: Record<string, number> = {};
-  for (const [k, v] of Object.entries(s.params)) {
-    const n = Number(v);
-    if (!Number.isFinite(n)) { p[k] = 1; continue; }
-    if (k === "mult" || k === "step" || k === "max" || k === "pct") p[k] = Math.max(0.001, n);
-    else p[k] = Math.max(1, Math.floor(n));
-  }
+  const p = s.params;
   const src = () => sourceValues(candles, s.source ?? "close");
   switch (s.type) {
     case "ema": return { g: "ma", line: emaV(src(), p.period) };
@@ -73,7 +60,7 @@ function computeStudy(candles: CandleDto[], s: Study): Computed {
     case "keltner": return { g: "band", ...keltner(candles, p.emaPeriod, p.atrPeriod, p.mult) };
     case "donchian": return { g: "band", ...donchian(candles, p.period) };
     case "supertrend": return { g: "supertrend", ...supertrend(candles, p.atrPeriod, p.mult) };
-    case "psar": { const r = psar(candles, p.step, p.max); return { g: "psar", sar: r.sar, dir: r.dir }; }
+    case "psar": return { g: "psar", dots: psar(candles, p.step, p.max) };
     case "ichimoku": return { g: "ichimoku", ...ichimoku(candles, p.conv, p.base, p.spanB), base: p.base };
     case "volume": return { g: "volume" };
     case "rsi": return { g: "single", line: rsi(candles, p.period), guides: [70, 30] };
@@ -107,7 +94,7 @@ function primaryOf(c: Computed): Num[] | null {
     case "ma": return c.line;
     case "band": return c.mid;
     case "supertrend": return c.line;
-    case "psar": return c.sar;
+    case "psar": return c.dots;
     case "ichimoku": return c.tenkan;
     case "single": return c.line;
     case "macd": return c.macd;
@@ -115,13 +102,6 @@ function primaryOf(c: Computed): Num[] | null {
     case "adx": return c.adx;
     default: return null;
   }
-}
-
-export interface CandleChartSettings {
-  grid: boolean;
-  logScale: boolean;
-  priceLine: boolean;
-  sessionBreaks: boolean;
 }
 
 export function CandleChart({
@@ -133,12 +113,9 @@ export function CandleChart({
   studies,
   intraday = false,
   livePrice = null,
-  liveVolume = null,
-  settings,
   onToggleStudy,
   onEditStudy,
   onRemoveStudy,
-  source,
 }: {
   candles: CandleDto[];
   priceLines?: Array<{ price: number; label: string; color: string }>;
@@ -151,17 +128,10 @@ export function CandleChart({
    * real time via `series.update()` (no full chart rebuild) between the
    * periodic historical refetches that eventually supersede it. */
   livePrice?: number | null;
-  /** Live cumulative session volume for the current bar (updates the volume pane). */
-  liveVolume?: number | null;
-  /** Display toggles (grid/log/priceLine/sessionBreaks). */
-  settings?: CandleChartSettings;
   onToggleStudy?: (id: string) => void;
   onEditStudy?: (id: string) => void;
   onRemoveStudy?: (id: string) => void;
-  /** Primary data provider that served the candles ("kotak_neo" | "yahoo"). Renders a small provenance chip in the header. */
-  source?: "kotak_neo" | "yahoo" | null;
 }) {
-
   const ref = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const [legend, setLegend] = useState<CandleDto | null>(null);
@@ -171,150 +141,29 @@ export function CandleChart({
   const candlesKeyRef = useRef<string>("");
   // live-tick plumbing: refs so the 1s price update never tears down the chart
   const priceSeriesRef = useRef<ISeriesApi<any> | null>(null);
-  const volumeSeriesRef = useRef<ISeriesApi<any> | null>(null);
   const liveBarRef = useRef<{ seriesTime: any; rawTime: string | number; open: number; high: number; low: number; close: number; volume: number } | null>(null);
-  // Median inter-bar gap (seconds) captured at last render; used by the live
-  // tick effect to detect when wall-clock has crossed a bar boundary so
-  // intraday charts roll to a fresh bar instead of stretching one monster bar.
-  const medianGapRef = useRef<number>(0);
   const [liveBar, setLiveBar] = useState<CandleDto | null>(null);
-  const s = settings ?? { grid: true, logScale: false, priceLine: true, sessionBreaks: false };
-  // Deconstructed so effect dep can be primitive and stable across parent
-  // renders when the settings object identity changes but values don't.
-  const { grid: sGrid, logScale: sLog, priceLine: sPriceLine, sessionBreaks: sSessionBreaks } = s;
 
-
-  // Memoize per-study compute keyed by (candles reference, study JSON) so
-  // toggling one study's param doesn't recompute every other study.
-  const studyCache = useRef<WeakMap<CandleDto[], Map<string, Computed>>>(new WeakMap());
-  const computed = useMemo(() => {
-    let bucket = studyCache.current.get(candles);
-    if (!bucket) { bucket = new Map(); studyCache.current.set(candles, bucket); }
-    return studies.map((st) => {
-      const key = `${st.type}|${st.source ?? "close"}|${JSON.stringify(st.params)}`;
-      let data = bucket!.get(key);
-      if (!data) { data = computeStudy(candles, st); bucket!.set(key, data); }
-      return { study: st, data };
-    });
-  }, [candles, studies]);
+  const computed = useMemo(
+    () => studies.map((s) => ({ study: s, data: computeStudy(candles, s) })),
+    [candles, studies],
+  );
 
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     // lightweight-charts silently renders nothing when times are out of order
-    // or duplicated. Normalise every time to a numeric epoch (seconds) before
-    // sorting/deduping so ISO ↔ number mismatches from refresh races don't
-    // slip through.
-    const _epoch = (t: string | number): number => {
-      if (typeof t === "number") return t;
-      const parsed = Date.parse(t);
-      return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
-    };
-    const _sorted = [...candles].sort((a, b) => _epoch(a.time) - _epoch(b.time));
-    const _seen = new Set<number>();
+    // or duplicated. Sort ascending and dedupe by time before feeding series.
+    const _tKey = (t: string | number) => (typeof t === "number" ? t : Date.parse(t) / 1000);
+    const _sorted = [...candles].sort((a, b) => _tKey(a.time) - _tKey(b.time));
+    const _seen = new Set<string>();
     const cleaned = _sorted.filter((c) => {
-      const k = _epoch(c.time);
+      const k = String(c.time);
       if (_seen.has(k)) return false;
       _seen.add(k);
       return true;
     });
-    // Surface upstream cache bugs — silently dropping duplicates hides them.
-    if (import.meta.env?.DEV && cleaned.length !== candles.length) {
-      // eslint-disable-next-line no-console
-      console.warn(`[CandleChart] dropped ${candles.length - cleaned.length} duplicate/out-of-order bars`);
-    }
     const data = cleaned;
-
-    // NSE session is 09:15–15:30 IST. Lightweight-charts defaults to UTC, so
-    // without an IST formatter the market opens at "03:45" on every chart.
-    // Format epoch seconds through Asia/Kolkata for both axis ticks and the
-    // crosshair label; underlying data stays in UTC.
-    const istTime = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hour12: false,
-    });
-    const istDate = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "2-digit",
-    });
-    const istDayMonth = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Asia/Kolkata", day: "2-digit", month: "short",
-    });
-    const istMonthYear = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Asia/Kolkata", month: "short", year: "2-digit",
-    });
-    const istDateTime = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "2-digit",
-      hour: "2-digit", minute: "2-digit", hour12: false,
-    });
-    // IST day-key ("YYYY-MM-DD") for detecting session boundaries on the axis.
-    const istDayKey = (d: Date) => {
-      const parts = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
-      }).formatToParts(d);
-      const y = parts.find((p) => p.type === "year")?.value ?? "";
-      const m = parts.find((p) => p.type === "month")?.value ?? "";
-      const dd = parts.find((p) => p.type === "day")?.value ?? "";
-      return `${y}-${m}-${dd}`;
-    };
-    // Detect intraday: caller-supplied prop is the source of truth (known at
-    // fetch time). Median-gap detection is a fallback for legacy callers that
-    // don't pass `intraday` — it's fragile at market open when only 1–2 bars
-    // exist for the day.
-    const _nums = data.map((c) => c.time).filter((t): t is number => typeof t === "number").slice(0, 8);
-    let _medianGap = 0;
-    if (_nums.length >= 2) {
-      const gaps = _nums.slice(1).map((t, i) => t - _nums[i]).sort((a, b) => a - b);
-      _medianGap = gaps[Math.floor(gaps.length / 2)] || 0;
-    }
-    medianGapRef.current = _medianGap;
-    const isIntraday = intraday || (_medianGap > 0 ? _medianGap < 86_400 : false);
-    const isMonthly = _medianGap >= 86_400 * 27;
-    // Log-scale safety: LWC's logarithmic price mode blows up on values <= 0
-    // (VIX-like series with a 0 print, or overlays). Force Normal when any
-    // low is non-positive so the whole chart doesn't disappear silently.
-    const hasNonPositivePrice = data.some((c) => c.low <= 0 || c.close <= 0);
-    const useLog = sLog && !hasNonPositivePrice;
-    if (sLog && hasNonPositivePrice && import.meta.env?.DEV) {
-      // eslint-disable-next-line no-console
-      console.warn("[CandleChart] log scale disabled — series contains value <= 0");
-    }
-    // Track last-seen day/month across tick formatter calls so we can print
-    // the date on the first tick of a new session (industry standard: TV,
-    // Kite, Tickertape all switch label style at day boundaries).
-    let _lastDayKey = "";
-    let _lastMonthKey = "";
-    const fmtAxis = (t: any) => {
-      if (typeof t !== "number") return String(t);
-      const d = new Date(t * 1000);
-      if (isMonthly) {
-        // Monthly/weekly bars: month + year, with year prefix on Jan.
-        return istMonthYear.format(d);
-      }
-      if (!isIntraday) {
-        // Daily bars: show DD Mon, prefix year on first tick of a new year.
-        const monthKey = istDayKey(d).slice(0, 7);
-        const yearKey = monthKey.slice(0, 4);
-        const label = istDayMonth.format(d);
-        if (yearKey !== _lastMonthKey.slice(0, 4)) {
-          _lastMonthKey = monthKey;
-          return `${label} '${yearKey.slice(2)}`;
-        }
-        _lastMonthKey = monthKey;
-        return label;
-      }
-      // Intraday: show date on the first tick of a new day, else HH:mm.
-      const dayKey = istDayKey(d);
-      if (dayKey !== _lastDayKey) {
-        _lastDayKey = dayKey;
-        return istDayMonth.format(d);
-      }
-      return istTime.format(d);
-    };
-    const fmtCrosshair = (t: any) => {
-      if (typeof t !== "number") return String(t);
-      const d = new Date(t * 1000);
-      return isIntraday ? istDateTime.format(d) : istDate.format(d);
-    };
-
 
     const chart = createChart(el, {
       height: fill ? el.clientHeight || height : height,
@@ -327,34 +176,18 @@ export function CandleChart({
         attributionLogo: false,
         panes: { separatorColor: "rgba(53,214,237,0.15)", separatorHoverColor: "rgba(53,214,237,0.35)", enableResize: true },
       },
-      localization: {
-        timeFormatter: fmtCrosshair,
-      },
       grid: {
-        vertLines: { color: "rgba(53,214,237,0.06)", visible: sGrid },
-        horzLines: { color: "rgba(53,214,237,0.06)", visible: sGrid },
+        vertLines: { color: "rgba(53,214,237,0.06)" },
+        horzLines: { color: "rgba(53,214,237,0.06)" },
       },
-      rightPriceScale: {
-        borderColor: "rgba(53,214,237,0.15)",
-        mode: useLog ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal,
-      },
-      timeScale: {
-        borderColor: "rgba(53,214,237,0.15)",
-        timeVisible: data.some((c) => typeof c.time === "number"),
-        tickMarkFormatter: fmtAxis,
-        // "Session breaks" hides the non-trading gaps by tightly packing bars
-        // — LWC exposes this via `shiftVisibleRangeOnNewBar` + `barSpacing`;
-        // the closest built-in is disabling `ticksVisible` on off-hours, but
-        // the most visible knob is `rightOffset` + `fixLeftEdge`.
-        rightOffset: sSessionBreaks ? 0 : 5,
-      },
+      rightPriceScale: { borderColor: "rgba(53,214,237,0.15)" },
+      timeScale: { borderColor: "rgba(53,214,237,0.15)", timeVisible: data.some((c) => typeof c.time === "number") },
       crosshair: {
         vertLine: { color: "rgba(53,214,237,0.4)", labelBackgroundColor: "#0a2733" },
         horzLine: { color: "rgba(53,214,237,0.4)", labelBackgroundColor: "#0a2733" },
       },
     });
     chartRef.current = chart;
-
 
     const toTime = (t: string | number) => (typeof t === "number" ? (t as UTCTimestamp) : t) as any;
     const lw = (n: number) => Math.max(1, Math.min(4, Math.round(n))) as 1 | 2 | 3 | 4;
@@ -382,15 +215,12 @@ export function CandleChart({
       });
       priceSeries.setData(data.map((c) => ({ time: toTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })));
     }
-    priceSeries.applyOptions({ priceLineVisible: sPriceLine, lastValueVisible: sPriceLine });
     priceSeriesRef.current = priceSeries;
     const lastRaw = data[data.length - 1];
     liveBarRef.current = lastRaw
       ? { seriesTime: toTime(lastRaw.time), rawTime: lastRaw.time, open: lastRaw.open, high: lastRaw.high, low: lastRaw.low, close: lastRaw.close, volume: lastRaw.volume }
       : null;
     setLiveBar(null);
-    volumeSeriesRef.current = null;
-
 
     const overlayLine = (values: Num[], color: string, width = 1, style?: LineStyle, lastVal = false, offset = 0) => {
       const line = chart.addSeries(LineSeries, {
@@ -401,149 +231,49 @@ export function CandleChart({
     };
 
     // ---- overlays (visible, price pane) ----
-    // Collected so multiple Supertrend studies don't leak plugins on cleanup.
-    const markersPlugins: ISeriesMarkersPluginApi<any>[] = [];
-
     for (const { study, data: c } of computed) {
       if (!study.visible) continue;
       const def = defByType(study.type);
       if (def.group !== "overlay") continue;
-      // VWAP is intraday-only (session-anchored); on daily+ TFs it collapses to
-      // the typical price and is misleading. Industry-standard: hide it.
-      if (study.type === "vwap" && !intraday) continue;
       const col = study.colors;
       const w = study.lineWidth;
       if (c.g === "ma") {
-        overlayLine(c.line, col[0], w, undefined, true);
+        // VWAP resets each session; on non-intraday timeframes it collapses to
+        // the typical price, so flag it as dashed to signal it's not meaningful.
+        const style = study.type === "vwap" && !intraday ? LineStyle.Dashed : undefined;
+        overlayLine(c.line, col[0], w, style, true);
       } else if (c.g === "band") {
         overlayLine(c.upper, col[0], w);
         overlayLine(c.mid, col[1], w, LineStyle.Dashed);
         overlayLine(c.lower, col[2], w);
       } else if (c.g === "supertrend") {
-        const upColor = col[0] ?? UP;
-        const dnColor = col[1] ?? DOWN;
-        // Emit contiguous segments per trend direction. At each flip we push
-        // a `null` whitespace point on the *newly-inactive* side so
-        // lightweight-charts breaks the line cleanly instead of visually
-        // jumping across the flip Y-gap.
-        // Whitespace points in lightweight-charts are `{ time }` with NO
-        // `value` key (null is rejected by the line-series assertion).
-        const upData: Array<{ time: any; value?: number }> = [];
-        const dnData: Array<{ time: any; value?: number }> = [];
-        for (let i = 0; i < data.length; i++) {
-          const v = c.line[i];
-          const d = c.dir[i];
-          const t = toTime(data[i].time);
-          if (v == null || d == null) continue;
-          const prevDir = i > 0 ? c.dir[i - 1] : null;
-          const flipped = prevDir != null && prevDir !== d;
-          const tPrev = i > 0 ? toTime(data[i - 1].time) : t;
-          if (d === 1) {
-            if (flipped) {
-              dnData.push({ time: t });
-              if (upData.length) upData.push({ time: tPrev });
-            }
-            upData.push({ time: t, value: v as number });
-          } else {
-            if (flipped) {
-              upData.push({ time: t });
-              if (dnData.length) dnData.push({ time: tPrev });
-            }
-            dnData.push({ time: t, value: v as number });
-          }
-        }
-        const upS = chart.addSeries(LineSeries, { color: upColor, lineWidth: lw(w), priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false });
-        upS.setData(upData as any);
-        const dnS = chart.addSeries(LineSeries, { color: dnColor, lineWidth: lw(w), priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false });
-        dnS.setData(dnData as any);
-        // Flip markers on the price series — triangles at direction changes.
-        // lightweight-charts v5 removed series.setMarkers; use the plugin API.
-        try {
-          const markers: Array<{ time: any; position: "belowBar" | "aboveBar"; color: string; shape: "arrowUp" | "arrowDown"; text?: string }> = [];
-          for (let i = 1; i < data.length; i++) {
-            const prev = c.dir[i - 1], cur = c.dir[i];
-            if (prev == null || cur == null || prev === cur) continue;
-            if (cur === 1) markers.push({ time: toTime(data[i].time), position: "belowBar", color: upColor, shape: "arrowUp", text: "Buy" });
-            else markers.push({ time: toTime(data[i].time), position: "aboveBar", color: dnColor, shape: "arrowDown", text: "Sell" });
-          }
-          if (markers.length) {
-            markersPlugins.push(createSeriesMarkers(priceSeries, markers as any));
-          }
-        } catch { /* markers optional */ }
+        const upData = data.flatMap((cc, i) => (c.line[i] != null && c.dir[i] === 1 ? [{ time: toTime(cc.time), value: c.line[i] as number }] : []));
+        const dnData = data.flatMap((cc, i) => (c.line[i] != null && c.dir[i] === -1 ? [{ time: toTime(cc.time), value: c.line[i] as number }] : []));
+        const upS = chart.addSeries(LineSeries, { color: UP, lineWidth: lw(w), priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+        upS.setData(upData);
+        const dnS = chart.addSeries(LineSeries, { color: DOWN, lineWidth: lw(w), priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+        dnS.setData(dnData);
       } else if (c.g === "psar") {
-        // Colour each dot by the algorithm's trend direction (industry
-        // standard) — green in uptrends, red in downtrends.
-        const upData: Array<{ time: any; value: number }> = [];
-        const dnData: Array<{ time: any; value: number }> = [];
-        for (let i = 0; i < data.length; i++) {
-          const v = c.sar[i];
-          const d = c.dir[i];
-          if (v == null || d == null) continue;
-          if (d === 1) upData.push({ time: toTime(data[i].time), value: v as number });
-          else dnData.push({ time: toTime(data[i].time), value: v as number });
-        }
-        const mk = (color: string, rows: any[]) => {
-          const line = chart.addSeries(LineSeries, {
-            color, lineVisible: false, pointMarkersVisible: true, pointMarkersRadius: 3,
-            priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
-          });
-          line.setData(rows);
-        };
-        mk(col[0] ?? UP, upData);
-        mk(DOWN, dnData);
+        const s = chart.addSeries(LineSeries, { color: col[0], lineVisible: false, pointMarkersVisible: true, pointMarkersRadius: 1.6, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+        s.setData(lineData(c.dots));
       } else if (c.g === "ichimoku") {
         overlayLine(c.tenkan, col[0], w);
         overlayLine(c.kijun, col[1], w);
-        // Senkou spans are projected `base` bars ahead of the last bar
-        // (TradingView convention). Compute an average bar interval from the
-        // last several bars, then append synthetic future timestamps so the
-        // cloud renders beyond the current price action instead of getting
-        // truncated at the right edge.
-        const projectSpan = (values: Num[], color: string) => {
-          const rows: Array<{ time: any; value: number }> = [];
-          // Historical portion — align spans back onto their computed bars.
-          for (let i = 0; i < data.length; i++) {
-            const v = values[i];
-            if (v == null) continue;
-            rows.push({ time: toTime(data[i].time), value: v as number });
-          }
-          // Future projection: last `base` valid values shifted forward.
-          const lastN = Math.min(c.base, data.length - 1);
-          if (lastN > 0) {
-            // Estimate bar spacing (numeric epoch seconds).
-            const asSec = (t: string | number) => (typeof t === "number" ? t : Math.floor(Date.parse(t as string) / 1000));
-            const spans: number[] = [];
-            for (let i = data.length - Math.min(20, data.length) + 1; i < data.length; i++) {
-              const dt = asSec(data[i].time) - asSec(data[i - 1].time);
-              if (Number.isFinite(dt) && dt > 0) spans.push(dt);
-            }
-            const step = spans.length ? spans.sort((a, b) => a - b)[Math.floor(spans.length / 2)] : 86400;
-            const lastT = asSec(data[data.length - 1].time);
-            for (let k = 1; k <= c.base; k++) {
-              const srcIdx = data.length - c.base + k - 1;
-              const v = values[srcIdx];
-              if (srcIdx < 0 || v == null) continue;
-              rows.push({ time: (lastT + step * k) as any, value: v as number });
-            }
-          }
-          const line = chart.addSeries(LineSeries, {
-            color, lineWidth: lw(w), lineStyle: LineStyle.Dashed,
-            priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
-          });
-          line.setData(rows);
-        };
-        projectSpan(c.spanA, col[2]);
-        projectSpan(c.spanB, col[3]);
+        // Senkou spans are displaced forward by `base` bars (TradingView).
+        overlayLine(c.spanA, col[2], w, LineStyle.Dashed, false, c.base);
+        overlayLine(c.spanB, col[3], w, LineStyle.Dashed, false, c.base);
+      } else if (c.g === "volume") {
+        const volSeries = chart.addSeries(HistogramSeries, { priceScaleId: "vol", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false });
+        chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+        volSeries.setData(data.map((cc) => ({ time: toTime(cc.time), value: cc.volume, color: cc.close >= cc.open ? "rgba(107,255,176,0.25)" : "rgba(255,95,109,0.25)" })));
       }
-
-      // volume handled below in its own pane so it gets a proper K/M axis
     }
 
     for (const pl of priceLines ?? []) {
       priceSeries.createPriceLine({ price: pl.price, color: pl.color, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: pl.label });
     }
 
-    // ---- oscillators + volume (visible, one sub-pane each) ----
+    // ---- oscillators (visible, one sub-pane each) ----
     let pane = 1;
     const paneLine = (values: Num[], color: string, p: number, width = 1) => {
       const s = chart.addSeries(LineSeries, { color, lineWidth: lw(width), priceLineVisible: false, lastValueVisible: true }, p);
@@ -552,32 +282,6 @@ export function CandleChart({
     };
     const guide = (s: ISeriesApi<any>, price: number) =>
       s.createPriceLine({ price, color: "rgba(127,233,255,0.28)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: "" });
-
-    // Volume gets its own sub-pane so it renders a proper K / M axis on the right.
-    for (const { study, data: c } of computed) {
-      if (!study.visible || c.g !== "volume") continue;
-      const vol = chart.addSeries(HistogramSeries, {
-        priceFormat: { type: "volume" },
-        priceLineVisible: false,
-        lastValueVisible: true,
-      }, pane);
-      vol.setData(data.map((cc, i) => {
-        // Industry-standard (TV/Kite): color volume by close vs previous close,
-        // not close vs open. First bar has no prior — use open as the fallback.
-        const prev = i > 0 ? data[i - 1].close : cc.open;
-        const up = cc.close >= prev;
-        return {
-          time: toTime(cc.time),
-          value: cc.volume,
-          color: up ? "rgba(107,255,176,0.55)" : "rgba(255,95,109,0.55)",
-        };
-      }));
-      volumeSeriesRef.current = vol;
-      pane++;
-      break;
-    }
-
-
 
     for (const { study, data: c } of computed) {
       if (!study.visible) continue;
@@ -610,17 +314,8 @@ export function CandleChart({
       }
       pane++;
     }
-    // Sub-pane sizing: split up to 55% of the chart height across all
-    // oscillator/volume panes (min 90px each, cap 180) so the price pane
-    // never collapses when the user stacks 3+ oscillators.
     const panes = chart.panes();
-    const subCount = Math.max(0, panes.length - 1);
-    if (subCount > 0) {
-      const chartH = fill ? (el.clientHeight || height) : height;
-      const budget = Math.max(180, Math.floor(chartH * 0.55));
-      const per = Math.max(90, Math.min(180, Math.floor(budget / subCount)));
-      for (let i = 1; i < panes.length; i++) panes[i].setHeight(per);
-    }
+    for (let i = 1; i < panes.length; i++) panes[i].setHeight(110);
 
     // ---- crosshair legend ----
     const byTime = new Map(data.map((c) => [String(c.time), c]));
@@ -654,189 +349,51 @@ export function CandleChart({
       const r = chart.timeScale().getVisibleLogicalRange();
       if (r) rangeRef.current = { from: r.from as number, to: r.to as number };
       ro.disconnect();
-      try { markersPlugins.forEach((p) => p.detach()); } catch { /* noop */ }
       chart.remove();
       chartRef.current = null;
       priceSeriesRef.current = null;
-      volumeSeriesRef.current = null;
     };
-  }, [candles, computed, priceLines, height, fill, chartType, intraday, sGrid, sLog, sPriceLine, sSessionBreaks]);
-
+  }, [candles, computed, priceLines, height, fill, chartType, intraday]);
 
   // ---- live tick: move/extend the rightmost bar without rebuilding the chart ----
   useEffect(() => {
     const series = priceSeriesRef.current;
     const base = liveBarRef.current;
-    if (!series || !base) return;
-    if (livePrice == null && liveVolume == null) return;
-    const close = livePrice != null && Number.isFinite(livePrice) ? livePrice : base.close;
-    const nowSec = Math.floor(Date.now() / 1000);
-    const gap = medianGapRef.current;
-    const baseTime = typeof base.rawTime === "number" ? base.rawTime : 0;
-    // Bar-boundary roll: if wall-clock has crossed one full `gap` past the
-    // current bar's open time, emit a fresh bar (open=prev close) instead of
-    // stretching a monster bar. Guards: only for intraday (gap < 1 day) and
-    // when we actually have a numeric base time.
-    if (gap > 0 && gap < 86_400 && baseTime > 0 && nowSec >= baseTime + gap && livePrice != null) {
-      const newTime = baseTime + Math.floor((nowSec - baseTime) / gap) * gap;
-      const fresh = {
-        seriesTime: newTime as UTCTimestamp,
-        rawTime: newTime,
-        open: base.close, high: Math.max(base.close, close), low: Math.min(base.close, close),
-        close, volume: 0,
-      };
-      liveBarRef.current = fresh;
-      try {
-        if (chartType === "line" || chartType === "area") {
-          series.update({ time: fresh.seriesTime, value: close });
-        } else {
-          series.update({ time: fresh.seriesTime, open: fresh.open, high: fresh.high, low: fresh.low, close: fresh.close });
-        }
-      } catch { /* noop */ }
-      setLiveBar({ time: fresh.rawTime, open: fresh.open, high: fresh.high, low: fresh.low, close: fresh.close, volume: fresh.volume });
-      return;
-    }
-    const nextVol = liveVolume != null && Number.isFinite(liveVolume) ? Math.max(base.volume, liveVolume) : base.volume;
-    const updated = { ...base, high: Math.max(base.high, close), low: Math.min(base.low, close), close, volume: nextVol };
+    if (!series || !base || livePrice == null || !Number.isFinite(livePrice)) return;
+    const close = livePrice;
+    const updated = { ...base, high: Math.max(base.high, close), low: Math.min(base.low, close), close };
     liveBarRef.current = updated;
-    if (livePrice != null && Number.isFinite(livePrice)) {
-      if (chartType === "line" || chartType === "area") {
-        series.update({ time: updated.seriesTime, value: close });
-      } else {
-        series.update({ time: updated.seriesTime, open: updated.open, high: updated.high, low: updated.low, close: updated.close });
-      }
-    }
-    const vol = volumeSeriesRef.current;
-    if (vol && (liveVolume != null || livePrice != null)) {
-      try {
-        vol.update({
-          time: updated.seriesTime,
-          value: updated.volume,
-          color: updated.close >= updated.open ? "rgba(107,255,176,0.55)" : "rgba(255,95,109,0.55)",
-        } as any);
-      } catch { /* noop */ }
+    if (chartType === "line" || chartType === "area") {
+      series.update({ time: updated.seriesTime, value: close });
+    } else {
+      series.update({ time: updated.seriesTime, open: updated.open, high: updated.high, low: updated.low, close: updated.close });
     }
     setLiveBar({ time: updated.rawTime, open: updated.open, high: updated.high, low: updated.low, close: updated.close, volume: updated.volume });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [livePrice, liveVolume]);
-
+  }, [livePrice]);
 
   // ---- legend rows (value at crosshair, else last bar) ----
   const legendRows: LegendRow[] = useMemo(() => {
     const idx = hoverIdx ?? candles.length - 1;
-    const compact = (n: number) => Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(n);
-    const BOUNDED_100 = new Set(["rsi", "stochRsi", "mfi", "aroon", "stoch", "williamsR", "uo"]);
-    const COMPACT_TYPES = new Set(["obv", "ad", "volume"]);
-    const rows: LegendRow[] = [];
-    for (const { study, data: c } of computed) {
-      // VWAP is intraday-only — hide the row on daily+ TFs to match the chart.
-      if (study.type === "vwap" && !intraday) continue;
+    return computed.map(({ study, data: c }) => {
       const prim = primaryOf(c);
       const v = prim && idx >= 0 && idx < prim.length ? prim[idx] : null;
-      const isVol = c.g === "volume";
-      const rawVol = isVol && idx >= 0 && candles[idx] ? candles[idx].volume : null;
-      const val: string = isVol
-        ? (rawVol != null ? compact(rawVol) : "—")
-        : v == null
-          ? "—"
-          : COMPACT_TYPES.has(study.type)
-            ? compact(v as number)
-            : BOUNDED_100.has(study.type)
-              ? (v as number).toFixed(1)
-              : (v as number).toFixed(2);
-      // For histogram indicators (AO), swatch reflects the current bar's sign
-      // so the legend colour matches what the user sees on the chart.
-      let swatch = study.colors[0];
-      if (c.g === "single" && c.hist && v != null) {
-        swatch = (v as number) >= 0 ? "#6bffb0" : "#ff5f6d";
-      }
-      rows.push({
+      return {
         id: study.id,
         label: studyLabel(study),
-        color: swatch,
-        value: val,
+        color: study.colors[0],
+        value: c.g === "volume" ? "" : v != null ? (v as number).toFixed(2) : "—",
         visible: study.visible,
-      });
-    }
-    return rows;
-  }, [computed, hoverIdx, candles.length, candles, intraday]);
+      };
+    });
+  }, [computed, hoverIdx, candles.length]);
 
   const last = liveBar ?? candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
   const l = legend ?? last;
-  // Δ vs previous bar (crosshair-aware): when hovering, compare to the bar
-  // just before the hovered one; otherwise compare last bar to the one prior.
-  // This is the only "change" we show in the legend — the old same-bar
-  // (close-open)/open readout showed +0.00% on a fresh live bar and
-  // contradicted the Quote panel's prev-close-anchored change.
-  const refPrev = hoverIdx != null && hoverIdx > 0 ? candles[hoverIdx - 1] : prev;
-  const deltaVsPrev = l && refPrev ? l.close - refPrev.close : null;
-  const deltaPctVsPrev = l && refPrev && refPrev.close ? ((l.close - refPrev.close) / refPrev.close) * 100 : null;
-  const chg = deltaPctVsPrev;
-
-  // Keyboard shortcuts: +/− zoom, ←/→ pan, Alt+H fit, Alt+L toggle log.
-  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    const chart = chartRef.current;
-    if (!chart) return;
-    const ts = chart.timeScale();
-    const range = ts.getVisibleLogicalRange();
-    if (e.altKey && (e.key === "h" || e.key === "H")) { ts.fitContent(); e.preventDefault(); return; }
-    if (!range) return;
-    const span = (range.to as number) - (range.from as number);
-    if (e.key === "+" || e.key === "=") {
-      ts.setVisibleLogicalRange({ from: (range.from as number) + span * 0.15, to: range.to });
-      e.preventDefault();
-    } else if (e.key === "-" || e.key === "_") {
-      ts.setVisibleLogicalRange({ from: (range.from as number) - span * 0.15, to: range.to });
-      e.preventDefault();
-    } else if (e.key === "ArrowLeft") {
-      const d = span * 0.1;
-      ts.setVisibleLogicalRange({ from: (range.from as number) - d, to: (range.to as number) - d });
-      e.preventDefault();
-    } else if (e.key === "ArrowRight") {
-      const d = span * 0.1;
-      ts.setVisibleLogicalRange({ from: (range.from as number) + d, to: (range.to as number) + d });
-      e.preventDefault();
-    }
-  };
-
-  const ariaLabel = last
-    ? `Price chart. Last ${last.close.toFixed(2)}, change ${(chg ?? 0).toFixed(2)} percent, ${candles.length} bars.`
-    : "Price chart. No data.";
+  const chg = l && candles.length > 1 ? ((l.close - l.open) / l.open) * 100 : null;
 
   return (
-    <div
-      role="img"
-      aria-label={ariaLabel}
-      tabIndex={0}
-      onKeyDown={onKeyDown}
-      style={{ position: "relative", width: "100%", outline: "none", ...(fill ? { height: "100%", minHeight: 260 } : { minHeight: height }) }}
-    >
-      {candles.length === 0 && (
-        <div style={{
-          position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center",
-          fontFamily: "var(--font-hud)", fontSize: 11, letterSpacing: "0.1em",
-          color: "var(--text-dim)", textTransform: "uppercase", pointerEvents: "none",
-        }}>
-          No data for this range
-        </div>
-      )}
-      {source && (
-        <div
-          title={source === "kotak_neo" ? "Kotak Neo — live" : "Yahoo Finance — delayed ~15m"}
-          style={{
-            position: "absolute", top: 4, right: 8, zIndex: 3, pointerEvents: "none",
-            fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.12em",
-            textTransform: "uppercase",
-            color: source === "kotak_neo" ? "#6bffb0" : "#f7c948",
-            background: "rgba(4,16,22,0.6)",
-            border: `1px solid ${source === "kotak_neo" ? "rgba(107,255,176,0.35)" : "rgba(247,201,72,0.35)"}`,
-            padding: "1px 6px", borderRadius: 2,
-          }}
-        >
-          {source === "kotak_neo" ? "kotak · live" : "yahoo · delayed"}
-        </div>
-      )}
+    <div style={{ position: "relative", width: "100%", ...(fill ? { height: "100%", minHeight: 260 } : { minHeight: height }) }}>
       {l && (
         <div style={{
           position: "absolute", top: 4, left: 6, zIndex: 3, pointerEvents: "none",
@@ -848,12 +405,8 @@ export function CandleChart({
           <span>H <b style={{ color: "var(--text)" }}>{l.high.toFixed(2)}</b></span>
           <span>L <b style={{ color: "var(--text)" }}>{l.low.toFixed(2)}</b></span>
           <span>C <b style={{ color: l.close >= l.open ? UP : DOWN }}>{l.close.toFixed(2)}</b></span>
-          {deltaVsPrev != null && deltaPctVsPrev != null && (
-            <span style={{ color: deltaVsPrev >= 0 ? UP : DOWN }}>
-              {deltaPctVsPrev >= 0 ? "+" : ""}{deltaPctVsPrev.toFixed(2)}% ({deltaVsPrev >= 0 ? "+" : ""}{deltaVsPrev.toFixed(2)}) <span style={{ opacity: 0.6 }}>vs prev close</span>
-            </span>
-          )}
-          {/* Volume intentionally omitted here — shown in the volume pane's right axis and legend row to avoid a triple readout. */}
+          {chg != null && <span style={{ color: chg >= 0 ? UP : DOWN }}>{chg >= 0 ? "+" : ""}{chg.toFixed(2)}%</span>}
+          <span>V <b style={{ color: "var(--text)" }}>{Intl.NumberFormat("en-IN", { notation: "compact" }).format(l.volume)}</b></span>
         </div>
       )}
       {(onToggleStudy || onEditStudy || onRemoveStudy) && (

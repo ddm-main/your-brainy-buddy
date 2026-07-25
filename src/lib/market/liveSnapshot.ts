@@ -83,22 +83,6 @@ export function computeLiveScore(
   const candles = withLivePrice(dailyCandles, quote);
   const snapshot = computeSnapshot(candles);
   if (!snapshot) return null;
-  // Stability cap: keep the EOD S/R visible unless the live close has cleared
-  // it by more than 0.25 × ATR. Prevents R from vanishing on the first tick
-  // above and hides the ATH-fallback flip-flop mid-session.
-  const atrV = snapshot.atr14 ?? null;
-  const tol = atrV ? 0.25 * atrV : 0;
-  const eodR = eodScore?.resistance_level ?? null;
-  const eodS = eodScore?.support_level ?? null;
-  if (eodR != null && snapshot.close < eodR + tol) {
-    snapshot.resistance = eodR;
-    snapshot.resistanceFallback = false;
-    // touches unknown from EOD row — leave whatever live compute returned
-  }
-  if (eodS != null && snapshot.close > eodS - tol) {
-    snapshot.support = eodS;
-    snapshot.supportFallback = false;
-  }
   const ctx: MarketContext = {
     sectorStrength: eodScore?.sector_strength ?? null,
     regime: breadth?.regime ?? null,

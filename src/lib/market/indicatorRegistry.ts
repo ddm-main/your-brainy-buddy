@@ -43,13 +43,10 @@ export interface IndicatorDef {
   group: "overlay" | "oscillator";
   params: ParamMeta[];
   hasSource?: boolean;
-  /** VWAP-style indicators that only make sense on intraday timeframes. */
-  intradayOnly?: boolean;
   lines: LineMeta[];
   defaultParams: Record<string, number>;
   defaultWidth: number;
 }
-
 
 const P = (key: string, label: string, min = 1, max = 500, step = 1): ParamMeta => ({ key, label, min, max, step });
 
@@ -78,11 +75,11 @@ export const INDICATOR_DEFS: IndicatorDef[] = [
   { type: "envelopes", label: "Envelopes", group: "overlay", hasSource: true, params: [P("period", "Length"), P("pct", "Percent", 0.1, 25, 0.1)], lines: [{ label: "Upper", defaultColor: GR }, { label: "Basis", defaultColor: GR }, { label: "Lower", defaultColor: GR }], defaultParams: { period: 20, pct: 2 }, defaultWidth: 1 },
   { type: "keltner", label: "Keltner Channels", group: "overlay", params: [P("emaPeriod", "EMA"), P("atrPeriod", "ATR"), P("mult", "Mult", 0.5, 10, 0.1)], lines: [{ label: "Upper", defaultColor: AM }, { label: "Basis", defaultColor: AM }, { label: "Lower", defaultColor: AM }], defaultParams: { emaPeriod: 20, atrPeriod: 10, mult: 2 }, defaultWidth: 1 },
   { type: "donchian", label: "Donchian Channels", group: "overlay", params: [P("period", "Length")], lines: [{ label: "Upper", defaultColor: BL }, { label: "Basis", defaultColor: BL }, { label: "Lower", defaultColor: BL }], defaultParams: { period: 20 }, defaultWidth: 1 },
-  { type: "vwap", label: "VWAP", group: "overlay", intradayOnly: true, params: [], lines: [{ label: "VWAP", defaultColor: PK }], defaultParams: {}, defaultWidth: 1 },
-  { type: "supertrend", label: "Supertrend", group: "overlay", params: [P("atrPeriod", "ATR"), P("mult", "Mult", 0.5, 10, 0.1)], lines: [{ label: "Up trend", defaultColor: UP }, { label: "Down trend", defaultColor: DN }], defaultParams: { atrPeriod: 10, mult: 3 }, defaultWidth: 2 },
+  { type: "vwap", label: "VWAP", group: "overlay", params: [], lines: [{ label: "VWAP", defaultColor: PK }], defaultParams: {}, defaultWidth: 1 },
+  { type: "supertrend", label: "Supertrend", group: "overlay", params: [P("atrPeriod", "ATR"), P("mult", "Mult", 0.5, 10, 0.1)], lines: [{ label: "Supertrend", defaultColor: UP }], defaultParams: { atrPeriod: 10, mult: 3 }, defaultWidth: 2 },
   { type: "psar", label: "Parabolic SAR", group: "overlay", params: [P("step", "Step", 0.001, 1, 0.001), P("max", "Max", 0.01, 1, 0.01)], lines: [{ label: "PSAR", defaultColor: GY }], defaultParams: { step: 0.02, max: 0.2 }, defaultWidth: 1 },
   { type: "ichimoku", label: "Ichimoku Cloud", group: "overlay", params: [P("conv", "Conversion"), P("base", "Base"), P("spanB", "Span B")], lines: [{ label: "Conversion", defaultColor: TE }, { label: "Base", defaultColor: PK }, { label: "Span A", defaultColor: UP }, { label: "Span B", defaultColor: DN }], defaultParams: { conv: 9, base: 26, spanB: 52 }, defaultWidth: 1 },
-  { type: "volume", label: "Volume", group: "overlay", params: [], lines: [{ label: "Volume (bar color follows candle)", defaultColor: UP }], defaultParams: {}, defaultWidth: 1 },
+  { type: "volume", label: "Volume", group: "overlay", params: [], lines: [{ label: "Volume", defaultColor: BL }], defaultParams: {}, defaultWidth: 1 },
   // ---- oscillators ----
   { type: "rsi", label: "RSI", group: "oscillator", params: [P("period", "Length")], lines: [{ label: "RSI", defaultColor: LI }], defaultParams: { period: 14 }, defaultWidth: 1 },
   { type: "macd", label: "MACD", group: "oscillator", params: [P("fast", "Fast"), P("slow", "Slow"), P("signal", "Signal")], lines: [{ label: "MACD", defaultColor: TE }, { label: "Signal", defaultColor: AM }, { label: "Hist", defaultColor: GR }], defaultParams: { fast: 12, slow: 26, signal: 9 }, defaultWidth: 1 },
@@ -137,31 +134,24 @@ export function makeStudy(type: IndicatorType, overrides?: { params?: Record<str
 }
 
 // A study restored from storage may predate a def change — backfill any missing
-// params/colors from the current def so it always renders. Params are clamped
-// to their def-declared min/max so a corrupt saved layout can't feed negatives
-// or 10 000-length periods into the indicator math.
+// params/colors from the current def so it always renders.
 export function normalizeStudy(raw: Study): Study | null {
   const def = DEF_BY_TYPE.get(raw.type);
   if (!def) return null;
-  const params: Record<string, number> = { ...def.defaultParams };
-  for (const p of def.params) {
-    const v = Number(raw.params?.[p.key]);
-    if (!Number.isFinite(v)) continue;
-    params[p.key] = Math.min(p.max, Math.max(p.min, v));
-  }
   return {
     id: raw.id || uid(),
     type: raw.type,
     visible: raw.visible !== false,
-    params,
+    params: { ...def.defaultParams, ...(raw.params ?? {}) },
     source: def.hasSource ? (raw.source ?? "close") : undefined,
     colors: def.lines.map((l, i) => raw.colors?.[i] ?? l.defaultColor),
     lineWidth: raw.lineWidth ?? def.defaultWidth,
   };
 }
 
-
 export const DEFAULT_STUDIES: Study[] = [
+  makeStudy("ema", { params: { period: 20 } }),
+  makeStudy("ema", { params: { period: 50 } }),
   makeStudy("volume"),
 ];
 

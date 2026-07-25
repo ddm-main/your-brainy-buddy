@@ -389,10 +389,8 @@ function RuleEditor({ rule, watchlists, onClose, onSave }: {
   const [exit, setExit] = useState<ScreenerCondition[]>(rule?.exit_conditions?.[0]?.conditions ?? []);
   const [stopLoss, setStopLoss] = useState(rule?.stop_loss_pct != null ? String(rule.stop_loss_pct) : "3");
   const [target, setTarget] = useState(rule?.target_pct != null ? String(rule.target_pct) : "6");
-  const [trailStop, setTrailStop] = useState(rule?.trail_stop_pct != null ? String(rule.trail_stop_pct) : "");
   const [product, setProduct] = useState<"MIS" | "CNC">(rule?.product ?? "MIS");
   const [orderType, setOrderType] = useState<"MARKET" | "LIMIT">(rule?.order_type ?? "MARKET");
-  const [exitOrderType, setExitOrderType] = useState<"MARKET" | "LIMIT" | "SL" | "SL-M">(rule?.exit_order_type ?? "MARKET");
   const [limitOffset, setLimitOffset] = useState(rule?.limit_offset_pct != null ? String(rule.limit_offset_pct) : "0.1");
   const [sizingMode, setSizingMode] = useState<"fixed_qty" | "fixed_capital">(rule?.sizing_mode ?? "fixed_capital");
   const [sizingValue, setSizingValue] = useState(rule?.sizing_value != null ? String(rule.sizing_value) : "5000");
@@ -411,7 +409,6 @@ function RuleEditor({ rule, watchlists, onClose, onSave }: {
     if (scopeType === "watchlist" && !watchlistId) { alert("Watchlist required"); return null; }
     if (entry.length === 0) { alert("At least one entry condition required"); return null; }
     if (!(Number(sizingValue) > 0)) { alert("Sizing must be a positive number — a rule saved with 0 or blank sizing silently never fires"); return null; }
-    if (trailStop && !(Number(trailStop) > 0)) { alert("Trailing stop % must be positive"); return null; }
     return {
       id: rule?.id,
       name: name.trim(),
@@ -422,9 +419,7 @@ function RuleEditor({ rule, watchlists, onClose, onSave }: {
       exit_conditions: exit.length ? [{ conditions: exit }] : [],
       stop_loss_pct: stopLoss ? Number(stopLoss) : null,
       target_pct: target ? Number(target) : null,
-      trail_stop_pct: trailStop ? Number(trailStop) : null,
       product, order_type: orderType,
-      exit_order_type: exitOrderType,
       limit_offset_pct: orderType === "LIMIT" ? Number(limitOffset) : null,
       sizing_mode: sizingMode, sizing_value: Number(sizingValue) || 0,
     };
@@ -495,10 +490,6 @@ function RuleEditor({ rule, watchlists, onClose, onSave }: {
             <input type="number" value={target} onChange={(e) => setTarget(e.target.value)} style={{ ...inputStyle, width: 90 }} />
           </div>
           <div>
-            <div style={labelStyle} title="Ratchet stop: after entry, high-water mark of LTP is tracked; exit fires if LTP drops this % from the high. Leave blank to disable.">Trail SL %</div>
-            <input type="number" value={trailStop} onChange={(e) => setTrailStop(e.target.value)} placeholder="off" style={{ ...inputStyle, width: 90 }} />
-          </div>
-          <div>
             <div style={labelStyle}>Product</div>
             <div style={{ display: "flex", gap: 4 }}>
               {(["MIS", "CNC"] as const).map((p) => <Btn key={p} size="sm" variant={product === p ? "primary" : "ghost"} onClick={() => setProduct(p)}>{p}</Btn>)}
@@ -508,12 +499,6 @@ function RuleEditor({ rule, watchlists, onClose, onSave }: {
             <div style={labelStyle}>Order type</div>
             <div style={{ display: "flex", gap: 4 }}>
               {(["MARKET", "LIMIT"] as const).map((o) => <Btn key={o} size="sm" variant={orderType === o ? "primary" : "ghost"} onClick={() => setOrderType(o)}>{o}</Btn>)}
-            </div>
-          </div>
-          <div>
-            <div style={labelStyle} title="SL/SL-M places a real broker-side stop-loss at entry so a stop still fires when the eval cron misses a tick.">Exit SL type</div>
-            <div style={{ display: "flex", gap: 4 }}>
-              {(["MARKET", "SL", "SL-M"] as const).map((o) => <Btn key={o} size="sm" variant={exitOrderType === o ? "primary" : "ghost"} onClick={() => setExitOrderType(o)}>{o}</Btn>)}
             </div>
           </div>
           {orderType === "LIMIT" && (

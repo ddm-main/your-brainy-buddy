@@ -1,1 +1,0 @@
-ALTER VIEW public.market_pipeline_status SET (security_invoker = on);

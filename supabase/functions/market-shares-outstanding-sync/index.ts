@@ -1,42 +1,14 @@
-// Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
-// market-shares-outstanding-sync — populate market_shares_outstanding.
-// Waterfall (Tickertape parity): Yahoo v10 quoteSummary (crumb-authenticated)
-// → NSE quote-equity issuedSize → FMP profile. Yahoo is primary because NSE's
-// endpoint frequently 401/blocks non-browser callers on Supabase edge IPs,
-// which is why market_shares_outstanding was sitting at 0 rows.
-// Kotak Neo isn't in the chain — the /quote payload doesn't expose shares
-// outstanding, so this stays vendor-only regardless of the user's broker.
-// Chunked, resumable: skips rows refreshed within 7 days.
-
+// market-shares-outstanding-sync — populate market_shares_outstanding by
+// reading `issuedSize` from NSE quote-equity for each active NSE equity,
+// with a Yahoo `defaultKeyStatistics.sharesOutstanding` fallback for symbols
+// NSE refuses. Chunked, resumable: only refreshes rows older than 7 days.
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { nseFetch } from "../_shared/market/nseClient.ts";
 import { fmpProfile } from "../_shared/market/fmpClient.ts";
-import { yahooQuoteSummary } from "../_shared/market/yahooCrumb.ts";
-import { toYahooSymbol } from "../_shared/market/yahooClient.ts";
 
-// CHUNK sized to drain the ~1600 outstanding rows in a couple of orchestrator
-// iterations without exceeding edge worker CPU time. REFRESH_DAYS at 7 keeps
-// re-scrapes weekly (shares outstanding only changes on corporate actions).
-const CHUNK = 1600;
-const CONCURRENCY = 8;
-const REFRESH_DAYS = 7;
-
-async function fetchYahooShares(symbol: string, exchange = "NSE"): Promise<number | null> {
-  // Try the stock's exchange first, then swap suffix as a fallback.
-  const primary = toYahooSymbol(symbol, exchange);
-  const alt = primary.endsWith(".NS") ? `${symbol}.BO` : `${symbol}.NS`;
-  for (const y of [primary, alt]) {
-    try {
-      const r = await yahooQuoteSummary(y, "defaultKeyStatistics,price");
-      const raw = r?.defaultKeyStatistics?.sharesOutstanding?.raw
-        ?? r?.price?.sharesOutstanding?.raw;
-      const n = Number(raw);
-      if (Number.isFinite(n) && n > 0) return n;
-    } catch { /* try next */ }
-  }
-  return null;
-}
+const CHUNK = 120;
+const CONCURRENCY = 4;
 
 async function fetchIssuedSize(symbol: string): Promise<number | null> {
   const url = `https://www.nseindia.com/api/quote-equity?symbol=${encodeURIComponent(symbol)}`;
@@ -51,6 +23,28 @@ async function fetchIssuedSize(symbol: string): Promise<number | null> {
     const n = typeof raw === "string" ? Number(raw.replace(/,/g, "")) : Number(raw);
     return Number.isFinite(n) && n > 0 ? n : null;
   } catch { return null; }
+}
+
+async function fetchYahooShares(symbol: string): Promise<number | null> {
+  // v10/quoteSummary now requires a crumb; v7/quote does not and returns
+  // sharesOutstanding directly. Try .NS first, then .BO.
+  const suffixes = [".NS", ".BO"];
+  for (const suf of suffixes) {
+    const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbol + suf)}`;
+    try {
+      const r = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0 (Jarvis shares-sync)", Accept: "application/json" },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!r.ok) continue;
+      const body = await r.json();
+      const q = body?.quoteResponse?.result?.[0];
+      const raw = q?.sharesOutstanding;
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) return n;
+    } catch { /* try next suffix */ }
+  }
+  return null;
 }
 
 async function fetchFmpShares(symbol: string): Promise<number | null> {
@@ -84,13 +78,15 @@ Deno.serve(async (req) => {
       });
     }
 
-    const cutoff = new Date(Date.now() - REFRESH_DAYS * 86400_000).toISOString();
+    const cutoff = new Date(Date.now() - 7 * 86400_000).toISOString();
+    // Pull a wider candidate pool, then subtract symbols already refreshed
+    // within 7d. Prioritizes symbols with NO row first, then oldest as_of.
     const { data: candidatePool } = await supabase
       .from("market_stocks")
       .select("symbol")
       .eq("is_active", true).eq("exchange", "NSE")
       .order("symbol")
-      .limit(3000);
+      .limit(2000);
     const poolSymbols = (candidatePool ?? []).map((s: any) => s.symbol);
 
     const cutoffDate = cutoff.slice(0, 10);
@@ -106,7 +102,7 @@ Deno.serve(async (req) => {
     const attempted = work.length;
     const skippedFresh = poolSymbols.length - work.length;
 
-    let yahooHits = 0, nseHits = 0, fmpHits = 0, failed = 0;
+    let nseHits = 0, yahooHits = 0, fmpHits = 0, failed = 0;
     const started = Date.now();
     const asOf = new Date().toISOString().slice(0, 10);
     const fmpKeyPresent = !!Deno.env.get("FINANCIAL_MODELING_PREP_API_KEY");
@@ -115,12 +111,12 @@ Deno.serve(async (req) => {
       while (work.length > 0) {
         const s = work.shift();
         if (!s) break;
-        // Yahoo first — it works from Supabase edges; NSE frequently doesn't.
-        let totalShares = await fetchYahooShares(s.symbol, "NSE");
-        let source: "yahoo" | "nse" | "fmp" = "yahoo";
+        let totalShares = await fetchIssuedSize(s.symbol);
+        let source: "nse" | "yahoo" | "fmp" = "nse";
         if (totalShares == null) {
-          totalShares = await fetchIssuedSize(s.symbol);
-          source = "nse";
+          await sleep(200 + Math.random() * 200);
+          totalShares = await fetchYahooShares(s.symbol);
+          source = "yahoo";
         }
         if (totalShares == null && fmpKeyPresent) {
           totalShares = await fetchFmpShares(s.symbol);
@@ -132,44 +128,27 @@ Deno.serve(async (req) => {
           source, fetched_at: new Date().toISOString(),
         }, { onConflict: "symbol,as_of" });
         if (upErr) { failed++; continue; }
-        if (source === "yahoo") yahooHits++;
-        else if (source === "nse") nseHits++;
+        if (source === "nse") nseHits++;
+        else if (source === "yahoo") yahooHits++;
         else fmpHits++;
-        // Snapshot onto market_stocks so Screener MCap renders instantly.
-        const totalCr = totalShares / 1e7;
-        const { data: last } = await supabase
-          .from("market_daily_prices")
-          .select("close").eq("symbol", s.symbol).eq("exchange", "NSE")
-          .order("trade_date", { ascending: false }).limit(1).maybeSingle();
-        const close = last?.close != null ? Number(last.close) : null;
-        const mcap = close != null && Number.isFinite(close) ? close * totalCr : null;
-        await supabase.from("market_stocks").update({
-          total_shares_cr: totalCr,
-          shares_source: source,
-          shares_as_of: new Date().toISOString(),
-          market_cap: mcap,
-          market_cap_calc_at: mcap != null ? new Date().toISOString() : null,
-          market_cap_source: mcap != null ? `calc:${source}_shares_x_close` : null,
-          market_cap_as_of:  mcap != null ? new Date().toISOString() : null,
-        }).eq("symbol", s.symbol).eq("exchange", "NSE");
-        // Gentle jitter to stay under Yahoo/Akamai rate limits.
+        // Gentle jitter to avoid Akamai / Yahoo rate limits.
         await sleep(150 + Math.random() * 250);
       }
     });
     await Promise.all(workers);
 
-    const synced = yahooHits + nseHits + fmpHits;
+    const synced = nseHits + yahooHits + fmpHits;
     await supabase.from("market_ingestion_runs").insert({
-      source: "shares_outstanding_waterfall", stage: "fetch",
+      source: "nse_shares_outstanding", stage: "fetch",
       status: failed > synced ? "partial" : "ok",
       rows_ingested: synced, duration_ms: Date.now() - started,
-      metadata: { failed, attempted, skipped_fresh: skippedFresh, yahoo: yahooHits, nse: nseHits, fmp: fmpHits },
+      metadata: { failed, attempted, skipped_fresh: skippedFresh, nse: nseHits, yahoo: yahooHits, fmp: fmpHits },
       finished_at: new Date().toISOString(),
     });
 
     return new Response(JSON.stringify({
       ok: true, attempted, synced, failed,
-      skipped_fresh: skippedFresh, yahoo: yahooHits, nse: nseHits, fmp: fmpHits,
+      skipped_fresh: skippedFresh, nse: nseHits, yahoo: yahooHits, fmp: fmpHits,
       drained: attempted < CHUNK,
     }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {

@@ -28,8 +28,6 @@ export function OrderTicket({
   const [price, setPrice] = useState("");
   const [trigger, setTrigger] = useState("");
   const [validity, setValidity] = useState<"DAY" | "IOC">("DAY");
-  const [disclosedQty, setDisclosedQty] = useState("");
-  const [amo, setAmo] = useState(false);
   const push = useUi((s) => s.push);
   const { place } = useMarketOrderMutations();
   const { data: fundsResp } = useFunds();
@@ -56,36 +54,15 @@ export function OrderTicket({
     return null;
   }, [side, funds, notional]);
 
-  // Enforce ₹0.05 tick size for equity LIMIT / SL orders — silently snap and
-  // warn once. Broker rejects otherwise with a cryptic error.
-  const tickHint = useMemo(() => {
-    if (orderType === "MARKET" || orderType === "SL-M") return null;
-    const p = Number(price);
-    if (!p) return null;
-    const snapped = Math.round(p * 20) / 20;
-    return Math.abs(snapped - p) > 1e-6 ? `Nearest tick: ₹${snapped.toFixed(2)}` : null;
-  }, [orderType, price]);
-
   const submit = async () => {
     const q = Number(qty);
     if (!q || q < 1) { push("Quantity must be at least 1", "warn"); return; }
     if ((orderType === "LIMIT" || orderType === "SL") && !Number(price)) { push("Price required", "warn"); return; }
     if ((orderType === "SL" || orderType === "SL-M") && !Number(trigger)) { push("Trigger price required", "warn"); return; }
-    const dq = disclosedQty ? Number(disclosedQty) : undefined;
-    if (dq != null) {
-      if (!Number.isFinite(dq) || dq < 0 || dq > q) { push("Disclosed qty must be between 0 and quantity", "warn"); return; }
-      // NSE rule: iceberg disclosed quantity must be at least 10% of order qty.
-      const minDq = Math.ceil(q * 0.10);
-      if (dq > 0 && dq < minDq) { push(`Disclosed qty must be ≥ 10% of order qty (min ${minDq})`, "warn"); return; }
-    }
-    // Confirm on large notional — fat-finger guard. ₹1L threshold.
-    if (notional >= 100_000 && !confirm(`Place ${side} ${q} ${symbol} for ${inr(notional)}?`)) return;
     const input: PlaceOrderInput = {
       symbol, exchange, side, quantity: q, orderType, product, validity,
       price: price ? Number(price) : undefined,
       triggerPrice: trigger ? Number(trigger) : undefined,
-      disclosedQuantity: dq,
-      amo: amo || undefined,
     };
     try {
       const r = await place.mutateAsync(input);
@@ -166,19 +143,6 @@ export function OrderTicket({
             <input style={inputStyle} type="number" step="0.05" value={trigger} onChange={(e) => setTrigger(e.target.value)} />
           </label>
         )}
-        {tickHint && (
-          <div className="hud-label" style={{ color: "var(--warn, #d97706)" }}>{tickHint}</div>
-        )}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          <label>
-            <span style={labelStyle}>Disclosed qty (optional)</span>
-            <input style={inputStyle} type="number" min={0} value={disclosedQty} onChange={(e) => setDisclosedQty(e.target.value)} placeholder="0" />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 18, fontSize: 12 }}>
-            <input type="checkbox" checked={amo} onChange={(e) => setAmo(e.target.checked)} />
-            AMO (after-market)
-          </label>
-        </div>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: 8, border: "1px solid var(--edge)", borderRadius: 3 }}>
           <div>
             <div className="hud-label" style={{ color: "var(--text-dim)" }}>Notional</div>

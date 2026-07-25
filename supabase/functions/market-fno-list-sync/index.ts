@@ -1,4 +1,3 @@
-// Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
 // market-fno-list-sync — download NSE F&O market lots CSV and flip
 // `fno_enabled` on market_stocks. Weekly cron; also runnable from MarketConfig.
 import { createClient } from "npm:@supabase/supabase-js@2";

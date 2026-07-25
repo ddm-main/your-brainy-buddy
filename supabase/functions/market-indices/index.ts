@@ -1,11 +1,6 @@
 // market-indices — user's chosen indices + latest market breadth.
-// Routes through the ACTIVE PROVIDER (Kotak Neo when connected, Yahoo
-// otherwise). Kotak's provider auto-falls-back to Yahoo per-symbol for
-// indices whose tokens aren't in market_stocks — so NIFTY/BANKNIFTY go
-// real-time when Kotak has them, everything else stays via Yahoo.
 // Reads from public.market_index_watch; falls back to a default 6 when empty.
-import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
-import { getActiveProvider } from "../_shared/market/provider.ts";
+import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient, yahooQuote } from "../_shared/market/common.ts";
 
 const DEFAULTS = [
   { symbol: "^NSEI",               name: "Nifty 50",   region: "IN", nse_symbol: "NIFTY",     fno_enabled: true,  constituents_slug: "nifty50" },
@@ -41,18 +36,10 @@ Deno.serve(async (req) => {
     }
     const source = rows.length > 0 ? rows : DEFAULTS;
 
-    // Route through the active provider. Keys are "NSE:<symbol>" — Kotak
-    // provider looks them up in the instrument-token map; anything not found
-    // (all indices, most of the time) falls back to Yahoo transparently.
-    const { provider } = await getActiveProvider(svc, auth.userId);
-    const keys = source.map((r) => `NSE:${r.symbol}`);
-    const quoteRows = await provider.getQuotes(keys);
-    const byKey = new Map(quoteRows.map((q) => [q.key, q]));
-
-    const providers = new Set<string>();
+    const quotes = await yahooQuote(source.map((r) => r.symbol));
+    const byS = new Map(quotes.map((q) => [q.symbol, q]));
     const out = source.map((r) => {
-      const q = byKey.get(`NSE:${r.symbol}`);
-      if (q?.source) providers.add(q.source);
+      const q = byS.get(r.symbol);
       return {
         symbol: r.symbol,
         name: r.name,
@@ -63,21 +50,9 @@ Deno.serve(async (req) => {
         price: q?.price ?? 0,
         change_pct: q?.change_pct ?? null,
         change_abs: q?.change_abs ?? null,
-        source: q?.source ?? null,
       };
     });
-
-    // Top-level provider summary — same convention as market-quotes so the
-    // strip can render an honest live/delayed chip.
-    let providerSummary: "kotak" | "yahoo" | "mixed" | "cache" | "none" = "none";
-    if (providers.size === 1) {
-      const only = [...providers][0];
-      providerSummary = only === "kotak" || only === "yahoo" || only === "cache" ? only : "mixed";
-    } else if (providers.size > 1) {
-      providerSummary = "mixed";
-    }
-
-    return jsonResponse(req, { quotes: out, breadth: breadthRes.data ?? null, source: provider.name, provider: providerSummary });
+    return jsonResponse(req, { quotes: out, breadth: breadthRes.data ?? null, source: "yahoo" });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }

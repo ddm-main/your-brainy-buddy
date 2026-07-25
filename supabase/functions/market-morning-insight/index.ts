@@ -1,5 +1,4 @@
-import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
-import { getActiveProvider } from "../_shared/market/provider.ts";
+import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor, yahooQuote } from "../_shared/market/common.ts";
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
@@ -11,20 +10,7 @@ Deno.serve(async (req) => {
       svc.from("market_holdings").select("symbol,exchange,quantity,avg_price").eq("user_id", auth.userId),
       svc.from("market_watchlist_items").select("symbol,exchange").eq("user_id", auth.userId),
     ]);
-    // Route through the active provider (Kotak-first) so the brief uses the
-    // same fast path as every other price call. Indices have no Kotak
-    // instrument tokens today, so this transparently falls back to Yahoo —
-    // but any future index-token mapping lights up automatically.
-    const { provider } = await getActiveProvider(svc, auth.userId);
-    const indexKeys = ["NSE:^NSEI", "NSE:^BSESN", "NSE:^NSEBANK", "NSE:^INDIAVIX"];
-    const indexRows = await provider.getQuotes(indexKeys).catch(() => []);
-    const indexNames: Record<string, string> = {
-      "NSE:^NSEI": "Nifty 50", "NSE:^BSESN": "Sensex",
-      "NSE:^NSEBANK": "Bank Nifty", "NSE:^INDIAVIX": "India VIX",
-    };
-    const indices = indexRows.map((r) => ({
-      name: indexNames[r.key] ?? r.key, price: r.price, change_pct: r.change_pct,
-    }));
+    const indices = await yahooQuote(["^NSEI", "^BSESN", "^NSEBANK", "^INDIAVIX"]);
     const holdingsCtx = (holdings ?? []).map((h: any) => `${h.symbol} qty=${h.quantity} avg=${h.avg_price}`).join(", ") || "none";
     const watchCtx = (watch ?? []).map((w: any) => w.symbol).join(", ") || "none";
     const marketCtx = indices.map((i) => `${i.name} ${i.price} (${i.change_pct?.toFixed(2) ?? "?"}%)`).join(" · ");

@@ -2,8 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import HudPanel from "@/components/hud/HudPanel";
 import { supabase } from "@/integrations/supabase/client";
-import { Mail, Landmark, FolderKanban, LogOut, LineChart, ShieldCheck, type LucideIcon } from "lucide-react";
-import { useAccessStore } from "@/store/accessStore";
+import { Mail, Landmark, FolderKanban, LogOut, LineChart, type LucideIcon } from "lucide-react";
 
 type Card = {
   to: string;
@@ -11,36 +10,25 @@ type Card = {
   desc: string;
   table: string;
   icon: LucideIcon;
-  adminOnly?: boolean;
 };
 
 const CARDS: Card[] = [
-  { to: "/config/email",       label: "Email",       desc: "Mailbox connections, sync rules, filters",                 table: "email_accounts", icon: Mail },
-  { to: "/config/finance",     label: "Finance",     desc: "Banks, accounts, cards, loans, goals, subscriptions",      table: "",               icon: Landmark },
-  { to: "/config/projects",    label: "Projects",    desc: "Active projects and areas",                                 table: "projects",       icon: FolderKanban },
-  { to: "/config/system-data", label: "System Data", desc: "Shared market data providers & pipeline (admin)",           table: "market_stocks",  icon: LineChart, adminOnly: true },
-  { to: "/config/admin",       label: "Admin",       desc: "Users, roles, and section access",                          table: "",               icon: ShieldCheck, adminOnly: true },
+  { to: "/config/email",    label: "Email",    desc: "Mailbox connections, sync rules, filters",              table: "email_accounts", icon: Mail },
+  { to: "/config/finance",  label: "Finance",  desc: "Banks, accounts, cards, loans, goals, subscriptions",   table: "",               icon: Landmark },
+  { to: "/config/projects", label: "Projects", desc: "Active projects and areas",                              table: "projects",       icon: FolderKanban },
+  { to: "/config/market",   label: "Market",   desc: "Data pipeline health, fundamentals & technicals resync", table: "market_stocks",  icon: LineChart },
 ];
 
 export default function ConfigHome() {
-  // `null` = query failed / not visible under RLS → hide the entry-count chip
-  // instead of showing an indefinite "…" spinner.
-  const [counts, setCounts] = useState<Record<string, number | null>>({});
-  const role = useAccessStore((s) => s.role);
-  const visibleCards = CARDS.filter((c) => (c.adminOnly ? role === "admin" : true));
+  const [counts, setCounts] = useState<Record<string, number>>({});
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const entries = await Promise.all(
         CARDS.filter((c) => c.table).map(async (c) => {
-          try {
-            const { count, error } = await supabase.from(c.table as any).select("id", { count: "exact", head: true });
-            if (error) return [c.table, null] as const;
-            return [c.table, typeof count === "number" ? count : null] as const;
-          } catch {
-            return [c.table, null] as const;
-          }
+          const { count } = await supabase.from(c.table as any).select("id", { count: "exact", head: true });
+          return [c.table, count ?? 0] as const;
         }),
       );
       if (!cancelled) setCounts(Object.fromEntries(entries));
@@ -51,7 +39,7 @@ export default function ConfigHome() {
   return (
     <HudPanel title="Configuration" index="CFG" live="ok" bodyClass="overflow-auto">
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 10 }}>
-        {visibleCards.map((c) => {
+        {CARDS.map((c) => {
           const Icon = c.icon;
           const n = counts[c.table];
           return (
@@ -80,7 +68,7 @@ export default function ConfigHome() {
                 <span style={{ color: "var(--accent)" }}><Icon size={16} /></span>
                 <div className="hud-label" style={{ color: "var(--accent)", fontSize: 11 }}>{c.label}</div>
                 <div style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-muted)" }}>
-                  {!c.table || n === undefined || n === null ? null : `${n} ${n === 1 ? "entry" : "entries"}`}
+                  {!c.table ? null : n === undefined ? "…" : `${n} ${n === 1 ? "entry" : "entries"}`}
                 </div>
               </div>
               <div style={{ fontSize: 12, color: "var(--text-dim, var(--text))", lineHeight: 1.4 }}>{c.desc}</div>

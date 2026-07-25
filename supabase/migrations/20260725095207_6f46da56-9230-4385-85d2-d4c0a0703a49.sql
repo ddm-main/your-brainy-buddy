@@ -1,1 +1,0 @@
-ALTER TABLE public.market_positions ADD COLUMN IF NOT EXISTS exit_source text;

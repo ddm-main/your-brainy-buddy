@@ -13,9 +13,6 @@ export interface ApiSettings {
   token_expires_at: string | null;
   last_sync_at: string | null;
   last_error: string | null;
-  funds_last_attempt_at?: string | null;
-  funds_last_error_code?: string | null;
-  funds_retry_after_at?: string | null;
   ucc: string | null;
   greeting_name: string | null;
   totp_secret_enc?: string | null;
@@ -29,11 +26,6 @@ export interface Quote {
   change_pct: number | null;
   day_change: number | null;
   source?: string | null;
-  // Per-quote provider that actually served this row ("kotak" | "yahoo" |
-  // "cache"). The Screener overlays intraday values on a row ONLY when this
-  // is "kotak" — Yahoo/cache stay on the EOD number the filter used, so the
-  // displayed 1D% can't drift below the range the user filtered on.
-  provider?: string | null;
   as_of?: string | null;
   previous_close_as_of?: string | null;
   stale?: boolean | null;
@@ -89,28 +81,6 @@ export interface BreadthDaily {
   nifty_close: number | null;
   nifty_change_pct: number | null;
   regime: string | null;
-  india_vix: number | null;
-  fii_net_cr: number | null;
-  dii_net_cr: number | null;
-  new_highs: number | null;
-  new_lows: number | null;
-  market_score: number | null;
-  computed_at?: string | null;
-}
-
-export interface TopMoverRow {
-  symbol: string;
-  exchange: string;
-  sector: string | null;
-  close: number | null;
-  change_pct: number | null;
-  volume: number | null;
-  rel_volume: number | null;
-  rsi14: number | null;
-  breakout_score: number | null;
-  trade_date: string | null;
-  direction: "gain" | "lose";
-  rn: number;
 }
 
 export interface SectorStrength {
@@ -199,8 +169,6 @@ export interface Position {
   pnl: number | null;
   trailing_stop: number | null;
   journal_notes: string | null;
-  is_broker_synced?: boolean | null;
-  exit_source?: string | null;
 }
 
 export interface CandleDto {
@@ -216,8 +184,6 @@ export interface CandlesResponse {
   candles: CandleDto[];
   emas: Record<string, Array<{ t: number; v: number | null }>>;
   timeframe: string;
-  /** Primary provider that served this response ("kotak_neo" or "yahoo"). Best-effort — kotak may internally fall back to yahoo per-symbol. */
-  provider?: "kotak_neo" | "yahoo";
 }
 
 export interface SavedScreener {

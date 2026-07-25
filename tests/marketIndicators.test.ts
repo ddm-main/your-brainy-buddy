@@ -146,12 +146,6 @@ describe("supportResistance", () => {
 });
 
 describe("computeSnapshot", () => {
-  it("uses the arithmetic average of the prior 30 volumes, excluding today", () => {
-    const candles = mkCandles(Array.from({ length: 31 }, (_, i) => 100 + i));
-    candles.forEach((c, i) => { c.volume = i < 30 ? i + 1 : 1_000_000; });
-    const snap = computeSnapshot(candles);
-    expect(snap?.volAvg30).toBe(15.5);
-  });
   it("returns a full snapshot for a real-shaped series", () => {
     const closes = Array.from({ length: 300 }, (_, i) => 100 * Math.exp(0.001 * i) + Math.sin(i / 7) * 3);
     const candles = mkCandles(closes);

@@ -1,27 +1,12 @@
 // market-backtest-run — simple deterministic rule backtester over stored/Yahoo candles.
-// P1.12: applies brokerage + slippage on every entry/exit so metrics match
-// live-trading reality. Defaults calibrated to Kotak Neo cash-equity delivery:
-//   - brokerage ~0.03% per side (flat-fee style broker; Zerodha CNC is 0)
-//   - slippage  0.05% per side (typical mid-cap market-order fill drift)
-// Overridable per-strategy via strategy.brokerage_pct / strategy.slippage_pct.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
-import { getActiveProvider } from "../_shared/market/provider.ts";
+import { yahooChartRetry, toYahooSymbol } from "../_shared/market/yahooClient.ts";
 import { ema, rsi, type Candle } from "../_shared/market/indicators.ts";
-import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
-
-const limiter = createMarketLimiter(10, 60_000);
 
 type Strategy = {
   id: string;
   user_id: string;
-  strategy: {
-    rule?: string; symbol?: string; exchange?: string;
-    stop_loss_pct?: number; target_pct?: number;
-    brokerage_pct?: number; slippage_pct?: number;
-    // "long" (default) — same v1 behavior as before. "short" runs the
-    // reverse: SELL to open, BUY to cover; SL/target measured against entry.
-    direction?: "long" | "short";
-  };
+  strategy: { rule?: string; symbol?: string; exchange?: string; stop_loss_pct?: number; target_pct?: number };
 };
 
 type Trade = {
@@ -30,12 +15,7 @@ type Trade = {
   entry: number;
   exit: number;
   return_pct: number;
-  gross_pct: number;
-  costs_pct: number;
 };
-
-const DEFAULT_BROKERAGE_PCT = 0.03; // 0.03% per side
-const DEFAULT_SLIPPAGE_PCT = 0.05;  // 0.05% per side
 
 const clampYears = (v: unknown) => {
   const n = Number(v ?? 3);
@@ -48,6 +28,7 @@ const isoDay = (t: number) => new Date(t * 1000).toISOString().slice(0, 10);
 function crossAbove(a: (number | null)[], b: (number | null)[], i: number) {
   return a[i - 1] != null && b[i - 1] != null && a[i] != null && b[i] != null && a[i - 1]! <= b[i - 1]! && a[i]! > b[i]!;
 }
+
 function crossBelow(a: (number | null)[], b: (number | null)[], i: number) {
   return a[i - 1] != null && b[i - 1] != null && a[i] != null && b[i] != null && a[i - 1]! >= b[i - 1]! && a[i]! < b[i]!;
 }
@@ -69,15 +50,7 @@ function stdev(xs: number[]) {
   return Math.sqrt(mean(xs.map((x) => (x - m) ** 2)));
 }
 
-function runRule(
-  candles: Candle[],
-  rule: string,
-  stopLossPct: number,
-  targetPct: number,
-  brokeragePct: number,
-  slippagePct: number,
-  direction: "long" | "short",
-) {
+function runRule(candles: Candle[], rule: string, stopLossPct: number, targetPct: number) {
   const closes = candles.map((c) => c.close);
   const e20 = ema(closes, 20);
   const e50 = ema(closes, 50);
@@ -90,84 +63,41 @@ function runRule(
   const equityCurve: Array<{ t: string; v: number }> = [];
   const trades: Trade[] = [];
 
-  // Costs applied on both legs. Slippage widens the entry price against you
-  // (buy higher / short lower) and the exit price against you too.
-  const long = direction === "long";
-  const costsRoundTripPct = 2 * (brokeragePct + slippagePct);
-
-  const enter = (i: number) => {
-    inPos = true;
-    // Slip entry against the trade direction.
-    entry = closes[i] * (long ? 1 + slippagePct / 100 : 1 - slippagePct / 100);
-    entryTime = candles[i].time;
-  };
+  const enter = (i: number) => { inPos = true; entry = closes[i]; entryTime = candles[i].time; };
   const exit = (i: number) => {
-    // Slip exit against the trade direction.
-    const raw = closes[i];
-    const filled = raw * (long ? 1 - slippagePct / 100 : 1 + slippagePct / 100);
-    const grossPct = long ? pct(filled, entry) : pct(entry, filled);
-    const retPct = grossPct - 2 * brokeragePct;
-    equity *= 1 + retPct / 100;
-    trades.push({
-      entry_time: isoDay(entryTime),
-      exit_time: isoDay(candles[i].time),
-      entry, exit: filled, return_pct: retPct,
-      gross_pct: grossPct, costs_pct: 2 * brokeragePct + 2 * slippagePct,
-    });
+    const ret = pct(closes[i], entry);
+    equity *= 1 + ret / 100;
+    trades.push({ entry_time: isoDay(entryTime), exit_time: isoDay(candles[i].time), entry, exit: closes[i], return_pct: ret });
     inPos = false;
     entry = 0;
   };
 
-  // Entry signal (direction-aware): long → cross-above / oversold / breakout;
-  // short → cross-below / overbought / breakdown.
-  const isEntry = (i: number): boolean => {
-    const prior20High = Math.max(...candles.slice(Math.max(0, i - 20), i).map((c) => c.high));
-    const prior20Low = Math.min(...candles.slice(Math.max(0, i - 20), i).map((c) => c.low));
-    if (long) {
-      if (rule === "ema_cross_20_50") return crossAbove(e20, e50, i);
-      if (rule === "rsi_reversion") return rs[i - 1] != null && rs[i - 1]! < 30 && rs[i] != null && rs[i]! >= 30;
-      if (rule === "breakout_20d") return closes[i] > prior20High;
-    } else {
-      if (rule === "ema_cross_20_50") return crossBelow(e20, e50, i);
-      if (rule === "rsi_reversion") return rs[i - 1] != null && rs[i - 1]! > 70 && rs[i] != null && rs[i]! <= 70;
-      if (rule === "breakout_20d") return closes[i] < prior20Low;
-    }
-    return false;
-  };
-  const isExit = (i: number): boolean => {
-    // return since entry — signed by direction
-    const changePct = long ? pct(closes[i], entry) : pct(entry, closes[i]);
-    if (changePct <= -Math.abs(stopLossPct)) return true;
-    if (changePct >= Math.abs(targetPct)) return true;
-    if (long) {
-      if (rule === "ema_cross_20_50") return crossBelow(e20, e50, i);
-      if (rule === "rsi_reversion") return rs[i] != null && rs[i]! > 70;
-      if (rule === "breakout_20d") return closes[i] < (e20[i] ?? closes[i] * 0.92);
-    } else {
-      if (rule === "ema_cross_20_50") return crossAbove(e20, e50, i);
-      if (rule === "rsi_reversion") return rs[i] != null && rs[i]! < 30;
-      if (rule === "breakout_20d") return closes[i] > (e20[i] ?? closes[i] * 1.08);
-    }
-    return false;
-  };
-
   for (let i = 55; i < candles.length; i++) {
+    const prior20High = Math.max(...candles.slice(Math.max(0, i - 20), i).map((c) => c.high));
     if (!inPos) {
-      if (isEntry(i)) enter(i);
-    } else if (isExit(i)) {
-      exit(i);
+      if (rule === "ema_cross_20_50" && crossAbove(e20, e50, i)) enter(i);
+      else if (rule === "rsi_reversion" && rs[i - 1] != null && rs[i - 1]! < 30 && rs[i] != null && rs[i]! >= 30) enter(i);
+      else if (rule === "breakout_20d" && closes[i] > prior20High) enter(i);
+    } else {
+      const ret = pct(closes[i], entry);
+      const shouldExit =
+        ret <= -Math.abs(stopLossPct) ||
+        ret >= Math.abs(targetPct) ||
+        (rule === "ema_cross_20_50" && crossBelow(e20, e50, i)) ||
+        (rule === "rsi_reversion" && rs[i] != null && rs[i]! > 70) ||
+        (rule === "breakout_20d" && closes[i] < (e20[i] ?? closes[i] * 0.92));
+      if (shouldExit) exit(i);
     }
     equityCurve.push({ t: isoDay(candles[i].time), v: Math.round(equity) });
   }
   if (inPos) exit(candles.length - 1);
-  return { equityCurve, trades, costsRoundTripPct };
+  return { equityCurve, trades };
 }
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
   const auth = await requireUserId(req);
   if ("error" in auth) return new Response("unauthorized", { status: 401, headers: corsFor(req) });
-  const rl = limiter.guard(req, auth.userId); if (rl) return rl;
   try {
     const body = await req.json().catch(() => ({}));
     const strategyId = String(body?.strategy_id ?? "");
@@ -188,28 +118,20 @@ Deno.serve(async (req) => {
     const exchange = String(s.strategy?.exchange ?? "NSE").toUpperCase();
     const rule = String(s.strategy?.rule ?? "ema_cross_20_50");
     if (!symbol) return errorResponse(req, "Strategy has no symbol", 400);
+    // Defaults preserve the historical -8%/+18% band for strategies saved
+    // before these fields existed; new strategies set their own via the UI.
     const stopLossPct = Number(s.strategy?.stop_loss_pct);
     const targetPct = Number(s.strategy?.target_pct);
     const effectiveStopLoss = Number.isFinite(stopLossPct) && stopLossPct > 0 ? stopLossPct : 8;
     const effectiveTarget = Number.isFinite(targetPct) && targetPct > 0 ? targetPct : 18;
-    const brokeragePct = Number.isFinite(Number(s.strategy?.brokerage_pct)) ? Number(s.strategy?.brokerage_pct) : DEFAULT_BROKERAGE_PCT;
-    const slippagePct = Number.isFinite(Number(s.strategy?.slippage_pct)) ? Number(s.strategy?.slippage_pct) : DEFAULT_SLIPPAGE_PCT;
-    const direction = s.strategy?.direction === "short" ? "short" : "long";
 
     const range = years >= 10 ? "10y" : years >= 3 ? "5y" : "1y";
-    // Route through the active provider (Kotak Neo when connected — falls
-    // back to Yahoo automatically when the symbol has no instrument token or
-    // Kotak returns empty).
-    const { provider } = await getActiveProvider(svc, auth.userId);
-    const allCandles = await provider.getOHLCV(symbol, exchange, range, "1d");
+    const allCandles = await yahooChartRetry(toYahooSymbol(symbol, exchange), range, "1d", 3);
     const cutoff = Math.floor(Date.now() / 1000 - years * 365.25 * 86_400);
     const candles = allCandles.filter((c) => c.time >= cutoff);
     if (candles.length < 80) return errorResponse(req, "Not enough candle history for backtest", 400);
 
-    const { equityCurve, trades, costsRoundTripPct } = runRule(
-      candles, rule, effectiveStopLoss, effectiveTarget,
-      brokeragePct, slippagePct, direction,
-    );
+    const { equityCurve, trades } = runRule(candles, rule, effectiveStopLoss, effectiveTarget);
     const returns = trades.map((t) => t.return_pct);
     const wins = returns.filter((r) => r > 0);
     const losses = returns.filter((r) => r <= 0);
@@ -230,12 +152,6 @@ Deno.serve(async (req) => {
       total_trades: trades.length,
       total_return: totalReturn,
       cagr: ((end / start) ** (1 / actualYears) - 1) * 100,
-      // P1.12: expose what costs are subtracting from raw returns so users
-      // can compare gross vs net at a glance.
-      brokerage_pct: brokeragePct,
-      slippage_pct: slippagePct,
-      costs_round_trip_pct: costsRoundTripPct,
-      direction,
     };
 
     const { data: inserted, error: insertError } = await svc.from("market_backtest_results")

@@ -17,10 +17,8 @@ import { callMarketFn } from "@/lib/market/api";
 import { useMarketSettings } from "@/lib/market/hooks";
 import { toSafeError } from "@/lib/errors";
 import { useUi } from "@/store/uiStore";
-import { useAccessStore } from "@/store/accessStore";
 
 export function KotakReconnectModal() {
-  const role = useAccessStore((s) => s.role);
   const { data: settings = [] } = useMarketSettings();
   const kotak = settings.find((s) => s.active_provider === "kotak_neo");
   const qc = useQueryClient();
@@ -34,24 +32,12 @@ export function KotakReconnectModal() {
 
   // Only for someone who's actually configured Kotak (has a consumer key) —
   // a user who's never touched it and is just running on Yahoo shouldn't
-  // see a "disconnected" popup for a broker they never connected. Broadened
-  // from just expired/error so pending_otp / disconnected also prompt — the
-  // Screener chip fires a `kotak:reconnect` event to reopen this modal after
-  // dismissal, so the user always has a one-click path back to real-time data.
-  const broken = !!kotak?.consumer_key && kotak.connection_status !== "connected";
+  // see a "disconnected" popup for a broker they never connected.
+  const broken = !!kotak?.consumer_key && ["expired", "error"].includes(kotak.connection_status);
 
   // Fresh check every time the Market shell mounts, i.e. every time the
   // section is actually opened — not just once per page load.
   useEffect(() => { setDismissed(false); setNeedsOtp(false); setMsg(null); }, []);
-
-  // Screener chip (and anywhere else) can force the modal open again after
-  // the user dismissed it — otherwise they'd be stuck on Yahoo until the
-  // next page load.
-  useEffect(() => {
-    const onOpen = () => { setDismissed(false); setNeedsOtp(false); setMsg(null); };
-    window.addEventListener("kotak:reconnect", onOpen);
-    return () => window.removeEventListener("kotak:reconnect", onOpen);
-  }, []);
 
   const reconnect = async () => {
     setBusy(true); setMsg(null);
@@ -85,7 +71,6 @@ export function KotakReconnectModal() {
     } finally { setBusy(false); }
   };
 
-  if (role !== "admin") return null;
   if (!broken || dismissed) return null;
 
   return (

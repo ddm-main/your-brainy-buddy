@@ -1,28 +1,25 @@
 // Market Holdings — manual CRUD + Kotak sync + live quotes
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
 import { HudPanel } from "@/components/hud/HudPanel";
-import { HudModal } from "@/components/hud/HudModal";
 import { Btn, Chip, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { supabase } from "@/integrations/supabase/client";
+import { SAFE_SUPABASE_URL } from "@/lib/supabaseSafe";
+import { authFetch } from "@/lib/authFetch";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { Plus, RefreshCw, Trash2, Download, ShoppingCart } from "lucide-react";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 import { approxAnnualizedReturnPct, holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
-import { useHoldings, useMarketSettings, usePortfolioLastSync, useQuotes, useSyncHoldings } from "@/lib/market/hooks";
+import { useQuotes } from "@/lib/market/hooks";
 import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
-import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
-import { PriceSourceChip } from "@/components/market/PriceSourceChip";
 import { PortfolioAllocation } from "@/components/market/PortfolioAllocation";
 import { OrderTicket } from "@/components/market/OrderTicket";
 
 type Holding = {
   id: string; symbol: string; exchange: string; quantity: number; avg_price: number;
   buy_date: string | null; investment_type: string | null; notes: string | null; source: string;
-  settled_qty?: number | null; t1_qty?: number | null; pledged_qty?: number | null;
 };
 type ScoreMap = Record<string, { breakout_score: number | null; prebreakout_score: number | null; score_components: any }>;
 
@@ -30,27 +27,32 @@ const empty = { symbol: "", exchange: "NSE", quantity: "", avg_price: "", buy_da
 
 export default function Holdings() {
   const push = useUi((s) => s.push);
-  const qc = useQueryClient();
-  const { data: rows = [] } = useHoldings();
-  const { data: settings = [] } = useMarketSettings();
-  const { data: lastSyncAt } = usePortfolioLastSync();
-  const syncMut = useSyncHoldings();
+  const [rows, setRows] = useState<Holding[]>([]);
   const [scores, setScores] = useState<ScoreMap>({});
   const [sectors, setSectors] = useState<Record<string, string | null>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [form, setForm] = useState({ ...empty });
   const [showForm, setShowForm] = useState(false);
-  const connected = settings.some((s) => s.active_provider === "kotak_neo" && s.connection_status === "connected");
+  const [connected, setConnected] = useState<string | null>(null);
   const [ticket, setTicket] = useState<{ symbol: string; exchange: "NSE" | "BSE"; side: "BUY" | "SELL"; qty?: number } | null>(null);
-  const [deleteHolding, setDeleteHolding] = useState<Holding | null>(null);
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ["market", "holdings"] });
+  const callFn = async (name: string, body: Record<string, unknown> = {}) => {
+    const url = `${SAFE_SUPABASE_URL}/functions/v1/${name}`;
+    const r = await authFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j?.error ?? r.statusText);
+    return j;
+  };
 
-  useEffect(() => {
-    const data = rows;
-    const symbols = [...new Set(data.map((h: any) => h.symbol))];
-    let active = true;
-    const run = async () => {
+  const load = async () => {
+    const [{ data, error }, { data: st }] = await Promise.all([
+      supabase.from("market_holdings").select("*").order("created_at", { ascending: false }),
+      supabase.from("market_api_settings").select("active_provider,connection_status").eq("connection_status", "connected").limit(1),
+    ]);
+    if (error) push(error.message, "err");
+    setRows((data ?? []) as Holding[]);
+    setConnected((st?.[0] as any)?.active_provider ?? null);
+    const symbols = [...new Set((data ?? []).map((h: any) => h.symbol))];
     if (symbols.length > 0) {
       // Keyed by symbol:exchange (quoteKey), not bare symbol — a symbol can
       // legitimately exist on both NSE and BSE with different rows in these
@@ -62,22 +64,19 @@ export default function Holdings() {
           .in("symbol", symbols),
         supabase.from("market_stocks").select("symbol,exchange,sector").in("symbol", symbols),
       ]);
-      if (!active) return;
       const map: ScoreMap = {};
       for (const s of (sc ?? []) as any[]) map[quoteKey(s.exchange, s.symbol)] = s;
       setScores(map);
       const secMap: Record<string, string | null> = {};
       for (const s of (st2 ?? []) as any[]) secMap[quoteKey(s.exchange, s.symbol)] = s.sector ?? null;
       setSectors(secMap);
-    } else { setScores({}); setSectors({}); }
-    };
-    run();
-    return () => { active = false; };
-  }, [rows]);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
 
   // Live quotes: same shared 1s market-hours hook every other page uses.
   const quoteKeys = useMemo(() => rows.map((h) => `${h.exchange}:${h.symbol}`), [rows]);
-  useEffect(() => { subscribeSymbolsForTicks(quoteKeys); }, [quoteKeys]);
   const { data: quotesData, isFetching: quotesFetching, refetch: refetchQuotes } = useQuotes(quoteKeys);
   const restQuotes = useMemo(() => {
     const map: Record<string, import("@/lib/market/types").Quote> = {};
@@ -108,26 +107,25 @@ export default function Holdings() {
     setForm({ ...empty });
     setShowForm(false);
     push("Holding added", "ok");
-    invalidate();
+    await load();
   };
 
-  const remove = async (row: Holding) => {
-    const { error } = await supabase.from("market_holdings").delete().eq("id", row.id);
+  const remove = async (id: string) => {
+    if (!confirm("Delete this holding?")) return;
+    const { error } = await supabase.from("market_holdings").delete().eq("id", id);
     if (error) { push(error.message, "err"); return; }
-    push(`Deleted ${row.symbol}`, "ok");
-    setDeleteHolding(null);
-    invalidate();
+    push("Deleted", "ok");
+    await load();
   };
 
   const sync = async () => {
     setBusy("sync");
-    syncMut.mutate(undefined, {
-      onSuccess: (r) => {
-        push(`Kotak sync: ${r?.inserted ?? 0} new, ${r?.updated ?? 0} updated${r?.removed ? `, ${r.removed} removed` : ""}`, "ok");
-        setBusy(null);
-      },
-      onError: (e) => { push(toSafeError(e, "Sync failed").message, "err"); setBusy(null); },
-    });
+    try {
+      const r = await callFn("market-sync-holdings", {});
+      push(`Kotak sync: ${r?.inserted ?? 0} new, ${r?.updated ?? 0} updated${r?.removed ? `, ${r.removed} removed` : ""}`, "ok");
+      await load();
+    } catch (e) { push(toSafeError(e, "Sync failed").message, "err"); }
+    finally { setBusy(null); }
   };
 
   const totals = useMemo(() => {
@@ -175,14 +173,13 @@ export default function Holdings() {
           <Btn size="sm" onClick={() => refetchQuotes()} disabled={busy !== null}>
             <RefreshCw size={11} style={{ marginRight: 4 }} /> {quotesFetching ? "refreshing…" : "refresh quotes"}
           </Btn>
-          {connected && (
+          {connected === "kotak_neo" && (
             <Btn size="sm" onClick={sync} disabled={busy !== null}>
               <Download size={11} style={{ marginRight: 4 }} /> {busy === "sync" ? "syncing…" : "sync from Kotak"}
             </Btn>
           )}
         </div>
       }>
-        {lastSyncAt && <div className="hud-label" style={{ color: "var(--text-dim)", marginBottom: 8 }}>Last synced {new Date(lastSyncAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 8 }}>
           <Stat label="Invested" value={totals.invested == null ? "—" : inr(totals.invested)} />
           <Stat label="Current Value" value={totals.current == null ? "—" : inr(totals.current)} />
@@ -255,10 +252,7 @@ export default function Holdings() {
                       <Link to={`/market/analysis/${h.symbol}?exchange=${h.exchange}`} style={{ color: "var(--accent)", textDecoration: "none" }}>{h.symbol}</Link>
                       <span style={{ color: "var(--text-dim)", marginLeft: 4, fontSize: 10 }}>{h.exchange}</span>
                     </td>
-                    <td style={td} title={`Settled: ${h.settled_qty ?? "—"}, T1: ${h.t1_qty ?? "—"}, pledged: ${h.pledged_qty ?? "—"}`}>
-                      {h.quantity}
-                      {(h.t1_qty || h.pledged_qty) ? <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 9 }}>T1 {h.t1_qty ?? 0} · Pledged {h.pledged_qty ?? 0}</div> : null}
-                    </td>
+                    <td style={td}>{h.quantity}</td>
                     <td style={td}>{Number(h.avg_price).toFixed(2)}</td>
                     <td style={td}>{calc.ltp != null ? calc.ltp.toFixed(2) : "—"}</td>
                     <td style={td}>{inr(calc.invested)}</td>
@@ -279,13 +273,13 @@ export default function Holdings() {
                     <td style={td}><Chip tone={q?.stale ? "warn" : h.source === "manual" ? "neutral" : "accent"}>{q?.stale ? "stale" : h.source}</Chip></td>
                     <td style={td}>
                       <span style={{ display: "inline-flex", gap: 4 }}>
-                        {connected && (
+                        {connected === "kotak_neo" && (
                           <>
                             <button onClick={() => setTicket({ symbol: h.symbol, exchange: h.exchange as "NSE" | "BSE", side: "BUY" })} className="hud-btn" data-variant="ghost" data-size="sm" title="Buy more"><ShoppingCart size={11} /></button>
                             <button onClick={() => setTicket({ symbol: h.symbol, exchange: h.exchange as "NSE" | "BSE", side: "SELL", qty: h.quantity })} className="hud-btn" data-variant="ghost" data-size="sm" title="Sell" style={{ color: "var(--danger)" }}>S</button>
                           </>
                         )}
-                        <button onClick={() => setDeleteHolding(h)} className="hud-btn" data-variant="ghost" data-size="sm" title="Delete">
+                        <button onClick={() => remove(h.id)} className="hud-btn" data-variant="ghost" data-size="sm" title="Delete">
                           <Trash2 size={11} />
                         </button>
                       </span>
@@ -308,11 +302,6 @@ export default function Holdings() {
       {ticket && (
         <OrderTicket open={ticket !== null} onClose={() => setTicket(null)}
           symbol={ticket.symbol} exchange={ticket.exchange} side={ticket.side} defaultQty={ticket.qty} />
-      )}
-      {deleteHolding && (
-        <HudModal open={deleteHolding !== null} onClose={() => setDeleteHolding(null)} title="Delete holding" footer={<><Btn onClick={() => setDeleteHolding(null)}>cancel</Btn><Btn variant="danger" onClick={() => remove(deleteHolding)}>delete</Btn></>}>
-          <div style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.5 }}>Delete {deleteHolding.symbol}? Broker-synced holdings can return on the next Kotak sync if still held.</div>
-        </HudModal>
       )}
     </div>
   );

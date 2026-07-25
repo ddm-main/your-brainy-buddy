@@ -9,22 +9,6 @@ import { inputStyle as baseInputStyle } from "@/components/hud/HudControls";
 
 export type SymbolOption = { symbol: string; exchange: string; company_name: string | null };
 
-// NSE-preferred dedupe: when a symbol lists on both NSE and BSE, keep the NSE
-// row (BSE is a fallback). Mirrors _shared/market/exchangePreference.ts —
-// see src/lib/market/exchangePreference.ts.
-function dedupeNsePreferred(rows: SymbolOption[]): SymbolOption[] {
-  const byKey = new Map<string, SymbolOption>();
-  for (const r of rows) {
-    const key = r.symbol.toUpperCase();
-    const existing = byKey.get(key);
-    if (!existing) { byKey.set(key, r); continue; }
-    const rIsNse = (r.exchange ?? "").toUpperCase() === "NSE";
-    const eIsNse = (existing.exchange ?? "").toUpperCase() === "NSE";
-    if (rIsNse && !eIsNse) byKey.set(key, r);
-  }
-  return Array.from(byKey.values());
-}
-
 export function SymbolSearchInput({
   value, onChange, onSelect, onEnter, exchange, placeholder, autoFocus, id, disabled,
   containerStyle, inputStyle: inputStyleOverride,
@@ -62,13 +46,12 @@ export function SymbolSearchInput({
       const { data } = await q;
       if (seq !== reqSeq.current) return;
       const rows = (data ?? []) as SymbolOption[];
-      const deduped = exchange ? rows : dedupeNsePreferred(rows);
-      deduped.sort((a, b) => {
+      rows.sort((a, b) => {
         const aStarts = a.symbol.startsWith(term) ? 0 : 1;
         const bStarts = b.symbol.startsWith(term) ? 0 : 1;
         return aStarts - bStarts || a.symbol.localeCompare(b.symbol);
       });
-      setOptions(deduped);
+      setOptions(rows);
       setHighlighted(-1);
     }, 200);
     return () => clearTimeout(t);

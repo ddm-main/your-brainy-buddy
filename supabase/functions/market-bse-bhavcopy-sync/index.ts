@@ -1,4 +1,3 @@
-// Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
 // market-bse-bhavcopy-sync — BSE EOD tail. NSE bhavcopy is authoritative for
 // dual-listed names; this fills the ~500-symbol BSE-only tail so the screener
 // universe matches Tickertape's ~4000-symbol coverage.

@@ -1,11 +1,8 @@
-// Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
 // market-news-sync — pulls Yahoo RSS headlines for a bounded symbol set
 // (explicit list, or the caller's own watchlist+holdings) and upserts into
-// market_news. Yahoo-only by design: Kotak Neo has no news feed, so there's
-// no primary provider to fall back from. Deliberately not a full-universe
-// cron: news for ~2700 stocks isn't useful for a personal app, only for
-// symbols the user actually cares about.
-
+// market_news. Deliberately not a full-universe cron: news for ~2700 stocks
+// isn't useful for a personal app, only for symbols the user actually cares
+// about.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { toYahooSymbol, yahooNews } from "../_shared/market/yahooClient.ts";
 

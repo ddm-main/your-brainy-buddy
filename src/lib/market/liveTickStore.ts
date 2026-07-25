@@ -9,14 +9,8 @@ export interface LiveTick {
 interface LiveTickStore {
   ticks: Record<string, LiveTick>;
   connected: boolean;
-  // True once the Kotak WS relay has announced itself on the shared channel
-  // (via a `hello` broadcast or any incoming tick). Used to distinguish
-  // "push · kotak" (relay running, ticks flowing) from "live · kotak" (REST
-  // only). Reset when the Realtime channel tears down.
-  relayAlive: boolean;
   upsertTick: (key: string, tick: Omit<LiveTick, "receivedAt">) => void;
   setConnected: (v: boolean) => void;
-  setRelayAlive: (v: boolean) => void;
 }
 
 // Keyed by "EXCHANGE:SYMBOL" (see quoteKey in src/lib/market/pnl.ts) — one
@@ -25,39 +19,26 @@ interface LiveTickStore {
 export const useLiveTickStore = create<LiveTickStore>((set) => ({
   ticks: {},
   connected: false,
-  relayAlive: false,
   upsertTick: (key, tick) =>
     set((s) => ({ ticks: { ...s.ticks, [key]: { ...tick, receivedAt: Date.now() } } })),
   setConnected: (v) => set({ connected: v }),
-  setRelayAlive: (v) => set({ relayAlive: v }),
 }));
 
-// Freshness thresholds. Thin-volume stocks may only tick every ~30-60s from
-// Kotak, so a 5s window was hiding real ticks. Off-hours we relax further so
-// the last known tick still shows as "live" until we get a REST refresh.
-export const TICK_FRESH_MS = 30_000;
-export const TICK_FRESH_MS_OFF_HOURS = 5 * 60_000;
+export const TICK_FRESH_MS = 5_000;
 
-export function nseOpenNow(now = new Date()): boolean {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Kolkata",
-    weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false,
-  }).formatToParts(now);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
-  const day = get("weekday");
-  if (day === "Sat" || day === "Sun") return false;
-  const mins = Number(get("hour")) * 60 + Number(get("minute"));
-  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
-}
-
-export function isFreshTick(tick: LiveTick | undefined, freshMs?: number): tick is LiveTick {
-  if (!tick) return false;
-  const window = freshMs ?? (nseOpenNow() ? TICK_FRESH_MS : TICK_FRESH_MS_OFF_HOURS);
-  return Date.now() - tick.receivedAt < window;
+export function isFreshTick(tick: LiveTick | undefined, freshMs = TICK_FRESH_MS): tick is LiveTick {
+  return !!tick && Date.now() - tick.receivedAt < freshMs;
 }
 
 // Overlay fresh push ticks onto a REST-derived quote map (both keyed by
-// "EXCHANGE:SYMBOL"). See original comment on invariant preservation.
+// "EXCHANGE:SYMBOL") — the shared merge used by every list view (Holdings,
+// Positions, Watchlist, Screener, Dashboard) so each only needs one
+// `useLiveTickStore` subscription instead of a per-row hook.
+//
+// When a fresh tick has no REST base to enrich, we skip it rather than
+// fabricating a partial `T` — callers that need "ticks-only" rows should
+// key on the raw store instead. This preserves the invariant that every
+// value in the returned map is a full `T`.
 export function mergeLiveQuotes<T extends { ltp: number; change_pct?: number | null }>(
   restByKey: Record<string, T>,
   ticks: Record<string, LiveTick>,
@@ -66,7 +47,7 @@ export function mergeLiveQuotes<T extends { ltp: number; change_pct?: number | n
   for (const [key, tick] of Object.entries(ticks)) {
     if (!isFreshTick(tick)) continue;
     const base = out[key];
-    if (!base) continue;
+    if (!base) continue; // no REST row to enrich — don't synthesize a partial T
     out[key] = { ...base, ltp: tick.ltp, change_pct: tick.change_pct };
   }
   return out;

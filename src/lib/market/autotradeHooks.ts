@@ -36,10 +36,8 @@ export interface AutoTradeRule {
   exit_conditions: ScreenerGroup[];
   stop_loss_pct: number | null;
   target_pct: number | null;
-  trail_stop_pct: number | null;
   product: "MIS" | "CNC";
   order_type: "MARKET" | "LIMIT";
-  exit_order_type: "MARKET" | "LIMIT" | "SL" | "SL-M";
   limit_offset_pct: number | null;
   sizing_mode: "fixed_qty" | "fixed_capital";
   sizing_value: number;

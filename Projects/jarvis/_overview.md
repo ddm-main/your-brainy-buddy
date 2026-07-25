@@ -17,7 +17,6 @@ Three sequential approval gates:
 - [ ] Pick Round 4 focus (see `roadmap.md` — HUD/Notifications wiring, further Finance depth, or a Tasks/Notes/Projects/Link module rebuild are all still open)
 
 ## Log
-- 2026-07-24 — Repaired Market Screener parity: NSE-equity default universe, same-session price/return/volume predicates, arithmetic prior-30-session volume baseline, raw-share units, global sorting, auditable filter columns, and deployed the corrected EOD producer.
 - 2026-07-09 — project created; PRD pack written (PRD, architecture, data-model, roadmap, homepage-spec)
 - 2026-07-09 — Step 2 executed: Phase 1 Supabase schema live (tasks, notes, decisions, projects, emails, finance tables, jarvis_actions; single-user RLS)
 - 2026-07-10 — Production security hardening round: owner-scoped RLS rewrite on every table (from single-user-open to `auth.uid()=user_id`), fixed a hardcoded-fallback OAuth-state signing secret, fixed a CRON_SECRET bypass, scrubbed leaked real credentials from `.env.example`

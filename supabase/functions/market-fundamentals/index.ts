@@ -1,9 +1,5 @@
-// Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
 // market-fundamentals — per-symbol company fundamentals via Yahoo quoteSummary.
 // Cached in market_fundamentals for 24h per user.
-// Yahoo-only: Kotak Neo returns quotes / depth / holdings / orders, not
-// P&L, balance sheet, ratios or ownership — so there's no broker-first path.
-
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { toYahooSymbol } from "../_shared/market/yahooClient.ts";
 import { yahooQuoteSummary } from "../_shared/market/yahooCrumb.ts";
@@ -148,52 +144,6 @@ Deno.serve(async (req) => {
         .maybeSingle();
       if (cached && Date.now() - new Date(cached.fetched_at).getTime() < 24 * 3600_000) {
         return jsonResponse(req, { fundamentals: cached.payload, cached: true, fetched_at: cached.fetched_at });
-      }
-    }
-
-    // Fallback to the global sync table (market_fundamentals_global) — the
-    // universe-wide fundamentals sync writes here, not to the per-user cache
-    // above. Map its column layout into the per-user payload shape so the
-    // Analysis panel sees ROE / Beta / Div Yield / etc. even when the
-    // Yahoo quoteSummary path is unavailable (rate-limited, crumb rotation).
-    if (!force) {
-      const { data: g } = await svc.from("market_fundamentals_global")
-        .select("*").eq("symbol", symbol).eq("exchange", exchange).maybeSingle();
-      const gAge = g?.updated_at ? Date.now() - new Date(g.updated_at).getTime() : Infinity;
-      if (g && gAge < 7 * 24 * 3600_000) {
-        // dividend_yield unit is fragile: Yahoo returns a decimal (0.002 for
-        // 0.2%), while some FMP paths return percent (0.2 meaning 0.2%, or
-        // 2.5 meaning 2.5%). Equity yields > 50% are unrealistic, so treat
-        // that as "already-percent" and normalise back to decimal so the UI's
-        // `* 100` renders correctly.
-        const rawDy = num(g.dividend_yield);
-        const dy = rawDy == null ? null : rawDy > 0.5 ? rawDy / 100 : rawDy;
-        const mapped: Fundamentals = {
-          symbol, exchange,
-          name: g.company_name ?? null,
-          sector: g.sector ?? null,
-          industry: g.industry ?? null,
-          market_cap: g.market_cap_cr != null ? Number(g.market_cap_cr) * 1e7 : null,
-          pe_ttm: num(g.pe_ttm), pe_forward: null, peg: num(g.peg),
-          eps_ttm: num(g.eps_ttm), eps_forward: null,
-          book_value: num(g.book_value), price_to_book: num(g.pb),
-          dividend_yield: dy,
-          roe: num(g.roe), roa: null,
-          profit_margin: null, operating_margin: null,
-          debt_to_equity: num(g.debt_to_equity),
-          current_ratio: num(g.current_ratio),
-          revenue_growth: num(g.revenue_growth_yoy),
-          earnings_growth: num(g.profit_growth_yoy),
-          revenue_ttm: g.revenue_ttm_cr != null ? Number(g.revenue_ttm_cr) * 1e7 : null,
-          gross_profit: null, ebitda: null, free_cash_flow: null,
-          beta: null,
-          fifty_two_week_high: num(g.high_52w),
-          fifty_two_week_low: num(g.low_52w),
-          shares_outstanding: null,
-          next_earnings_at: null, last_dividend_at: null,
-          summary: null, website: null, employees: null,
-        };
-        return jsonResponse(req, { fundamentals: mapped, cached: true, fetched_at: g.updated_at, source: "global" });
       }
     }
 

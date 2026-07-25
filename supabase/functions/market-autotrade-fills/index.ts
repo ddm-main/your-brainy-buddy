@@ -9,8 +9,9 @@
 import { preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret, istTradeDate, isTradingHoliday } from "../_shared/market/cron.ts";
 import { getActiveProvider } from "../_shared/market/provider.ts";
-import { withKotakSession, kotakOrders, type KotakSettings } from "../_shared/market/kotakClient.ts";
+import { withKotakSession, KOTAK_SETTINGS_COLS, type KotakSettings } from "../_shared/market/kotakClient.ts";
 import { encryptStatementPassword } from "../_shared/crypto.ts";
+import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 
 const encryptValue = async (v: string): Promise<string> =>
   JSON.stringify(await encryptStatementPassword(v));
@@ -32,6 +33,47 @@ function normalizeKotakStatus(s: string): "filled" | "cancelled" | "rejected" | 
   if (t.includes("reject")) return "rejected";
   if (t.includes("partial")) return "partial";
   return "placed";
+}
+
+// Kotak /quick/user/orders returns a list. Field names vary; try common spellings.
+async function kotakOrderBook(s: KotakSettings): Promise<any[]> {
+  const editToken = await (async () => {
+    // decrypt session token via crypto's mirror of what sessionHeaders would do
+    // — reuse the sessionHeaders helper indirectly by calling kotakFetch here.
+    // Simplest: hit the endpoint directly.
+    return null;
+  })().catch(() => null);
+  // Fall through: call via withKotakSession using a lightweight direct fetch
+  return [];
+}
+
+async function fetchOrderBook(svc: SupabaseClient, settings: KotakSettings): Promise<any[]> {
+  // Delegate to kotakClient's sessioned fetch by importing the raw fetch
+  // helper via a local minimal request. To avoid duplicating decrypt logic
+  // we reuse withKotakSession + a direct fetch to /quick/user/orders.
+  const doFetch = async (s: KotakSettings) => {
+    // sessionHeaders lives inside kotakClient.ts and isn't exported; build
+    // headers here from the encrypted session fields.
+    const { decryptStatementPassword } = await import("../_shared/crypto.ts");
+    const editToken = s.session_token_enc
+      ? await decryptStatementPassword(JSON.parse(s.session_token_enc))
+      : null;
+    if (!editToken || !s.sid || !s.consumer_key || !s.base_url) return [];
+    const base = s.base_url.replace(/\/+$/, "");
+    const r = await fetch(`${base}/quick/user/orders`, {
+      headers: {
+        Authorization: s.consumer_key,
+        Auth: editToken,
+        Sid: s.sid,
+        accept: "application/json",
+      },
+    });
+    if (!r.ok) throw new Error(`Kotak order book HTTP ${r.status}`);
+    const j = await r.json().catch(() => ({}));
+    const d = j?.data ?? j ?? [];
+    return Array.isArray(d) ? d : [d].filter(Boolean);
+  };
+  return withKotakSession(svc, settings, encryptValue, doFetch);
 }
 
 function pickOrderId(o: any): string {
@@ -81,9 +123,7 @@ Deno.serve(async (req) => {
       try {
         const { provider, settings } = await getActiveProvider(svc, userId);
         if (provider.name !== "kotak_neo" || !settings || settings.connection_status !== "connected") continue;
-        // Reuse the shared, session-refreshing kotakOrders() rather than a bespoke
-        // fetch — keeps the endpoint + auth surface in one place.
-        const book = await withKotakSession(svc, settings as KotakSettings, encryptValue, (ss) => kotakOrders(ss));
+        const book = await fetchOrderBook(svc, settings as KotakSettings);
         const byId = new Map<string, any>();
         for (const b of book) {
           const id = pickOrderId(b);
