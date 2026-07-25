@@ -33,8 +33,9 @@ export default function Orders() {
   const push = useUi((s) => s.push);
   const { data: ordersData, isFetching: ordersFetching, refetch: refetchOrders } = useBrokerOrders();
   const { data: tradesData, isFetching: tradesFetching, refetch: refetchTrades } = useBrokerTrades();
-  const { cancel } = useMarketOrderMutations();
+  const { cancel, modify } = useMarketOrderMutations();
   const [ticket, setTicket] = useState<{ symbol: string; exchange: "NSE" | "BSE"; side: "BUY" | "SELL" } | null>(null);
+  const [modifying, setModifying] = useState<BrokerOrder | null>(null);
 
   const orders = ordersData?.orders ?? [];
   const trades = tradesData?.trades ?? [];
@@ -70,11 +71,13 @@ export default function Orders() {
           <RefreshCw size={11} style={{ marginRight: 4 }} />{busy ? "…" : "refresh"}
         </Btn>
       }>
-        {pending.length === 0 ? <Empty msg="No pending orders" /> : <OrdersTable rows={pending} onCancel={doCancel} showCancel />}
+        {pending.length === 0 ? <Empty msg="No pending orders" /> : (
+          <OrdersTable rows={pending} onCancel={doCancel} onModify={setModifying} showActions />
+        )}
       </HudPanel>
 
       <HudPanel flow title={`Completed · ${done.length}`} index="MK.OR2">
-        {done.length === 0 ? <Empty msg="No completed orders today" /> : <OrdersTable rows={done} onCancel={() => {}} showCancel={false} />}
+        {done.length === 0 ? <Empty msg="No completed orders today" /> : <OrdersTable rows={done} onCancel={() => {}} onModify={() => {}} showActions={false} />}
       </HudPanel>
 
       <HudPanel flow title={`Trades · ${trades.length}`} index="MK.TR">
@@ -94,8 +97,8 @@ export default function Orders() {
                     <td style={td}>{t.trade_time}</td>
                     <td style={td}>{t.symbol}</td>
                     <td style={{ ...td, color: t.side === "BUY" ? "var(--ok)" : "var(--err)" }}>{t.side}</td>
-                    <td style={{ ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{t.quantity}</td>
-                    <td style={{ ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>₹{t.price?.toFixed?.(2)}</td>
+                    <td style={{ ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtNum(t.quantity)}</td>
+                    <td style={{ ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtInr(t.price)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -108,6 +111,21 @@ export default function Orders() {
         <OrderTicket open onClose={() => setTicket(null)}
           symbol={ticket.symbol} exchange={ticket.exchange} side={ticket.side} />
       )}
+
+      {modifying && (
+        <ModifyOrderModal
+          order={modifying}
+          onClose={() => setModifying(null)}
+          onSubmit={async (patch) => {
+            try {
+              await modify.mutateAsync({ order_id: modifying.order_id, ...patch });
+              push("Modify requested", "ok");
+              setModifying(null);
+            } catch (e) { push(toSafeError(e, "Modify failed").message, "err"); }
+          }}
+          submitting={modify.isPending}
+        />
+      )}
     </div>
   );
 }
@@ -119,7 +137,9 @@ function Empty({ msg }: { msg: string }) {
   return <div className="hud-label" style={{ color: "var(--text-dim)" }}>{msg}</div>;
 }
 
-function OrdersTable({ rows, onCancel, showCancel }: { rows: BrokerOrder[]; onCancel: (id: string) => void; showCancel: boolean }) {
+function OrdersTable({ rows, onCancel, onModify, showActions }: {
+  rows: BrokerOrder[]; onCancel: (id: string) => void; onModify: (o: BrokerOrder) => void; showActions: boolean;
+}) {
   return (
     <div style={{ overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
@@ -129,7 +149,7 @@ function OrdersTable({ rows, onCancel, showCancel }: { rows: BrokerOrder[]; onCa
             <th style={{ ...th, textAlign: "right" }}>Qty · Filled</th>
             <th style={{ ...th, textAlign: "right" }}>Price</th>
             <th style={th}>Status</th>
-            {showCancel && <th style={th} />}
+            {showActions && <th style={th} />}
           </tr>
         </thead>
         <tbody>
@@ -139,14 +159,19 @@ function OrdersTable({ rows, onCancel, showCancel }: { rows: BrokerOrder[]; onCa
               <td style={td}>{o.symbol}</td>
               <td style={{ ...td, color: o.side === "BUY" ? "var(--ok)" : "var(--err)" }}>{o.side}</td>
               <td style={td}>{o.product}</td>
-              <td style={{ ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{o.quantity} · {o.filled_qty}</td>
-              <td style={{ ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{o.price ? `₹${o.price.toFixed(2)}` : "MKT"}</td>
+              <td style={{ ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtNum(o.quantity)} · {fmtNum(o.filled_qty)}</td>
+              <td style={{ ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{o.price && Number.isFinite(o.price) ? fmtInr(o.price) : "MKT"}</td>
               <td style={td}>{o.status}</td>
-              {showCancel && (
+              {showActions && (
                 <td style={{ ...td, textAlign: "right" }}>
-                  <Btn size="sm" variant="danger" onClick={() => onCancel(o.order_id)}>
-                    <X size={11} style={{ marginRight: 4 }} />cancel
-                  </Btn>
+                  <div style={{ display: "inline-flex", gap: 4 }}>
+                    <Btn size="sm" onClick={() => onModify(o)} title="Modify order">
+                      <Pencil size={11} style={{ marginRight: 4 }} />modify
+                    </Btn>
+                    <Btn size="sm" variant="danger" onClick={() => onCancel(o.order_id)}>
+                      <X size={11} style={{ marginRight: 4 }} />cancel
+                    </Btn>
+                  </div>
                 </td>
               )}
             </tr>
@@ -156,3 +181,47 @@ function OrdersTable({ rows, onCancel, showCancel }: { rows: BrokerOrder[]; onCa
     </div>
   );
 }
+
+function ModifyOrderModal({
+  order, onClose, onSubmit, submitting,
+}: {
+  order: BrokerOrder;
+  onClose: () => void;
+  onSubmit: (patch: { quantity?: number; price?: number; orderType?: "MARKET" | "LIMIT" | "SL" | "SL-M"; triggerPrice?: number }) => void;
+  submitting: boolean;
+}) {
+  const [qty, setQty] = useState(String(order.quantity ?? ""));
+  const [price, setPrice] = useState(order.price ? String(order.price) : "");
+  const submit = () => {
+    const q = Number(qty), p = Number(price);
+    const patch: Parameters<typeof onSubmit>[0] = {};
+    if (q > 0 && q !== order.quantity) patch.quantity = q;
+    if (p > 0 && p !== order.price) patch.price = p;
+    if (Object.keys(patch).length === 0) { onClose(); return; }
+    onSubmit(patch);
+  };
+  return (
+    <HudModal open onClose={onClose} width={380}
+      title={<>Modify · {order.symbol}</>}
+      footer={<>
+        <Btn onClick={onClose} disabled={submitting}>Cancel</Btn>
+        <Btn variant="primary" onClick={submit} disabled={submitting}>{submitting ? "Sending…" : "Modify"}</Btn>
+      </>}
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <label>
+          <span style={labelStyle}>Quantity</span>
+          <input style={inputStyle} type="number" min={1} value={qty} onChange={(e) => setQty(e.target.value)} />
+        </label>
+        <label>
+          <span style={labelStyle}>Limit price</span>
+          <input style={inputStyle} type="number" step="0.05" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="MKT" />
+        </label>
+        <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 10 }}>
+          Only fields you change are sent. Order type / trigger stays the same.
+        </div>
+      </div>
+    </HudModal>
+  );
+}
+
