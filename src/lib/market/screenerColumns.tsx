@@ -11,7 +11,7 @@ export { FILTER_TO_COL, colsFromActiveFilters, type ColsFromFiltersOpts } from "
 
 /** Basic column defs suitable for the Overview widget. Headers/formatting mirror
  *  the Screener table so saved screens have the same visible result shape. */
-export function overviewColumnMap<TRow extends Record<string, any>>(): Record<string, ColumnDef<TRow, any>> {
+export function overviewColumnMap<TRow extends Record<string, any>>(onScoreClick?: (symbol: string) => void): Record<string, ColumnDef<TRow, any>> {
   return {
     symbol: {
       header: "Stock", accessorKey: "symbol",
@@ -68,11 +68,11 @@ export function overviewColumnMap<TRow extends Record<string, any>>(): Record<st
     ret_ytd: { header: "YTD %", accessorKey: "ret_ytd", meta: { align: "right" } as any, cell: ({ getValue }: any) => <PctCell value={getValue() as number | null} /> },
     breakout_score: {
       header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" } as any,
-      cell: ({ row }: any) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" />,
+      cell: ({ row }: any) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" onClick={onScoreClick ? () => onScoreClick(row.original.symbol) : undefined} />,
     },
     prebreakout_score: {
       header: "Pre-BO", accessorKey: "prebreakout_score", meta: { align: "right" } as any,
-      cell: ({ row }: any) => <ScoreBadge score={row.original.prebreakout_score} components={row.original.score_components?.prebreakout} label="pre-breakout components" />,
+      cell: ({ row }: any) => <ScoreBadge score={row.original.prebreakout_score} components={row.original.score_components?.prebreakout} label="pre-breakout components" onClick={onScoreClick ? () => onScoreClick(row.original.symbol) : undefined} />,
     },
     actions: {
       id: "actions", header: "", enableSorting: false, meta: { align: "right" } as any,

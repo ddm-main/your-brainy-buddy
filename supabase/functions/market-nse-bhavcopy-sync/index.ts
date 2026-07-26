@@ -114,7 +114,7 @@ function normalizeRow(r: Record<string, string>, tradeDateIso: string) {
   const prevClose = num(r["PrvsClsgPric"] ?? r["PREVCLOSE"]);
   const volume = numInt(r["TtlTradgVol"] ?? r["TOTTRDQTY"]);
   const tradedValue = num(r["TtlTrfVal"] ?? r["TOTTRDVAL"]);
-  return { symbol, series, open, high, low, close, prev_close: prevClose, volume, traded_value: tradedValue, trade_date: tradeDateIso };
+  return { symbol, exchange: "NSE", series, open, high, low, close, prev_close: prevClose, volume, traded_value: tradedValue, trade_date: tradeDateIso };
 }
 
 function num(v: string | undefined): number | null {
@@ -233,7 +233,7 @@ Deno.serve(async (req) => {
     for (let i = 0; i < rows.length; i += 500) {
       const chunk = rows.slice(i, i + 500);
       const { error } = await supabase.from("market_eod_nse").upsert(chunk, {
-        onConflict: "symbol,trade_date",
+        onConflict: "symbol,exchange,trade_date",
       });
       if (error) throw error;
       inserted += chunk.length;

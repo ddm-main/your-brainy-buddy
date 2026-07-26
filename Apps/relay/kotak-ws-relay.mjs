@@ -33,6 +33,13 @@ const SILENCE_TIMEOUT_MS = 45_000; // no message (incl. our own heartbeats' repl
 const TOKEN_MAP_REFRESH_MS = 5 * 60_000;
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS = 30_000;
+// A socket that opens and is immediately closed again (stale/expired Kotak
+// session rejected at the auth-frame level, gateway hiccup) must NOT reset
+// backoff to base — that produces a hot reconnect loop hammering Kotak's WS
+// endpoint every ~2s indefinitely, which is exactly the pattern brokers
+// rate-limit or lock accounts for. Only a connection that stayed open this
+// long, or received real traffic, counts as "healthy" for backoff purposes.
+const SUSTAINED_CONNECTION_MS = 10_000;
 
 function log(...args) {
   console.log(`[relay ${new Date().toISOString()}]`, ...args);
@@ -118,16 +125,20 @@ class Supervisor {
 
   async connectLoop() {
     while (!this.stopped) {
+      let healthy = false;
       try {
-        await this.connectOnce();
-        this.reconnectDelay = RECONNECT_BASE_MS; // clean disconnect resets backoff
+        healthy = await this.connectOnce();
       } catch (e) {
         log("connection attempt failed:", e.message);
       }
       if (this.stopped) break;
-      log(`reconnecting in ${Math.round(this.reconnectDelay / 1000)}s…`);
-      await new Promise((r) => setTimeout(r, this.reconnectDelay));
-      this.reconnectDelay = Math.min(this.reconnectDelay * 1.7, RECONNECT_MAX_MS);
+      const delay = this.reconnectDelay;
+      log(`reconnecting in ${Math.round(delay / 1000)}s…`);
+      await new Promise((r) => setTimeout(r, delay));
+      // Only a sustained/healthy connection resets backoff to base — an
+      // open-then-immediately-closed cycle keeps growing it instead of
+      // hot-looping. See SUSTAINED_CONNECTION_MS above.
+      this.reconnectDelay = healthy ? RECONNECT_BASE_MS : Math.min(this.reconnectDelay * 1.7, RECONNECT_MAX_MS);
     }
   }
 
@@ -169,6 +180,8 @@ class Supervisor {
       const ws = new WebSocket(session.wsUrl);
       this.ws = ws;
       let settled = false;
+      let openedAt = null;
+      let sawTraffic = false;
       const resetSilence = () => {
         clearTimeout(this.silenceTimer);
         this.silenceTimer = setTimeout(() => {
@@ -178,6 +191,7 @@ class Supervisor {
       };
 
       ws.addEventListener("open", () => {
+        openedAt = Date.now();
         log("connected to", session.wsUrl);
         ws.send(JSON.stringify({ type: "cn", Authorization: session.consumerKey, Sid: session.sid, Auth: session.editToken }));
         const tokens = [...byToken.keys()].map((tok) => `nse_cm|${tok}`);
@@ -193,6 +207,7 @@ class Supervisor {
       });
 
       ws.addEventListener("message", (ev) => {
+        sawTraffic = true;
         resetSilence();
         this.handleMessage(ev.data);
       });
@@ -204,8 +219,10 @@ class Supervisor {
       ws.addEventListener("close", (ev) => {
         clearTimeout(this.silenceTimer);
         clearInterval(this.heartbeatTimer);
-        log(`socket closed (code ${ev.code})`);
-        if (!settled) { settled = true; resolve(); }
+        const openMs = openedAt ? Date.now() - openedAt : 0;
+        const healthy = sawTraffic || openMs >= SUSTAINED_CONNECTION_MS;
+        log(`socket closed (code ${ev.code}) after ${Math.round(openMs / 1000)}s${healthy ? "" : " — not sustained, backing off"}`);
+        if (!settled) { settled = true; resolve(healthy); }
       });
 
       // In case `new WebSocket` itself throws asynchronously with no close event.
@@ -234,7 +251,11 @@ class Supervisor {
       type: "broadcast",
       event: "tick",
       payload: { symbol, exchange: "NSE", ltp, change_pct: Number.isFinite(changePct) ? changePct : null },
-    });
+      // Ticks fire many times a second; an unhandled rejection here (channel
+      // briefly erroring/closing mid-tick) would crash the whole process by
+      // Node's default behavior, cutting live ticks for every user until the
+      // supervisor's restart timer fires. Log and drop the tick instead.
+    })?.catch((e) => log("tick broadcast failed:", e?.message ?? e));
   }
 }
 

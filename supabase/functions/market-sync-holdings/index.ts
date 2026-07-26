@@ -51,7 +51,7 @@ Deno.serve(async (req) => {
         brokerRows.delete(key);
         updated++;
       } else {
-        await svc.from("market_holdings").insert({
+        const { error: insErr } = await svc.from("market_holdings").insert({
           user_id: auth.userId,
           symbol: h.symbol,
           exchange: h.exchange,
@@ -63,7 +63,23 @@ Deno.serve(async (req) => {
           buy_date: h.buy_date ?? null,
           source: "kotak_sync",
         });
-        inserted++;
+        if (insErr?.code === "23505") {
+          // A concurrent sync call (auto-refresh racing a manual click) won
+          // the insert between our read and this write — update its row
+          // instead of erroring, backed by idx_market_holdings_broker_unique.
+          const { data: race } = await svc.from("market_holdings")
+            .select("id").eq("user_id", auth.userId).eq("symbol", h.symbol)
+            .eq("exchange", h.exchange).eq("source", "kotak_sync").maybeSingle();
+          if (race) {
+            await svc.from("market_holdings").update({
+              quantity: h.quantity, avg_price: h.avg_price,
+              settled_qty: h.settled_qty ?? null, t1_qty: h.t1_qty ?? null, pledged_qty: h.pledged_qty ?? null,
+            }).eq("id", race.id);
+            updated++;
+          }
+        } else {
+          inserted++;
+        }
       }
     }
 

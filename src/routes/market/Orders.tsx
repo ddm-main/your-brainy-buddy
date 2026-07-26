@@ -77,7 +77,9 @@ export default function Orders() {
         </Btn>
       }>
         {pending.length === 0 ? <Empty msg="No pending orders" /> : (
-          <OrdersTable rows={pending} onCancel={doCancel} onModify={setModifying} showActions />
+          <OrdersTable rows={pending} onCancel={doCancel} onModify={setModifying} showActions
+            cancelingId={cancel.isPending ? cancel.variables ?? null : null}
+            modifyingId={modify.isPending ? modify.variables?.order_id ?? null : null} />
         )}
       </HudPanel>
 
@@ -142,8 +144,15 @@ function Empty({ msg }: { msg: string }) {
   return <div className="hud-label" style={{ color: "var(--text-dim)" }}>{msg}</div>;
 }
 
-function OrdersTable({ rows, onCancel, onModify, showActions }: {
+function OrdersTable({ rows, onCancel, onModify, showActions, cancelingId = null, modifyingId = null }: {
   rows: BrokerOrder[]; onCancel: (id: string) => void; onModify: (o: BrokerOrder) => void; showActions: boolean;
+  // Which single row (if any) has an in-flight cancel/modify mutation —
+  // cancel/modify are shared mutation instances, so isPending alone can't
+  // tell rows apart; previously no row disabled its buttons during an
+  // in-flight request at all (unlike OrderTicket's Place button), so a
+  // double-click before the first request settled could fire a second
+  // concurrent cancel/modify on the same row.
+  cancelingId?: string | null; modifyingId?: string | null;
 }) {
   return (
     <div style={{ overflowX: "auto" }}>
@@ -170,11 +179,11 @@ function OrdersTable({ rows, onCancel, onModify, showActions }: {
               {showActions && (
                 <td style={{ ...td, textAlign: "right" }}>
                   <div style={{ display: "inline-flex", gap: 4 }}>
-                    <Btn size="sm" onClick={() => onModify(o)} title="Modify order">
+                    <Btn size="sm" onClick={() => onModify(o)} title="Modify order" disabled={modifyingId === o.order_id || cancelingId === o.order_id}>
                       <Pencil size={11} style={{ marginRight: 4 }} />modify
                     </Btn>
-                    <Btn size="sm" variant="danger" onClick={() => onCancel(o.order_id)}>
-                      <X size={11} style={{ marginRight: 4 }} />cancel
+                    <Btn size="sm" variant="danger" onClick={() => onCancel(o.order_id)} disabled={cancelingId === o.order_id || modifyingId === o.order_id}>
+                      <X size={11} style={{ marginRight: 4 }} />{cancelingId === o.order_id ? "cancelling…" : "cancel"}
                     </Btn>
                   </div>
                 </td>

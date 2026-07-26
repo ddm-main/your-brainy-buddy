@@ -94,6 +94,15 @@ export interface ScreenerRow {
   ret_ytd: number | null;
   fno_enabled: boolean | null;
   sme: boolean | null;
+
+  // v3 — swing/intraday scoring + liquidity gate. Additive; breakout_score/
+  // prebreakout_score above are unrelated and unchanged.
+  swing_score: number | null;
+  swing_components: Record<string, number> | null;
+  intraday_score: number | null;
+  intraday_components: Record<string, number> | null;
+  avg_turnover_cr: number | null;
+  is_liquid_tradable: boolean | null;
 }
 
 
@@ -282,12 +291,12 @@ export function useScreenerData(universe: UniverseId, enabled = true) {
         volume:            num(s.volume),
         rel_volume:        num(s.rel_volume),
         vol_avg30:         num(s.vol_avg30),
-        vol_gt_avg30:      (() => {
-          const vol = num(s.volume);
-          const avg = num(s.vol_avg30);
-          if (vol == null || avg == null || avg <= 0) return null;
-          return vol > avg;
-        })(),
+        // Trust the view's own computed value (market_screener_rows already
+        // derives this from the same volume/vol_avg30 columns) instead of a
+        // third independent re-derivation — this, a since-superseded SQL
+        // migration, and the view were three separate implementations of
+        // the same boolean, a drift risk if any one of them changes.
+        vol_gt_avg30:      s.vol_gt_avg30 ?? null,
 
         ema_20:            num(s.ema20 ?? s.ema_20),
         ema_50:            num(s.ema50 ?? s.ema_50),
@@ -315,6 +324,12 @@ export function useScreenerData(universe: UniverseId, enabled = true) {
         breakout_score:    s.breakout_score ?? null,
         prebreakout_score: s.prebreakout_score ?? null,
         score_components:  s.score_components ?? null,
+        swing_score:        s.swing_score ?? null,
+        swing_components:   s.swing_components ?? null,
+        intraday_score:      s.intraday_score ?? null,
+        intraday_components: s.intraday_components ?? null,
+        avg_turnover_cr:     num(s.avg_turnover_cr),
+        is_liquid_tradable:  s.is_liquid_tradable ?? null,
       }));
 
     },

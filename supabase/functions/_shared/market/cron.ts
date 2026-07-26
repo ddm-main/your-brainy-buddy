@@ -4,6 +4,21 @@
 // compares against Vault without exposing the secret value to the browser.
 import { createClient } from "npm:@supabase/supabase-js@2";
 
+// Plain `===`/Array.includes string comparison short-circuits on the first
+// differing byte — a timing side-channel on a secret comparison. Length is
+// checked up front (standard practice, including Node's own
+// crypto.timingSafeEqual, which throws rather than compares on a length
+// mismatch); only the byte-for-byte comparison itself needs to be constant-time.
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const enc = new TextEncoder();
+  const aBytes = enc.encode(a);
+  const bBytes = enc.encode(b);
+  if (aBytes.length !== bBytes.length) return false;
+  let diff = 0;
+  for (let i = 0; i < aBytes.length; i++) diff |= aBytes[i] ^ bBytes[i];
+  return diff === 0;
+}
+
 export async function requireCronSecret(req: Request): Promise<Response | null> {
   const expected = [
     Deno.env.get("CRON_SECRET"),
@@ -18,7 +33,7 @@ export async function requireCronSecret(req: Request): Promise<Response | null> 
       headers: { "Content-Type": "application/json" },
     });
   }
-  if (expected.includes(got)) return null;
+  if (expected.some((e) => timingSafeEqualStr(e, got))) return null;
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");

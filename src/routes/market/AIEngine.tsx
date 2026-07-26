@@ -50,7 +50,13 @@ export default function AIEngine() {
     );
   }
 
-  const busy = isLoading || refresh.isPending;
+  // refresh is one shared mutation instance — its isPending reflects
+  // whatever symbol was last mutate()'d, not necessarily the one on screen.
+  // Fast navigation (re-analyze RELIANCE, then jump to TCS before it
+  // resolves) would otherwise show TCS as "analyzing" for RELIANCE's
+  // in-flight call. Scope busy/pending to the symbol currently in flight.
+  const refreshingThis = refresh.isPending && refresh.variables?.symbol === sym;
+  const busy = isLoading || refreshingThis;
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 12, alignItems: "start" }}>
@@ -59,7 +65,7 @@ export default function AIEngine() {
           <div style={{ display: "flex", gap: 6 }}>
             <Btn size="sm" onClick={() => nav(`/market/analysis/${sym}`)}>chart</Btn>
             <Btn size="sm" onClick={() => refresh.mutate({ symbol: sym })} disabled={busy}>
-              <RefreshCw size={11} style={{ marginRight: 4 }} /> {refresh.isPending ? "re-analyzing…" : "re-analyze"}
+              <RefreshCw size={11} style={{ marginRight: 4 }} /> {refreshingThis ? "re-analyzing…" : "re-analyze"}
             </Btn>
           </div>
         }>

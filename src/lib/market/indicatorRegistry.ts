@@ -100,7 +100,8 @@ export const INDICATOR_DEFS: IndicatorDef[] = [
   { type: "cmf", label: "Chaikin Money Flow", group: "oscillator", params: [P("period", "Length")], lines: [{ label: "CMF", defaultColor: GR }], defaultParams: { period: 20 }, defaultWidth: 1 },
   { type: "ad", label: "Accum / Dist", group: "oscillator", params: [], lines: [{ label: "A/D", defaultColor: BL }], defaultParams: {}, defaultWidth: 1 },
   { type: "chaikinOsc", label: "Chaikin Oscillator", group: "oscillator", params: [P("fast", "Fast"), P("slow", "Slow")], lines: [{ label: "Chaikin", defaultColor: TE }], defaultParams: { fast: 3, slow: 10 }, defaultWidth: 1 },
-  { type: "aroon", label: "Aroon", group: "oscillator", params: [P("period", "Length")], lines: [{ label: "Up", defaultColor: UP }, { label: "Down", defaultColor: DN }], defaultParams: { period: 14 }, defaultWidth: 1 },
+  // min period 2 — aroon() divides by (period - 1); period=1 produced NaN/Infinity.
+  { type: "aroon", label: "Aroon", group: "oscillator", params: [P("period", "Length", 2)], lines: [{ label: "Up", defaultColor: UP }, { label: "Down", defaultColor: DN }], defaultParams: { period: 14 }, defaultWidth: 1 },
   { type: "vortex", label: "Vortex", group: "oscillator", params: [P("period", "Length")], lines: [{ label: "+VI", defaultColor: UP }, { label: "-VI", defaultColor: DN }], defaultParams: { period: 14 }, defaultWidth: 1 },
   { type: "stddev", label: "Std Deviation", group: "oscillator", hasSource: true, params: [P("period", "Length")], lines: [{ label: "StdDev", defaultColor: AM }], defaultParams: { period: 20 }, defaultWidth: 1 },
   { type: "obv", label: "OBV", group: "oscillator", params: [], lines: [{ label: "OBV", defaultColor: BL }], defaultParams: {}, defaultWidth: 1 },

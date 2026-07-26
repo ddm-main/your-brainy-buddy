@@ -29,6 +29,25 @@ interface GTT {
   expires_at: string | null;
 }
 
+// A tick slow enough to still be placing an order when the next cron fire
+// starts must not let both invocations act on the same 'active' row and
+// both fire the same GTT. Same lease pattern as market-autotrade-eval's
+// eval_lock_at: an atomic conditional UPDATE, not an in-process lock (which
+// wouldn't survive across separate stateless calls anyway). Stale-lease
+// recovery after CLAIM_LEASE_MS so a crashed invocation can't wedge a GTT
+// out of evaluation forever.
+const CLAIM_LEASE_MS = 2 * 60_000;
+
+async function claimGtt(svc: SupabaseClient, id: string): Promise<boolean> {
+  const staleBefore = new Date(Date.now() - CLAIM_LEASE_MS).toISOString();
+  const { data } = await svc.from("market_gtt_orders")
+    .update({ eval_claimed_at: new Date().toISOString() })
+    .eq("id", id).eq("status", "active")
+    .or(`eval_claimed_at.is.null,eval_claimed_at.lt.${staleBefore}`)
+    .select("id");
+  return !!data?.length;
+}
+
 async function expireOverdue(svc: SupabaseClient) {
   const now = new Date().toISOString();
   await svc.from("market_gtt_orders")
@@ -88,6 +107,7 @@ Deno.serve(async (req) => {
             else if (g.side === "SELL" && ltp <= g.trigger_price) triggered = true;
           }
           if (!triggered) continue;
+          if (!await claimGtt(svc, g.id)) continue; // another invocation is already handling this row
 
           try {
             const orderInput: PlaceOrderInput = {

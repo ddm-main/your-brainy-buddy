@@ -11,6 +11,8 @@ import {
   higherLows,
   supportResistance,
   computeSnapshot,
+  resampleWeekly,
+  computeWeeklySnapshot,
   type Candle,
 } from "../supabase/functions/_shared/market/indicators";
 import { totp, base32Decode } from "../supabase/functions/_shared/market/totp";
@@ -166,6 +168,60 @@ describe("computeSnapshot", () => {
   });
   it("null for too-short series", () => {
     expect(computeSnapshot(mkCandles([1, 2, 3]))).toBeNull();
+  });
+});
+
+describe("resampleWeekly", () => {
+  it("aggregates daily candles into OHLCV weekly bars with no volume lost", () => {
+    const candles = mkCandles(Array.from({ length: 14 }, (_, i) => 100 + i));
+    const weekly = resampleWeekly(candles);
+    // 14 daily bars starting mid-week span 2-3 ISO weeks depending on alignment.
+    expect(weekly.length).toBeGreaterThanOrEqual(2);
+    expect(weekly.length).toBeLessThanOrEqual(3);
+    const totalVolume = candles.reduce((a, c) => a + c.volume, 0);
+    const weeklyVolume = weekly.reduce((a, c) => a + c.volume, 0);
+    expect(weeklyVolume).toBe(totalVolume);
+    expect(weekly[weekly.length - 1].close).toBe(candles[candles.length - 1].close);
+    expect(weekly[0].open).toBe(candles[0].open);
+  });
+  it("each weekly bar's high/low bounds its member daily candles", () => {
+    const closes = [10, 50, 30, 20, 15, 40, 5, 60, 25, 35];
+    const candles = mkCandles(closes);
+    const weekly = resampleWeekly(candles);
+    for (const bar of weekly) {
+      expect(bar.high).toBeGreaterThanOrEqual(bar.low);
+    }
+    // Global max/min must appear inside some weekly bar's range.
+    const globalHigh = Math.max(...candles.map((c) => c.high));
+    const globalLow = Math.min(...candles.map((c) => c.low));
+    expect(Math.max(...weekly.map((w) => w.high))).toBeCloseTo(globalHigh);
+    expect(Math.min(...weekly.map((w) => w.low))).toBeCloseTo(globalLow);
+  });
+});
+
+describe("computeWeeklySnapshot", () => {
+  it("returns null with fewer than 25 weekly bars", () => {
+    const candles = mkCandles(Array(60).fill(100)); // ~8-9 weekly bars
+    expect(computeWeeklySnapshot(candles)).toBeNull();
+  });
+  it("reads a steady uptrend as weekly-constructive (above EMA20W, RSI>50, trendUpW)", () => {
+    const closes = Array.from({ length: 300 }, (_, i) => 100 + i * 0.3);
+    const candles = mkCandles(closes);
+    const snap = computeWeeklySnapshot(candles);
+    expect(snap).not.toBeNull();
+    expect(snap!.barsW).toBeGreaterThanOrEqual(25);
+    expect(snap!.closeW).toBeCloseTo(closes[closes.length - 1], 0);
+    expect(snap!.aboveEma20W).toBe(true);
+    expect(snap!.rsi14W).toBeGreaterThan(50);
+    expect(snap!.trendUpW).toBe(true);
+  });
+  it("reads a steady downtrend as weekly-non-constructive", () => {
+    const closes = Array.from({ length: 300 }, (_, i) => 400 - i * 0.3);
+    const candles = mkCandles(closes);
+    const snap = computeWeeklySnapshot(candles);
+    expect(snap).not.toBeNull();
+    expect(snap!.aboveEma20W).toBe(false);
+    expect(snap!.trendUpW).toBe(false);
   });
 });
 

@@ -124,12 +124,19 @@ Deno.serve(async (req) => {
       }
 
       // Batch upsert in chunks of 500. `id` is PK so upsert = update.
+      // A symbol's `factors` are only ever marked applied together, below —
+      // if any chunk fails partway through, none of this symbol's actions
+      // are marked applied, so the whole symbol retries cleanly next run
+      // instead of leaving a split/bonus factor discontinuity permanently
+      // baked into part of the price history with no way to detect or fix it.
+      let symbolFailed = false;
       for (let i = 0; i < updates.length; i += 500) {
         const chunk = updates.slice(i, i + 500);
         const { error: upErr } = await svc.from("market_daily_prices").upsert(chunk);
-        if (upErr) { errors.push(`${symbol} price upsert: ${upErr.message}`); break; }
+        if (upErr) { errors.push(`${symbol} price upsert: ${upErr.message}`); symbolFailed = true; break; }
         pricesUpdated += chunk.length;
       }
+      if (symbolFailed) { skipped++; continue; }
       for (const f of factors) appliedIds.push(f.action_id);
       actionsApplied += factors.length;
       symbolsProcessed++;

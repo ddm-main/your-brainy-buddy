@@ -25,6 +25,13 @@ export const FILTER_TO_COL: Record<string, string> = {
   ret_5d: "ret_5d", ret_21d: "ret_21d", ret_ytd: "ret_ytd",
   breakout_score: "breakout_score", prebreakout_score: "prebreakout_score",
   sector: "sector", industry: "industry",
+  // Previously missing — filtering by these narrowed results but the
+  // matching column never rendered, making the match criterion invisible.
+  atr_pct: "atr_pct", macd_hist: "macd_hist", bb_width: "bb_width",
+  rel_strength_nifty: "rel_strength_nifty", sector_strength: "sector_strength",
+  high_52w: "high_52w", low_52w: "low_52w",
+  current_ratio: "current_ratio", quick_ratio: "quick_ratio",
+  sales: "sales", net_profit: "net_profit",
 };
 
 export interface ColsFromFiltersOpts {

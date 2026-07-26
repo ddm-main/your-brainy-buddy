@@ -4,6 +4,13 @@
 // so the UI never renders "—" LTP for a symbol we actually know a price for.
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { getActiveProvider } from "../_shared/market/provider.ts";
+import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
+
+// This is the hot ~1s-poll path (provider.ts comment) across several panels
+// at once, so the ceiling is generous — it exists to catch a buggy client
+// or leaked token polling unbounded (Kotak/Yahoo lockout risk), not normal
+// multi-panel usage.
+const limiter = createMarketLimiter(300, 60_000);
 
 const istDateKey = (d: Date): string =>
   new Intl.DateTimeFormat("en-CA", {
@@ -37,6 +44,7 @@ Deno.serve(async (req) => {
   try {
     const auth = await requireUserId(req);
     if ("error" in auth) return new Response("unauthorized", { status: 401, headers: corsFor(req) });
+    const rl = limiter.guard(req, auth.userId); if (rl) return rl;
     const body = await req.json().catch(() => ({}));
     const symbols: string[] = Array.isArray(body?.symbols) ? body.symbols : [];
     if (symbols.length === 0) return jsonResponse(req, { quotes: [], source: "none" });
@@ -113,6 +121,15 @@ Deno.serve(async (req) => {
     // provider, cache wins. Only for symbols we have a live provider price
     // for; the cache-fallback branch above already handled the rest.
     const today = currentIstDate();
+    const expected = expectedTradingDate();
+    // Cheap, local, no-external-call sanity check on the hot live-quote
+    // path — parity.ts's Tickertape-based audit only ever runs offline
+    // (market-parity-refresh/market-value-audit), so a wrong-decimal or
+    // stuck-price tick could reach the client with nothing checking it.
+    // A >5x (or <1/5) move against yesterday's real close is never a
+    // legitimate single-session equity move outside a split/bonus, which
+    // the corp-action guard below already accounts for.
+    const suspiciousKeys = new Set<string>();
     const resolvedKeys = symbols.filter((k) => {
       const q = byKey.get(k);
       return q && q.price && (q as any).source !== "cache";
@@ -135,10 +152,52 @@ Deno.serve(async (req) => {
         const key = `${r.exchange}:${r.symbol}`;
         if (!priorByKey.has(key)) priorByKey.set(key, { close: Number(r.close), trade_date: r.trade_date });
       }
+      // Corp-action guard: a real split/bonus/dividend ex-dated between the
+      // cached close and today explains a large delta on its own — without
+      // this, the "cache wins on >0.5% disagreement" heuristic below would
+      // "correct" a genuine adjustment back to the stale unadjusted value.
+      const { data: recentActions } = await svc
+        .from("corporate_actions")
+        .select("symbol,exchange,ex_date")
+        .in("symbol", uniqSymbols)
+        .lte("ex_date", today)
+        .order("ex_date", { ascending: false })
+        .limit(2000);
+      const actionExDatesByKey = new Map<string, string[]>();
+      for (const a of (recentActions ?? []) as any[]) {
+        const key = `${a.exchange}:${a.symbol}`;
+        const list = actionExDatesByKey.get(key) ?? [];
+        list.push(a.ex_date);
+        actionExDatesByKey.set(key, list);
+      }
       for (const p of parsed) {
         const cached = priorByKey.get(p.key);
         if (!cached || !cached.close) continue;
+        // Freshness guard: only trust the cache as the reference T-1 close
+        // if the row itself isn't stale (missed sync day) — overriding with
+        // an even-older cached close would corrupt day_change for every
+        // downstream consumer, including AutoTrade/alerts, instead of
+        // protecting it.
+        if (cached.trade_date < expected) continue;
+        const hasRecentCorpAction = (actionExDatesByKey.get(p.key) ?? []).some((d) => d > cached.trade_date);
         const q = byKey.get(p.key)!;
+        if (!hasRecentCorpAction && q.price > 0) {
+          const ratio = q.price / cached.close;
+          if (ratio > 5 || ratio < 0.2) {
+            suspiciousKeys.add(p.key);
+            try {
+              await svc.from("market_value_audit").insert({
+                symbol: p.symbol, exchange: p.exchange, field: "price",
+                our_value: q.price, ref_value: cached.close, ref_source: "market_daily_prices_t1",
+                delta_pct: (ratio - 1) * 100, checked_at: new Date().toISOString(),
+                source_provider: q.source ?? provider.name, source_method: "market-quotes live sanity",
+                status: "mismatch", threshold_pct: 400,
+                remediation: "live quote is >5x (or <1/5) yesterday's close with no corporate action on file — check for a decimal-place or stuck-price error",
+              });
+            } catch { /* best-effort — never let audit logging fail the quote response */ }
+          }
+        }
+        if (hasRecentCorpAction) continue;
         // Prefer cache when the provider's prev_close is missing, or when
         // the cache's row is newer than the provider's prev_close_as_of, or
         // when they disagree by more than 0.5% (a real different-day mismatch,
@@ -159,7 +218,6 @@ Deno.serve(async (req) => {
       }
     }
 
-    const expected = expectedTradingDate();
     const allowDayMove = isCurrentIstTradingDay();
 
     const out = symbols.flatMap((key) => {
@@ -185,6 +243,7 @@ Deno.serve(async (req) => {
         as_of: q.as_of ?? null,
         previous_close_as_of: q.previous_close_as_of ?? null,
         stale,
+        suspicious: suspiciousKeys.has(key),
       }];
     });
 

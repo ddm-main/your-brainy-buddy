@@ -12,10 +12,15 @@ export function ScoreBadge({
   score,
   components,
   label,
+  onClick,
 }: {
   score: number | null | undefined;
   components?: Record<string, number> | null;
   label?: string;
+  // Default is hover-tooltip only (unchanged). When provided, the badge also
+  // becomes clickable — stopPropagation so a badge nested in a clickable
+  // table row navigates to ITS target, not the row's.
+  onClick?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   if (score == null) return <span style={{ color: "var(--text-muted)" }}>—</span>;
@@ -25,6 +30,7 @@ export function ScoreBadge({
       style={{ position: "relative", display: "inline-block" }}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
+      onClick={onClick ? (e) => { e.stopPropagation(); onClick(); } : undefined}
     >
       <span
         style={{
@@ -39,7 +45,9 @@ export function ScoreBadge({
           fontSize: 11,
           fontVariantNumeric: "tabular-nums",
           background: "rgba(0,0,0,0.25)",
+          cursor: onClick ? "pointer" : undefined,
         }}
+        title={onClick ? "Open AI score analysis" : undefined}
       >
         {score}
       </span>

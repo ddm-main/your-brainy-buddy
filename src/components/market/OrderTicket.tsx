@@ -1,7 +1,7 @@
 // OrderTicket — modal order-entry ticket for a single symbol.
 // Supports MARKET / LIMIT / SL / SL-M, product MIS / CNC / NRML, DAY / IOC,
 // and displays live LTP + notional + margin usage as the user types.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { HudModal } from "@/components/hud/HudModal";
 import { Btn, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { useQuotes } from "@/lib/market/hooks";
@@ -35,7 +35,17 @@ export function OrderTicket({
   const { data: fundsResp } = useFunds();
   const funds = fundsResp?.funds ?? null;
 
-  useEffect(() => { if (open) { setSide(initialSide); setQty(defaultQty ? String(defaultQty) : "1"); } }, [open, initialSide, defaultQty]);
+  // Stable per order-entry intent: regenerated only when the ticket opens
+  // for a new order, so repeated submit attempts on the same ticket (retry
+  // after a perceived failure, accidental double-click that slips past the
+  // isPending guard) carry the same key and the server can dedupe them.
+  const idempotencyKeyRef = useRef(crypto.randomUUID());
+  useEffect(() => {
+    if (open) {
+      setSide(initialSide); setQty(defaultQty ? String(defaultQty) : "1");
+      idempotencyKeyRef.current = crypto.randomUUID();
+    }
+  }, [open, initialSide, defaultQty]);
 
   const { data: quoteData } = useQuotes(open ? [`${exchange}:${symbol}`] : []);
   const ltp = quoteData?.quotes?.[0]?.ltp ?? null;
@@ -56,14 +66,18 @@ export function OrderTicket({
     return null;
   }, [side, funds, notional]);
 
-  // Enforce ₹0.05 tick size for equity LIMIT / SL orders — silently snap and
-  // warn once. Broker rejects otherwise with a cryptic error.
+  // Enforce ₹0.05 tick size for equity LIMIT / SL orders. Previously this
+  // hint was cosmetic only — it was shown but never applied, so submit()
+  // sent the raw unsnapped price and the broker rejected it with a cryptic
+  // error the UI never anticipated. snapToTick() below is what actually
+  // gets submitted; tickHint just tells the user it happened.
+  const snapToTick = (p: number) => Math.round(p * 20) / 20;
   const tickHint = useMemo(() => {
     if (orderType === "MARKET" || orderType === "SL-M") return null;
     const p = Number(price);
     if (!p) return null;
-    const snapped = Math.round(p * 20) / 20;
-    return Math.abs(snapped - p) > 1e-6 ? `Nearest tick: ₹${snapped.toFixed(2)}` : null;
+    const snapped = snapToTick(p);
+    return Math.abs(snapped - p) > 1e-6 ? `Snapped to nearest tick: ₹${snapped.toFixed(2)}` : null;
   }, [orderType, price]);
 
   const submit = async () => {
@@ -80,12 +94,18 @@ export function OrderTicket({
     }
     // Confirm on large notional — fat-finger guard. ₹1L threshold.
     if (notional >= 100_000 && !confirm(`Place ${side} ${q} ${symbol} for ${inr(notional)}?`)) return;
+    // marginWarning was previously computed and displayed but never
+    // actually gated submission — a false sense of a guard that wasn't
+    // wired up. Same pattern as the large-notional/close-position-drift
+    // confirms: block by default, let the user explicitly override.
+    if (marginWarning && !confirm(`${marginWarning}. Place order anyway?`)) return;
     const input: PlaceOrderInput = {
       symbol, exchange, side, quantity: q, orderType, product, validity,
-      price: price ? Number(price) : undefined,
-      triggerPrice: trigger ? Number(trigger) : undefined,
+      price: price ? snapToTick(Number(price)) : undefined,
+      triggerPrice: trigger ? snapToTick(Number(trigger)) : undefined,
       disclosedQuantity: dq,
       amo: amo || undefined,
+      idempotencyKey: idempotencyKeyRef.current,
     };
     try {
       const r = await place.mutateAsync(input);

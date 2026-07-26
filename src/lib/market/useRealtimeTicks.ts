@@ -12,7 +12,7 @@
 import { useEffect, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useSession } from "@/lib/useSession";
-import { useLiveTickStore } from "./liveTickStore";
+import { useLiveTickStore, RELAY_STALE_MS } from "./liveTickStore";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
 interface TickPayload {
@@ -68,6 +68,7 @@ export function useRealtimeTicks() {
   const setConnected = useLiveTickStore((s) => s.setConnected);
   const upsertTick = useLiveTickStore((s) => s.upsertTick);
   const setRelayAlive = useLiveTickStore((s) => s.setRelayAlive);
+  const markRelayMessage = useLiveTickStore((s) => s.markRelayMessage);
   const userId = session?.user.id;
   const channelRef = useRef<RealtimeChannel | null>(null);
 
@@ -82,7 +83,7 @@ export function useRealtimeTicks() {
       .on("broadcast", { event: "tick" }, ({ payload }: { payload: TickPayload }) => {
         if (cancelled || !payload?.symbol || !Number.isFinite(payload.ltp)) return;
         // Any tick confirms the relay is actively pushing.
-        setRelayAlive(true);
+        markRelayMessage();
         upsertTick(`${(payload.exchange ?? "NSE").toUpperCase()}:${payload.symbol.toUpperCase()}`, {
           ltp: payload.ltp,
           change_pct: payload.change_pct ?? null,
@@ -91,7 +92,7 @@ export function useRealtimeTicks() {
       .on("broadcast", { event: "hello" }, () => {
         // Relay handshake — flips the chip to "push · kotak" before the first
         // tick actually lands, so thin symbols don't sit as "live · kotak".
-        if (!cancelled) setRelayAlive(true);
+        if (!cancelled) markRelayMessage();
       })
       .subscribe((status) => {
         if (!cancelled) setConnected(status === "SUBSCRIBED");
@@ -99,15 +100,29 @@ export function useRealtimeTicks() {
         if (status === "SUBSCRIBED" && pendingSymbols) flushSubscribe();
       });
 
+    // Watchdog: relayAlive is only ever set true by a hello/tick above. If
+    // the relay process dies or loses its Kotak upstream after even one
+    // message, nothing here would otherwise ever clear it — every
+    // PriceSourceChip would keep showing green "push · kotak" with zero
+    // ticks actually flowing. Poll well under RELAY_STALE_MS so the flip
+    // happens promptly once messages stop.
+    const watchdog = setInterval(() => {
+      const { lastRelayMessageAt, relayAlive } = useLiveTickStore.getState();
+      if (relayAlive && lastRelayMessageAt != null && Date.now() - lastRelayMessageAt > RELAY_STALE_MS) {
+        setRelayAlive(false);
+      }
+    }, 15_000);
+
     return () => {
       cancelled = true;
+      clearInterval(watchdog);
       setConnected(false);
       setRelayAlive(false);
       if (sharedChannel === channel) sharedChannel = null;
       channelRef.current = null;
       supabase.removeChannel(channel);
     };
-  }, [userId, setConnected, upsertTick, setRelayAlive]);
+  }, [userId, setConnected, upsertTick, setRelayAlive, markRelayMessage]);
 }
 
 export function useRelayAlive(): boolean {

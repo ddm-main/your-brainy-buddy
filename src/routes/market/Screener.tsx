@@ -47,7 +47,7 @@ import { safeStorage } from "@/lib/safeStorage";
 interface ColSpec { id: string; label: string; align?: "right" | "left"; default?: boolean }
 const COLUMNS: ColSpec[] = [
   { id: "symbol",             label: "Stock",        default: true },
-  { id: "sector",             label: "Sector",       default: true },
+  { id: "sector",             label: "Sector" },
   { id: "industry",           label: "Industry" },
   { id: "market_cap",         label: "Mcap (₹Cr)",   align: "right", default: true },
   { id: "close",              label: "LTP (₹)",      align: "right", default: true },
@@ -81,10 +81,18 @@ const COLUMNS: ColSpec[] = [
   { id: "ret_ytd",            label: "YTD %",         align: "right" },
   { id: "breakout_score",     label: "Breakout",      align: "right", default: true },
   { id: "prebreakout_score",  label: "Pre-BO",        align: "right" },
+  { id: "swing_score",        label: "Swing",         align: "right" },
+  { id: "intraday_score",     label: "Intraday",      align: "right" },
+  { id: "avg_turnover_cr",    label: "Turnover (₹Cr)",align: "right" },
   { id: "setup",              label: "Setup" },
 ];
-const DEFAULT_COLS = COLUMNS.filter((c) => c.default).map((c) => c.id);
+// Explicit, in this exact order — not derived from COLUMNS' declaration
+// order (which is grouped by category for the column picker, not display
+// intent) so the default view is guaranteed Stock, LTP, 1D Return, 52W,
+// MCAP, Breakout regardless of how COLUMNS gets reordered later.
+const DEFAULT_COLS = ["symbol", "close", "change_pct", "pct_from_52w_high", "market_cap", "breakout_score"];
 const COLS_STORE_KEY = "screener.visibleCols.v3";
+const HIDE_ILLIQUID_KEY = "screener.hideIlliquid.v1";
 const PAGE_SIZE_KEY  = "screener.pageSize.v2";
 const DEFAULT_SAVED_KEY = "market.screener.defaultSavedId";
 const STATE_STORE_KEY = "screener.state.v2"; // { universe, active, savedId } — persists across visits so re-opening doesn't reset filters or the attached saved screen
@@ -180,6 +188,14 @@ function ScreenerInner() {
   });
   useEffect(() => { safeStorage.setJSON(COLS_STORE_KEY, visibleCols); }, [visibleCols]);
 
+  // Penny/illiquid names are hidden by default (see LIQUIDITY_MIN_* gate in
+  // scoring.ts) — an explicit opt-in surfaces them rather than silently
+  // excluding names with no way back. `is_liquid_tradable == null` (gate not
+  // yet computed for this row, e.g. pre-migration backfill) is treated as
+  // "unknown" and always shown so this never hides the whole universe.
+  const [hideIlliquid, setHideIlliquid] = useState<boolean>(() => safeStorage.getJSON<boolean>(HIDE_ILLIQUID_KEY, true));
+  useEffect(() => { safeStorage.setJSON(HIDE_ILLIQUID_KEY, hideIlliquid); }, [hideIlliquid]);
+
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<number>(() => {
     const raw = safeStorage.get(PAGE_SIZE_KEY);
@@ -236,6 +252,8 @@ function ScreenerInner() {
     return { fundPct, sectorPct, techPct, tone, eod: latestTradeDate };
   }, [rows, latestTradeDate]);
 
+  const illiquidCount = useMemo(() => rows.filter((r) => r.is_liquid_tradable === false).length, [rows]);
+
   // Change %/Price come from the once-daily EOD pipeline (market_stock_scores),
   // while the results table's Chg%/Price columns overlay a live quote for
   // display — filtering on the stale value while showing the live one meant a
@@ -254,11 +272,12 @@ function ScreenerInner() {
   // owns freshness; this pass just runs the active filters.
   const filtered = useMemo(() => {
     let out: ScreenerRow[] = rows;
+    if (hideIlliquid) out = out.filter((r) => r.is_liquid_tradable !== false);
     for (const af of active) {
       out = out.filter((r) => filterMatches(r as any, af, latestTradeDate));
     }
     return out;
-  }, [rows, active, latestTradeDate]);
+  }, [rows, active, latestTradeDate, hideIlliquid]);
 
 
   useEffect(() => { setPage(0); }, [active, universe, pageSize]);
@@ -484,23 +503,26 @@ function ScreenerInner() {
   // columns matching those filters (plus Symbol). With no filters we fall
   // back to the user's saved column preset. This mirrors Tickertape's
   // "columns follow filters" behaviour.
+  // Core columns always lead, in this fixed order, regardless of which
+  // filters are active — otherwise LTP/1D Return/MCAP/Breakout silently
+  // disappear or reorder whenever the active filter set doesn't happen to
+  // touch them (matches the same fix on the Dashboard's Top Breakouts table).
   const effectiveCols = useMemo(
     () => {
       if (active.length === 0) return visibleCols;
-      // When filters are active, show ONLY the identity column + the columns
-      // corresponding to each selected filter — nothing else.
-      const filterCols = colsFromActiveFilters(active);
+      // When filters are active, show the core columns + whichever extra
+      // columns correspond to each selected filter — nothing else beyond that.
+      const filterCols = colsFromActiveFilters(active).filter((id) => !DEFAULT_COLS.includes(id));
       const seen = new Set<string>();
-      return ["symbol", ...filterCols].filter((id) => (seen.has(id) ? false : (seen.add(id), true)));
+      return [...DEFAULT_COLS, ...filterCols].filter((id) => (seen.has(id) ? false : (seen.add(id), true)));
     },
     [active, visibleCols],
   );
 
-  const defaultSorting = useMemo<SortingState>(() => (
-    active.some((filter) => canonicalFilterId(filter.id) === "change_pct")
-      ? [{ id: "liveChangePct", desc: true }]
-      : [{ id: "breakout_score", desc: true }]
-  ), [active]);
+  // Always default-sort by breakout_score, regardless of active filters —
+  // previously a "change_pct" filter silently switched the default sort to
+  // 1D Return instead.
+  const defaultSorting = useMemo<SortingState>(() => [{ id: "breakout_score", desc: true }], []);
   const [sorting, setSorting] = useState<SortingState>(defaultSorting);
   useEffect(() => { setSorting(defaultSorting); }, [defaultSorting]);
 
@@ -715,12 +737,35 @@ function ScreenerInner() {
       ret_ytd: { header: "YTD %", accessorKey: "ret_ytd", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
       breakout_score: {
         header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },
-        cell: ({ row }) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" />,
+        cell: ({ row }) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" onClick={() => nav(`/market/ai/${row.original.symbol}`)} />,
       },
       prebreakout_score: {
         header: "Pre-BO", accessorKey: "prebreakout_score", meta: { align: "right" },
-        cell: ({ row }) => <ScoreBadge score={row.original.prebreakout_score} components={row.original.score_components?.prebreakout} label="pre-breakout components" />,
+        cell: ({ row }) => <ScoreBadge score={row.original.prebreakout_score} components={row.original.score_components?.prebreakout} label="pre-breakout components" onClick={() => nav(`/market/ai/${row.original.symbol}`)} />,
       },
+      swing_score: {
+        header: "Swing", accessorKey: "swing_score", meta: { align: "right" },
+        cell: ({ row }) => <ScoreBadge score={row.original.swing_score} components={row.original.swing_components} label="swing components" onClick={() => nav(`/market/ai/${row.original.symbol}`)} />,
+      },
+      intraday_score: {
+        header: "Intraday", accessorKey: "intraday_score", meta: { align: "right" },
+        cell: ({ row }) => <ScoreBadge score={row.original.intraday_score} components={row.original.intraday_components} label="intraday components" onClick={() => nav(`/market/ai/${row.original.symbol}`)} />,
+      },
+      avg_turnover_cr: {
+        header: "Turnover (₹Cr)", accessorKey: "avg_turnover_cr", meta: { align: "right" },
+        cell: ({ getValue }) => fmtNum(getValue() as number | null, 1),
+      },
+      atr_pct: { header: "ATR %", accessorKey: "atr_pct", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
+      macd_hist: { header: "MACD Hist", accessorKey: "macd_hist", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 2) },
+      bb_width: { header: "BB Width", accessorKey: "bb_width", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 3) },
+      rel_strength_nifty: { header: "RS vs NIFTY", accessorKey: "rel_strength_nifty", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
+      sector_strength: { header: "Sector Str", accessorKey: "sector_strength", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 2) },
+      high_52w: { header: "52w High", accessorKey: "high_52w", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null) },
+      low_52w: { header: "52w Low", accessorKey: "low_52w", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null) },
+      current_ratio: { header: "Current Ratio", accessorKey: "current_ratio", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 2) },
+      quick_ratio: { header: "Quick Ratio", accessorKey: "quick_ratio", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 2) },
+      sales: { header: "Sales (₹Cr)", accessorKey: "sales", meta: { align: "right" }, cell: ({ getValue }) => fmtInt(getValue() as number | null) },
+      net_profit: { header: "Net Profit (₹Cr)", accessorKey: "net_profit", meta: { align: "right" }, cell: ({ getValue }) => fmtInt(getValue() as number | null) },
       setup: {
         header: "Setup", id: "setup", enableSorting: false,
         cell: ({ row }) => (
@@ -733,7 +778,7 @@ function ScreenerInner() {
       },
     };
     return effectiveCols.map((id) => all[id]).filter(Boolean);
-  }, [effectiveCols, latestTradeDate, liveByKey]);
+  }, [effectiveCols, latestTradeDate, liveByKey, nav]);
 
   const columnsWithActions = useMemo<ColumnDef<ScreenerRow, any>[]>(() => {
     return [
@@ -914,6 +959,24 @@ function ScreenerInner() {
                     EOD {healthSummary.eod ?? "—"} · same-session values
                   </button>
                 )}
+                <button type="button" onClick={() => setHideIlliquid((v) => !v)}
+                  title={hideIlliquid
+                    ? `Hiding ${illiquidCount} penny/illiquid name${illiquidCount === 1 ? "" : "s"} (price/mcap/turnover below the liquidity floor) — click to show them`
+                    : "Showing all stocks, including penny/illiquid names — click to hide them again"}
+                  aria-label="Toggle penny/illiquid stocks"
+                  aria-pressed={hideIlliquid}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 6,
+                    padding: "3px 8px", border: "1px solid var(--edge)",
+                    background: hideIlliquid ? "transparent" : "var(--accent-dim, rgba(255,184,77,0.12))",
+                    color: hideIlliquid ? "var(--text-muted)" : "var(--accent)",
+                    cursor: "pointer",
+                    fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
+                    borderRadius: 2,
+                  }}>
+                  {hideIlliquid ? <Check size={11} /> : <X size={11} />}
+                  {hideIlliquid ? "Liquid only" : "All (incl. penny)"}
+                </button>
                 <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}
                   style={{ ...inputStyle, padding: "4px 6px", fontSize: 11 }}
                   title="Rows per page">

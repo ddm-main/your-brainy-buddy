@@ -61,14 +61,14 @@ export default function PortfolioOverview() {
   const positionKeys = useMemo(() => positions.filter((p) => !p.closed_at).map((p) => `${p.exchange}:${p.symbol}`), [positions]);
   const allKeys = useMemo(() => [...new Set([...holdingKeys, ...positionKeys])], [holdingKeys, positionKeys]);
   useEffect(() => { subscribeSymbolsForTicks(allKeys); }, [allKeys]);
-  const { data: quotesData } = useQuotes(allKeys);
+  const { data: quotesData, dataUpdatedAt: quotesUpdatedAt } = useQuotes(allKeys);
   const restQuotes = useMemo(() => {
     const map: Record<string, import("@/lib/market/types").Quote> = {};
     for (const q of quotesData?.quotes ?? []) map[quoteKey(q.exchange, q.symbol)] = q;
     return map;
   }, [quotesData]);
   const liveTicks = useLiveTickStore((s) => s.ticks);
-  const quotes = useMemo(() => mergeLiveQuotes(restQuotes, liveTicks), [restQuotes, liveTicks]);
+  const quotes = useMemo(() => mergeLiveQuotes(restQuotes, liveTicks, quotesUpdatedAt), [restQuotes, liveTicks, quotesUpdatedAt]);
 
   // Holdings summary — uses the same null-vs-zero contract as Holdings.tsx.
   const hSummary = useMemo(() => {

@@ -149,11 +149,18 @@ Deno.serve(async (req) => {
     // 5 sessions but is missing from market_stocks. Guarantees the tradable
     // universe covers everything the daily bhavcopy actually shows.
     let seededFromBhavcopy = 0;
+    const recentBhavSymbols = new Set<string>();
     try {
       const since = new Date(Date.now() - 5 * 86400_000).toISOString().slice(0, 10);
+      // exchange filter: market_eod_nse now holds both NSE and BSE rows
+      // (previously undistinguished by any column, relying on NSE/BSE
+      // symbol-format never colliding) — this fallback specifically seeds
+      // NSE-only stocks, so an explicit filter here instead of an implicit
+      // one.
       const { data: bhav } = await supabase
         .from("market_eod_nse")
         .select("symbol, series")
+        .eq("exchange", "NSE")
         .gte("trade_date", since);
       const known = new Set<string>();
       const { data: knownRows } = await supabase
@@ -166,8 +173,9 @@ Deno.serve(async (req) => {
       for (const r of bhav ?? []) {
         const sym = (r as any).symbol as string;
         const series = ((r as any).series || "EQ").toUpperCase();
-        if (!sym || known.has(sym) || toSeed.has(sym)) continue;
-        if (!TRADABLE_SERIES.has(series)) continue;
+        if (!sym || !TRADABLE_SERIES.has(series)) continue;
+        recentBhavSymbols.add(sym);
+        if (known.has(sym) || toSeed.has(sym)) continue;
         toSeed.set(sym, { symbol: sym, series });
       }
       const seedRows = [...toSeed.values()].map((r) => ({
@@ -182,10 +190,39 @@ Deno.serve(async (req) => {
       }
     } catch { /* non-fatal */ }
 
+    // Delisting sweep — nothing previously ever deactivated a symbol that
+    // drops out of NSE's master list; combined with market-scrips-sync
+    // force-setting in_universe=true for any still-is_active row, a
+    // delisted/suspended stock stayed in the screener/scoring universe
+    // indefinitely with a frozen last price. A symbol is only deactivated
+    // if it's missing from BOTH this run's master CSV (main + SME) AND the
+    // last 5 sessions of actual NSE bhavcopy trades — either alone would be
+    // too aggressive (a same-day master-CSV hiccup, or a stock that trades
+    // without yet being in the master list).
+    let deactivated = 0;
+    try {
+      const stillValid = new Set<string>([...seenSymbol, ...recentBhavSymbols]);
+      const { data: activeRows } = await supabase
+        .from("market_stocks")
+        .select("symbol")
+        .eq("exchange", "NSE")
+        .eq("is_active", true);
+      const toDeactivate = (activeRows ?? [])
+        .map((r: any) => r.symbol as string)
+        .filter((sym) => !stillValid.has(sym));
+      for (let i = 0; i < toDeactivate.length; i += 500) {
+        const chunk = toDeactivate.slice(i, i + 500);
+        const { error } = await supabase.from("market_stocks")
+          .update({ is_active: false, in_universe: false })
+          .eq("exchange", "NSE").in("symbol", chunk);
+        if (!error) deactivated += chunk.length;
+      }
+    } catch { /* non-fatal — a failed sweep just means next run tries again */ }
+
     await supabase.from("market_ingestion_runs").insert({
       source: "nse_master", stage: "fetch", status: "ok",
       rows_ingested: masterUpserted, duration_ms: Date.now() - started,
-      metadata: { stocks_upserted: stocksUpserted, sme_rows: smeCount, seeded_from_bhavcopy: seededFromBhavcopy },
+      metadata: { stocks_upserted: stocksUpserted, sme_rows: smeCount, seeded_from_bhavcopy: seededFromBhavcopy, deactivated },
       finished_at: new Date().toISOString(),
     });
 
@@ -195,6 +232,7 @@ Deno.serve(async (req) => {
       stocks_rows: stocksUpserted,
       sme_rows: smeCount,
       seeded_from_bhavcopy: seededFromBhavcopy,
+      deactivated,
       parsed: parsed.length,
     }), { headers: { ...cors, "Content-Type": "application/json" } });
   } catch (err) {

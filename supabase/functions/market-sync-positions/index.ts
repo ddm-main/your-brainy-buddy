@@ -39,7 +39,7 @@ Deno.serve(async (req) => {
       const current: any = existingByKey.get(key);
       if (current) {
         const { error } = await svc.from("market_positions")
-          .update({ quantity: p.quantity, entry_price: p.entry_price, journal_notes: SYNC_MARK })
+          .update({ quantity: p.quantity, entry_price: p.entry_price, product: p.product, journal_notes: SYNC_MARK })
           .eq("id", current.id);
         if (!error) updated++;
         existingByKey.delete(key);
@@ -51,10 +51,27 @@ Deno.serve(async (req) => {
           side: p.side,
           quantity: p.quantity,
           entry_price: p.entry_price,
+          product: p.product,
           journal_notes: SYNC_MARK,
           is_broker_synced: true,
         });
-        if (!error) inserted++;
+        if (error?.code === "23505") {
+          // A concurrent sync call won the insert between our read and this
+          // write — update its row instead, backed by
+          // idx_market_positions_broker_unique.
+          const { data: race } = await svc.from("market_positions")
+            .select("id").eq("user_id", auth.userId).eq("symbol", p.symbol)
+            .eq("exchange", p.exchange).eq("side", p.side)
+            .eq("is_broker_synced", true).is("closed_at", null).maybeSingle();
+          if (race) {
+            await svc.from("market_positions")
+              .update({ quantity: p.quantity, entry_price: p.entry_price, product: p.product, journal_notes: SYNC_MARK })
+              .eq("id", race.id);
+            updated++;
+          }
+        } else if (!error) {
+          inserted++;
+        }
       }
     }
 

@@ -86,6 +86,15 @@ function runRule(
   let inPos = false;
   let entry = 0;
   let entryTime = 0;
+  // Entry/rule-exit signals are evaluated on a bar's own close (we can't
+  // know that until the bar has finished), so the fill must happen at the
+  // NEXT bar's open — filling at the same bar's close is a lookahead bug
+  // (it assumes you could observe today's close and transact at that same
+  // close simultaneously, which is impossible live). Stop-loss/target are
+  // different: the level is fixed at entry, so a resting order can
+  // legitimately fill intrabar the same day price touches it.
+  let pendingEntry = false;
+  let pendingExit = false;
   let equity = 100_000;
   const equityCurve: Array<{ t: string; v: number }> = [];
   const trades: Trade[] = [];
@@ -95,15 +104,14 @@ function runRule(
   const long = direction === "long";
   const costsRoundTripPct = 2 * (brokeragePct + slippagePct);
 
-  const enter = (i: number) => {
+  const fillEntry = (i: number, raw: number) => {
     inPos = true;
     // Slip entry against the trade direction.
-    entry = closes[i] * (long ? 1 + slippagePct / 100 : 1 - slippagePct / 100);
+    entry = raw * (long ? 1 + slippagePct / 100 : 1 - slippagePct / 100);
     entryTime = candles[i].time;
   };
-  const exit = (i: number) => {
+  const fillExit = (i: number, raw: number) => {
     // Slip exit against the trade direction.
-    const raw = closes[i];
     const filled = raw * (long ? 1 - slippagePct / 100 : 1 + slippagePct / 100);
     const grossPct = long ? pct(filled, entry) : pct(entry, filled);
     const retPct = grossPct - 2 * brokeragePct;
@@ -120,7 +128,7 @@ function runRule(
 
   // Entry signal (direction-aware): long → cross-above / oversold / breakout;
   // short → cross-below / overbought / breakdown.
-  const isEntry = (i: number): boolean => {
+  const isEntrySignal = (i: number): boolean => {
     const prior20High = Math.max(...candles.slice(Math.max(0, i - 20), i).map((c) => c.high));
     const prior20Low = Math.min(...candles.slice(Math.max(0, i - 20), i).map((c) => c.low));
     if (long) {
@@ -134,11 +142,8 @@ function runRule(
     }
     return false;
   };
-  const isExit = (i: number): boolean => {
-    // return since entry — signed by direction
-    const changePct = long ? pct(closes[i], entry) : pct(entry, closes[i]);
-    if (changePct <= -Math.abs(stopLossPct)) return true;
-    if (changePct >= Math.abs(targetPct)) return true;
+  // Rule-based exit only — stop-loss/target are checked intrabar, separately.
+  const isExitSignal = (i: number): boolean => {
     if (long) {
       if (rule === "ema_cross_20_50") return crossBelow(e20, e50, i);
       if (rule === "rsi_reversion") return rs[i] != null && rs[i]! > 70;
@@ -150,16 +155,50 @@ function runRule(
     }
     return false;
   };
+  // A stop-loss/target that's only checked against the close would miss a
+  // stock that gapped/spiked through the level intrabar and closed back
+  // inside the band — understating realized drawdown/loss frequency vs
+  // live trading. Returns the level touched, or null.
+  const intrabarStopOrTarget = (i: number): number | null => {
+    const stopLevel = long ? entry * (1 - Math.abs(stopLossPct) / 100) : entry * (1 + Math.abs(stopLossPct) / 100);
+    const targetLevel = long ? entry * (1 + Math.abs(targetPct) / 100) : entry * (1 - Math.abs(targetPct) / 100);
+    const { high, low } = candles[i];
+    if (long) {
+      if (low <= stopLevel) return stopLevel;
+      if (high >= targetLevel) return targetLevel;
+    } else {
+      if (high >= stopLevel) return stopLevel;
+      if (low <= targetLevel) return targetLevel;
+    }
+    return null;
+  };
 
   for (let i = 55; i < candles.length; i++) {
-    if (!inPos) {
-      if (isEntry(i)) enter(i);
-    } else if (isExit(i)) {
-      exit(i);
+    // Execute signals raised on the previous bar's close at THIS bar's open.
+    if (pendingEntry && !inPos) {
+      fillEntry(i, candles[i].open);
+      pendingEntry = false;
+    } else if (pendingExit && inPos) {
+      fillExit(i, candles[i].open);
+      pendingExit = false;
     }
+
+    if (inPos) {
+      const level = intrabarStopOrTarget(i);
+      if (level != null) {
+        fillExit(i, level);
+      } else if (isExitSignal(i)) {
+        pendingExit = true;
+      }
+    } else if (isEntrySignal(i)) {
+      pendingEntry = true;
+    }
+
     equityCurve.push({ t: isoDay(candles[i].time), v: Math.round(equity) });
   }
-  if (inPos) exit(candles.length - 1);
+  // Window ended mid-trade with no further bar to fill a next-open exit —
+  // close out at the final bar's close (best available reference).
+  if (inPos) fillExit(candles.length - 1, closes[candles.length - 1]);
   return { equityCurve, trades, costsRoundTripPct };
 }
 
@@ -196,7 +235,11 @@ Deno.serve(async (req) => {
     const slippagePct = Number.isFinite(Number(s.strategy?.slippage_pct)) ? Number(s.strategy?.slippage_pct) : DEFAULT_SLIPPAGE_PCT;
     const direction = s.strategy?.direction === "short" ? "short" : "long";
 
-    const range = years >= 10 ? "10y" : years >= 3 ? "5y" : "1y";
+    // Bucket must always cover the requested period_years — "1y" for a
+    // 2-year request silently under-fetched candle history (the cutoff
+    // filter below can't reject anything the fetch never returned), so the
+    // backtest ran on less data than period_years claimed with no error.
+    const range = years > 5 ? "10y" : years > 2 ? "5y" : years > 1 ? "2y" : "1y";
     // Route through the active provider (Kotak Neo when connected — falls
     // back to Yahoo automatically when the symbol has no instrument token or
     // Kotak returns empty).

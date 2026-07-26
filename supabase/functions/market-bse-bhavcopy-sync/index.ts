@@ -184,7 +184,7 @@ Deno.serve(async (req) => {
         instrument_type: "EQ", is_active: true, in_universe: true,
       });
       eodBatch.push({
-        symbol, series: type || "A",
+        symbol, exchange: "BSE", series: type || "A",
         open: num(r["OPEN"]), high: num(r["HIGH"]), low: num(r["LOW"]),
         close, prev_close: num(r["PREVCLOSE"]),
         volume: num(r["NO_OF_SHRS"]), traded_value: num(r["NET_TURNOV"]),
@@ -202,7 +202,7 @@ Deno.serve(async (req) => {
     for (let i = 0; i < eodBatch.length; i += 500) {
       const chunk = eodBatch.slice(i, i + 500);
       const { error } = await supabase.from("market_eod_nse")
-        .upsert(chunk, { onConflict: "symbol,trade_date" });
+        .upsert(chunk, { onConflict: "symbol,exchange,trade_date" });
       if (!error) eodInserted += chunk.length;
     }
 

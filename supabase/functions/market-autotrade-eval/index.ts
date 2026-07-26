@@ -130,7 +130,11 @@ async function mirrorAutotradeExit(
 function computeOpenPositions(orders: OrderRow[]): OpenPosition[] {
   const map = new Map<string, OpenPosition & { entryCost: number }>();
   for (const o of orders) {
-    if (o.status !== "filled" && o.status !== "placed") continue;
+    // "pending" = a claim row written before the broker call resolves (see
+    // the entry-fire block below). Counting it as open here is what stops a
+    // second tick from re-firing the same entry if the post-placeOrder
+    // ledger update itself fails — the row exists either way.
+    if (o.status !== "filled" && o.status !== "placed" && o.status !== "pending") continue;
     const key = `${o.rule_id}:${o.symbol}:${o.exchange}`;
     const cur = map.get(key) ?? { ruleId: o.rule_id ?? "", symbol: o.symbol, exchange: o.exchange, qty: 0, entryPrice: 0, entryCost: 0 };
     const px = o.filled_price ?? o.requested_price ?? 0;
@@ -438,7 +442,36 @@ Deno.serve(async (req) => {
                 quantity: qty, orderType: rule.order_type, product: rule.product,
                 price: rule.order_type === "LIMIT" ? ltp * (1 + (rule.limit_offset_pct ?? 0) / 100) : undefined,
               };
-              const result = await provider.placeOrder(orderInput);
+
+              // Claim the entry BEFORE calling the broker. computeOpenPositions
+              // treats "pending" as open, so if the broker call succeeds but
+              // this process dies (or a later update below fails) before the
+              // row is marked "placed", the position still reads as open on
+              // the next tick and the duplicate-fire guard still holds —
+              // instead of the ledger showing nothing and the rule re-firing
+              // another live BUY every tick until conditions clear.
+              const { data: claimRow, error: claimErr } = await svc.from("market_autotrade_orders")
+                .insert({
+                  user_id: userId, rule_id: rule.id, symbol: scope.symbol, exchange: scope.exchange,
+                  side: "BUY", leg: "entry", quantity: qty, order_type: rule.order_type, product: rule.product,
+                  requested_price: orderInput.price ?? ltp, status: "pending",
+                  reason: "entry conditions met", placed_at: new Date().toISOString(),
+                })
+                .select("id").single();
+              if (claimErr || !claimRow) {
+                await log(svc, userId, "error", `Could not claim entry for ${scope.symbol} — skipping this tick to avoid an unrecorded order`, rule.id);
+                continue;
+              }
+
+              let result: { orderId: string; status: string };
+              try {
+                result = await provider.placeOrder(orderInput);
+              } catch (e) {
+                await svc.from("market_autotrade_orders")
+                  .update({ status: "rejected", reason: `broker call failed: ${e instanceof Error ? e.message : String(e)}` })
+                  .eq("id", claimRow.id);
+                throw e;
+              }
 
               // Optional broker-side protective SL — placed immediately
               // after the entry so a stop still fires even if the eval cron
@@ -463,13 +496,9 @@ Deno.serve(async (req) => {
                 }
               }
 
-              await svc.from("market_autotrade_orders").insert({
-                user_id: userId, rule_id: rule.id, symbol: scope.symbol, exchange: scope.exchange,
-                side: "BUY", leg: "entry", quantity: qty, order_type: rule.order_type, product: rule.product,
-                requested_price: orderInput.price ?? ltp, broker_order_id: result.orderId, status: "placed",
-                broker_sl_order_id: brokerSlOrderId,
-                reason: "entry conditions met", placed_at: new Date().toISOString(),
-              });
+              await svc.from("market_autotrade_orders")
+                .update({ broker_order_id: result.orderId, status: "placed", broker_sl_order_id: brokerSlOrderId })
+                .eq("id", claimRow.id);
               try {
                 await mirrorAutotradeEntry(svc, userId, rule.id, scope.symbol, scope.exchange, qty, orderInput.price ?? ltp);
               } catch { /* best-effort mirror — the real entry already fired, don't let this look like a failure */ }

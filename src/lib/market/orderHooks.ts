@@ -61,6 +61,10 @@ export interface PlaceOrderInput {
   product: "MIS" | "CNC" | "NRML"; price?: number; triggerPrice?: number;
   validity?: "DAY" | "IOC"; disclosedQuantity?: number; amo?: boolean;
   skipMarginCheck?: boolean;
+  // Stable across retries of the same order-entry intent (see OrderTicket) —
+  // lets the server dedupe a network-retry/double-click instead of placing
+  // the order twice. Omit only for callers that don't need dedupe.
+  idempotencyKey?: string;
 }
 
 export function useFunds() {

@@ -3,8 +3,12 @@
 // with full market context.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { istTradeDate, requireCronSecret } from "../_shared/market/cron.ts";
-import { classifyRegime, breakoutScore, preBreakoutScore } from "../_shared/market/scoring.ts";
-import type { IndicatorSnapshot } from "../_shared/market/indicators.ts";
+import {
+  classifyRegime, breakoutScore, preBreakoutScore,
+  evaluateLiquidity, swingScore, intradayScore,
+  type AdvancedSignals,
+} from "../_shared/market/scoring.ts";
+import type { IndicatorSnapshot, WeeklySnapshot } from "../_shared/market/indicators.ts";
 import { yahooChartRetry } from "../_shared/market/yahooClient.ts";
 import { getServiceProvider } from "../_shared/market/provider.ts";
 
@@ -67,6 +71,43 @@ function snapFromRow(r: any): IndicatorSnapshot {
   };
 }
 
+// v3 — reconstruct the weekly/advanced-signal inputs swingScore/intradayScore
+// need from what market-pipeline-eod already persisted this same run, rather
+// than re-fetching candles (this pass deliberately works only from already-
+// persisted columns, same rationale as snapFromRow above).
+function weeklyFromRow(r: any): WeeklySnapshot | null {
+  if (r.weekly_close == null) return null;
+  return {
+    closeW: r.weekly_close,
+    ema20W: r.weekly_ema20 ?? null,
+    rsi14W: r.weekly_rsi14 ?? null,
+    aboveEma20W: !!r.weekly_ema20 && r.weekly_close > r.weekly_ema20,
+    trendUpW: !!r.weekly_trend_up,
+    higherLowsW: !!r.weekly_higher_lows,
+    barsW: 0,
+  };
+}
+
+function advFromRow(r: any): AdvancedSignals {
+  const vwapV = r.vwap ?? null;
+  return {
+    vwapRel: vwapV != null && vwapV !== 0 && r.close != null ? (r.close - vwapV) / vwapV : null,
+    supertrendDir: r.supertrend_dir ?? null,
+    mfi14: r.mfi14 ?? null,
+    percentB: r.bb_percent_b ?? null,
+    patterns: {
+      bullishEngulfing: !!r.pattern_flags?.bullish_engulfing,
+      bearishEngulfing: !!r.pattern_flags?.bearish_engulfing,
+      hammer: !!r.pattern_flags?.hammer,
+      shootingStar: !!r.pattern_flags?.shooting_star,
+      doji: !!r.pattern_flags?.doji,
+      cupAndHandle: !!r.pattern_flags?.cup_and_handle,
+      flag: !!r.pattern_flags?.flag,
+      ascendingTriangle: !!r.pattern_flags?.ascending_triangle,
+    },
+  };
+}
+
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
   try {
@@ -81,16 +122,17 @@ Deno.serve(async (req) => {
 
     const today = istTradeDate();
 
-    // Pull all scored rows, then join sector/is_active from market_stocks
-    // in-memory (no FK between the two tables, so PostgREST embeds fail).
-    const stockMeta = new Map<string, { sector: string | null; is_active: boolean }>();
+    // Pull all scored rows, then join sector/is_active/market_cap from
+    // market_stocks in-memory (no FK between the two tables, so PostgREST
+    // embeds fail).
+    const stockMeta = new Map<string, { sector: string | null; is_active: boolean; market_cap: number | null }>();
     for (let from = 0; ; from += 1000) {
       const { data, error } = await svc.from("market_stocks")
-        .select("symbol,exchange,sector,is_active")
+        .select("symbol,exchange,sector,is_active,market_cap")
         .range(from, from + 999);
       if (error) return errorResponse(req, error.message, 500);
       for (const d of data ?? []) {
-        stockMeta.set(`${d.symbol}|${d.exchange}`, { sector: d.sector ?? null, is_active: !!d.is_active });
+        stockMeta.set(`${d.symbol}|${d.exchange}`, { sector: d.sector ?? null, is_active: !!d.is_active, market_cap: d.market_cap != null ? Number(d.market_cap) : null });
       }
       if (!data || data.length < 1000) break;
     }
@@ -105,7 +147,7 @@ Deno.serve(async (req) => {
       for (const d of data ?? []) {
         const meta = stockMeta.get(`${d.symbol}|${d.exchange}`);
         if (!meta || !meta.is_active) continue;
-        rows.push({ ...d, sector: d.sector ?? meta.sector ?? null });
+        rows.push({ ...d, sector: d.sector ?? meta.sector ?? null, market_cap: meta.market_cap });
       }
       if (!data || data.length < 1000) break;
     }
@@ -243,6 +285,21 @@ Deno.serve(async (req) => {
         const bs = breakoutScore(snap, ctx);
         const ps = preBreakoutScore(snap, ctx);
         const scoreComponents = { breakout: bs.components, prebreakout: ps.components };
+
+        // v3 — re-score swing/intraday with the same real market context
+        // breakout/prebreakout just got, mirroring the eod pass's preliminary
+        // (neutral-context) computation. gapPct/relVolumeSoFar aren't
+        // available here (no candles in this pass) — intraday_score drops
+        // those two factors' contribution in this refinement, same
+        // graceful-degradation approach the rest of this pipeline already
+        // uses for optional fields.
+        const avgTurnoverCr = r.vol_avg20 != null && r.close != null ? (r.vol_avg20 * r.close) / 1e7 : null;
+        const liquidity = evaluateLiquidity({ close: r.close, marketCapCr: r.market_cap, avgTurnoverCr });
+        const weekly = weeklyFromRow(r);
+        const adv = advFromRow(r);
+        const sw = swingScore({ s: snap, ctx, weekly, adv, liquidity });
+        const is = intradayScore({ s: snap, ctx, adv, liquidity, relVolumeSoFar: null, gapPct: null });
+
         const nowIso = new Date().toISOString();
         const { error } = await svc.from("market_stock_scores").update({
           sector_strength: Math.round(sectorStrength * 100) / 100,
@@ -251,6 +308,12 @@ Deno.serve(async (req) => {
           breakout_score: bs.score,
           prebreakout_score: ps.score,
           score_components: scoreComponents,
+          is_liquid_tradable: liquidity.ok,
+          liquidity_reasons: liquidity.reasons,
+          swing_score: sw.score,
+          swing_components: sw.components,
+          intraday_score: is.score,
+          intraday_components: is.components,
           computed_at: nowIso,
         }).eq("symbol", r.symbol).eq("exchange", r.exchange);
         if (!error) updated++;

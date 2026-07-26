@@ -347,10 +347,20 @@ export type UniverseId =
   | "sme"
   | "midcap150"
   | "smallcap250";
+// midcap150/smallcap250 are deliberately NOT exposed here despite being
+// fully wired in screenerRun.ts's resolveUniverseFilter — the index-member
+// data they'd filter against (index_key "NIFTYMIDCAP150"/"NIFTYSMALLCAP250")
+// is never actually synced by market-index-constituents (it only syncs the
+// ...100 variants), so selecting either would silently return an empty
+// screener with no error. Exposing them only once that sync gap is closed.
 export const UNIVERSES: Array<{ id: UniverseId; label: string }> = [
   { id: "all",         label: "All Stocks" },
   { id: "nifty500",    label: "Nifty 500" },
   { id: "nifty50",     label: "Nifty 50" },
+  { id: "banknifty",   label: "Bank Nifty" },
+  { id: "finnifty",    label: "Fin Nifty" },
+  { id: "fno",         label: "F&O" },
+  { id: "sme",         label: "SME" },
 ];
 
 // ----- Curated presets — Tickertape / Screener.in inspired -----

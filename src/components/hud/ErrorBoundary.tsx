@@ -3,6 +3,17 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 interface Props { children: ReactNode; }
 interface State { error: Error | null; }
 
+// React.lazy() caches a REJECTED dynamic-import promise for the life of
+// that module reference — after a real chunk-load failure (stale-deploy
+// hash, network blip), retrying via setState({error:null}) just re-renders
+// the same lazy component and re-throws the identical cached rejection.
+// The only real recovery is a hard reload, which re-fetches a fresh chunk
+// manifest.
+function isChunkLoadError(error: Error): boolean {
+  const msg = `${error.name} ${error.message}`;
+  return /dynamically imported module|loading chunk|chunkloaderror|failed to fetch/i.test(msg);
+}
+
 export default class ErrorBoundary extends Component<Props, State> {
   state: State = { error: null };
 
@@ -13,8 +24,17 @@ export default class ErrorBoundary extends Component<Props, State> {
     console.error("[JARVIS] uncaught:", error, info);
   }
 
+  reboot = () => {
+    if (this.state.error && isChunkLoadError(this.state.error)) {
+      window.location.reload();
+      return;
+    }
+    this.setState({ error: null });
+  };
+
   render() {
     if (!this.state.error) return this.props.children;
+    const chunkFailure = isChunkLoadError(this.state.error);
     return (
       <div style={{
         display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
@@ -26,7 +46,7 @@ export default class ErrorBoundary extends Component<Props, State> {
           {this.state.error.message}
         </div>
         <button
-          onClick={() => this.setState({ error: null })}
+          onClick={this.reboot}
           style={{
             padding: "6px 14px", border: "1px solid var(--edge-strong)",
             background: "transparent", color: "var(--accent)",
@@ -34,7 +54,7 @@ export default class ErrorBoundary extends Component<Props, State> {
             cursor: "pointer", textTransform: "uppercase",
           }}
         >
-          reboot module
+          {chunkFailure ? "reload app" : "reboot module"}
         </button>
       </div>
     );

@@ -43,13 +43,26 @@ export function TradingViewChart({
   useEffect(() => {
     const container = ref.current;
     if (!container) return;
+
+    // symbol/exchange can originate from a route param (Analysis.tsx —
+    // `/market/analysis/:symbol`) with no upstream character validation.
+    // Refuse to render rather than hand untrusted text to the TV embed
+    // script — same allowlist market-order-place uses for symbol server-side.
+    if (!/^[A-Z0-9._&-]{1,32}$/.test(symbol) || !/^[A-Z]{1,10}$/.test(exchange)) {
+      container.innerHTML = "";
+      return;
+    }
+
     container.innerHTML = '<div class="tradingview-widget-container__widget" style="height:100%;width:100%"></div>';
 
     const script = document.createElement("script");
     script.src = EMBED_SRC;
     script.async = true;
     script.type = "text/javascript";
-    script.innerHTML = JSON.stringify({
+    // .text (not .innerHTML) — assigning to innerHTML on a <script> element
+    // is a DOM-XSS sink even for JSON-looking content; .text sets the node's
+    // text content without any HTML/script parsing of the assigned string.
+    script.text = JSON.stringify({
       autosize: true,
       symbol: `${exchange}:${symbol}`,
       interval,

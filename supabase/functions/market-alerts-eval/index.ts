@@ -56,15 +56,22 @@ Deno.serve(async (req) => {
     // market_data was never created; the actual computed indicator table is
     // market_stock_scores (close/rsi14/ema20/ema50/ema200/breakout_score).
     const { data: scores } = await svc.from("market_stock_scores")
-      .select("symbol,exchange,close,rsi14,ema20,ema50,ema200,breakout_score")
+      .select("symbol,exchange,close,trade_date,rsi14,ema20,ema50,ema200,breakout_score")
       .in("symbol", symbols);
     const scoreMap = new Map((scores ?? []).map((s) => [`${s.symbol}:${s.exchange}`, s]));
+    const today = istTradeDate();
 
     const events: unknown[] = [];
     const firedIds: string[] = [];
     for (const a of alerts) {
       const sc = scoreMap.get(`${a.symbol}:${a.exchange}`) as any;
-      const px = quoteMap.get(`${a.symbol}:${a.exchange}`) ?? (sc?.close ? Number(sc.close) : undefined);
+      // Freshness gate — same one AutoTrade's entry eval already applies
+      // (scoreRow.trade_date !== today → skip). Without it, a live-quote
+      // miss (provider hiccup, rate limit) fell back to market_stock_scores'
+      // close with no check it was today's session, so a price_above/
+      // price_below alert could fire off a stale close as if it were live.
+      const scFresh = sc?.trade_date === today;
+      const px = quoteMap.get(`${a.symbol}:${a.exchange}`) ?? (scFresh && sc?.close != null ? Number(sc.close) : undefined);
       let fires = false, val: number | null = null;
       switch (a.alert_type) {
         case "price_above": fires = px != null && px > (a.threshold ?? 0); val = px ?? null; break;
