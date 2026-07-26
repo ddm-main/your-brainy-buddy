@@ -659,6 +659,24 @@ export async function getActiveProvider(
   return { provider: yahooProvider(svc), settings: null };
 }
 
+// Read-only market-data provider. Market data (quotes, candles, depth, index
+// levels) is not account-bound, so every signed-in user gets the best feed the
+// app has: their own broker when connected, otherwise the app-level connected
+// Kotak session, otherwise Yahoo. Never use this for account-bound calls
+// (orders, holdings, positions, funds) — those must stay on getActiveProvider.
+export async function getReadProvider(
+  svc: SupabaseClient,
+  userId: string,
+): Promise<ActiveProvider> {
+  const own = await getActiveProvider(svc, userId);
+  if (own.settings) return own;
+  try {
+    return await getServiceProvider(svc);
+  } catch {
+    return own;
+  }
+}
+
 // Service-level provider for cron jobs (no user context): first connected kotak row, else yahoo.
 export async function getServiceProvider(svc: SupabaseClient): Promise<ActiveProvider> {
   const { data } = await svc

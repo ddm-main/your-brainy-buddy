@@ -5,7 +5,7 @@
 //   - slippage  0.05% per side (typical mid-cap market-order fill drift)
 // Overridable per-strategy via strategy.brokerage_pct / strategy.slippage_pct.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
-import { getActiveProvider } from "../_shared/market/provider.ts";
+import { getReadProvider } from "../_shared/market/provider.ts";
 import { ema, rsi, type Candle } from "../_shared/market/indicators.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 
@@ -243,7 +243,7 @@ Deno.serve(async (req) => {
     // Route through the active provider (Kotak Neo when connected — falls
     // back to Yahoo automatically when the symbol has no instrument token or
     // Kotak returns empty).
-    const { provider } = await getActiveProvider(svc, auth.userId);
+    const { provider } = await getReadProvider(svc, auth.userId);
     const allCandles = await provider.getOHLCV(symbol, exchange, range, "1d");
     const cutoff = Math.floor(Date.now() / 1000 - years * 365.25 * 86_400);
     const candles = allCandles.filter((c) => c.time >= cutoff);

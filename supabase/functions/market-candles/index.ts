@@ -3,7 +3,7 @@
 // 15m/1h: intraday provider fetch, cached in market_intraday_prices (15-min staleness).
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { yahooChartRetry, toYahooSymbol } from "../_shared/market/yahooClient.ts";
-import { getActiveProvider } from "../_shared/market/provider.ts";
+import { getReadProvider } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 
 const limiter = createMarketLimiter(120, 60_000);
@@ -56,7 +56,7 @@ Deno.serve(async (req) => {
       if (rows.length < 100 || stale) {
         const range = rows.length < 100 ? "2y" : "30d";
         try {
-          const { provider } = await getActiveProvider(svc, auth.userId);
+          const { provider } = await getReadProvider(svc, auth.userId);
           let candles;
           try {
             candles = await provider.getOHLCV(symbol, exchange, range, "1d");
@@ -114,7 +114,7 @@ Deno.serve(async (req) => {
     let raw;
     let providerName: "kotak_neo" | "yahoo" = "yahoo";
     try {
-      const { provider } = await getActiveProvider(svc, auth.userId);
+      const { provider } = await getReadProvider(svc, auth.userId);
       raw = await provider.getOHLCV(symbol, exchange, cfg.range, cfg.interval);
       providerName = provider.name === "kotak_neo" ? "kotak_neo" : "yahoo";
     } catch {
