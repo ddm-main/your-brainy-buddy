@@ -700,7 +700,8 @@ export async function withKotakSession<T>(
           .select("session_token_enc,sid,hs_server_id,base_url,connection_status,token_expires_at")
           .eq("id", s.id).maybeSingle();
         if (latest && latest.connection_status === "connected"
-          && latest.session_token_enc && latest.session_token_enc !== s.session_token_enc) {
+          && latest.session_token_enc && latest.session_token_enc !== s.session_token_enc
+          && String(latest.hs_server_id ?? "").trim()) {
           return { ...s, ...latest } as KotakSettings;
         }
         const sess = await kotakAutoLogin(s);
