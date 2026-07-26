@@ -80,7 +80,6 @@ export function PriceSourceChip({ compact = false, stale = false, dotOnly = fals
           boxShadow: relayAlive ? `0 0 6px ${tone}` : "none",
         }}
       />
-      {label}
     </span>
   );
 }
