@@ -32,8 +32,8 @@ const fmtNum = (n: number | null | undefined) =>
 
 export default function Orders() {
   const push = useUi((s) => s.push);
-  const { data: ordersData, isFetching: ordersFetching, refetch: refetchOrders } = useBrokerOrders();
-  const { data: tradesData, isFetching: tradesFetching, refetch: refetchTrades } = useBrokerTrades();
+  const { data: ordersData, isFetching: ordersFetching, error: ordersError, refetch: refetchOrders } = useBrokerOrders();
+  const { data: tradesData, isFetching: tradesFetching, error: tradesError, refetch: refetchTrades } = useBrokerTrades();
   const { cancel, modify } = useMarketOrderMutations();
   const [ticket, setTicket] = useState<{ symbol: string; exchange: "NSE" | "BSE"; side: "BUY" | "SELL" } | null>(null);
   const [modifying, setModifying] = useState<BrokerOrder | null>(null);
@@ -68,9 +68,23 @@ export default function Orders() {
 
   const refreshAll = () => { refetchOrders(); refetchTrades(); };
   const busy = ordersFetching || tradesFetching;
+  const brokerError = ordersError ?? tradesError;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {brokerError && (
+        <HudPanel flow title="Broker sync issue" index="MK.ERR">
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ color: "var(--danger)", fontSize: 12, lineHeight: 1.45 }}>
+              {toSafeError(brokerError, "Could not load Kotak orders/trades").message}
+            </div>
+            <Btn size="sm" onClick={refreshAll} disabled={busy}>
+              <RefreshCw size={11} style={{ marginRight: 4 }} />retry
+            </Btn>
+          </div>
+        </HudPanel>
+      )}
+
       <HudPanel flow title={`Pending · ${pending.length}`} index="MK.OR1" actions={
         <Btn size="sm" onClick={refreshAll} disabled={busy}>
           <RefreshCw size={11} style={{ marginRight: 4 }} />{busy ? "…" : "refresh"}
