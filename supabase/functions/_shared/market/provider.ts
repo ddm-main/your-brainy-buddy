@@ -646,7 +646,9 @@ export interface ActiveProvider {
   settings: KotakSettings | null;
 }
 
-// Highest-priority connected provider for the user; falls back to Yahoo.
+// Account-bound provider: the caller's OWN broker connection. Orders,
+// holdings, positions, funds, GTT and AutoTrade must use this and nothing
+// else — another account's session would place trades on the wrong book.
 export async function getActiveProvider(
   svc: SupabaseClient,
   userId: string,
@@ -659,36 +661,62 @@ export async function getActiveProvider(
   return { provider: yahooProvider(svc), settings: null };
 }
 
-// Read-only market-data provider. Market data (quotes, candles, depth, index
-// levels) is not account-bound, so every signed-in user gets the best feed the
-// app has: their own broker when connected, otherwise the app-level connected
-// Kotak session, otherwise Yahoo. Never use this for account-bound calls
-// (orders, holdings, positions, funds) — those must stay on getActiveProvider.
+// ---------- System market-data feed ----------
+// Market data (quotes, candles, depth, index levels) is NOT account-bound, so
+// the app runs it off one designated "system" Kotak connection
+// (market_api_settings.is_system) instead of requiring every user to connect
+// their own broker. Users only connect Kotak for their own account data.
+const SYSTEM_FEED_TTL_MS = 15_000;
+let systemFeedCache: { row: KotakSettings | null; expiresAt: number } | null = null;
+
+export function invalidateSystemFeedCache(): void {
+  systemFeedCache = null;
+}
+
+async function getSystemFeedRow(svc: SupabaseClient): Promise<KotakSettings | null> {
+  if (systemFeedCache && systemFeedCache.expiresAt > Date.now()) return systemFeedCache.row;
+  const cols = KOTAK_SETTINGS_COLS + ",active_provider,is_system";
+  // 1) Explicitly designated system feed.
+  const { data: designated } = await svc
+    .from("market_api_settings").select(cols)
+    .eq("is_system", true).eq("active_provider", "kotak_neo").limit(1);
+  let row = ((designated ?? []) as KotakSettings[])[0] ?? null;
+  // 2) Legacy fallback — no designation yet: newest connected Kotak row.
+  if (!row) {
+    const { data } = await svc
+      .from("market_api_settings").select(cols)
+      .eq("active_provider", "kotak_neo")
+      .order("updated_at", { ascending: false }).limit(5);
+    const rows = (data ?? []) as KotakSettings[];
+    row = rows.find((r) => r.connection_status === "connected") ?? rows.find((r) => r.totp_secret_enc) ?? null;
+  }
+  systemFeedCache = { row, expiresAt: Date.now() + SYSTEM_FEED_TTL_MS };
+  return row;
+}
+
+const usableSession = (r: KotakSettings | null | undefined): boolean =>
+  !!r && (r.connection_status === "connected" || !!r.totp_secret_enc);
+
+// Read-only market-data provider. System Kotak feed first (so every signed-in
+// user gets real-time prices without connecting a broker), the caller's own
+// Kotak next, Yahoo last. Never use this for account-bound calls.
 export async function getReadProvider(
   svc: SupabaseClient,
   userId: string,
 ): Promise<ActiveProvider> {
-  const own = await getActiveProvider(svc, userId);
-  if (own.settings) return own;
   try {
-    return await getServiceProvider(svc);
-  } catch {
-    return own;
-  }
+    const sys = await getSystemFeedRow(svc);
+    if (usableSession(sys)) return { provider: kotakProvider(svc, sys!), settings: sys };
+  } catch { /* fall through to the caller's own connection */ }
+  return getActiveProvider(svc, userId);
 }
 
-// Service-level provider for cron jobs (no user context): first connected kotak row, else yahoo.
+// Service-level provider for cron jobs (no user context) — same system feed.
 export async function getServiceProvider(svc: SupabaseClient): Promise<ActiveProvider> {
-  const { data } = await svc
-    .from("market_api_settings")
-    .select(KOTAK_SETTINGS_COLS + ",active_provider")
-    .eq("active_provider", "kotak_neo")
-    .order("updated_at", { ascending: false })
-    .limit(5);
-  const rows = (data ?? []) as KotakSettings[];
-  const usable = rows.find((r) => r.connection_status === "connected") ?? rows.find((r) => r.totp_secret_enc);
-  if (usable) return { provider: kotakProvider(svc, usable), settings: usable };
+  const row = await getSystemFeedRow(svc);
+  if (usableSession(row)) return { provider: kotakProvider(svc, row!), settings: row };
   return { provider: yahooProvider(svc), settings: null };
 }
 
 export { yahooProvider };
+

@@ -5,6 +5,7 @@
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { getReadProvider } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
+import { getSharedQuotes } from "../_shared/market/quoteCache.ts";
 
 // This is the hot ~1s-poll path (provider.ts comment) across several panels
 // at once, so the ceiling is generous — it exists to catch a buggy client
@@ -51,7 +52,9 @@ Deno.serve(async (req) => {
 
     const svc = svcClient();
     const { provider } = await getReadProvider(svc, auth.userId);
-    let rows = await provider.getQuotes(symbols);
+    // Shared cache + in-flight de-dup: all users read one system Kotak
+    // session, so identical symbol requests must coalesce upstream.
+    let rows = await getSharedQuotes(provider, symbols);
     const byKey = new Map(rows.map((r) => [r.key, r]));
 
     // Retry once for symbols the provider couldn't quote — mitigates Yahoo 429s.
@@ -62,7 +65,7 @@ Deno.serve(async (req) => {
     if (missing.length > 0) {
       await new Promise((r) => setTimeout(r, 400));
       try {
-        const retry = await provider.getQuotes(missing);
+        const retry = await getSharedQuotes(provider, missing);
         for (const r of retry) if (r.price) byKey.set(r.key, r);
       } catch { /* keep first-pass results */ }
     }

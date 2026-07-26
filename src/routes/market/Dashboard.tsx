@@ -29,6 +29,7 @@ import { useEscapeClose } from "@/lib/useEscapeClose";
 import { MarketStrip } from "@/components/market/MarketStrip";
 import { PriceSourceChip } from "@/components/market/PriceSourceChip";
 
+
 const DEFAULT_BREAKOUT_KEY = "market.dash.breakoutScreen";
 const SCREENER_DEFAULT_SAVED_KEY = "market.screener.defaultSavedId";
 const EXPLICIT_CLEAR = "__cleared__";
@@ -397,37 +398,13 @@ export default function MarketDashboard() {
     </div>
   );
 
-  // Kotak-connect banner: shown when the provider is Yahoo (~15m delayed)
-  // AND Kotak isn't connected, unless the user dismissed it this session.
-  const kotakConnected = connected === "kotak_neo";
-  const showKotakBanner =
-    !kotakConnected &&
-    (quoteProvider === "yahoo" || quoteProvider === "mixed" || quoteProvider === "cache") &&
-    !sessionStorage.getItem("mk.dash.kotak-banner.dismissed");
+  // Price-feed status is admin-only and lives in /config/system-data. No
+  // banner here — every user reads prices from the shared system Kotak feed.
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 0, height: "100%" }}>
       <MarketStrip actions={indexActions} />
-      {showKotakBanner && (
-        <div role="status" style={{
-          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-          padding: "6px 10px", border: "1px dashed var(--edge-strong)", borderRadius: 3,
-          fontSize: 11, color: "var(--text-dim)", background: "rgba(255,180,60,0.04)", flexShrink: 0,
-        }}>
-          <span style={{ color: "var(--warn, #f5a524)" }}>●</span>
-          <span>Prices are <b>~15 minutes delayed</b> (Yahoo Finance). Connect Kotak Neo for real-time quotes across Overview, Screener, and Portfolio.</span>
-          <Link to="/market/settings" style={{
-            marginLeft: "auto", color: "var(--accent)", textDecoration: "none",
-            border: "1px solid var(--edge)", padding: "2px 8px", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
-          }}>Connect Kotak Neo</Link>
-          <button
-            onClick={() => { sessionStorage.setItem("mk.dash.kotak-banner.dismissed", "1"); qc.invalidateQueries({ queryKey: ["market"] }); }}
-            aria-label="Dismiss for this session"
-            className="hud-btn focus-outline" data-variant="ghost" data-size="sm"
-            title="Dismiss for this session"
-          ><X size={12} /></button>
-        </div>
-      )}
+
 
       {/* Row 2 · Top Breakouts · Watchlist · Portfolio (right) */}
       <div

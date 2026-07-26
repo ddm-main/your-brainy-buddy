@@ -1,0 +1,1 @@
+DROP VIEW IF EXISTS public.market_system_feed;

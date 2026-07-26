@@ -6,6 +6,7 @@
 // Reads from public.market_index_watch; falls back to a default 6 when empty.
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { getReadProvider } from "../_shared/market/provider.ts";
+import { getSharedQuotes } from "../_shared/market/quoteCache.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 
 const limiter = createMarketLimiter(300, 60_000);
@@ -18,6 +19,19 @@ const DEFAULTS = [
   { symbol: "^CNXSC",              name: "Smallcap",   region: "IN", nse_symbol: null,        fno_enabled: false, constituents_slug: null },
   { symbol: "^INDIAVIX",           name: "India VIX",  region: "IN", nse_symbol: null,        fno_enabled: false, constituents_slug: null },
 ];
+
+// Symbols the market strip always renders. They are resolved even when the
+// user's own index watchlist doesn't contain them — previously India VIX
+// showed a permanent "—" for any user whose watchlist lacked the row.
+const ALWAYS = [
+  { symbol: "^NSEI",      name: "Nifty 50",   region: "IN", nse_symbol: "NIFTY",     fno_enabled: true,  constituents_slug: "nifty50" },
+  { symbol: "^BSESN",     name: "Sensex",     region: "IN", nse_symbol: null,        fno_enabled: false, constituents_slug: null },
+  { symbol: "^NSEBANK",   name: "Bank Nifty", region: "IN", nse_symbol: "BANKNIFTY", fno_enabled: true,  constituents_slug: "niftybank" },
+  { symbol: "^INDIAVIX",  name: "India VIX",  region: "IN", nse_symbol: null,        fno_enabled: false, constituents_slug: null },
+];
+
+const istDate = (): string =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
@@ -43,14 +57,18 @@ Deno.serve(async (req) => {
         rows = (r2.data ?? []) as any;
       } catch { /* fall through */ }
     }
-    const source = rows.length > 0 ? rows : DEFAULTS;
+    const base = rows.length > 0 ? rows : DEFAULTS;
+    // Union of the user's watchlist and the always-on strip symbols, in
+    // watchlist order with the missing strip entries appended.
+    const seenSym = new Set(base.map((r) => r.symbol));
+    const source = [...base, ...ALWAYS.filter((a) => !seenSym.has(a.symbol))] as typeof base;
 
     // Route through the active provider. Keys are "NSE:<symbol>" — Kotak
     // provider looks them up in the instrument-token map; anything not found
     // (all indices, most of the time) falls back to Yahoo transparently.
     const { provider } = await getReadProvider(svc, auth.userId);
     const keys = source.map((r) => `NSE:${r.symbol}`);
-    const quoteRows = await provider.getQuotes(keys);
+    const quoteRows = await getSharedQuotes(provider, keys);
     const byKey = new Map(quoteRows.map((q) => [q.key, q]));
 
     const providers = new Set<string>();
@@ -79,6 +97,16 @@ Deno.serve(async (req) => {
       providerSummary = only === "kotak" || only === "yahoo" || only === "cache" ? only : "mixed";
     } else if (providers.size > 1) {
       providerSummary = "mixed";
+    }
+
+    // Persist India VIX onto today's breadth row — nothing else writes that
+    // column, so the Breadth panel's "India VIX" cell was always blank.
+    const vix = out.find((q) => q.symbol === "^INDIAVIX");
+    if (vix && typeof vix.price === "number" && vix.price > 0) {
+      svc.from("market_breadth_daily")
+        .update({ india_vix: vix.price })
+        .eq("trade_date", istDate())
+        .then(() => {}, () => {});
     }
 
     return jsonResponse(req, { quotes: out, breadth: breadthRes.data ?? null, source: provider.name, provider: providerSummary });

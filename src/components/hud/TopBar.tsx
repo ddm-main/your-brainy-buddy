@@ -1,6 +1,6 @@
 import { NavLink, Link, useLocation } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
-import { Bell, SlidersHorizontal, Wifi, LogOut, User as UserIcon } from "lucide-react";
+import { Bell, SlidersHorizontal, Wifi, LogOut, Settings as SettingsIcon, User as UserIcon } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 
 import { useEffect, useRef, useState } from "react";
@@ -150,7 +150,9 @@ export default function TopBar() {
           const items: { to: string; label: string; end?: boolean; key: string; isActive: (p: string) => boolean }[] = [];
           for (const n of baseNav) {
             if (onMarket && n.to === "/market") {
-              for (const g of MARKET_GROUPS) {
+              // "Settings" is moved into the user (avatar) menu below to
+              // declutter the top nav; skip it here.
+              for (const g of MARKET_GROUPS.filter((g) => g.key !== "settings")) {
                 items.push({
                   key: `mg-${g.key}`,
                   to: g.to,
@@ -286,6 +288,13 @@ export default function TopBar() {
                   <div className="hud-label" style={{ color: "var(--accent)", marginTop: 4 }}>{role ?? "—"}</div>
                 </div>
                 <div style={{ padding: 6, display: "flex", flexDirection: "column", gap: 2 }}>
+                  <button
+                    className="focus-outline"
+                    onClick={() => { setUserOpen(false); navigate("/market/settings"); }}
+                    style={menuItem}
+                  >
+                    <SettingsIcon size={13} /> Market Settings
+                  </button>
                   {canConfig && (
                     <button
                       className="focus-outline"

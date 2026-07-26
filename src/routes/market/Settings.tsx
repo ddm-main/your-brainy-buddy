@@ -3,6 +3,8 @@
 import { Link } from "react-router-dom";
 import { LineChart } from "lucide-react";
 import BrokerConnectPanel from "@/components/market/BrokerConnectPanel";
+import SystemFeedPanel from "@/components/market/SystemFeedPanel";
+
 import { useAccessStore } from "@/store/accessStore";
 
 export default function MarketSettings() {
@@ -22,7 +24,9 @@ export default function MarketSettings() {
           <LineChart size={12} /> System Data →
         </Link>
       )}
+      <SystemFeedPanel />
       <BrokerConnectPanel />
+
     </div>
   );
 }

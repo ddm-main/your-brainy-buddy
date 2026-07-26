@@ -22,10 +22,13 @@ export interface SafeFetchOptions extends RequestInit {
   allowHosts?: string[]; // optional exact-host allowlist
 }
 
+// `headers` is included so callers that need a cookie handshake (e.g. the NSE
+// endpoints, which reject requests without the cookies their homepage sets)
+// can read Set-Cookie without bypassing the SSRF guard.
 export async function safeFetch(
   input: string | URL,
   opts: SafeFetchOptions = {},
-): Promise<{ ok: boolean; status: number; bytes: Uint8Array; contentType: string; error?: string }> {
+): Promise<{ ok: boolean; status: number; bytes: Uint8Array; contentType: string; headers?: Headers; error?: string }> {
   const { timeoutMs = 8000, maxBytes = 2 * 1024 * 1024, allowHosts, ...init } = opts;
   let url: URL;
   try { url = new URL(input); } catch { return { ok: false, status: 0, bytes: new Uint8Array(), contentType: "", error: "invalid_url" }; }
@@ -62,7 +65,7 @@ export async function safeFetch(
     const buf = new Uint8Array(total);
     let off = 0;
     for (const c of chunks) { buf.set(c, off); off += c.byteLength; }
-    return { ok: res.ok, status: res.status, bytes: buf, contentType: res.headers.get("content-type") ?? "" };
+    return { ok: res.ok, status: res.status, bytes: buf, contentType: res.headers.get("content-type") ?? "", headers: res.headers };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return { ok: false, status: 0, bytes: new Uint8Array(), contentType: "", error: msg };

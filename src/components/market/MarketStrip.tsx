@@ -6,7 +6,7 @@
 // moment the relay is up. Auto-refreshes via useIndices polling — no manual button.
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useIndices, useBreadth } from "@/lib/market/hooks";
+import { useIndices, useBreadth, useFiiDiiLatest } from "@/lib/market/hooks";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
 import { BreadthDetailsDialog } from "@/components/market/BreadthDetailsDialog";
@@ -18,8 +18,10 @@ const SLOT_SYMBOLS: Array<{ symbol: string; label: string }> = [
   { symbol: "^BSESN",    label: "SENSEX" },
   { symbol: "^NSEBANK",  label: "BANKNIFTY" },
   { symbol: "^INDIAVIX", label: "VIX" },
-  // GIFT Nifty (formerly SGX Nifty) — Yahoo symbol for NSE-IX INR futures.
-  { symbol: "GIFTNIFTY", label: "GIFT NIFTY" },
+  // GIFT Nifty was listed here as "GIFTNIFTY", which is not a resolvable
+  // ticker on either upstream (Yahoo maps it to GIFTNIFTY.NS → 404; Kotak has
+  // no NSE token for NSE-IX). It rendered a permanent "—", so it's removed
+  // rather than left looking broken.
 ];
 
 const fmtNum = (n: number | null | undefined, d = 2) =>
@@ -33,6 +35,7 @@ export function MarketStrip({ actions }: Props) {
   const nav = useNavigate();
   const { data: indicesData, dataUpdatedAt: indicesUpdatedAt, isError: indicesError } = useIndices() as { data: any; dataUpdatedAt: number; isError: boolean };
   const { data: breadth } = useBreadth();
+  const { data: fiiDii } = useFiiDiiLatest();
   const [breadthOpen, setBreadthOpen] = useState(false);
 
   const pushTicks = useLiveTickStore((s) => s.ticks);
@@ -67,8 +70,24 @@ export function MarketStrip({ actions }: Props) {
   }, [indicesData, pushTicks, indicesUpdatedAt]);
 
   const ad = breadth ? { adv: breadth.advances ?? 0, dec: breadth.declines ?? 0 } : null;
-  const fiiCr = breadth?.fii_net_cr ?? null;
-  const diiCr = breadth?.dii_net_cr ?? null;
+  const breadthDate = (breadth as any)?.trade_date ?? null;
+  // fii_net_cr / dii_net_cr on market_breadth_daily are never populated by any
+  // job — read the table the FII/DII sync actually writes, falling back to the
+  // breadth columns if they ever do get filled.
+  const fiiCr = fiiDii?.fii_net ?? breadth?.fii_net_cr ?? null;
+  const diiCr = fiiDii?.dii_net ?? breadth?.dii_net_cr ?? null;
+  const flowDate = fiiDii?.activity_date ?? null;
+  const todayIst = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+  const breadthStale = breadthDate && breadthDate !== todayIst;
+  const flowStale = flowDate && flowDate !== todayIst;
+  const adTitle = breadthDate
+    ? `Advances / Declines for ${breadthDate}${breadthStale ? " (last trading session)" : ""} · click for breadth details`
+    : "Market breadth unavailable";
+  const flowTitle = (who: string) =>
+    flowDate
+      ? `${who} net cash flow (₹ crore) for ${flowDate}${flowStale ? " (last trading session)" : ""} · click for details`
+      : `${who} net cash flow unavailable — the daily NSE FII/DII feed has not returned data yet`;
+
 
   return (
     <>
@@ -112,12 +131,12 @@ export function MarketStrip({ actions }: Props) {
         onClick={() => setBreadthOpen(true)}
         className="focus-outline"
         aria-label="Open market breadth details"
-        title="Open market breadth details"
+        title={adTitle}
         style={{
           display: "inline-flex", gap: 6, alignItems: "baseline",
           background: "transparent", border: 0, padding: "2px 4px",
           margin: 0, cursor: "pointer", font: "inherit", color: "inherit",
-          borderRadius: 2,
+          borderRadius: 2, opacity: breadthStale ? 0.55 : 1,
         }}
       >
         <span style={{ color: "var(--text-muted)" }}>A/D</span>
@@ -132,22 +151,23 @@ export function MarketStrip({ actions }: Props) {
         )}
       </button>
 
+
       {/* FII — its own chip */}
       <button
         onClick={() => setBreadthOpen(true)}
         className="focus-outline"
         aria-label="Open FII/DII details"
-        title="FII net flow (₹ crores) · click for details"
+        title={flowTitle("FII")}
         style={{
           display: "inline-flex", gap: 6, alignItems: "baseline",
           background: "transparent", border: 0, padding: "2px 4px",
           margin: 0, cursor: "pointer", font: "inherit", color: "inherit",
-          borderRadius: 2,
+          borderRadius: 2, opacity: fiiCr != null && flowStale ? 0.55 : 1,
         }}
       >
         <span style={{ color: "var(--text-muted)" }}>FII</span>
         {fiiCr == null ? (
-          <span style={{ color: "var(--text-dim)" }}>—</span>
+          <span style={{ color: "var(--text-dim)" }}>n/a</span>
         ) : (
           <span style={{ color: fiiCr >= 0 ? "var(--ok)" : "var(--danger)", fontVariantNumeric: "tabular-nums" }}>
             {fiiCr >= 0 ? "+" : ""}{fmtNum(fiiCr, 0)}cr
@@ -160,17 +180,17 @@ export function MarketStrip({ actions }: Props) {
         onClick={() => setBreadthOpen(true)}
         className="focus-outline"
         aria-label="Open FII/DII details"
-        title="DII net flow (₹ crores) · click for details"
+        title={flowTitle("DII")}
         style={{
           display: "inline-flex", gap: 6, alignItems: "baseline",
           background: "transparent", border: 0, padding: "2px 4px",
           margin: 0, cursor: "pointer", font: "inherit", color: "inherit",
-          borderRadius: 2,
+          borderRadius: 2, opacity: diiCr != null && flowStale ? 0.55 : 1,
         }}
       >
         <span style={{ color: "var(--text-muted)" }}>DII</span>
         {diiCr == null ? (
-          <span style={{ color: "var(--text-dim)" }}>—</span>
+          <span style={{ color: "var(--text-dim)" }}>n/a</span>
         ) : (
           <span style={{ color: diiCr >= 0 ? "var(--ok)" : "var(--danger)", fontVariantNumeric: "tabular-nums" }}>
             {diiCr >= 0 ? "+" : ""}{fmtNum(diiCr, 0)}cr
@@ -179,7 +199,7 @@ export function MarketStrip({ actions }: Props) {
       </button>
 
       <span style={{ marginLeft: actions ? undefined : "auto", display: "inline-flex", alignItems: "center" }}>
-        <PriceSourceChip compact stale={indicesError} />
+        <PriceSourceChip dotOnly stale={indicesError} />
       </span>
 
       {actions && (

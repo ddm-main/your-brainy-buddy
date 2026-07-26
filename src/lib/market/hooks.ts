@@ -35,6 +35,15 @@ function justClosedWindow(): boolean {
   return day >= 1 && day <= 5 && utcMin > 600 && utcMin <= 615;
 }
 
+// react-query re-evaluates `refetchInterval` after every fetch when it is a
+// FUNCTION, but freezes it when it is a plain number computed at render time.
+// Every market hook used the number form, so a tab mounted before 09:15 kept
+// polling at the closed-market cadence (e.g. 120 s) for the whole session.
+// This helper keeps the cadence honest without needing a re-render.
+export function liveInterval(openMs: number, closedMs: number | false, justClosedMs?: number) {
+  return () => (marketOpen() ? openMs : justClosedWindow() ? (justClosedMs ?? closedMs) : closedMs);
+}
+
 export function useMarketSettings() {
   return useQuery({
     queryKey: ["market", "settings"],
@@ -46,12 +55,50 @@ export function useMarketSettings() {
   });
 }
 
+// Status of the app-wide market-data feed (the designated system Kotak Neo
+// connection). Market data is not account-bound: every signed-in user reads
+// prices from this one feed, and only connects their own Kotak for account
+// data (orders, holdings, positions, funds). Price banners must key off THIS,
+// not off whether the current user personally connected a broker.
+export interface SystemFeedStatus {
+  configured: boolean;
+  designated: boolean;
+  status: string;
+  healthy: boolean;
+  last_error: string | null;
+  last_sync_at: string | null;
+  token_expires_at: string | null;
+  id: string | null;
+  ucc: string | null;
+  is_owner: boolean;
+  is_admin: boolean;
+}
+
+export function useSystemFeed() {
+  return useQuery({
+    queryKey: ["market", "system-feed"],
+    queryFn: () => callMarketFn<SystemFeedStatus>("market-system-feed"),
+    staleTime: 60_000,
+    refetchInterval: 5 * 60_000,
+  });
+}
+
+export function useDesignateSystemFeed() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => callMarketFn<SystemFeedStatus>("market-system-feed", { action: "designate", id }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["market", "system-feed"] }); },
+  });
+}
+
+
 export function useIndices() {
   return useQuery({
     queryKey: ["market", "indices"],
     queryFn: () =>
       callMarketFn<{ quotes: IndexQuote[]; breadth: BreadthDaily | null }>("market-indices"),
-    refetchInterval: marketOpen() ? 2_000 : 120_000,
+    refetchInterval: liveInterval(1_000, 120_000, 15_000),
+    placeholderData: (prev: unknown) => prev as any,
     refetchIntervalInBackground: false,
   });
 }
@@ -66,7 +113,7 @@ export function useTopMovers() {
       return (data ?? []) as unknown as TopMoverRow[];
     },
     staleTime: 60_000,
-    refetchInterval: marketOpen() ? 60_000 : false,
+    refetchInterval: liveInterval(60_000, false),
     refetchIntervalInBackground: false,
   });
 }
@@ -117,19 +164,22 @@ export function useQuotes(keys: string[], opts?: { intervalMs?: number }) {
   // need a faster REST poll (~3s) to feel "live" instead of updating once
   // a minute. Off-hours we keep the just-closed short window then stop.
   const openInterval = opts?.intervalMs ?? 1_000;
-  const open = marketOpen();
   return useQuery({
     queryKey: ["market", "quotes", [...keys].sort().join(",")],
-    queryFn: () => callMarketFn<{ quotes: Quote[]; source: string }>("market-quotes", { symbols: keys }),
+    queryFn: () => callMarketFn<{ quotes: Quote[]; source: string; provider?: string }>("market-quotes", { symbols: keys }),
     enabled: keys.length > 0,
-    refetchInterval: open ? openInterval : justClosedWindow() ? 15_000 : false,
+    refetchInterval: liveInterval(openInterval, false, 15_000),
     // During market hours the poll itself keeps the data fresh — a short
     // stale window prevents duplicate parallel fetches when many components
     // subscribe. Off-hours the value can't move, so cache it and stop firing
     // refetches on remount/focus.
-    staleTime: open ? Math.max(500, openInterval - 200) : Infinity,
-    refetchOnWindowFocus: open,
-    refetchOnReconnect: open,
+    // `open` was captured at render, so a component mounted before 09:15 kept
+    // an Infinity staleTime (and focus/reconnect refetches disabled) for the
+    // whole session. Short stale window always; off-hours the interval is
+    // already false so nothing polls anyway.
+    staleTime: Math.max(500, openInterval - 200),
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
     // Keep the last successful batch visible while a new fetch is in flight
     // so subscribing new symbols (paging/filtering) doesn't blank the table.
     placeholderData: (prev: unknown) => prev as any,
@@ -179,7 +229,7 @@ export function usePositions() {
       if (error) throw error;
       return (data ?? []) as Position[];
     },
-    refetchInterval: marketOpen() ? 10_000 : justClosedWindow() ? 30_000 : 5 * 60_000,
+    refetchInterval: liveInterval(10_000, 5 * 60_000, 30_000),
     refetchIntervalInBackground: false,
   });
 }
@@ -226,7 +276,7 @@ export function useHoldings() {
       if (error) throw error;
       return (data ?? []) as HoldingRow[];
     },
-    refetchInterval: marketOpen() ? 30_000 : 5 * 60_000,
+    refetchInterval: liveInterval(30_000, 5 * 60_000),
     refetchIntervalInBackground: false,
   });
 }
@@ -250,7 +300,7 @@ export function useTodayRealized() {
       if (error) throw error;
       return (data ?? []) as TodayRealizedRow[];
     },
-    refetchInterval: marketOpen() ? 30_000 : justClosedWindow() ? 60_000 : false,
+    refetchInterval: liveInterval(30_000, false, 60_000),
     refetchIntervalInBackground: false,
     staleTime: 20_000,
   });
@@ -339,16 +389,27 @@ export function useBreadth() {
   return useQuery({
     queryKey: ["market", "breadth"],
     queryFn: async (): Promise<BreadthDaily | null> => {
+      // market_breadth_latest points at whatever the breadth job wrote last,
+      // which on a Sat/Sun/holiday run is a degenerate row (zero A/D) that
+      // silently overwrote Friday's real session. Read the most recent
+      // trading session directly from market_breadth_daily instead, filtering
+      // out rows with no advances or declines.
       const { data, error } = await supabase
-        .from("market_breadth_latest" as any).select("*").maybeSingle();
+        .from("market_breadth_daily" as any)
+        .select("*")
+        .or("advances.gt.0,declines.gt.0")
+        .order("trade_date", { ascending: false })
+        .limit(1)
+        .maybeSingle();
       if (error) throw error;
       return data as BreadthDaily | null;
     },
     staleTime: 60_000,
-    refetchInterval: marketOpen() ? 60_000 : false,
+    refetchInterval: liveInterval(60_000, false),
     refetchIntervalInBackground: false,
   });
 }
+
 
 export interface FiiDiiRow {
   activity_date: string;
@@ -360,6 +421,9 @@ export interface FiiDiiRow {
 }
 
 // Recent FII/DII activity (defaults to CASH segment, last 10 sessions).
+// Segment is matched case-insensitively — the sync writer historically wrote
+// lowercase "cash" while every reader asked for "CASH", so exact matching
+// silently returned zero rows.
 export function useFiiDiiHistory(limit = 10, segment = "CASH") {
   return useQuery({
     queryKey: ["market", "fii-dii-history", segment, limit],
@@ -367,13 +431,37 @@ export function useFiiDiiHistory(limit = 10, segment = "CASH") {
       const { data, error } = await supabase
         .from("fii_dii_activity")
         .select("activity_date,segment,fii_net,dii_net,net_buy_inr_cr,source")
-        .eq("segment", segment)
+        .ilike("segment", segment)
         .order("activity_date", { ascending: false })
         .limit(limit);
       if (error) throw error;
       return (data ?? []) as FiiDiiRow[];
     },
     staleTime: 5 * 60_000,
+  });
+}
+
+// Latest FII/DII net cash flows (₹ crore) for the market strip.
+// `market_breadth_daily.fii_net_cr` / `dii_net_cr` are never written by any
+// job, so the strip used to read permanently-NULL columns. fii_dii_activity
+// is the table the sync actually populates — read that instead.
+export function useFiiDiiLatest(segment = "CASH") {
+  return useQuery({
+    queryKey: ["market", "fii-dii-latest", segment],
+    queryFn: async (): Promise<FiiDiiRow | null> => {
+      const { data, error } = await supabase
+        .from("fii_dii_activity")
+        .select("activity_date,segment,fii_net,dii_net,net_buy_inr_cr,source")
+        .ilike("segment", segment)
+        .order("activity_date", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return (data ?? null) as FiiDiiRow | null;
+    },
+    staleTime: 5 * 60_000,
+    refetchInterval: liveInterval(15 * 60_000, false),
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -405,7 +493,7 @@ export function useCandles(symbol: string | undefined, timeframe: string, exchan
     queryFn: () => callMarketFn<CandlesResponse>("market-candles", { symbol, timeframe, exchange }),
     enabled: !!symbol,
     staleTime: intraday ? 60_000 : 5 * 60_000,
-    refetchInterval: intraday && marketOpen() ? 60_000 : false,
+    refetchInterval: intraday ? liveInterval(60_000, false) : (false as const),
     refetchIntervalInBackground: false,
   });
 }
@@ -418,7 +506,7 @@ export function useDepth(symbol: string | undefined, exchange = "NSE") {
     queryKey: ["market", "depth", symbol ?? "", exchange],
     queryFn: () => callMarketFn<DepthResponse>("market-depth", { symbol, exchange }),
     enabled: !!symbol,
-    refetchInterval: marketOpen() ? 1_000 : false,
+    refetchInterval: liveInterval(1_000, false),
     retry: false,
   });
 }
@@ -561,7 +649,7 @@ export function useOptionChain(symbol: string | undefined, expiry?: string) {
       rows: Array<{ strike: number; call: any; put: any }>;
     }>("market-option-chain", { symbol, expiry }),
     enabled: !!symbol,
-    refetchInterval: marketOpen() ? 60_000 : false,
+    refetchInterval: liveInterval(60_000, false),
     staleTime: 30_000,
   });
 }

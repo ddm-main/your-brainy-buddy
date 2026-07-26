@@ -54,22 +54,36 @@ async function dec(encJson) {
 // server-side, plus ws_url (not modeled there since edge functions never
 // open a socket themselves).
 const SETTINGS_COLS =
-  "id,user_id,consumer_key,base_url,ws_url,ucc,session_token_enc,sid,hs_server_id,connection_status,token_expires_at,totp_secret_enc";
+  "id,user_id,consumer_key,base_url,ws_url,ucc,session_token_enc,sid,hs_server_id,connection_status,token_expires_at,totp_secret_enc,is_system";
 
 async function fetchKotakSession() {
-  const { data, error } = await svc
-    .from("market_api_settings")
-    .select(SETTINGS_COLS)
-    .eq("active_provider", "kotak_neo")
-    .eq("connection_status", "connected")
-    .order("updated_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (error) throw error;
-  if (!data) return null;
+  // Bind to the designated system market-data feed
+  // (market_api_settings.is_system) so ticks don't silently follow whichever
+  // user reconnected last. Falls back to the newest connected Kotak row when
+  // no feed has been designated yet.
+  const pick = async (q) => {
+    const { data, error } = await q;
+    if (error) throw error;
+    return (data ?? [])[0] ?? null;
+  };
+  let data = await pick(
+    svc.from("market_api_settings").select(SETTINGS_COLS)
+      .eq("active_provider", "kotak_neo").eq("is_system", true).limit(1),
+  );
+  if (!data || data.connection_status !== "connected") {
+    const fallback = await pick(
+      svc.from("market_api_settings").select(SETTINGS_COLS)
+        .eq("active_provider", "kotak_neo").eq("connection_status", "connected")
+        .order("updated_at", { ascending: false }).limit(1),
+    );
+    if (fallback) data = fallback;
+  }
+  if (!data || data.connection_status !== "connected") return null;
+  log(`bound to ${data.is_system ? "system" : "fallback"} feed · ucc=${data.ucc ?? "?"}`);
   const editToken = await dec(data.session_token_enc);
   if (!editToken || !data.sid || !data.consumer_key) return null;
   return {
+
     userId: data.user_id,
     consumerKey: data.consumer_key,
     editToken,
@@ -78,6 +92,19 @@ async function fetchKotakSession() {
     wsUrl: data.ws_url || "wss://mlhsm.kotaksecurities.com",
   };
 }
+
+// Kotak Neo NSE index instrument tokens on the nse_cm channel. Kept as a
+// small static map because these tokens are effectively immutable and are
+// not present in market_stocks (which is equities-only). Without these the
+// MarketStrip index chips never receive push ticks and only move at the
+// 1s REST cadence — this is what makes NIFTY/BANKNIFTY/VIX feel realtime.
+// SENSEX lives on bse_cm and Kotak's index feed for it is unreliable via
+// this WS, so we leave it on REST-only.
+const INDEX_TOKEN_MAP = [
+  { token: "26000", symbol: "^NSEI" },     // NIFTY 50
+  { token: "26009", symbol: "^NSEBANK" },  // NIFTY BANK
+  { token: "26017", symbol: "^INDIAVIX" }, // INDIA VIX
+];
 
 async function fetchTokenMap() {
   const { data, error } = await svc
@@ -93,8 +120,13 @@ async function fetchTokenMap() {
     bySymbol.set(row.symbol, row.token);
     byToken.set(String(row.token), row.symbol);
   }
+  for (const idx of INDEX_TOKEN_MAP) {
+    bySymbol.set(idx.symbol, idx.token);
+    byToken.set(idx.token, idx.symbol);
+  }
   return { bySymbol, byToken };
 }
+
 
 class Supervisor {
   constructor() {

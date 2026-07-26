@@ -14,7 +14,7 @@ import { requireUserId } from "../_shared/auth.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
 import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
 import { safeFetch } from "../_shared/http.ts";
-import { getActiveProvider } from "../_shared/market/provider.ts";
+import { getReadProvider } from "../_shared/market/provider.ts";
 
 
 const YAHOO_HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"];
@@ -107,7 +107,7 @@ Deno.serve(async (req) => {
     const kotakEligible = TRACKED.filter((t) => t.kotakKey);
     if (kotakEligible.length > 0) {
       try {
-        const { provider } = await getActiveProvider(supabase, auth.userId);
+        const { provider } = await getReadProvider(supabase, auth.userId);
         const quotes = await provider.getQuotes(kotakEligible.map((t) => t.kotakKey!));
         const byKey = new Map(quotes.map((q) => [q.key, q]));
         for (const t of kotakEligible) {

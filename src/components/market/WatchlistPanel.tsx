@@ -2,13 +2,13 @@
 // Multi-list: users get up to N named lists (tabs below the header). The
 // symbol search sits inline in the panel header, so no vertical space is
 // spent on a separate row.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip } from "@/components/hud/HudControls";
 import { supabase } from "@/integrations/supabase/client";
 import { useUi } from "@/store/uiStore";
-import { Pencil, RefreshCw, Settings2, ShoppingCart, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Pencil, ShoppingCart, Trash2 } from "lucide-react";
 import { SymbolSearchInput, type SymbolOption } from "@/components/market/SymbolSearchInput";
 import { quoteKey } from "@/lib/market/pnl";
 import { useQuotes } from "@/lib/market/hooks";
@@ -16,19 +16,30 @@ import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
 import type { Quote } from "@/lib/market/types";
 import { OrderTicket } from "@/components/market/OrderTicket";
-import { Return1DCell } from "@/components/hud/DataTable";
-import { PriceSourceChip } from "@/components/market/PriceSourceChip";
+
+type SortMode = "manual" | "symbol" | "price-desc" | "price-asc" | "return-desc" | "return-asc";
+const SORT_KEY_PREFIX = "market.watchlist.sort.";
+const SORT_OPTIONS: Array<{ mode: SortMode; label: string }> = [
+  { mode: "manual", label: "Manual" },
+  { mode: "symbol", label: "Symbol A→Z" },
+  { mode: "price-desc", label: "Price ↓" },
+  { mode: "price-asc", label: "Price ↑" },
+  { mode: "return-desc", label: "1D Return ↓" },
+  { mode: "return-asc", label: "1D Return ↑" },
+];
+const LEGACY_SORT_MAP: Record<string, SortMode> = {
+  changeDesc: "return-desc",
+  changeAsc: "return-asc",
+};
 
 type Item = { id: string; watchlist_id: string; symbol: string; exchange: string };
 type List = { id: string; name: string };
 
 const ACTIVE_KEY = "market.watchlist.activeId";
-// Seed a single "Default" list on first use. Users can add more via "+ new".
-// (Previous behavior of pre-creating 4 empty tabs cluttered the panel.)
 const MIN_LISTS = 1;
 
 export function WatchlistPanel({
-  readyCount, nearCount, weakCount, onSettings,
+  readyCount, nearCount, weakCount,
 }: {
   readyCount?: number;
   nearCount?: number;
@@ -43,6 +54,8 @@ export function WatchlistPanel({
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
   const [ticket, setTicket] = useState<{ symbol: string; exchange: "NSE" | "BSE"; side: "BUY" | "SELL" } | null>(null);
+  const [sortOpen, setSortOpen] = useState(false);
+  const sortMenuRef = useRef<HTMLDivElement | null>(null);
 
   const loadLists = async () => {
     const { data: u } = await supabase.auth.getUser();
@@ -51,7 +64,6 @@ export function WatchlistPanel({
       .select("id,name").order("created_at", { ascending: true });
     if (error) { push(error.message, "err"); setLoading(false); return; }
     let rows = (wl ?? []) as List[];
-    // Seed default lists so the user always has ≥4 slots to work with.
     if (rows.length < MIN_LISTS) {
       const toCreate: Array<{ user_id: string; name: string }> = [
         { user_id: u.user.id, name: "Default" },
@@ -62,7 +74,6 @@ export function WatchlistPanel({
       else rows = [...rows, ...((inserted ?? []) as List[])];
     }
     setLists(rows);
-    // Reconcile active id
     const stored = localStorage.getItem(ACTIVE_KEY);
     const valid = stored && rows.some((r) => r.id === stored) ? stored : rows[0]?.id ?? null;
     if (valid !== activeId) setActiveId(valid);
@@ -87,7 +98,39 @@ export function WatchlistPanel({
 
   const quoteKeys = useMemo(() => items.map((i) => `${i.exchange}:${i.symbol}`), [items]);
   useEffect(() => { subscribeSymbolsForTicks(quoteKeys); }, [quoteKeys]);
-  const { data: quotesData, dataUpdatedAt: quotesUpdatedAt, isFetching: quotesFetching, isError: quotesError, refetch: refetchQuotes } = useQuotes(quoteKeys);
+  const { data: quotesData, dataUpdatedAt: quotesUpdatedAt, isError: quotesError } = useQuotes(quoteKeys);
+  const [sortMode, setSortMode] = useState<SortMode>("manual");
+  useEffect(() => {
+    if (!activeId) return;
+    const stored = localStorage.getItem(SORT_KEY_PREFIX + activeId);
+    if (!stored) { setSortMode("manual"); return; }
+    const migrated = LEGACY_SORT_MAP[stored] ?? stored;
+    const valid = SORT_OPTIONS.some((o) => o.mode === migrated);
+    setSortMode(valid ? (migrated as SortMode) : "manual");
+  }, [activeId]);
+
+  const selectSort = (m: SortMode) => {
+    setSortMode(m);
+    if (activeId) localStorage.setItem(SORT_KEY_PREFIX + activeId, m);
+    setSortOpen(false);
+  };
+
+  // Close sort menu on outside click / Escape.
+  useEffect(() => {
+    if (!sortOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (!sortMenuRef.current) return;
+      if (!sortMenuRef.current.contains(e.target as Node)) setSortOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setSortOpen(false); };
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [sortOpen]);
+
   const restQuotes = useMemo(() => {
     const map: Record<string, Quote> = {};
     for (const q of quotesData?.quotes ?? []) map[quoteKey(q.exchange, q.symbol)] = q;
@@ -95,6 +138,7 @@ export function WatchlistPanel({
   }, [quotesData]);
   const liveTicks = useLiveTickStore((s) => s.ticks);
   const quotes = useMemo(() => mergeLiveQuotes(restQuotes, liveTicks, quotesUpdatedAt), [restQuotes, liveTicks, quotesUpdatedAt]);
+  const batchProvider = quotesData?.provider ?? null;
 
   const addVerified = async (opt: SymbolOption) => {
     if (!activeId) return;
@@ -153,13 +197,25 @@ export function WatchlistPanel({
     if (activeId === l.id) setActiveId(remaining[0]?.id ?? null);
   };
 
+  const activeSort = SORT_OPTIONS.find((o) => o.mode === sortMode) ?? SORT_OPTIONS[0];
+  const sortIcon = sortMode.endsWith("-desc") ? <ArrowDown size={11} />
+    : sortMode.endsWith("-asc") ? <ArrowUp size={11} />
+    : <ArrowUpDown size={11} />;
+
+  // Compact input override for the header search — cuts the input from the
+  // default HUD height (~30px) down to ~22px so it aligns with the small
+  // buttons next to it.
+  const compactSearchStyle: React.CSSProperties = {
+    height: 22, padding: "0 6px", fontSize: 11, lineHeight: "22px",
+  };
+
   const headerActions = (
     <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, justifyContent: "flex-end" }}>
-      <PriceSourceChip compact stale={quotesError} />
-      <div style={{ width: 220 }}>
+      <div style={{ width: 150 }}>
         <SymbolSearchInput value={newSym} onChange={setNewSym}
-          placeholder={adding ? "adding…" : "Search & add symbol…"}
-          onSelect={addVerified} disabled={adding || !activeId} />
+          placeholder={adding ? "adding…" : "add symbol…"}
+          onSelect={addVerified} disabled={adding || !activeId}
+          inputStyle={compactSearchStyle} />
       </div>
       {(readyCount != null || nearCount != null || weakCount != null) && (
         <div style={{ display: "flex", gap: 3 }}>
@@ -168,16 +224,66 @@ export function WatchlistPanel({
           {weakCount ? <Chip tone="err">{weakCount} weak</Chip> : null}
         </div>
       )}
-      <Btn size="sm" onClick={() => refetchQuotes()} disabled={quotesFetching || items.length === 0} title="refresh quotes">
-        <RefreshCw size={11} />
-      </Btn>
-      {onSettings && (
-        <Btn size="sm" onClick={onSettings} title="settings"><Settings2 size={11} /></Btn>
-      )}
+      {quotesError && <Chip tone="warn">stale</Chip>}
+      <div ref={sortMenuRef} style={{ position: "relative" }}>
+        <Btn size="sm" onClick={() => setSortOpen((v) => !v)} title={`Sort: ${activeSort.label}`}>
+          {sortIcon}
+        </Btn>
+        {sortOpen && (
+          <div
+            className="hud-scroll"
+            style={{
+              position: "absolute", right: 0, top: "calc(100% + 4px)", zIndex: 100,
+              background: "var(--bg)", border: "1px solid var(--edge-strong)",
+              minWidth: 150, padding: 4,
+            }}
+          >
+            {SORT_OPTIONS.map((o) => (
+              <div key={o.mode}
+                onClick={() => selectSort(o.mode)}
+                style={{
+                  padding: "5px 8px", fontSize: 11, cursor: "pointer",
+                  background: o.mode === sortMode ? "rgba(53,214,237,0.12)" : "transparent",
+                  color: o.mode === sortMode ? "var(--accent)" : "var(--text)",
+                }}
+              >
+                {o.label}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 
   const activeList = lists.find((l) => l.id === activeId);
+
+  const sortedItems = useMemo(() => {
+    if (sortMode === "manual") return items;
+    const q = (it: Item) => quotes[quoteKey(it.exchange, it.symbol)];
+    const changeOf = (it: Item) => {
+      const x = q(it);
+      if (x?.change_pct != null) return x.change_pct;
+      if (x?.ltp != null && x?.previous_close != null && x.previous_close !== 0)
+        return ((x.ltp - x.previous_close) / x.previous_close) * 100;
+      return null;
+    };
+    const priceOf = (it: Item) => q(it)?.ltp ?? null;
+    const arr = [...items];
+    if (sortMode === "symbol") { arr.sort((a, b) => a.symbol.localeCompare(b.symbol)); return arr; }
+    const isPrice = sortMode.startsWith("price");
+    const dir = sortMode.endsWith("-desc") ? -1 : 1;
+    const value = isPrice ? priceOf : changeOf;
+    arr.sort((a, b) => {
+      const av = value(a); const bv = value(b);
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      return (av - bv) * dir;
+    });
+    return arr;
+  }, [items, quotes, sortMode]);
+
 
   return (
     <HudPanel flow title="Watchlist" actions={headerActions}>
@@ -236,34 +342,62 @@ export function WatchlistPanel({
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minHeight: 0, overflowY: "auto" }}>
-          {items.map((i) => {
+          {sortedItems.map((i) => {
             const q = quotes[quoteKey(i.exchange, i.symbol)];
+            const abs = q?.day_change ?? (q?.ltp != null && q?.previous_close != null ? q.ltp - q.previous_close : null);
+            const pct = q?.change_pct ?? (q?.ltp != null && q?.previous_close != null && q.previous_close !== 0
+              ? ((q.ltp - q.previous_close) / q.previous_close) * 100 : null);
+            const changeColor = abs == null ? "var(--text-muted)" : abs > 0 ? "var(--ok, #10b981)" : abs < 0 ? "var(--err, #ef4444)" : "var(--text-dim)";
+            const sign = (n: number) => (n > 0 ? "+" : "");
+            // Prefer the batch-level provider summary (which reflects the
+            // active read provider) over each row's individual source — the
+            // per-row source can be "cache" or "yahoo" even when Kotak is
+            // the primary provider and simply doesn't have a token for a
+            // specific symbol.
+            const providerLabel = q?.source
+              ? `via ${q.source}${batchProvider && batchProvider !== q.source ? ` (batch: ${batchProvider})` : ""}`
+              : batchProvider ? `via ${batchProvider}` : null;
+            const tooltip = [
+              q?.previous_close != null
+                ? `prev close ₹${q.previous_close.toFixed(2)}${q.previous_close_as_of ? ` (as of ${q.previous_close_as_of})` : ""}`
+                : null,
+              providerLabel,
+            ].filter(Boolean).join(" · ") || undefined;
             return (
-              <div key={i.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 2px", borderBottom: "1px solid var(--edge)", fontSize: 12 }}>
-                <Link to={`/market/analysis/${i.symbol}?exchange=${i.exchange}`} style={{ color: "var(--accent)", textDecoration: "none" }}>
+              <div key={i.id}
+                title={tooltip}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 68px 108px auto",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "5px 2px",
+                  borderBottom: "1px solid var(--edge)",
+                  fontSize: 12,
+                }}
+              >
+                <Link to={`/market/analysis/${i.symbol}?exchange=${i.exchange}`}
+                  style={{ color: "var(--accent)", textDecoration: "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {i.symbol} <span style={{ color: "var(--text-dim)", fontSize: 10 }}>{i.exchange}</span>
                 </Link>
-                <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <span
-                    style={{ fontVariantNumeric: "tabular-nums" }}
-                    title={q?.source ? `price source: ${q.source}${q?.stale ? " · stale" : ""}` : undefined}
-                  >
-                    {q ? q.ltp.toFixed(2) : "—"}
-                  </span>
-                  <span
-                    style={{ minWidth: 120, textAlign: "right" }}
-                    title={q?.previous_close != null
-                      ? `prev close ₹${q.previous_close.toFixed(2)}${q.previous_close_as_of ? ` (as of ${q.previous_close_as_of})` : ""}`
-                      : "no prior close available"}
-                  >
-                    <Return1DCell
-                      abs={q?.day_change ?? (q?.ltp != null && q?.previous_close != null ? q.ltp - q.previous_close : null)}
-                      pct={q?.change_pct ?? null}
-                    />
-                  </span>
+                <span style={{
+                  fontVariantNumeric: "tabular-nums", textAlign: "right",
+                  color: "var(--text)",
+                }}>
+                  {q ? q.ltp.toFixed(2) : "—"}
+                </span>
+                <span style={{
+                  fontVariantNumeric: "tabular-nums", textAlign: "right",
+                  color: changeColor, fontSize: 11,
+                }}>
+                  {abs != null && pct != null
+                    ? `${sign(abs)}${abs.toFixed(2)} (${sign(pct)}${pct.toFixed(2)}%)`
+                    : "—"}
+                </span>
+                <span style={{ display: "flex", gap: 4, alignItems: "center" }}>
                   {q?.stale && <span style={{ fontSize: 9, color: "var(--warn)" }}>stale</span>}
                   <button onClick={() => setTicket({ symbol: i.symbol, exchange: i.exchange as "NSE" | "BSE", side: "BUY" })} className="hud-btn" data-variant="ghost" data-size="sm" title="Buy"><ShoppingCart size={11} /></button>
-                  <button onClick={() => removeItem(i.id)} className="hud-btn" data-variant="ghost" data-size="sm"><Trash2 size={11} /></button>
+                  <button onClick={() => removeItem(i.id)} className="hud-btn" data-variant="ghost" data-size="sm" title="Remove"><Trash2 size={11} /></button>
                 </span>
               </div>
             );

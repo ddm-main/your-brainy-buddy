@@ -41,6 +41,7 @@ import {
 } from "@/lib/market/screenerCatalog";
 import { AlertTriangle, Check, Database, Download, Plus, RotateCcw, Save, Search, Star, X } from "lucide-react";
 import ErrorBoundary from "@/components/hud/ErrorBoundary";
+
 import { safeStorage } from "@/lib/safeStorage";
 
 // ---- Columns ----
@@ -88,16 +89,14 @@ const COLUMNS: ColSpec[] = [
 ];
 // Explicit, in this exact order — not derived from COLUMNS' declaration
 // order (which is grouped by category for the column picker, not display
-// intent). Every user (not just whoever customised their own localStorage)
-// lands on the same full default view: Stock, MCAP, LTP, 1D Return, Volume,
-// RVol, PE, ROE, 52w Δ, Breakout.
+// intent). Every user lands on the same lean default view:
+// Stock, LTP, 1D Return, Volume, 52w Δ, Breakout.
 const DEFAULT_COLS = [
-  "symbol", "market_cap", "close", "change_pct", "volume",
-  "rel_volume", "pe", "roe", "pct_from_52w_high", "breakout_score",
+  "symbol", "close", "change_pct", "volume", "pct_from_52w_high", "breakout_score",
 ];
-// v4: bumped so browsers holding the old 6-column v3 selection pick up the
-// current default instead of rendering a stale, narrower table.
-const COLS_STORE_KEY = "screener.visibleCols.v4";
+// v5: bumped so browsers holding a prior selection pick up the current
+// default instead of rendering a stale column set.
+const COLS_STORE_KEY = "screener.visibleCols.v5";
 const HIDE_ILLIQUID_KEY = "screener.hideIlliquid.v1";
 const PAGE_SIZE_KEY  = "screener.pageSize.v2";
 const DEFAULT_SAVED_KEY = "market.screener.defaultSavedId";
@@ -248,8 +247,12 @@ function ScreenerInner() {
     return Math.round((today - latest) / 86_400_000);
   }, [latestTradeDate]);
   const istDow = new Date(Date.now() + 5.5 * 3600_000).getUTCDay(); // 0=Sun..6=Sat, IST-shifted
-  const staleThresholdDays = istDow === 1 ? 3 : 1; // Monday: Fri/Sat/Sun gap is normal
-  const isDataStale = dataStaleDays != null && dataStaleDays > staleThresholdDays;
+  // On non-trading days (Sat/Sun) EOD has nothing new to publish — the gap to
+  // last Friday is expected, so the banner is meaningless. Monday keeps its
+  // 3-day grace for the Fri→Mon weekend gap.
+  const staleThresholdDays = istDow === 0 ? 2 : istDow === 6 ? 1 : istDow === 1 ? 3 : 1;
+  const isWeekend = istDow === 0 || istDow === 6;
+  const isDataStale = !isWeekend && dataStaleDays != null && dataStaleDays > staleThresholdDays;
 
   // Worst-of-3 coverage summary for the compact status pill in the Results
   // header. Full breakdown still lives behind the Health modal.
@@ -619,16 +622,15 @@ function ScreenerInner() {
     return nseOpenNow ? "yahoo" : "closed";
   }, [visibleKeys.length, anyPush, relayAlive, quoteProvider, nseOpenNow]);
 
-  // Provider guardrail — Kotak disconnected banner + reconnect prompt.
+  // Provider guardrail — the user's OWN Kotak session (account-bound actions
+  // like trading from the screener). Price freshness is a separate concern
+  // owned by <PriceFeedBanner/>, which reports the system feed's health.
   const { data: mkSettings = [] } = useMarketSettings();
   const kotakRow = mkSettings.find((s: any) => s.active_provider === "kotak_neo");
   const kotakConnected = kotakRow?.connection_status === "connected";
   const kotakConfigured = !!kotakRow?.consumer_key;
   const kotakDisconnected = kotakConfigured && !kotakConnected;
-  const showKotakBanner =
-    !kotakConnected &&
-    (quoteProvider === "yahoo" || quoteProvider === "mixed" || quoteProvider === "cache") &&
-    typeof window !== "undefined" && !sessionStorage.getItem("mk.screener.kotak-banner.dismissed");
+
   const openKotakReconnect = () => {
     try { window.dispatchEvent(new Event("kotak:reconnect")); } catch { /* */ }
   };
@@ -860,26 +862,9 @@ function ScreenerInner() {
         </div>
       )}
 
-      {showKotakBanner && (
-        <div role="status" style={{
-          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-          padding: "6px 10px", border: "1px dashed var(--edge-strong, var(--edge))", borderRadius: 3,
-          fontSize: 11, color: "var(--text-dim, var(--text-muted))", background: "rgba(255,180,60,0.04)", flexShrink: 0,
-        }}>
-          <span style={{ color: "var(--warn, #f5a524)" }}>●</span>
-          <span>Prices are <b>~15 minutes delayed</b> (Yahoo Finance). Connect Kotak Neo for real-time quotes.</span>
-          <Link to="/market/settings" style={{
-            marginLeft: "auto", color: "var(--accent)", textDecoration: "none",
-            border: "1px solid var(--edge)", padding: "2px 8px", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
-          }}>Connect Kotak Neo</Link>
-          <button
-            onClick={() => { sessionStorage.setItem("mk.screener.kotak-banner.dismissed", "1"); qc.invalidateQueries({ queryKey: ["market"] }); }}
-            aria-label="Dismiss for this session"
-            className="hud-btn focus-outline" data-variant="ghost" data-size="sm"
-            title="Dismiss for this session"
-          ><X size={12} /></button>
-        </div>
-      )}
+
+
+
 
       {/* Save-as modal — replaces the always-visible inline input. */}
       <HudModal open={saveModalOpen} onClose={() => setSaveModalOpen(false)}
@@ -1183,13 +1168,8 @@ function AddFilterPicker({ activeIds, onPick, rows }: {
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
   const term = q.trim().toLowerCase();
-  // One pass over the rows instead of one per rendered filter row.
-  const latest = useMemo(() => latestTradeDateOf(rows), [rows]);
 
   const renderRow = (f: FilterDef) => {
-    const cov = coverageOf(rows as any[], f.id, latest);
-    const pct = cov.total ? Math.round((cov.has / cov.total) * 100) : 0;
-    const covTone: "ok" | "warn" | "err" | undefined = pct >= 90 ? undefined : pct >= 50 ? "warn" : "err";
     const isFav = favSet.has(f.id);
     return (
       <div key={f.id}
@@ -1201,7 +1181,6 @@ function AddFilterPicker({ activeIds, onPick, rows }: {
       >
         <span>{f.label}</span>
         <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {rows.length > 0 && f.kind !== "boolean" && covTone && <Chip tone={covTone}>{pct}%</Chip>}
           <button
             aria-label={isFav ? "Unstar filter" : "Star filter"}
             onClick={(e) => { e.stopPropagation(); toggleFav.mutate({ filterId: f.id, isFav }); }}
@@ -1341,9 +1320,6 @@ function InlineFilterEditor({ def, af, rows, sectorList, industryList, onChange,
   sectorList: string[]; industryList: string[];
   onChange: (patch: Partial<ActiveFilter>) => void; onClear: () => void;
 }) {
-  const cov = coverageOf(rows as any[], def.id, latestTradeDateOf(rows));
-  const pct = cov.total ? Math.round((cov.has / cov.total) * 100) : 0;
-  const covTone: "ok" | "warn" | "err" | undefined = pct >= 90 ? undefined : pct >= 50 ? "warn" : "err";
   const isActive = af !== undefined;
   const inpS: React.CSSProperties = { ...inputStyle, padding: "4px 6px", width: "100%", fontSize: 11 };
 
@@ -1352,7 +1328,6 @@ function InlineFilterEditor({ def, af, rows, sectorList, industryList, onChange,
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, marginBottom: 4 }}>
         <span style={{ fontSize: 11, color: isActive ? "var(--accent)" : "var(--text)" }} title={def.hint}>{def.label}</span>
         <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
-          {rows.length > 0 && def.kind !== "boolean" && covTone && <Chip tone={covTone}>{pct}%</Chip>}
           {isActive && (
             <button onClick={onClear} title="Clear" style={{ background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", display: "flex", padding: 0 }}>
               <X size={10} />

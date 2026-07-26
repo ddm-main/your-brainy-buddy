@@ -2,7 +2,7 @@
 // Critical rule: store NULL when no provider has data (never substitute 0).
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
-import { getActiveProvider } from "./provider.ts";
+import { getReadProvider } from "./provider.ts";
 import { nseEquityMeta } from "./nseClient.ts";
 import * as fmp from "./fmpClient.ts";
 import * as alpha from "./alphaVantageClient.ts";
@@ -127,7 +127,7 @@ async function getProviderFetcher(
 ): Promise<ProviderFn | null> {
   switch (providerName) {
     case "kotak": {
-      const { provider } = await getActiveProvider(svc, userId ?? "");
+      const { provider } = await getReadProvider(svc, userId ?? "");
       if (provider.name !== "kotak_neo") return null;
       return async (symbol, exchange) => {
         const quotes = await provider.getQuotes([`${exchange}:${symbol}`]);

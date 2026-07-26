@@ -1609,6 +1609,7 @@ export type Database = {
           greeting_name: string | null
           hs_server_id: string | null
           id: string
+          is_system: boolean
           last_error: string | null
           last_sync_at: string | null
           mobile_number_enc: string | null
@@ -1642,6 +1643,7 @@ export type Database = {
           greeting_name?: string | null
           hs_server_id?: string | null
           id?: string
+          is_system?: boolean
           last_error?: string | null
           last_sync_at?: string | null
           mobile_number_enc?: string | null
@@ -1675,6 +1677,7 @@ export type Database = {
           greeting_name?: string | null
           hs_server_id?: string | null
           id?: string
+          is_system?: boolean
           last_error?: string | null
           last_sync_at?: string | null
           mobile_number_enc?: string | null
@@ -2027,6 +2030,126 @@ export type Database = {
           regime?: string | null
           trade_date?: string
           unchanged?: number | null
+        }
+        Relationships: []
+      }
+      market_breakout_snapshots: {
+        Row: {
+          breakout_score: number | null
+          close: number | null
+          components: Json | null
+          computed_at: string
+          exchange: string
+          market_cap: number | null
+          prebreakout_score: number | null
+          regime: string | null
+          rel_volume: number | null
+          sector: string | null
+          swing_score: number | null
+          symbol: string
+          trade_date: string
+        }
+        Insert: {
+          breakout_score?: number | null
+          close?: number | null
+          components?: Json | null
+          computed_at?: string
+          exchange?: string
+          market_cap?: number | null
+          prebreakout_score?: number | null
+          regime?: string | null
+          rel_volume?: number | null
+          sector?: string | null
+          swing_score?: number | null
+          symbol: string
+          trade_date: string
+        }
+        Update: {
+          breakout_score?: number | null
+          close?: number | null
+          components?: Json | null
+          computed_at?: string
+          exchange?: string
+          market_cap?: number | null
+          prebreakout_score?: number | null
+          regime?: string | null
+          rel_volume?: number | null
+          sector?: string | null
+          swing_score?: number | null
+          symbol?: string
+          trade_date?: string
+        }
+        Relationships: []
+      }
+      market_breakout_tracker: {
+        Row: {
+          below_threshold_days: number
+          closed_at: string | null
+          created_at: string
+          current_close: number | null
+          current_return_pct: number | null
+          days_tracked: number
+          detected_score: number | null
+          entry_close: number | null
+          exchange: string
+          first_detected_date: string
+          followthrough_score: number | null
+          last_evaluated_date: string | null
+          last_score: number | null
+          market_cap: number | null
+          peak_close: number | null
+          peak_return_pct: number | null
+          score_trend: Json
+          sector: string | null
+          status: string
+          symbol: string
+          updated_at: string
+        }
+        Insert: {
+          below_threshold_days?: number
+          closed_at?: string | null
+          created_at?: string
+          current_close?: number | null
+          current_return_pct?: number | null
+          days_tracked?: number
+          detected_score?: number | null
+          entry_close?: number | null
+          exchange?: string
+          first_detected_date: string
+          followthrough_score?: number | null
+          last_evaluated_date?: string | null
+          last_score?: number | null
+          market_cap?: number | null
+          peak_close?: number | null
+          peak_return_pct?: number | null
+          score_trend?: Json
+          sector?: string | null
+          status?: string
+          symbol: string
+          updated_at?: string
+        }
+        Update: {
+          below_threshold_days?: number
+          closed_at?: string | null
+          created_at?: string
+          current_close?: number | null
+          current_return_pct?: number | null
+          days_tracked?: number
+          detected_score?: number | null
+          entry_close?: number | null
+          exchange?: string
+          first_detected_date?: string
+          followthrough_score?: number | null
+          last_evaluated_date?: string | null
+          last_score?: number | null
+          market_cap?: number | null
+          peak_close?: number | null
+          peak_return_pct?: number | null
+          score_trend?: Json
+          sector?: string | null
+          status?: string
+          symbol?: string
+          updated_at?: string
         }
         Relationships: []
       }

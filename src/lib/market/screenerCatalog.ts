@@ -252,10 +252,7 @@ export function filterMatches(row: Record<string, any>, af: ActiveFilter, latest
   if (def.kind === "enum" && (!af.values || af.values.length === 0)) return true;
   const minNum = af.min === undefined || af.min === "" || Number.isNaN(Number(af.min)) ? null : Number(af.min);
   const maxNum = af.max === undefined || af.max === "" || Number.isNaN(Number(af.max)) ? null : Number(af.max);
-  const effectiveMaxNum = def.kind === "number" && def.maxIsOpenEnded && maxNum !== null && def.max !== undefined && maxNum === def.max
-    ? null
-    : maxNum;
-  if (def.kind === "number" && minNum === null && effectiveMaxNum === null) return true;
+  if (def.kind === "number" && minNum === null && maxNum === null) return true;
   // Applicability: rows outside the scope are excluded from filtering — they pass through
   // untouched so that, e.g., an ETF is not dropped by a PE filter. Technical filters
   // are strict: if a row has no technical row/date, it cannot prove it matches.
@@ -274,18 +271,22 @@ export function filterMatches(row: Record<string, any>, af: ActiveFilter, latest
   }
   if (def.kind === "enum") {
     const values = af.values ?? [];
-    return typeof v === "string" && values.includes(v);
+    if (typeof v !== "string") return false;
+    const norm = v.trim().toLowerCase();
+    return values.some((x) => typeof x === "string" && x.trim().toLowerCase() === norm);
   }
   let n: number;
-  if (v == null || Number.isNaN(v)) {
+  if (v == null) {
     if (def.nullMeansZero) n = 0;
     else return false;
   } else {
     n = Number(v);
+    // NaN means the upstream value was malformed — treat as "unknown, exclude"
+    // regardless of nullMeansZero (which only applies to a genuine null).
+    if (!Number.isFinite(n)) return false;
   }
-  if (!Number.isFinite(n)) return false;
   if (minNum !== null && n < minNum) return false;
-  if (effectiveMaxNum !== null && n > effectiveMaxNum) return false;
+  if (maxNum !== null && n > maxNum) return false;
   return true;
 }
 
@@ -299,12 +300,14 @@ export function coverageOf(rows: Array<Record<string, any>>, filterId: string, l
   const scoped = rows.filter((r) => rowIsApplicable(r, scope, latestTradeDate));
   let has = 0;
   for (const r of scoped) {
-    const v = r[canonicalId];
+    // Match filterMatches' lookup exactly — 1D Return uses valueKey
+    // `change_pct_raw`; coverage should reflect the same column filtering does.
+    const v = def.valueKey ? (r[def.valueKey] ?? r[canonicalId]) : r[canonicalId];
     if (def.kind === "boolean") { if (v !== null && v !== undefined) has++; }
     else if (def.kind === "enum") { if (typeof v === "string" && v.length > 0) has++; }
     else {
-      if (v != null && !Number.isNaN(v)) has++;
-      else if (def.nullMeansZero) has++; // NULL is a meaningful zero
+      if (v != null && Number.isFinite(Number(v))) has++;
+      else if (v == null && def.nullMeansZero) has++; // NULL is a meaningful zero
     }
   }
   return { has, total: scoped.length };

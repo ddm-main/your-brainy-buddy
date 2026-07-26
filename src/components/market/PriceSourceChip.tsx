@@ -10,7 +10,10 @@
 // once at the app shell. Panels just render this chip.
 import { useLiveTickStore } from "@/lib/market/liveTickStore";
 
-export function PriceSourceChip({ compact = false, stale = false }: { compact?: boolean; stale?: boolean }) {
+// `dotOnly` renders just the status dot with the explanation in the tooltip —
+// used by MarketStrip, where the "live · kotak" text was noise on an already
+// dense one-line strip.
+export function PriceSourceChip({ compact = false, stale = false, dotOnly = false }: { compact?: boolean; stale?: boolean; dotOnly?: boolean }) {
   const connected = useLiveTickStore((s) => s.connected);
   const relayAlive = useLiveTickStore((s) => s.relayAlive);
 
@@ -26,18 +29,36 @@ export function PriceSourceChip({ compact = false, stale = false }: { compact?: 
     ? { label: "live · kotak", tone: "var(--accent-soft)" }
     : { label: "rest", tone: "var(--text-dim)" };
 
+  const title = stale
+    ? "Price refresh is failing — the value shown is the last one that loaded successfully."
+    : relayAlive
+    ? "Relay is pushing live ticks over Realtime."
+    : connected
+    ? "Realtime channel joined; waiting for relay ticks. Prices refresh via REST."
+    : "No realtime channel — prices refresh via REST only.";
+
+  if (dotOnly) {
+    return (
+      <span
+        role="img"
+        aria-label={`Price feed status: ${label}`}
+        title={title}
+        style={{
+          display: "inline-block",
+          width: 7,
+          height: 7,
+          borderRadius: "50%",
+          background: tone,
+          boxShadow: relayAlive ? `0 0 6px ${tone}` : "none",
+        }}
+      />
+    );
+  }
+
   return (
     <span
       className="hud-label"
-      title={
-        stale
-          ? "Price refresh is failing — the value shown is the last one that loaded successfully."
-          : relayAlive
-          ? "Relay is pushing live ticks over Realtime."
-          : connected
-          ? "Realtime channel joined; waiting for relay ticks. Prices refresh via REST."
-          : "No realtime channel — prices refresh via REST only."
-      }
+      title={title}
       style={{
         display: "inline-flex",
         alignItems: "center",
