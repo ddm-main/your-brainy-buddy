@@ -205,11 +205,42 @@ async function sessionHeaders(s: KotakSettings): Promise<Record<string, string>>
   const editToken = await dec(s.session_token_enc);
   if (!editToken || !s.sid) throw new KotakError("No active Kotak session", 401);
   return {
-    Authorization: s.consumer_key ?? "",
     Auth: editToken,
     Sid: s.sid,
     accept: "*/*",
   };
+}
+
+function appendSId(s: KotakSettings): string {
+  return s.hs_server_id ? `?sId=${encodeURIComponent(s.hs_server_id)}` : "";
+}
+
+function routeUrl(s: KotakSettings, path: string, includeSId = true): string {
+  const base = apiBase(s);
+  const cleanPath = path.replace(/^\/+/, "");
+  return `${base}/${cleanPath}${includeSId ? appendSId(s) : ""}`;
+}
+
+async function kotakRouteFetch(
+  s: KotakSettings,
+  paths: string[],
+  init: RequestInit,
+): Promise<any> {
+  let lastErr: unknown = null;
+  for (const path of paths) {
+    try {
+      return await kotakFetch(routeUrl(s, path), init);
+    } catch (e) {
+      lastErr = e;
+      const status = (e as { status?: number } | null)?.status;
+      // Kotak has both legacy `quick/*` and NAPI `Orders/2.0/*` route
+      // families. Some sessions return a baseUrl that accepts only one of
+      // them. Try the sibling route on 404, but do not mask auth/session
+      // failures or real broker-side rejections.
+      if (status !== 404) throw e;
+    }
+  }
+  throw lastErr ?? new KotakError("Kotak route not found", 404);
 }
 
 export async function kotakHoldings(s: KotakSettings): Promise<any[]> {
@@ -232,13 +263,13 @@ export async function kotakHoldingsEnvelope(s: KotakSettings): Promise<{ rows: a
 
 export async function kotakPositions(s: KotakSettings): Promise<any[]> {
   const h = await sessionHeaders(s);
-  const j = await kotakFetch(`${apiBase(s)}/quick/user/positions`, { headers: h });
+  const j = await kotakRouteFetch(s, ["quick/user/positions", "Orders/2.0/quick/user/positions"], { headers: h });
   return j?.data ?? [];
 }
 
 export async function kotakPositionsEnvelope(s: KotakSettings): Promise<{ rows: any[]; ok: boolean; raw: any }> {
   const h = await sessionHeaders(s);
-  const j = await kotakFetch(`${apiBase(s)}/quick/user/positions`, { headers: h });
+  const j = await kotakRouteFetch(s, ["quick/user/positions", "Orders/2.0/quick/user/positions"], { headers: h });
   const rows = Array.isArray(j?.data) ? j.data : [];
   const stat = String(j?.stat ?? j?.stCode ?? "").toLowerCase();
   const ok = stat === "ok" || (stat === "" && Array.isArray(j?.data));
@@ -260,7 +291,7 @@ export async function kotakLimits(s: KotakSettings): Promise<any> {
   let lastErr: unknown = null;
   for (const body of combos) {
     try {
-      const j = await kotakFetch(`${apiBase(s)}/quick/user/limits`, {
+      const j = await kotakRouteFetch(s, ["quick/user/limits", "Orders/2.0/quick/user/limits"], {
         method: "POST",
         headers: { ...h, "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -284,7 +315,7 @@ export async function kotakLimits(s: KotakSettings): Promise<any> {
 // MarginUsed / Collateral) but is more reliable on cash-only accounts.
 export async function kotakUserMargin(s: KotakSettings): Promise<any> {
   const h = await sessionHeaders(s);
-  return await kotakFetch(`${apiBase(s)}/quick/user/margin`, {
+  return await kotakRouteFetch(s, ["quick/user/margin", "Orders/2.0/quick/user/margin"], {
     method: "POST",
     headers: { ...h, "Content-Type": "application/json" },
     body: JSON.stringify({ seg: "CASH", exch: "NSE", prod: "ALL" }),
@@ -551,23 +582,15 @@ export async function kotakModifyOrder(
   return { orderId, status: String(j?.stat ?? j?.stCode ?? ""), raw: j };
 }
 
-// Orders + trades (today).
-// Kotak Neo v2 exposes the order/trade books under the versioned `Orders/2.0`
-// prefix and requires the per-session hsServerId as an `sId` query param —
-// hitting `/quick/user/orders` bare returns "404 page not found".
-function sIdQuery(s: KotakSettings): string {
-  return s.hs_server_id ? `?sId=${encodeURIComponent(s.hs_server_id)}` : "";
-}
-
 export async function kotakOrders(s: KotakSettings): Promise<any[]> {
   const h = await sessionHeaders(s);
-  const j = await kotakFetch(`${apiBase(s)}/Orders/2.0/quick/user/orders${sIdQuery(s)}`, { headers: { ...h, accept: "application/json" } });
+  const j = await kotakRouteFetch(s, ["quick/user/orders", "Orders/2.0/quick/user/orders"], { headers: { ...h, accept: "application/json" } });
   return j?.data ?? j?.orders ?? [];
 }
 
 export async function kotakTrades(s: KotakSettings): Promise<any[]> {
   const h = await sessionHeaders(s);
-  const j = await kotakFetch(`${apiBase(s)}/Orders/2.0/quick/user/trades${sIdQuery(s)}`, { headers: { ...h, accept: "application/json" } });
+  const j = await kotakRouteFetch(s, ["quick/user/trades", "Orders/2.0/quick/user/trades"], { headers: { ...h, accept: "application/json" } });
   return j?.data ?? j?.trades ?? [];
 }
 
