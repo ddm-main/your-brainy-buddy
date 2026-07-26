@@ -42,6 +42,14 @@ function apiBase(s: KotakSettings): string {
   return b;
 }
 
+function firstNonEmpty(...values: unknown[]): string {
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
 
 // Next midnight IST expressed in UTC — Kotak sessions die around then.
 export function nextIstMidnightIso(): string {
@@ -152,13 +160,21 @@ export async function kotakLogin(
   });
   const editToken = validate?.data?.token;
   const editSid = validate?.data?.sid;
-  const hsServerId = validate?.data?.hsServerId ?? login?.data?.hsServerId ?? "";
-  const baseUrl = String(validate?.data?.baseUrl ?? "").replace(/\/+$/, "");
+  // Kotak's MPIN validate payload often includes hsServerId as an empty
+  // string, while the preceding TOTP login payload carries the real server
+  // id (server2/server4/etc.). Using `??` here persisted "" and dropped the
+  // required `sId` query param from order/trade/position calls, which Kotak
+  // can surface as a misleading 404. Always pick the first non-empty value.
+  const hsServerId = firstNonEmpty(validate?.data?.hsServerId, login?.data?.hsServerId);
+  const baseUrl = firstNonEmpty(validate?.data?.baseUrl).replace(/\/+$/, "");
   if (!editToken || !editSid) {
     throw new KotakError("Kotak validate: no session token", 502, JSON.stringify(validate).slice(0, 500));
   }
   if (!baseUrl) {
     throw new KotakError("Kotak validate: no baseUrl in response", 502, JSON.stringify(validate).slice(0, 500));
+  }
+  if (!hsServerId) {
+    throw new KotakError("Kotak validate: no hsServerId in response", 502, JSON.stringify({ login, validate }).slice(0, 500));
   }
 
   return {
@@ -215,6 +231,12 @@ function appendSId(s: KotakSettings): string {
   return s.hs_server_id ? `?sId=${encodeURIComponent(s.hs_server_id)}` : "";
 }
 
+function requireServerId(s: KotakSettings): void {
+  if (!String(s.hs_server_id ?? "").trim()) {
+    throw new KotakError("Kotak session is missing server id — reconnect required", 401);
+  }
+}
+
 function routeUrl(s: KotakSettings, path: string, includeSId = true): string {
   const base = apiBase(s);
   const cleanPath = path.replace(/^\/+/, "");
@@ -262,12 +284,14 @@ export async function kotakHoldingsEnvelope(s: KotakSettings): Promise<{ rows: a
 }
 
 export async function kotakPositions(s: KotakSettings): Promise<any[]> {
+  requireServerId(s);
   const h = await sessionHeaders(s);
   const j = await kotakRouteFetch(s, ["quick/user/positions", "Orders/2.0/quick/user/positions"], { headers: h });
   return j?.data ?? [];
 }
 
 export async function kotakPositionsEnvelope(s: KotakSettings): Promise<{ rows: any[]; ok: boolean; raw: any }> {
+  requireServerId(s);
   const h = await sessionHeaders(s);
   const j = await kotakRouteFetch(s, ["quick/user/positions", "Orders/2.0/quick/user/positions"], { headers: h });
   const rows = Array.isArray(j?.data) ? j.data : [];
@@ -277,6 +301,7 @@ export async function kotakPositionsEnvelope(s: KotakSettings): Promise<{ rows: 
 }
 
 export async function kotakLimits(s: KotakSettings): Promise<any> {
+  requireServerId(s);
   const h = await sessionHeaders(s);
   // /quick/user/limits intermittently returns 5xx / empty bodies when queried
   // with {ALL,ALL,ALL} on cash-only Neo accounts. Try the concrete cash combo
@@ -314,6 +339,7 @@ export async function kotakLimits(s: KotakSettings): Promise<any> {
 // to /quick/user/limits — it returns the same shape (Net / CashAvailable /
 // MarginUsed / Collateral) but is more reliable on cash-only accounts.
 export async function kotakUserMargin(s: KotakSettings): Promise<any> {
+  requireServerId(s);
   const h = await sessionHeaders(s);
   return await kotakRouteFetch(s, ["quick/user/margin", "Orders/2.0/quick/user/margin"], {
     method: "POST",
@@ -583,12 +609,14 @@ export async function kotakModifyOrder(
 }
 
 export async function kotakOrders(s: KotakSettings): Promise<any[]> {
+  requireServerId(s);
   const h = await sessionHeaders(s);
   const j = await kotakRouteFetch(s, ["quick/user/orders", "Orders/2.0/quick/user/orders"], { headers: { ...h, accept: "application/json" } });
   return j?.data ?? j?.orders ?? [];
 }
 
 export async function kotakTrades(s: KotakSettings): Promise<any[]> {
+  requireServerId(s);
   const h = await sessionHeaders(s);
   const j = await kotakRouteFetch(s, ["quick/user/trades", "Orders/2.0/quick/user/trades"], { headers: { ...h, accept: "application/json" } });
   return j?.data ?? j?.trades ?? [];
