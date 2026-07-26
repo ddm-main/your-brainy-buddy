@@ -142,10 +142,15 @@ Deno.serve(async (req) => {
 
     // Cache check: 24h TTL
     if (!force) {
-      const { data: cached } = await svc.from("market_fundamentals")
+      // Fundamentals are not personal data — reuse the freshest cached row for
+      // this symbol regardless of which user warmed it, so every user gets the
+      // same figures instead of an empty cache on first visit.
+      const { data: cachedRows } = await svc.from("market_fundamentals")
         .select("payload,fetched_at")
-        .eq("user_id", auth.userId).eq("symbol", symbol).eq("exchange", exchange)
-        .maybeSingle();
+        .eq("symbol", symbol).eq("exchange", exchange)
+        .order("fetched_at", { ascending: false })
+        .limit(1);
+      const cached = cachedRows?.[0] ?? null;
       if (cached && Date.now() - new Date(cached.fetched_at).getTime() < 24 * 3600_000) {
         return jsonResponse(req, { fundamentals: cached.payload, cached: true, fetched_at: cached.fetched_at });
       }
