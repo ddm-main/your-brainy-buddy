@@ -1,5 +1,5 @@
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
-import { getActiveProvider } from "../_shared/market/provider.ts";
+import { getReadProvider } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 
 // Generous — this now hits the DB cache on every call except the first of
@@ -40,7 +40,7 @@ Deno.serve(async (req) => {
     // same fast path as every other price call. Indices have no Kotak
     // instrument tokens today, so this transparently falls back to Yahoo —
     // but any future index-token mapping lights up automatically.
-    const { provider } = await getActiveProvider(svc, auth.userId);
+    const { provider } = await getReadProvider(svc, auth.userId);
     const indexKeys = ["NSE:^NSEI", "NSE:^BSESN", "NSE:^NSEBANK", "NSE:^INDIAVIX"];
     // Previously a bare `.catch(() => [])` — the model was still asked for
     // "market tone" off an empty context with nothing in the response

@@ -3,7 +3,7 @@
 // that neither provider can quote fall back to the last cached daily close
 // so the UI never renders "—" LTP for a symbol we actually know a price for.
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
-import { getActiveProvider } from "../_shared/market/provider.ts";
+import { getReadProvider } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 
 // This is the hot ~1s-poll path (provider.ts comment) across several panels
@@ -50,7 +50,7 @@ Deno.serve(async (req) => {
     if (symbols.length === 0) return jsonResponse(req, { quotes: [], source: "none" });
 
     const svc = svcClient();
-    const { provider } = await getActiveProvider(svc, auth.userId);
+    const { provider } = await getReadProvider(svc, auth.userId);
     let rows = await provider.getQuotes(symbols);
     const byKey = new Map(rows.map((r) => [r.key, r]));
 

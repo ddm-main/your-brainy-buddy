@@ -5,7 +5,7 @@
 // real-time when Kotak has them, everything else stays via Yahoo.
 // Reads from public.market_index_watch; falls back to a default 6 when empty.
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
-import { getActiveProvider } from "../_shared/market/provider.ts";
+import { getReadProvider } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 
 const limiter = createMarketLimiter(300, 60_000);
@@ -48,7 +48,7 @@ Deno.serve(async (req) => {
     // Route through the active provider. Keys are "NSE:<symbol>" — Kotak
     // provider looks them up in the instrument-token map; anything not found
     // (all indices, most of the time) falls back to Yahoo transparently.
-    const { provider } = await getActiveProvider(svc, auth.userId);
+    const { provider } = await getReadProvider(svc, auth.userId);
     const keys = source.map((r) => `NSE:${r.symbol}`);
     const quoteRows = await provider.getQuotes(keys);
     const byKey = new Map(quoteRows.map((q) => [q.key, q]));

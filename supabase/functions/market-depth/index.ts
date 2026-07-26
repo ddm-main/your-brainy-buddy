@@ -1,6 +1,6 @@
 // market-depth — 5-level bid/ask ladder from the active provider (Kotak-only).
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
-import { getActiveProvider } from "../_shared/market/provider.ts";
+import { getReadProvider } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 
 const limiter = createMarketLimiter(180, 60_000);
@@ -16,7 +16,7 @@ Deno.serve(async (req) => {
     const exchange = String(b?.exchange ?? "NSE").toUpperCase();
     if (!symbol) return errorResponse(req, "symbol required");
     const svc = svcClient();
-    const { provider } = await getActiveProvider(svc, auth.userId);
+    const { provider } = await getReadProvider(svc, auth.userId);
     const ladder = await provider.getDepth(symbol, exchange);
     return jsonResponse(req, ladder);
   } catch (e) {
