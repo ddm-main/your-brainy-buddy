@@ -1,48 +1,41 @@
-# 1D Return — Unified "+abs (+pct%)" Display
-
 ## Goal
 
-Everywhere 1D return is rendered in the app, show absolute rupee change alongside the percentage, matching the Screener grid: `+3.14 (+8.83%)` (green/red by sign, `—` when unknown). No business-logic changes — pure presentation.
+Every signed-in user sees the same Market UI and the same data quality as the admin. Only genuinely personal things stay per-user: broker credentials, orders/trades, holdings/positions/funds, GTT, AutoTrade, watchlists, alerts, saved screeners, notes.
 
-## Shared helper (new)
+## What I verified in the code
 
-Add `Return1DCell` to `src/components/hud/DataTable.tsx` (next to `PctCell`):
+- Market navigation (Overview / Screener / Breakout / Portfolio / AutoTrade / Config) is **not** role-gated — every tab is rendered for everyone. The 1D-return cell (`Return1DCell`, "+648.50 (+8.73%)") also comes from one shared column map used by both Overview and Screener.
+  → So a user seeing a nav without BREAKOUT/CONFIG and an old `%`-only column is running an **older build** (published site / cached tab), not different code. Step 1 confirms this.
+- Real, code-level divergence does exist at the **data** layer: `getActiveProvider(svc, userId)` only looks at that user's own `market_api_settings` row. With no Kotak connection, a normal user always falls back to delayed Yahoo — stale EOD prices, missing absolute change, "Data is 2 days behind" banner, no live LTP.
+- These tables are user-scoped even though they hold *shared market knowledge*, so a normal user's copy is empty: `market_fundamentals`, `market_option_chain_snapshots`, `market_stock_ai`, `market_morning_insight_cache`. (`market_quotes`, `market_stock_scores`, `market_screener_rows`, breakout snapshots/tracker are already shared — good.)
 
-- Props: `{ abs: number | null | undefined; pct: number | null | undefined }`.
-- Renders `+A.AA (+P.PP%)` when both known, falls back to whichever is available, `—` when neither. Uses `var(--ok)` / `var(--danger)` / `var(--text-dim)` by sign of pct (fallback: sign of abs). Uses the same minus glyph and `whiteSpace: nowrap` as the current Screener cell.
-- When only abs is missing but `ltp` + `previous_close` (or `day_change`) are derivable at the callsite, callers may pass a computed abs. The helper itself does no derivation.
+## Plan
 
-Also refactor Screener's inline cell (`src/routes/market/Screener.tsx` L658–678) to use `Return1DCell` so it stays the single source of truth.
+**1. Reproduce and pin the cause of the UI delta**
+- Log in as the non-admin user in the preview with Playwright, screenshot Overview + Screener + nav, and diff against the admin view.
+- If the preview already matches admin, the difference is the stale published build → republish and note it. If it doesn't match, fix whatever the diff shows.
 
-## Callsites to update
+**2. Shared read-only market feed (chosen: shared live data for everyone)**
+- Add `getReadProvider(svc, userId)` in `supabase/functions/_shared/market/provider.ts`: use the user's own Kotak row when present, otherwise fall back to the app-level connected Kotak row (same logic as `getServiceProvider`), otherwise Yahoo.
+- Switch **read-only** functions to it: quotes, candles, depth, indices, screener/breakout refresh, fundamentals, analysis, stock insight, top movers, market strip.
+- Keep `getActiveProvider` (strict per-user) for anything account-bound: orders, trades, holdings, positions, funds, GTT, AutoTrade execution. A user without their own broker gets a clear "connect your broker to trade" state there — never someone else's account data.
+- Broker credentials are never returned to the client; only derived market data.
 
-Each callsite computes `abs` from data already at hand — no new fetches, no schema changes.
+**3. Shared reference data (migration)**
+- Read fundamentals from the already-shared `market_fundamentals_global`; keep the per-user `market_fundamentals` only as a legacy cache, or add a shared read path so every user gets PE/ROE/growth columns in the screener.
+- Make option-chain snapshots, AI stock insights, and the morning-insight cache readable app-wide (write stays service-role); add the GRANT + read policies in the same migration.
+- Ensure `market_index_watch` defaults are seeded for every new user (indices strip shows NIFTY/SENSEX/BANKNIFTY/VIX for non-admins too).
 
-1. **Overview / Top Breakouts grid** — `src/lib/market/screenerColumns.tsx` `change_pct` column: replace `<PctCell value={row.original.change_pct}/>` with `<Return1DCell abs={row.original.change_abs} pct={row.original.change_pct}/>`. (`change_abs` already selected by `screenerRun.ts` and present in `market_screener_rows`.)
-2. **Watchlist** — `src/components/market/WatchlistPanel.tsx` L251–256: use `Return1DCell` with `abs = q?.day_change ?? (q?.ltp && q?.previous_close ? q.ltp - q.previous_close : null)`, `pct = q?.change_pct`.
-3. **Top Movers strip** — `src/components/market/TopMoversPanel.tsx` L46: same helper; derive abs from row (`day_change` / `ltp − prev_close` as available).
-4. **Market Strip (indices)** — `src/components/market/MarketStrip.tsx` L44–75: extend the live/quote map with `change_abs`, feed into `Return1DCell`. Live-tick source already carries `ltp` + `change_pct`; derive abs from `ltp * pct / (100 + pct)` when `change_abs` isn't in the tick payload (same trick Screener uses at L664–665).
-5. **Index Detail** — `src/routes/market/IndexDetail.tsx`:
-   - Header (L66–67) already has both `chgPct` and `chgAbs` — ensure it renders in the unified `+A (+P%)` format.
-   - Constituents table column (L383–384): extend `liveByKey` map to also carry `change_abs` (compute from live tick when missing), swap `PctCell` for `Return1DCell`.
-6. **Positions table** — `src/routes/market/Positions.tsx` L192: column shows day-change %. Swap for `Return1DCell` fed with `quote.day_change`/derived abs and `quote.change_pct`.
-7. **Breadth Details dialog** — `src/components/market/BreadthDetailsDialog.tsx` L85–87: swap the inline `%` span for `Return1DCell` (abs from `s.change_abs` if present in that row shape, else derived from `s.ltp` + `s.change_pct`; if abs isn't derivable there, the helper falls back to `+P.PP%`).
-8. **Dashboard "Top Breakouts" table** — `src/routes/market/Dashboard.tsx` uses the shared `overviewColumnMap`, so it inherits the fix from #1. Verify the live-tick overlay at L219 carries `change_abs` too (add it, derived from tick's ltp + pct).
-9. **Analysis header** — `src/routes/market/Analysis.tsx` L283: header currently shows `chgPct` only. Add abs from `quote.day_change` (or derived) and render in unified format.
+**4. UI consistency sweep**
+- Price-source chip / "15-min delayed Yahoo" banner: derive from the actual feed in use, so a non-admin on the shared live feed sees "LIVE · KOTAK" and no misleading connect-banner.
+- "Data is N days behind" banner: keep, but base it on the shared EOD pipeline, not on per-user sync.
+- Align default column presets (`columnPresets.ts` / localStorage keys) so a fresh browser gets the current 10-column layout, not the old 7-column one.
+- Grep for every remaining `role === "admin"` branch outside Config → confirm only Admin Panel / System Data / Kotak reconnect modal are gated, and that Market Config shows the per-user broker section to everyone.
 
-## Not in scope
-
-- No changes to filtering, sorting, freshness gating, DB views, or edge functions.
-- Sort behavior stays keyed on `change_pct` (unchanged accessor).
-- Portfolio Overview P&L cards already show ₹ + % — leave alone.
+**5. Verify**
+- Playwright side-by-side: admin vs normal user on Overview, Screener, Breakout, Portfolio, Analysis. Confirm identical columns, identical 1D-return format with absolute change, same LTP values, fundamentals populated, and that Portfolio/Orders correctly show the personal empty state for the non-admin.
 
 ## Technical notes
 
-- Sign source: use `pct` for color when present, else `abs`. Zero → dim. This matches Screener today.
-- Formatting: `abs.toFixed(2)` with `+`/`−` (Unicode minus) prefix; `pct.toFixed(2)%` likewise; single `whiteSpace: nowrap` span, so column widths stay tight.
-- No new DB columns needed — `change_abs` exists on `market_screener_rows`; `Quote.day_change` + `previous_close` cover the live paths.
-
-## Verification
-
-- Typecheck (`tsgo`) + `bunx vitest run` (existing tests unaffected).
-- Playwright: load `/market` (Top Breakouts), `/market/screener`, `/market/positions`, `/market/holdings`, an index detail page, and a symbol Analysis page; screenshot each and confirm the `+abs (+pct%)` format renders with correct colors.
+- Files touched: `supabase/functions/_shared/market/provider.ts`, the read-only `market-*` functions, one migration for shared read access on fundamentals/option-chain/AI/insight-cache, `src/components/market/PriceSourceChip.tsx`, `src/routes/market/Dashboard.tsx`, `src/routes/market/Screener.tsx`, `src/lib/market/columnPresets.ts`.
+- No change to RLS on account-bound tables; the shared feed is server-side only (service client), so no broker token is exposed.
