@@ -2,17 +2,16 @@
 // (Holdings, Positions, Portfolio, Watchlist, Screener preview). Consolidates
 // what MarketStrip renders inline so every panel speaks the same language:
 //
-//   push · kotak   — realtime channel joined AND relay is pushing ticks
-//   live · kotak   — realtime channel joined, no relay yet (REST-only refresh)
-//   rest           — no realtime channel (auth missing or channel down)
+//   green dot  — realtime channel joined AND relay is pushing ticks
+//   amber dot  — realtime channel joined, no relay yet (REST-only refresh)
+//   grey dot   — no realtime channel (auth missing or channel down)
 //
 // Read-only; subscription lifecycle is owned by `useRealtimeTicks` mounted
 // once at the app shell. Panels just render this chip.
 import { useLiveTickStore } from "@/lib/market/liveTickStore";
 
-// `dotOnly` renders just the status dot with the explanation in the tooltip —
-// used by MarketStrip, where the "live · kotak" text was noise on an already
-// dense one-line strip.
+// The chip now renders only the status dot; the textual label is hidden to keep
+// panel headers clean. The tooltip still describes the feed state.
 export function PriceSourceChip({ compact = false, stale = false, dotOnly = false }: { compact?: boolean; stale?: boolean; dotOnly?: boolean }) {
   const connected = useLiveTickStore((s) => s.connected);
   const relayAlive = useLiveTickStore((s) => s.relayAlive);
@@ -81,7 +80,6 @@ export function PriceSourceChip({ compact = false, stale = false, dotOnly = fals
           boxShadow: relayAlive ? `0 0 6px ${tone}` : "none",
         }}
       />
-      {label}
     </span>
   );
 }
