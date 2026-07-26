@@ -422,3 +422,124 @@ export function intradayScore(input: IntradayInput): ScoreResultV3 {
   components.regime_mult = Math.round(regimeMult * 100) / 100;
   return { score: Math.round(clamp(total, 0, 100)), components, liquidityOk: true, liquidityReasons: [] };
 }
+
+// ============================================================================
+// Breakout tracking — multi-day forward follow-through. Additive; nothing
+// here touches the frozen v2/v3 scorers above. Consumed by
+// market-pipeline-aggregates' episode pass and the Breakout UI. Thresholds
+// are the single source of truth for both.
+// ============================================================================
+
+// Min breakout_score for a stock to enter the tracker.
+export const BREAKOUT_QUALIFY_SCORE = 70;
+// Return % vs entry that promotes an open episode to "extended".
+export const EXTEND_PCT = 8;
+// Drawdown % below entry that fails an episode.
+export const FAIL_PCT = 6;
+// Consecutive sub-threshold sessions before an open episode is "cooled".
+export const COOL_DAYS = 3;
+// Sessions after which an open episode auto-closes (tracking horizon).
+export const MAX_TRACK_DAYS = 15;
+// Recent-score history cap kept per episode.
+export const SCORE_TREND_CAP = 15;
+
+export type BreakoutStatus = "active" | "extended" | "cooled" | "failed" | "closed";
+
+export interface BreakoutEpisodeState {
+  entryClose: number;
+  currentClose: number;
+  peakClose: number;
+  daysTracked: number;
+  belowThresholdDays: number;
+  scoreTrend: number[]; // recent breakout scores, oldest→newest
+  lastScore: number;
+}
+
+// 0-100 quality grade of an in-flight breakout episode. Rewards follow-through
+// (return above entry, still near its peak, stable/rising score) and punishes
+// fade (deep pullback from peak, decaying score, prolonged cooling). Used for
+// the tracker's "Health" column and to rank open episodes.
+export function breakoutFollowThroughScore(ep: BreakoutEpisodeState): ScoreResult {
+  const c: Record<string, number> = {};
+  const entry = ep.entryClose;
+  const retPct = entry > 0 ? ((ep.currentClose - entry) / entry) * 100 : 0;
+  const peakRetPct = entry > 0 ? ((ep.peakClose - entry) / entry) * 100 : 0;
+
+  // --- Return since entry (35) --- rewards follow-through; below entry → 0.
+  c.return = ramp(retPct, 0, EXTEND_PCT) * 35;
+
+  // --- Hold near peak (25) --- fraction of peak gain retained. A pick that
+  // ran +10% then gave it all back scores near 0 here even if still >entry.
+  const hold = peakRetPct > 0 ? clamp(retPct / peakRetPct, 0, 1) : (retPct >= 0 ? 1 : 0);
+  c.hold_peak = hold * 25;
+
+  // --- Score stability / trend (25) --- current level + slope over the window.
+  c.score_level = ramp(ep.lastScore, 50, 85) * 15;
+  const t = ep.scoreTrend;
+  const slope = t.length >= 2 ? t[t.length - 1] - t[0] : 0;
+  c.score_slope = ramp(slope, -10, 10) * 10;
+
+  // --- Maturity (15) --- a young episode still proving itself keeps partial
+  // credit; prolonged cooling bleeds it out.
+  c.freshness = (1 - ramp(ep.daysTracked, 1, MAX_TRACK_DAYS)) * 8;
+  c.not_cooling = (1 - ramp(ep.belowThresholdDays, 0, COOL_DAYS)) * 7;
+
+  // --- Penalty: drawdown below entry ---
+  let penalty = 0;
+  const penalties: Record<string, number> = {};
+  if (retPct < 0) {
+    const p = ramp(-retPct, 0, FAIL_PCT) * 25;
+    penalties.drawdown = p; penalty += p;
+  }
+
+  const gross = Object.values(c).reduce((a, b) => a + b, 0);
+  const total = gross - penalty;
+  const components = Object.fromEntries(Object.entries(c).map(([k, v]) => [k, Math.round(v * 10) / 10]));
+  for (const [k, v] of Object.entries(penalties)) components[`penalty_${k}`] = -Math.round(v * 10) / 10;
+  return { score: Math.round(clamp(total, 0, 100)), components };
+}
+
+export interface EpisodeTickInput {
+  status: BreakoutStatus;
+  entryClose: number;
+  close: number;
+  score: number;
+  daysTracked: number;        // BEFORE this tick
+  belowThresholdDays: number; // BEFORE this tick
+}
+export interface EpisodeTickResult {
+  status: BreakoutStatus;
+  belowThresholdDays: number;
+  returnPct: number;
+}
+
+// Pure lifecycle transition for one open episode given today's close + score.
+// Kept here (not inline in the edge fn) so it's unit-tested and the UI can
+// preview the same rules. Priority: terminal stays terminal → hard fail →
+// age-out → extended → cooled → recover → hold.
+export function nextEpisodeStatus(inp: EpisodeTickInput): EpisodeTickResult {
+  const { entryClose, close, score } = inp;
+  const returnPct = entryClose > 0 ? ((close - entryClose) / entryClose) * 100 : 0;
+  const belowThresholdDays = score < BREAKOUT_QUALIFY_SCORE ? inp.belowThresholdDays + 1 : 0;
+  const daysTracked = inp.daysTracked + 1;
+
+  if (inp.status === "failed" || inp.status === "closed") {
+    return { status: inp.status, belowThresholdDays, returnPct };
+  }
+  if (returnPct <= -FAIL_PCT) {
+    return { status: "failed", belowThresholdDays, returnPct };
+  }
+  if (daysTracked >= MAX_TRACK_DAYS) {
+    return { status: "closed", belowThresholdDays, returnPct };
+  }
+  if (returnPct >= EXTEND_PCT && score >= BREAKOUT_QUALIFY_SCORE - 10) {
+    return { status: "extended", belowThresholdDays, returnPct };
+  }
+  if (belowThresholdDays >= COOL_DAYS) {
+    return { status: "cooled", belowThresholdDays, returnPct };
+  }
+  if (inp.status === "cooled" && score >= BREAKOUT_QUALIFY_SCORE) {
+    return { status: "active", belowThresholdDays, returnPct };
+  }
+  return { status: inp.status === "extended" ? "extended" : "active", belowThresholdDays, returnPct };
+}

@@ -12,6 +12,7 @@ const Dashboard = lazy(() => import("@/routes/market/Dashboard"));
 const Holdings = lazy(() => import("@/routes/market/Holdings"));
 const Positions = lazy(() => import("@/routes/market/Positions"));
 const Screener = lazy(() => import("@/routes/market/Screener"));
+const Breakout = lazy(() => import("@/routes/market/Breakout"));
 const Analysis = lazy(() => import("@/routes/market/Analysis"));
 const Backtesting = lazy(() => import("@/routes/market/Backtesting"));
 const MarketSettings = lazy(() => import("@/routes/market/Settings"));
@@ -36,6 +37,8 @@ const GROUPS: Group[] = [
     match: (p) => p === "/market" || p === "/market/" || /^\/market\/index\//.test(p), subs: [] },
   { key: "screener", label: "Screener", to: "/market/screener",
     match: (p) => /^\/market\/screener/.test(p), subs: [] },
+  { key: "breakout", label: "Breakout", to: "/market/breakout",
+    match: (p) => /^\/market\/breakout/.test(p), subs: [] },
   { key: "portfolio", label: "Portfolio", to: "/market/portfolio",
     match: (p) => /^\/market\/(portfolio|holdings|positions|orders|gtt)/.test(p),
     subs: [
@@ -142,6 +145,7 @@ export default function Market() {
               <Route path="orders" element={<Orders />} />
               <Route path="gtt" element={<GTT />} />
               <Route path="screener" element={<Screener />} />
+              <Route path="breakout" element={<Breakout />} />
               <Route path="analysis" element={<Navigate to="/market/screener" replace />} />
               <Route path="analysis/:symbol" element={<Analysis />} />
               <Route path="backtesting" element={<Backtesting />} />

@@ -6,6 +6,13 @@ import {
   evaluateLiquidity,
   swingScore,
   intradayScore,
+  breakoutFollowThroughScore,
+  nextEpisodeStatus,
+  BREAKOUT_QUALIFY_SCORE,
+  EXTEND_PCT,
+  FAIL_PCT,
+  COOL_DAYS,
+  MAX_TRACK_DAYS,
   LIQUIDITY_MIN_PRICE,
   LIQUIDITY_MIN_MARKET_CAP_CR,
   LIQUIDITY_MIN_TURNOVER_CR,
@@ -381,5 +388,103 @@ describe("intradayScore", () => {
     const withLiveRead = intradayScore({ s: baseSnap, ctx: neutralCtx, liquidity: okLiquidity, relVolumeSoFar: 4, gapPct: null });
     const withoutLiveRead = intradayScore({ s: baseSnap, ctx: neutralCtx, liquidity: okLiquidity, relVolumeSoFar: null, gapPct: null });
     expect(withLiveRead.score).toBeGreaterThan(withoutLiveRead.score);
+  });
+});
+
+// ============================================================================
+// Breakout tracking — follow-through score + episode lifecycle transitions.
+// ============================================================================
+
+describe("breakoutFollowThroughScore", () => {
+  it("rewards a pick following through near its peak with a rising score", () => {
+    const r = breakoutFollowThroughScore({
+      entryClose: 100, currentClose: 109, peakClose: 110,
+      daysTracked: 3, belowThresholdDays: 0, scoreTrend: [70, 75, 82], lastScore: 82,
+    });
+    expect(r.score).toBeGreaterThan(75);
+  });
+
+  it("punishes a pick that ran up then gave the whole gain back", () => {
+    const held = breakoutFollowThroughScore({
+      entryClose: 100, currentClose: 110, peakClose: 110,
+      daysTracked: 4, belowThresholdDays: 0, scoreTrend: [72, 74, 76], lastScore: 76,
+    });
+    const gaveBack = breakoutFollowThroughScore({
+      entryClose: 100, currentClose: 100.5, peakClose: 110,
+      daysTracked: 4, belowThresholdDays: 0, scoreTrend: [72, 74, 76], lastScore: 76,
+    });
+    expect(gaveBack.score).toBeLessThan(held.score);
+    expect(gaveBack.components.hold_peak).toBeLessThan(held.components.hold_peak);
+  });
+
+  it("applies a drawdown penalty below entry", () => {
+    const r = breakoutFollowThroughScore({
+      entryClose: 100, currentClose: 96, peakClose: 102,
+      daysTracked: 5, belowThresholdDays: 2, scoreTrend: [72, 65, 58], lastScore: 58,
+    });
+    expect(r.components.penalty_drawdown).toBeLessThan(0);
+  });
+
+  it("is bounded 0..100", () => {
+    const hot = breakoutFollowThroughScore({
+      entryClose: 100, currentClose: 130, peakClose: 130,
+      daysTracked: 1, belowThresholdDays: 0, scoreTrend: [90, 95], lastScore: 95,
+    });
+    const dead = breakoutFollowThroughScore({
+      entryClose: 100, currentClose: 80, peakClose: 101,
+      daysTracked: 14, belowThresholdDays: 5, scoreTrend: [70, 40, 20], lastScore: 20,
+    });
+    expect(hot.score).toBeLessThanOrEqual(100);
+    expect(dead.score).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("nextEpisodeStatus", () => {
+  const open = { status: "active" as const, entryClose: 100, daysTracked: 2, belowThresholdDays: 0 };
+
+  it("fails an episode that draws down past FAIL_PCT below entry", () => {
+    const r = nextEpisodeStatus({ ...open, close: 100 - FAIL_PCT - 1, score: 75 });
+    expect(r.status).toBe("failed");
+  });
+
+  it("promotes to extended on strong follow-through with a holding score", () => {
+    const r = nextEpisodeStatus({ ...open, close: 100 + EXTEND_PCT + 1, score: BREAKOUT_QUALIFY_SCORE });
+    expect(r.status).toBe("extended");
+  });
+
+  it("cools after COOL_DAYS of sub-threshold score without failing", () => {
+    const r = nextEpisodeStatus({
+      status: "active", entryClose: 100, close: 101, score: BREAKOUT_QUALIFY_SCORE - 5,
+      daysTracked: 4, belowThresholdDays: COOL_DAYS - 1,
+    });
+    expect(r.status).toBe("cooled");
+    expect(r.belowThresholdDays).toBe(COOL_DAYS);
+  });
+
+  it("recovers a cooled episode back to active once score clears threshold", () => {
+    const r = nextEpisodeStatus({
+      status: "cooled", entryClose: 100, close: 102, score: BREAKOUT_QUALIFY_SCORE + 2,
+      daysTracked: 6, belowThresholdDays: 4,
+    });
+    expect(r.status).toBe("active");
+    expect(r.belowThresholdDays).toBe(0);
+  });
+
+  it("auto-closes after MAX_TRACK_DAYS", () => {
+    const r = nextEpisodeStatus({
+      status: "extended", entryClose: 100, close: 108, score: 75,
+      daysTracked: MAX_TRACK_DAYS - 1, belowThresholdDays: 0,
+    });
+    expect(r.status).toBe("closed");
+  });
+
+  it("keeps terminal states terminal", () => {
+    const failed = nextEpisodeStatus({ status: "failed", entryClose: 100, close: 120, score: 90, daysTracked: 3, belowThresholdDays: 0 });
+    expect(failed.status).toBe("failed");
+  });
+
+  it("resets the sub-threshold counter when the score recovers above threshold", () => {
+    const r = nextEpisodeStatus({ ...open, close: 103, score: BREAKOUT_QUALIFY_SCORE + 1, belowThresholdDays: 2 });
+    expect(r.belowThresholdDays).toBe(0);
   });
 });

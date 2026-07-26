@@ -6,7 +6,9 @@ import { istTradeDate, requireCronSecret } from "../_shared/market/cron.ts";
 import {
   classifyRegime, breakoutScore, preBreakoutScore,
   evaluateLiquidity, swingScore, intradayScore,
-  type AdvancedSignals,
+  BREAKOUT_QUALIFY_SCORE, SCORE_TREND_CAP,
+  breakoutFollowThroughScore, nextEpisodeStatus,
+  type AdvancedSignals, type BreakoutStatus,
 } from "../_shared/market/scoring.ts";
 import type { IndicatorSnapshot, WeeklySnapshot } from "../_shared/market/indicators.ts";
 import { yahooChartRetry } from "../_shared/market/yahooClient.ts";
@@ -267,6 +269,17 @@ Deno.serve(async (req) => {
     });
 
     // ---- Final scoring with market context ----
+    // Collect each row's freshly-computed scores so the breakout-tracking pass
+    // below can snapshot them — the DB update writes the new values but the
+    // in-memory `r` still holds the pre-rescore breakout_score.
+    interface Scored {
+      symbol: string; exchange: string;
+      close: number | null; market_cap: number | null;
+      sector: string | null; rel_volume: number | null;
+      breakout: number; prebreakout: number; swing: number;
+      liquidityOk: boolean; components: unknown;
+    }
+    const scored: Scored[] = [];
     let updated = 0;
     for (let i = 0; i < rows.length; i += 50) {
       const batch = rows.slice(i, i + 50);
@@ -317,7 +330,136 @@ Deno.serve(async (req) => {
           computed_at: nowIso,
         }).eq("symbol", r.symbol).eq("exchange", r.exchange);
         if (!error) updated++;
+
+        scored.push({
+          symbol: r.symbol, exchange: r.exchange,
+          close: r.close ?? null, market_cap: r.market_cap ?? null,
+          sector: r.sector ?? null, rel_volume: r.rel_volume ?? null,
+          breakout: bs.score, prebreakout: ps.score, swing: sw.score,
+          liquidityOk: liquidity.ok, components: scoreComponents,
+        });
       }));
+    }
+
+    // ---- Breakout tracking: daily snapshot + multi-day episode maintenance ----
+    // Re-checks every open episode (yesterday's picks) and opens fresh episodes
+    // for today's new qualifiers, so a stock flagged earlier keeps being
+    // followed forward alongside the day's new breakouts. Idempotent per day:
+    // re-runs on the same trade_date refresh values without double-counting
+    // days_tracked or re-appending the score trend.
+    const tracking = { snapshots: 0, opened: 0, updated_ep: 0, failed: 0, closed: 0 };
+    try {
+      const qualifiers = scored.filter(
+        (x) => x.close != null && x.liquidityOk && x.breakout >= BREAKOUT_QUALIFY_SCORE,
+      );
+      const scoredByKey = new Map(scored.map((x) => [`${x.symbol}|${x.exchange}`, x]));
+
+      // 1. Snapshot today's qualifiers (per-symbol daily score history).
+      const snapRows = qualifiers.map((x) => ({
+        symbol: x.symbol, exchange: x.exchange, trade_date: today,
+        breakout_score: x.breakout, prebreakout_score: x.prebreakout, swing_score: x.swing,
+        close: x.close, market_cap: x.market_cap, sector: x.sector,
+        rel_volume: x.rel_volume, regime, components: x.components,
+        computed_at: new Date().toISOString(),
+      }));
+      for (let i = 0; i < snapRows.length; i += 500) {
+        const chunk = snapRows.slice(i, i + 500);
+        const { error } = await svc.from("market_breakout_snapshots")
+          .upsert(chunk, { onConflict: "symbol,exchange,trade_date" });
+        if (!error) tracking.snapshots += chunk.length;
+      }
+
+      // 2. Load open episodes (active/extended/cooled) and re-evaluate each.
+      const openEps: any[] = [];
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await svc.from("market_breakout_tracker")
+          .select("*").in("status", ["active", "extended", "cooled"])
+          .range(from, from + 999);
+        if (error) break;
+        openEps.push(...(data ?? []));
+        if (!data || data.length < 1000) break;
+      }
+      const openKeys = new Set(openEps.map((e) => `${e.symbol}|${e.exchange}`));
+
+      const epUpdates: any[] = [];
+      for (const e of openEps) {
+        const key = `${e.symbol}|${e.exchange}`;
+        const now = scoredByKey.get(key);
+        if (!now || now.close == null) continue; // no data today — leave untouched
+        const alreadyToday = e.last_evaluated_date === today;
+        const entry = Number(e.entry_close) || now.close;
+        const prevDays = alreadyToday ? Math.max(0, (e.days_tracked ?? 1) - 1) : (e.days_tracked ?? 1);
+        const prevBelow = alreadyToday ? e.below_threshold_days ?? 0 : e.below_threshold_days ?? 0;
+
+        const tick = nextEpisodeStatus({
+          status: e.status as BreakoutStatus,
+          entryClose: entry, close: now.close, score: now.breakout,
+          daysTracked: prevDays, belowThresholdDays: prevBelow,
+        });
+        const peakClose = Math.max(Number(e.peak_close) || entry, now.close);
+        const peakRet = entry > 0 ? ((peakClose - entry) / entry) * 100 : 0;
+        const daysTracked = alreadyToday ? (e.days_tracked ?? 1) : (e.days_tracked ?? 1) + 1;
+        const baseTrend: number[] = Array.isArray(e.score_trend) ? e.score_trend : [];
+        const scoreTrend = alreadyToday ? baseTrend : [...baseTrend, now.breakout].slice(-SCORE_TREND_CAP);
+        const ft = breakoutFollowThroughScore({
+          entryClose: entry, currentClose: now.close, peakClose,
+          daysTracked, belowThresholdDays: tick.belowThresholdDays,
+          scoreTrend, lastScore: now.breakout,
+        });
+        const terminal = tick.status === "failed" || tick.status === "closed";
+
+        epUpdates.push({
+          symbol: e.symbol, exchange: e.exchange, first_detected_date: e.first_detected_date,
+          entry_close: entry, detected_score: e.detected_score,
+          peak_close: peakClose, peak_return_pct: Math.round(peakRet * 100) / 100,
+          current_close: now.close, current_return_pct: Math.round(tick.returnPct * 100) / 100,
+          days_tracked: daysTracked, last_score: now.breakout,
+          followthrough_score: ft.score, score_trend: scoreTrend,
+          status: tick.status, below_threshold_days: tick.belowThresholdDays,
+          sector: now.sector, market_cap: now.market_cap,
+          last_evaluated_date: today,
+          closed_at: terminal ? new Date().toISOString() : null,
+          updated_at: new Date().toISOString(),
+        });
+        if (tick.status === "failed") tracking.failed++;
+        else if (tick.status === "closed") tracking.closed++;
+        else tracking.updated_ep++;
+      }
+      for (let i = 0; i < epUpdates.length; i += 500) {
+        const chunk = epUpdates.slice(i, i + 500);
+        await svc.from("market_breakout_tracker")
+          .upsert(chunk, { onConflict: "symbol,exchange,first_detected_date" });
+      }
+
+      // 3. Open fresh episodes for today's qualifiers with no open episode.
+      const newEps = qualifiers
+        .filter((x) => !openKeys.has(`${x.symbol}|${x.exchange}`))
+        .map((x) => ({
+          symbol: x.symbol, exchange: x.exchange, first_detected_date: today,
+          entry_close: x.close, detected_score: x.breakout,
+          peak_close: x.close, peak_return_pct: 0,
+          current_close: x.close, current_return_pct: 0,
+          days_tracked: 1, last_score: x.breakout,
+          followthrough_score: 50, score_trend: [x.breakout],
+          status: "active", below_threshold_days: 0,
+          sector: x.sector, market_cap: x.market_cap,
+          last_evaluated_date: today,
+          updated_at: new Date().toISOString(),
+        }));
+      for (let i = 0; i < newEps.length; i += 500) {
+        const chunk = newEps.slice(i, i + 500);
+        // ignoreDuplicates: a symbol that already has today's episode (rare
+        // same-day re-run) isn't reset to a fresh entry.
+        const { error } = await svc.from("market_breakout_tracker")
+          .upsert(chunk, { onConflict: "symbol,exchange,first_detected_date", ignoreDuplicates: true });
+        if (!error) tracking.opened += chunk.length;
+      }
+    } catch (e) {
+      // Tracking is additive — never let it fail the whole aggregates run.
+      await svc.from("market_provider_health").insert({
+        provider: "aggregates", endpoint: "breakout-tracking", ok: false,
+        latency_ms: 0, error: (e instanceof Error ? e.message : String(e)).slice(0, 500),
+      }).then(() => {}, () => {});
     }
 
     return jsonResponse(req, {
@@ -327,6 +469,7 @@ Deno.serve(async (req) => {
       breadth: { advances, declines, regime, pct_above_ema50: Math.round(pctAboveEma50) },
       sectors: sectorRows.length,
       rescored: updated,
+      breakout_tracking: tracking,
     });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
