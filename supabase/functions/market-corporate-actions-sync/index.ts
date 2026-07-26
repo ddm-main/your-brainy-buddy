@@ -46,6 +46,13 @@ Deno.serve(async (req) => {
     symbols = symbols.filter((s) => s.exchange === "NSE").slice(0, isCron ? 200 : 40); // NSE-only source
 
     let upserted = 0;
+    // Previously a split/bonus/dividend whose ratio/amount regex didn't
+    // match the NSE subject phrasing silently got a row with null
+    // ratio_from/ratio_to/amount — market-corp-actions-apply's eventFactor()
+    // then skips it forever (only counted in an internal `skipped`
+    // counter), permanently under-adjusting that symbol's price history
+    // with zero operator visibility. Surface these instead of swallowing them.
+    const unparsed: Array<{ symbol: string; action_type: string; subject: string }> = [];
     for (const { symbol, exchange } of symbols) {
       const actions = await nseCorporateActions(symbol);
       if (actions.length === 0) continue;
@@ -74,6 +81,12 @@ Deno.serve(async (req) => {
             const m = subj.match(/RS?\.?\s*(\d+(?:\.\d+)?)/);
             if (m) amount = Number(m[1]);
           }
+          const needsRatio = action_type === "split" || action_type === "bonus";
+          const parsedOk = needsRatio ? (ratio_from != null && ratio_to != null) : action_type === "dividend" ? amount != null : true;
+          if (!parsedOk) {
+            unparsed.push({ symbol, action_type, subject: a.subject ?? "" });
+            console.warn(`[market-corporate-actions-sync] could not parse ${action_type} ratio/amount for ${symbol}: "${a.subject}" — row will be inserted with null values and skipped forever by market-corp-actions-apply until manually corrected`);
+          }
           return {
             symbol, exchange, action_type,
             ex_date: a.exDate,
@@ -90,7 +103,7 @@ Deno.serve(async (req) => {
         if (!error) upserted++;
       }
     }
-    return jsonResponse(req, { ok: true, symbols: symbols.length, upserted });
+    return jsonResponse(req, { ok: true, symbols: symbols.length, upserted, unparsed });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 502);
   }

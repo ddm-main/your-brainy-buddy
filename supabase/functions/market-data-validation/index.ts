@@ -103,6 +103,66 @@ serve(async (req) => {
     // 8. Check for NULL treated as 0 (should be explicit 0 or NULL, never implicit)
     // This is a data entry issue — validate during sync, not here
 
+    // 9. Price-table sanity — previously this validator only ever checked
+    // `market_data` (a fundamentals table). The tables the EOD pipeline
+    // actually writes (market_daily_prices, market_stock_scores) had no
+    // guard at all: no negative-price check, no high>=low check. Scoped to
+    // the latest trade_date only, matching this job's "validate what just
+    // synced" nightly role rather than re-scanning the full history.
+    const { data: latestPriceRow } = await supabase
+      .from("market_daily_prices")
+      .select("trade_date")
+      .order("trade_date", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (latestPriceRow?.trade_date) {
+      const latestDate = latestPriceRow.trade_date as string;
+      const { data: priceRows } = await supabase
+        .from("market_daily_prices")
+        .select("symbol,exchange,open,high,low,close")
+        .eq("trade_date", latestDate);
+      for (const r of (priceRows ?? []) as any[]) {
+        const { symbol, open, high, low, close } = r;
+        if (close != null && Number(close) <= 0) {
+          errors.push(`${symbol}: non-positive close (${close}) on ${latestDate}`);
+          continue;
+        }
+        if (high != null && low != null && Number(high) < Number(low)) {
+          errors.push(`${symbol}: high (${high}) < low (${low}) on ${latestDate}`);
+          continue;
+        }
+        if (low != null && high != null) {
+          if (close != null && (Number(close) < Number(low) || Number(close) > Number(high))) {
+            errors.push(`${symbol}: close (${close}) outside [low ${low}, high ${high}] on ${latestDate}`);
+          }
+          if (open != null && (Number(open) < Number(low) || Number(open) > Number(high))) {
+            errors.push(`${symbol}: open (${open}) outside [low ${low}, high ${high}] on ${latestDate}`);
+          }
+        }
+      }
+      validated += (priceRows ?? []).length;
+    }
+
+    const { data: latestScoreRow } = await supabase
+      .from("market_stock_scores")
+      .select("trade_date")
+      .order("trade_date", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (latestScoreRow?.trade_date) {
+      const latestDate = latestScoreRow.trade_date as string;
+      const { data: scoreRows } = await supabase
+        .from("market_stock_scores")
+        .select("symbol,close")
+        .eq("trade_date", latestDate);
+      for (const r of (scoreRows ?? []) as any[]) {
+        if (r.close != null && Number(r.close) <= 0) {
+          errors.push(`${r.symbol}: non-positive close (${r.close}) in market_stock_scores on ${latestDate}`);
+        }
+      }
+      validated += (scoreRows ?? []).length;
+    }
+
     const summary = {
       validated,
       fixed,

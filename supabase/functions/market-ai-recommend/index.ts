@@ -5,6 +5,7 @@
 import { preflight, jsonResponse, errorResponse, svcClient, SHARED_CACHE_USER_ID } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
 import { createLovableAiGatewayProvider } from "../_shared/ai-gateway.ts";
+import { sanitizeAiTrade, type AiVerdict } from "../_shared/market/aiTradeValidation.ts";
 import { generateText, NoObjectGeneratedError, Output } from "npm:ai";
 import { z } from "npm:zod";
 
@@ -89,22 +90,33 @@ Rules:
           }
           if (!output) throw err;
         }
-        await svc.from("market_stock_ai").insert({
+        const verdict = (output.recommendation.toLowerCase() as AiVerdict);
+        const closePrice = s.close != null ? Number(s.close) : null;
+        const sane = sanitizeAiTrade({ verdict, entry: output.entry_price, stop_loss: output.stop_loss, targets: output.targets }, closePrice);
+        const sanitizedOutput = { ...output, entry_price: sane.entry, stop_loss: sane.stop_loss, targets: sane.targets, plausibility_flags: sane.flags };
+        // market_stock_ai has a unique index on (user_id, symbol, exchange)
+        // (market_stock_ai_user_symbol_uidx) — this was a plain .insert()
+        // despite the file header calling it an upsert, so it only ever
+        // succeeded once per symbol: every subsequent day's re-score (a new
+        // score_hash) silently failed the unique constraint and this row
+        // never updated again.
+        const { error: upsertErr } = await svc.from("market_stock_ai").upsert({
           user_id: SHARED_CACHE_USER_ID,
           symbol: s.symbol,
           exchange: s.exchange,
           recommendation: output.recommendation,
           confidence: output.confidence,
-          entry_price: output.entry_price,
-          stop_loss: output.stop_loss,
-          targets: output.targets,
+          entry_price: sane.entry,
+          stop_loss: sane.stop_loss,
+          targets: sane.targets,
           holding_period_days: output.holding_period_days,
           risk_level: output.risk_level,
           rationale: output.rationale,
           score_hash: hashScore(s as any),
-          payload: output,
+          payload: sanitizedOutput,
           computed_at: new Date().toISOString(),
-        });
+        }, { onConflict: "user_id,symbol,exchange" });
+        if (upsertErr) throw upsertErr;
         updated++;
       } catch (e) { failed++; if (failed <= 3) console.error("ai_recommend_fail", s.symbol, e instanceof Error ? e.message : String(e)); }
     }

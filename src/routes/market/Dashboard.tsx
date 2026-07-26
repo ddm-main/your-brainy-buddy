@@ -23,25 +23,11 @@ import { toSafeError } from "@/lib/errors";
 import { Settings2, Trash2, X } from "lucide-react";
 import type { Quote, StockScore } from "@/lib/market/types";
 import { holdingPnl, quoteKey } from "@/lib/market/pnl";
-import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { isFreshTick, nseOpenNow, useLiveTickStore } from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
 import { useEscapeClose } from "@/lib/useEscapeClose";
 import { MarketStrip } from "@/components/market/MarketStrip";
-// IST market hours check (Mon–Fri 09:15–15:30). Used to differentiate
-// "cached close" (intraday stale data — actionable) from "closed" (after
-// hours — expected). Uses Intl to avoid TZ drift on non-IST clients.
-function isNseOpen(now: Date = new Date()): boolean {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Kolkata",
-    weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false,
-  }).formatToParts(now);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
-  const day = get("weekday");
-  if (day === "Sat" || day === "Sun") return false;
-  const hh = Number(get("hour")); const mm = Number(get("minute"));
-  const mins = hh * 60 + mm;
-  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
-}
+import { PriceSourceChip } from "@/components/market/PriceSourceChip";
 
 const DEFAULT_BREAKOUT_KEY = "market.dash.breakoutScreen";
 const SCREENER_DEFAULT_SAVED_KEY = "market.screener.defaultSavedId";
@@ -204,7 +190,7 @@ export default function MarketDashboard() {
   // outside the Kotak WS relay's holdings/watchlist subscription set. Poll
   // the REST batch every ~3s during market hours to make the panel feel live
   // rather than updating once a minute.
-  const { data: scoreQuotes } = useQuotes(scoreKeys, { intervalMs: 3_000 });
+  const { data: scoreQuotes, isError: scoreQuotesError } = useQuotes(scoreKeys, { intervalMs: 3_000 });
   const pushTicks = useLiveTickStore((s) => s.ticks);
   const relayAlive = useRelayAlive();
   // Ask the Kotak WS relay to push ticks for whatever's on screen — filters
@@ -238,9 +224,9 @@ export default function MarketDashboard() {
     if (quotes.length === 0) return "none";
     if (quoteProvider === "kotak") return "kotak";
     if (quoteProvider === "mixed") return "mixed";
-    if (quoteProvider === "cache") return isNseOpen() ? "cache" : "closed";
+    if (quoteProvider === "cache") return nseOpenNow() ? "cache" : "closed";
     // Yahoo (or unknown) — during hours it's ~15m delayed, off-hours it's just the close.
-    return isNseOpen() ? "yahoo" : "closed";
+    return nseOpenNow() ? "yahoo" : "closed";
   }, [scoreQuotes, anyPush, scoreKeys, quoteProvider, relayAlive]);
 
   const { data: counts } = useQuery({
@@ -373,13 +359,18 @@ export default function MarketDashboard() {
   // already conveyed by the filter chip itself). With no active saved filter,
   // fall back to a compact breakout table.
   const breakoutColumns = useMemo<ColumnDef<BreakoutDisplayRow, any>[]>(() => {
-    const colMap = overviewColumnMap<BreakoutDisplayRow>();
+    const colMap = overviewColumnMap<BreakoutDisplayRow>((symbol) => nav(`/market/ai/${symbol}`));
+    // Core columns always lead, in this fixed order, regardless of which
+    // saved screener/filters are active — otherwise MCAP/breakout_score
+    // silently disappear or reorder whenever the active filter set doesn't
+    // happen to touch them.
+    const CORE_IDS = ["symbol", "close", "change_pct", "market_cap", "breakout_score"];
     const ids = hasActiveFilters
-      ? colsFromActiveFilters(selectedScreenState.active, {
-        skipBooleans: true,
-        allowedCols: OVERVIEW_COL_IDS,
-      })
-      : ["symbol", "market_cap", "close", "change_pct", "breakout_score"];
+      ? [...CORE_IDS, ...colsFromActiveFilters(selectedScreenState.active, {
+          skipBooleans: true,
+          allowedCols: OVERVIEW_COL_IDS,
+        }).filter((id) => !CORE_IDS.includes(id))]
+      : CORE_IDS;
     const seen = new Set<string>();
     const out: ColumnDef<BreakoutDisplayRow, any>[] = [];
     for (const id of ids) {
@@ -469,7 +460,10 @@ export default function MarketDashboard() {
               ))}
             </select>
             <Chip tone="neutral">{breakoutCountLabel}</Chip>
-            {/* Provider chip lives on the MarketStrip now — one source of truth. */}
+            {/* MarketStrip's chip covers index/relay health; this one covers
+                this panel's own rotating-symbol quote query, which has its
+                own independent error/staleness state. */}
+            <PriceSourceChip compact stale={scoreQuotesError} />
           </div>
         }
       >

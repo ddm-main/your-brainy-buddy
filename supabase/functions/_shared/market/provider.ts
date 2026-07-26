@@ -64,6 +64,7 @@ export interface PositionRow {
   side: "long" | "short";
   quantity: number;
   entry_price: number;
+  product: "MIS" | "CNC" | "NRML" | null;
 }
 
 // Fully-closed intraday trade — buyQty == sellQty, net = 0. Kept for realized
@@ -400,7 +401,14 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       }
       // range like "2y","60d","30d"; interval like "1d","1h","15m"
       const now = Math.floor(Date.now() / 1000);
-      const rangeSec: Record<string, number> = { "1d": 86400, "5d": 5 * 86400, "30d": 30 * 86400, "60d": 60 * 86400, "1y": 365 * 86400, "2y": 730 * 86400 };
+      const rangeSec: Record<string, number> = {
+        "1d": 86400, "5d": 5 * 86400, "30d": 30 * 86400, "60d": 60 * 86400,
+        "1y": 365 * 86400, "2y": 730 * 86400,
+        // Previously missing — any caller requesting "5y"/"10y" (e.g. the
+        // backtester) silently fell through to the `?? 730 * 86400` default
+        // below and got capped at 2 years of Kotak candles with no error.
+        "5y": 5 * 365 * 86400, "10y": 10 * 365 * 86400,
+      };
       const fromEpoch = now - (rangeSec[range] ?? 730 * 86400);
       const kotakInterval = interval === "1d" ? "D" : interval === "1h" ? "60" : interval === "15m" ? "15" : interval === "5m" ? "5" : "D";
       const t0 = Date.now();
@@ -520,12 +528,15 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
           entry = netQty > 0 && flBuyQty > 0 ? buyAmt / flBuyQty
                 : netQty < 0 && flSellQty > 0 ? sellAmt / flSellQty : 0;
         }
+        const rawProduct = String(p.prod ?? p.product ?? "").toUpperCase();
+        const product = (rawProduct === "MIS" || rawProduct === "CNC" || rawProduct === "NRML") ? rawProduct : null;
         rows.push({
           symbol,
           exchange,
           side: (netQty >= 0 ? "long" : "short"),
           quantity: Math.abs(netQty),
           entry_price: entry,
+          product,
         });
       }
       return { rows, realized, complete: env.ok };
@@ -550,11 +561,11 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
         validity: input.validity,
         disclosedQuantity: input.disclosedQuantity,
         amo: input.amo,
-      }));
+      }), { retryOnAuthError: false });
       return { orderId: result.orderId, status: result.status };
     },
     async modifyOrder(orderId, changes) {
-      const r = await withKotakSession(svc, s, encryptValue, (ss) => kotakModifyOrder(ss, orderId, changes));
+      const r = await withKotakSession(svc, s, encryptValue, (ss) => kotakModifyOrder(ss, orderId, changes), { retryOnAuthError: false });
       return { orderId: r.orderId, status: r.status };
     },
     async cancelOrder(orderId) {
@@ -576,7 +587,7 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
         quantity: input.quantity,
         fromProduct: input.fromProduct,
         toProduct: input.toProduct,
-      }));
+      }), { retryOnAuthError: false });
       return { ok: true };
     },
     async getFunds(): Promise<FundsSnapshot> {

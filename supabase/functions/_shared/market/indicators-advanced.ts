@@ -2,6 +2,7 @@
 // Pure TS; oldest → newest series alignment.
 
 import type { Candle } from "./indicators.ts";
+export { obv } from "./indicators.ts";
 
 // -------- VWAP (session or full-window rolling average) --------
 export function vwap(candles: Candle[]): (number | null)[] {
@@ -66,15 +67,8 @@ export function supertrend(
   return { line, dir };
 }
 
-// -------- OBV (On-Balance Volume) --------
-export function obv(candles: Candle[]): number[] {
-  const out: number[] = new Array(candles.length).fill(0);
-  for (let i = 1; i < candles.length; i++) {
-    const prev = candles[i - 1].close, cur = candles[i].close;
-    out[i] = out[i - 1] + (cur > prev ? candles[i].volume : cur < prev ? -candles[i].volume : 0);
-  }
-  return out;
-}
+// OBV lived here too as a byte-for-byte duplicate of indicators.ts's obv() —
+// re-exported above instead of redefined.
 
 // -------- MFI (Money Flow Index) --------
 export function mfi(candles: Candle[], period = 14): (number | null)[] {

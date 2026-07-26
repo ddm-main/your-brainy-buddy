@@ -101,10 +101,16 @@ Deno.serve(async (req) => {
 
     if (action === "cancel_order") {
       const orderId = String(b?.order_id ?? "");
-      const brokerOrderId = String(b?.broker_order_id ?? "");
-      if (!orderId || !brokerOrderId) return errorResponse(req, "order_id and broker_order_id required");
-      const { data: row } = await svc.from("market_autotrade_orders").select("id,user_id").eq("id", orderId).maybeSingle();
+      if (!orderId) return errorResponse(req, "order_id required");
+      // broker_order_id is read from the owned DB row, not accepted from the
+      // request body — a client-supplied value here previously let a caller
+      // submit a valid order_id they own alongside an unrelated
+      // broker_order_id, cancelling a different order at their own broker
+      // while the ledger marked the WRONG order_id as cancelled.
+      const { data: row } = await svc.from("market_autotrade_orders").select("id,user_id,broker_order_id").eq("id", orderId).maybeSingle();
       if (!row || row.user_id !== userId) return errorResponse(req, "not found", 404);
+      if (!row.broker_order_id) return errorResponse(req, "no broker order id on this row", 400);
+      const brokerOrderId = row.broker_order_id as string;
       const { settings } = await getActiveProvider(svc, userId);
       if (!settings) return errorResponse(req, "Kotak Neo not connected", 400);
       await withKotakSession(svc, settings, encryptValue, (ss) => kotakCancelOrder(ss, brokerOrderId));

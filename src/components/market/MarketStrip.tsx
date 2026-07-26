@@ -10,6 +10,7 @@ import { useIndices, useBreadth } from "@/lib/market/hooks";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
 import { BreadthDetailsDialog } from "@/components/market/BreadthDetailsDialog";
+import { PriceSourceChip } from "@/components/market/PriceSourceChip";
 import { Return1DCell, deriveChangeAbs } from "@/components/hud/DataTable";
 
 const SLOT_SYMBOLS: Array<{ symbol: string; label: string }> = [
@@ -30,7 +31,7 @@ interface Props {
 
 export function MarketStrip({ actions }: Props) {
   const nav = useNavigate();
-  const { data: indicesData } = useIndices() as { data: any };
+  const { data: indicesData, dataUpdatedAt: indicesUpdatedAt, isError: indicesError } = useIndices() as { data: any; dataUpdatedAt: number; isError: boolean };
   const { data: breadth } = useBreadth();
   const [breadthOpen, setBreadthOpen] = useState(false);
 
@@ -44,9 +45,11 @@ export function MarketStrip({ actions }: Props) {
   const bySym = useMemo(() => {
     const m = new Map<string, { price: number; change_pct: number | null; change_abs: number | null }>();
     for (const q of (indicesData?.quotes ?? []) as any[]) {
-      // Overlay a fresh push tick when we have one for this symbol AND it has a finite ltp.
+      // Overlay a push tick only when it's fresh AND actually newer than the
+      // last REST refresh — a stale-but-still-"fresh" tick (up to 30s old)
+      // must not override a REST print that landed more recently.
       const tick = pushTicks[`NSE:${q.symbol}`];
-      if (isFreshTick(tick) && Number.isFinite(tick.ltp)) {
+      if (isFreshTick(tick) && Number.isFinite(tick.ltp) && tick.receivedAt >= indicesUpdatedAt) {
         m.set(q.symbol, {
           price: tick.ltp,
           change_pct: tick.change_pct,
@@ -61,7 +64,7 @@ export function MarketStrip({ actions }: Props) {
       }
     }
     return m;
-  }, [indicesData, pushTicks]);
+  }, [indicesData, pushTicks, indicesUpdatedAt]);
 
   const ad = breadth ? { adv: breadth.advances ?? 0, dec: breadth.declines ?? 0 } : null;
   const fiiCr = breadth?.fii_net_cr ?? null;
@@ -174,6 +177,10 @@ export function MarketStrip({ actions }: Props) {
           </span>
         )}
       </button>
+
+      <span style={{ marginLeft: actions ? undefined : "auto", display: "inline-flex", alignItems: "center" }}>
+        <PriceSourceChip compact stale={indicesError} />
+      </span>
 
       {actions && (
         <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6 }}>

@@ -2,7 +2,7 @@
 // Chart fills the viewport height; indicators are computed client-side in
 // CandleChart, so toggles work even before the EOD pipeline has run.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Navigate, useParams, useSearchParams } from "react-router-dom";
+import { Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { HudPanel } from "@/components/hud/HudPanel";
@@ -64,6 +64,7 @@ function loadState(): Persisted {
 }
 
 export default function Analysis() {
+  const nav = useNavigate();
   const { symbol } = useParams();
   const qc = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -408,6 +409,7 @@ export default function Analysis() {
               score={liveScore?.breakout.score ?? score?.breakout_score}
               components={liveScore?.breakout.components ?? score?.score_components?.breakout}
               label="breakout components"
+              onClick={() => nav(`/market/ai/${sym}`)}
             />
           </Row>
           <Row label="Pre-Breakout">
@@ -415,6 +417,7 @@ export default function Analysis() {
               score={liveScore?.prebreakout.score ?? score?.prebreakout_score}
               components={liveScore?.prebreakout.components ?? score?.score_components?.prebreakout}
               label="pre-breakout components"
+              onClick={() => nav(`/market/ai/${sym}`)}
             />
           </Row>
           <Row label="Setups">
@@ -477,16 +480,20 @@ export default function Analysis() {
         </>
         )}
 
-        {/* AI Verdict — cached 6h per symbol */}
+        {/* AI Verdict — cached 6h per symbol. refreshInsight is one shared
+            mutation instance; scope its pending state to the symbol
+            actually in flight so navigating to a different symbol mid-refresh
+            doesn't show a stale "analyzing…" for the wrong one. */}
+        {(() => { const refreshingThis = refreshInsight.isPending && refreshInsight.variables?.symbol === sym; return (
         <HudPanel flow title="AI Verdict" index="A6"
           actions={
-            <Btn size="sm" variant="ghost" disabled={!sym || refreshInsight.isPending}
+            <Btn size="sm" variant="ghost" disabled={!sym || refreshingThis}
               onClick={() => sym && refreshInsight.mutate({ symbol: sym })}
               aria-label="refresh AI verdict">
               <RefreshCw size={11} />
             </Btn>
           }>
-          {insightLoading || refreshInsight.isPending ? (
+          {insightLoading || refreshingThis ? (
             <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)" }}>analyzing…</div>
           ) : insightError ? (
             <div className="hud-label" style={{ fontSize: 11, color: "var(--danger)" }}>
@@ -532,6 +539,7 @@ export default function Analysis() {
             <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)" }}>press refresh</div>
           )}
         </HudPanel>
+        ); })()}
 
         {/* Fundamentals */}
         {fund && (

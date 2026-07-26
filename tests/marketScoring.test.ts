@@ -3,9 +3,17 @@ import {
   breakoutScore,
   preBreakoutScore,
   classifyRegime,
+  evaluateLiquidity,
+  swingScore,
+  intradayScore,
+  LIQUIDITY_MIN_PRICE,
+  LIQUIDITY_MIN_MARKET_CAP_CR,
+  LIQUIDITY_MIN_TURNOVER_CR,
   type MarketContext,
+  type LiquidityGate,
+  type AdvancedSignals,
 } from "../supabase/functions/_shared/market/scoring";
-import type { IndicatorSnapshot } from "../supabase/functions/_shared/market/indicators";
+import type { IndicatorSnapshot, WeeklySnapshot } from "../supabase/functions/_shared/market/indicators";
 
 const baseSnap: IndicatorSnapshot = {
   close: 100,
@@ -235,5 +243,143 @@ describe("classifyRegime", () => {
   it("neutral otherwise and on nulls", () => {
     expect(classifyRegime(50, 50)).toBe("neutral");
     expect(classifyRegime(null, null)).toBe("neutral");
+  });
+});
+
+// ============================================================================
+// v3 — liquidity gate + swingScore/intradayScore. breakoutScore/preBreakoutScore
+// above are untouched; these cover the additive scorers only.
+// ============================================================================
+
+describe("evaluateLiquidity", () => {
+  it("passes a liquid large-cap", () => {
+    const r = evaluateLiquidity({ close: 500, marketCapCr: 5000, avgTurnoverCr: 10 });
+    expect(r.ok).toBe(true);
+    expect(r.reasons).toEqual([]);
+  });
+
+  it("flags a penny stock on every axis at once", () => {
+    const r = evaluateLiquidity({ close: 5, marketCapCr: 20, avgTurnoverCr: 0.1 });
+    expect(r.ok).toBe(false);
+    expect(r.reasons).toHaveLength(3);
+  });
+
+  it("flags price alone when cap/turnover are otherwise fine", () => {
+    const r = evaluateLiquidity({ close: LIQUIDITY_MIN_PRICE - 1, marketCapCr: 5000, avgTurnoverCr: 10 });
+    expect(r.ok).toBe(false);
+    expect(r.reasons).toEqual([`price below ₹${LIQUIDITY_MIN_PRICE}`]);
+  });
+
+  it("treats unknown (null) inputs as failing, not liquid-by-default", () => {
+    const r = evaluateLiquidity({ close: null, marketCapCr: null, avgTurnoverCr: null });
+    expect(r.ok).toBe(false);
+    expect(r.reasons).toHaveLength(3);
+  });
+
+  it("passes exactly at the threshold (>=, not >)", () => {
+    const r = evaluateLiquidity({
+      close: LIQUIDITY_MIN_PRICE,
+      marketCapCr: LIQUIDITY_MIN_MARKET_CAP_CR,
+      avgTurnoverCr: LIQUIDITY_MIN_TURNOVER_CR,
+    });
+    expect(r.ok).toBe(true);
+  });
+});
+
+const okLiquidity: LiquidityGate = { ok: true, reasons: [] };
+const gatedLiquidity: LiquidityGate = { ok: false, reasons: ["price below ₹20", "market cap below ₹100Cr"] };
+
+const constructiveWeekly: WeeklySnapshot = {
+  closeW: 110, ema20W: 100, rsi14W: 60, aboveEma20W: true, trendUpW: true, higherLowsW: true, barsW: 30,
+};
+
+const fullAdv: AdvancedSignals = {
+  vwapRel: 0.02, supertrendDir: 1, mfi14: 70, percentB: 0.9,
+  patterns: {
+    bullishEngulfing: true, hammer: false, doji: false,
+    cupAndHandle: true, flag: true, ascendingTriangle: true,
+    bearishEngulfing: false, shootingStar: false,
+  },
+};
+
+describe("swingScore", () => {
+  it("gates illiquid stocks to 0 with reasons surfaced, never silently included", () => {
+    const r = swingScore({ s: baseSnap, ctx: neutralCtx, weekly: null, liquidity: gatedLiquidity });
+    expect(r.score).toBe(0);
+    expect(r.liquidityOk).toBe(false);
+    expect(r.liquidityReasons).toEqual(gatedLiquidity.reasons);
+  });
+
+  it("is bounded 0..100 for a liquid stock with every input populated", () => {
+    const r = swingScore({
+      s: { ...baseSnap, close: 105, rollingHigh20: 100, baseTightness: 0.02, baseDepthPct: 6, baseDurationDays: 30, rsPercentile: 90 },
+      ctx: { sectorStrength: 0.9, regime: "bullish", relStrengthNifty: 12, deliveryPct: null },
+      weekly: constructiveWeekly,
+      adv: fullAdv,
+      liquidity: okLiquidity,
+    });
+    expect(r.score).toBeGreaterThanOrEqual(0);
+    expect(r.score).toBeLessThanOrEqual(100);
+    expect(r.liquidityOk).toBe(true);
+  });
+
+  it("weekly confluence alone lifts the score, all else held equal", () => {
+    const noWeekly = swingScore({ s: baseSnap, ctx: neutralCtx, weekly: null, liquidity: okLiquidity });
+    const withWeekly = swingScore({ s: baseSnap, ctx: neutralCtx, weekly: constructiveWeekly, liquidity: okLiquidity });
+    expect(withWeekly.score).toBeGreaterThan(noWeekly.score);
+  });
+
+  it("scores a strong multi-timeframe swing setup much higher than a weak one", () => {
+    const strong = swingScore({
+      s: { ...baseSnap, close: 105, rollingHigh20: 100, atr14: 2, baseTightness: 0.02, baseDepthPct: 6, baseDurationDays: 30, rsPercentile: 90, adx14: 32, macdHistRising: true },
+      ctx: { sectorStrength: 0.9, regime: "bullish", relStrengthNifty: 12, deliveryPct: null },
+      weekly: constructiveWeekly,
+      adv: fullAdv,
+      liquidity: okLiquidity,
+    });
+    const weak = swingScore({
+      s: { ...baseSnap, rsi14: 35, aboveEma200: false, emaAligned: false, macd: -1, macdSignal: 0, macdHistRising: false, pctFrom52wHigh: -40, rsPercentile: 10 },
+      ctx: { sectorStrength: 0.1, regime: "bearish", relStrengthNifty: -15, deliveryPct: null },
+      weekly: null,
+      liquidity: okLiquidity,
+    });
+    expect(strong.score - weak.score).toBeGreaterThan(40);
+  });
+});
+
+describe("intradayScore", () => {
+  it("gates illiquid stocks to 0 with reasons surfaced", () => {
+    const r = intradayScore({ s: baseSnap, ctx: neutralCtx, liquidity: gatedLiquidity, relVolumeSoFar: null, gapPct: null });
+    expect(r.score).toBe(0);
+    expect(r.liquidityOk).toBe(false);
+    expect(r.liquidityReasons).toEqual(gatedLiquidity.reasons);
+  });
+
+  it("is bounded 0..100 with every input populated", () => {
+    const r = intradayScore({
+      s: { ...baseSnap, close: 104, rollingHigh20: 100 },
+      ctx: { sectorStrength: 0.7, regime: "bullish", relStrengthNifty: 8, deliveryPct: null },
+      adv: fullAdv,
+      liquidity: okLiquidity,
+      relVolumeSoFar: 4,
+      gapPct: 2.5,
+    });
+    expect(r.score).toBeGreaterThanOrEqual(0);
+    expect(r.score).toBeLessThanOrEqual(100);
+  });
+
+  it("a live volume surge beats a quiet session", () => {
+    const surge = intradayScore({ s: baseSnap, ctx: neutralCtx, liquidity: okLiquidity, relVolumeSoFar: 4, gapPct: 2 });
+    const quiet = intradayScore({ s: baseSnap, ctx: neutralCtx, liquidity: okLiquidity, relVolumeSoFar: 0.5, gapPct: 0 });
+    expect(surge.score).toBeGreaterThan(quiet.score);
+  });
+
+  it("time-of-day relVolumeSoFar overrides the snapshot's stale full-day relVolume", () => {
+    // baseSnap.relVolume is 1 (flat) — a live time-of-day read saying today is
+    // already running at 4x must move the score, proving relVolumeSoFar wins
+    // over falling back to s.relVolume.
+    const withLiveRead = intradayScore({ s: baseSnap, ctx: neutralCtx, liquidity: okLiquidity, relVolumeSoFar: 4, gapPct: null });
+    const withoutLiveRead = intradayScore({ s: baseSnap, ctx: neutralCtx, liquidity: okLiquidity, relVolumeSoFar: null, gapPct: null });
+    expect(withLiveRead.score).toBeGreaterThan(withoutLiveRead.score);
   });
 });

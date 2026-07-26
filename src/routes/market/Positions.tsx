@@ -347,6 +347,7 @@ export default function Positions() {
           open={closingPos !== null}
           onClose={() => setClosingPos(null)}
           symbol={closingPos.symbol}
+          exchange={closingPos.exchange}
           side={closingPos.side}
           quantity={closingPos.quantity}
           entryPrice={closingPos.entry_price}
@@ -394,8 +395,12 @@ function ConvertPositionModal({ open, onClose, position, pending, onConfirm }: {
   pending: boolean;
   onConfirm: (fromProduct: "MIS" | "CNC" | "NRML", toProduct: "MIS" | "CNC" | "NRML") => void;
 }) {
-  const [fromProduct, setFromProduct] = useState<"MIS" | "CNC" | "NRML">("MIS");
-  const [toProduct, setToProduct] = useState<"MIS" | "CNC" | "NRML">("CNC");
+  // Default "From" to the position's actual product (now synced from the
+  // broker) instead of always guessing MIS — previously guessing wrong
+  // meant either a clean broker rejection, or (worse, if both MIS/CNC legs
+  // of the same symbol existed) the wrong leg being targeted.
+  const [fromProduct, setFromProduct] = useState<"MIS" | "CNC" | "NRML">(position.product ?? "MIS");
+  const [toProduct, setToProduct] = useState<"MIS" | "CNC" | "NRML">(position.product === "CNC" ? "MIS" : "CNC");
   if (!open) return null;
   const same = fromProduct === toProduct;
   return (

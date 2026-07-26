@@ -201,6 +201,7 @@ export interface Position {
   journal_notes: string | null;
   is_broker_synced?: boolean | null;
   exit_source?: string | null;
+  product?: "MIS" | "CNC" | "NRML" | null;
 }
 
 export interface CandleDto {

@@ -130,6 +130,20 @@ export function NewAlertModal({ symbol, exchange, onClose, onCreated }: {
     try {
       const { data: u } = await supabase.auth.getUser();
       if (!u?.user) throw new Error("not signed in");
+      // Dedupe: re-opening "new alert" and resubmitting the same condition
+      // previously created duplicate rows, each independently evaluated/
+      // fired by market-alerts-eval — duplicate notifications for one signal.
+      const thresholdValue = needsThreshold ? Number(threshold) : null;
+      let dupeQuery = supabase.from("market_alerts").select("id")
+        .eq("user_id", u.user.id).eq("symbol", symbol).eq("exchange", exchange)
+        .eq("alert_type", alertType).eq("channel", channel).eq("is_active", true);
+      dupeQuery = thresholdValue == null ? dupeQuery.is("threshold", null) : dupeQuery.eq("threshold", thresholdValue);
+      const { data: existing } = await dupeQuery.limit(1);
+      if (existing && existing.length > 0) {
+        push("An identical active alert already exists for this symbol", "warn");
+        setBusy(false);
+        return;
+      }
       const { error } = await supabase.from("market_alerts").insert({
         user_id: u.user.id,
         symbol, exchange,

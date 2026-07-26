@@ -436,6 +436,77 @@ export function baseMetrics(candles: Candle[], window = 30): {
 }
 
 
+// Resample daily candles into ISO-week (Mon-start) bars. Pure aggregation
+// over data already fetched/persisted elsewhere — no new data source.
+// Assumes `candles` is sorted oldest→newest (the convention this whole file
+// uses), one call per `time` (unix seconds, UTC).
+function isoWeekKey(unixSeconds: number): string {
+  const d = new Date(unixSeconds * 1000);
+  const dow = (d.getUTCDay() + 6) % 7; // 0=Mon..6=Sun
+  const monday = new Date(d);
+  monday.setUTCDate(d.getUTCDate() - dow);
+  return monday.toISOString().slice(0, 10);
+}
+
+export function resampleWeekly(candles: Candle[]): Candle[] {
+  const out: Candle[] = [];
+  let curKey: string | null = null;
+  let bar: Candle | null = null;
+  for (const c of candles) {
+    const key = isoWeekKey(c.time);
+    if (key !== curKey) {
+      if (bar) out.push(bar);
+      bar = { time: c.time, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume };
+      curKey = key;
+    } else if (bar) {
+      if (c.high > bar.high) bar.high = c.high;
+      if (c.low < bar.low) bar.low = c.low;
+      bar.close = c.close;
+      bar.volume += c.volume;
+    }
+  }
+  if (bar) out.push(bar);
+  return out;
+}
+
+export interface WeeklySnapshot {
+  closeW: number | null;
+  ema20W: number | null;
+  rsi14W: number | null;
+  aboveEma20W: boolean;
+  // aboveEma20W AND rsi14W > 50 — the single "is the weekly chart
+  // constructive" flag consumed by swingScore.
+  trendUpW: boolean;
+  higherLowsW: boolean;
+  barsW: number;
+}
+
+// Weekly trend confirmation, resampled from whatever daily candles the
+// caller already has in memory (market-pipeline-eod fetches 2y daily —
+// plenty for ~25+ weekly bars). No new persistence, no new provider calls.
+export function computeWeeklySnapshot(dailyCandles: Candle[]): WeeklySnapshot | null {
+  const weekly = resampleWeekly(dailyCandles);
+  // ~25 weekly bars (~6 months) is the minimum for a meaningful EMA20/RSI14 read.
+  if (weekly.length < 25) return null;
+  const closes = weekly.map((c) => c.close);
+  const lows = weekly.map((c) => c.low);
+  const e20 = ema(closes, 20);
+  const r14 = rsi(closes, 14);
+  const closeW = closes[closes.length - 1];
+  const ema20W = lastDefined(e20);
+  const rsi14W = lastDefined(r14);
+  const aboveEma20W = ema20W != null && closeW > ema20W;
+  return {
+    closeW,
+    ema20W,
+    rsi14W,
+    aboveEma20W,
+    trendUpW: aboveEma20W && rsi14W != null && rsi14W > 50,
+    higherLowsW: higherLows(lows, weekly.length, 3),
+    barsW: weekly.length,
+  };
+}
+
 export interface IndicatorSnapshot {
   close: number;
   changePct: number | null;

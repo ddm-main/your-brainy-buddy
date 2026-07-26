@@ -96,15 +96,19 @@ export default function AutoTrade() {
 
   const toggleEnabled = () => {
     if (!settings) return;
+    // This is the one global switch gating live automated order placement
+    // for every armed rule — every other arm/disarm action on this page
+    // confirms; an accidental click here shouldn't be the exception.
+    if (!settings.enabled && !confirm("Enable AutoTrade? Armed rules will start placing real orders automatically.")) return;
     settingsMut.mutate({ enabled: !settings.enabled, ...(settings.enabled ? {} : { disabled_reason: null, disabled_at: null }) });
   };
 
   const saveCaps = () => {
     if (!caps) return;
     settingsMut.mutate({
-      max_capital_per_rule: Number(caps.max_capital_per_rule) || 0,
+      max_capital_per_rule: Math.max(0, Number(caps.max_capital_per_rule) || 0),
       max_open_positions: Math.max(1, Number(caps.max_open_positions) || 1),
-      daily_loss_limit: Number(caps.daily_loss_limit) || 0,
+      daily_loss_limit: Math.max(0, Number(caps.daily_loss_limit) || 0),
     });
     setCaps(null);
   };

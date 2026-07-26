@@ -6,8 +6,12 @@
 // Cron hits this every 5 min in the evening window; it no-ops once drained.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { istTradeDate, requireCronSecret } from "../_shared/market/cron.ts";
-import { computeSnapshot } from "../_shared/market/indicators.ts";
-import { breakoutScore, preBreakoutScore } from "../_shared/market/scoring.ts";
+import { computeSnapshot, computeWeeklySnapshot } from "../_shared/market/indicators.ts";
+import { vwap as vwapSeries, supertrend, mfi as mfiSeries, percentB, detectPatterns } from "../_shared/market/indicators-advanced.ts";
+import {
+  breakoutScore, preBreakoutScore, evaluateLiquidity, swingScore, intradayScore,
+  type AdvancedSignals,
+} from "../_shared/market/scoring.ts";
 import { getServiceProvider } from "../_shared/market/provider.ts";
 
 const CHUNK = 100;
@@ -34,7 +38,7 @@ Deno.serve(async (req) => {
     const cutoff = `${today}T00:00:00Z`; // one pass per IST day
 
     const { data: stocks, error } = await svc.from("market_stocks")
-      .select("symbol,exchange,yahoo_symbol,sector,last_price_sync_at,price_sync_attempts,price_sync_attempts_day")
+      .select("symbol,exchange,yahoo_symbol,sector,market_cap,last_price_sync_at,price_sync_attempts,price_sync_attempts_day")
       .eq("is_active", true)
       .eq("exchange", "NSE")
       .or(`last_price_sync_at.is.null,last_price_sync_at.lt.${cutoff}`)
@@ -95,10 +99,60 @@ Deno.serve(async (req) => {
           }));
           await svc.from("market_daily_prices").upsert(priceRows, { onConflict: "symbol,exchange,trade_date" });
 
+          // v3 — weekly confirmation (resampled from the same 2y daily candles
+          // already fetched, no new data source) + advanced signals
+          // (vwap/supertrend/mfi/%B/patterns — computed by indicators-advanced.ts
+          // since forever, never wired to anything until now).
+          const weekly = computeWeeklySnapshot(candles);
+          const vwapLast = vwapSeries(candles).at(-1) ?? null;
+          const st = supertrend(candles);
+          const supertrendDir = (st.dir.at(-1) ?? null) as 1 | -1 | null;
+          const mfi14 = mfiSeries(candles).at(-1) ?? null;
+          const bbPercentB = percentB(snap.close, snap.bbUpper, snap.bbLower);
+          const patternFlags = detectPatterns(candles);
+          const adv: AdvancedSignals = {
+            vwapRel: vwapLast != null && vwapLast !== 0 ? (snap.close - vwapLast) / vwapLast : null,
+            supertrendDir,
+            mfi14,
+            percentB: bbPercentB,
+            patterns: {
+              bullishEngulfing: patternFlags.bullish_engulfing,
+              bearishEngulfing: patternFlags.bearish_engulfing,
+              hammer: patternFlags.hammer,
+              shootingStar: patternFlags.shooting_star,
+              doji: patternFlags.doji,
+              cupAndHandle: patternFlags.cup_and_handle,
+              flag: patternFlags.flag,
+              ascendingTriangle: patternFlags.ascending_triangle,
+            },
+          };
+
+          // Liquidity gate — market_cap here is market_stocks' plain column
+          // (cheap, same-table), a cruder estimate than the screener view's
+          // multi-source fallback (consensus/shares-outstanding/fundamentals)
+          // but good enough for a pass/fail gate, not for display.
+          const avgTurnoverCr = snap.volAvg20 != null ? (snap.volAvg20 * snap.close) / 1e7 : null;
+          const liquidity = evaluateLiquidity({
+            close: snap.close,
+            marketCapCr: stock.market_cap != null ? Number(stock.market_cap) : null,
+            avgTurnoverCr,
+          });
+
           // Preliminary scores with neutral market context (finalized by aggregates)
           const ctx = { sectorStrength: null, regime: null, relStrengthNifty: null, deliveryPct: null };
           const bs = breakoutScore(snap, ctx);
           const ps = preBreakoutScore(snap, ctx);
+
+          // v3 — swing/intraday. This EOD pass has only the day's already-closed
+          // candle, so intraday_score here is "how strong was TODAY's now-closed
+          // session on an intraday-momentum basis" (real gap, full-day relVolume)
+          // — a persisted baseline. The genuinely live, time-of-day-normalized
+          // version is computed client-side during market hours (liveSnapshot.ts),
+          // never persisted.
+          const prevCandle = candles[candles.length - 2];
+          const gapPct = prevCandle?.close ? ((candles[candles.length - 1].open - prevCandle.close) / prevCandle.close) * 100 : null;
+          const sw = swingScore({ s: snap, ctx, weekly, adv, liquidity });
+          const is = intradayScore({ s: snap, ctx, adv, liquidity, relVolumeSoFar: null, gapPct });
 
           await svc.from("market_stock_scores").upsert({
             symbol: stock.symbol,
@@ -149,6 +203,24 @@ Deno.serve(async (req) => {
             breakout_score: bs.score,
             prebreakout_score: ps.score,
             score_components: { breakout: bs.components, prebreakout: ps.components },
+            // v3 additions — additive, breakout_score/prebreakout_score above unchanged.
+            weekly_close: weekly?.closeW ?? null,
+            weekly_ema20: weekly?.ema20W ?? null,
+            weekly_rsi14: weekly?.rsi14W ?? null,
+            weekly_trend_up: weekly?.trendUpW ?? null,
+            weekly_higher_lows: weekly?.higherLowsW ?? null,
+            vwap: vwapLast,
+            supertrend: st.line.at(-1) ?? null,
+            supertrend_dir: supertrendDir,
+            mfi14,
+            bb_percent_b: bbPercentB,
+            pattern_flags: patternFlags,
+            is_liquid_tradable: liquidity.ok,
+            liquidity_reasons: liquidity.reasons,
+            swing_score: sw.score,
+            swing_components: sw.components,
+            intraday_score: is.score,
+            intraday_components: is.components,
             computed_at: new Date().toISOString(),
           }, { onConflict: "symbol,exchange" });
 

@@ -20,7 +20,16 @@ export function FullscreenShell({
   useEffect(() => {
     if (!fullscreen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" || e.key === "f" || e.key === "F") onExit();
+      if (e.key !== "Escape" && e.key !== "f" && e.key !== "F") return;
+      // Same guard Analysis.tsx's own F-toggle uses — without it, typing
+      // "f" into an input (alert threshold, symbol search) open inside
+      // fullscreen unexpectedly exits fullscreen. Escape is exempted from
+      // the guard on inputs since closing a modal/blurring on Escape while
+      // fullscreen is still up is expected, not surprising.
+      const el = document.activeElement as HTMLElement | null;
+      const typing = el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+      if (typing && e.key !== "Escape") return;
+      onExit();
     };
     window.addEventListener("keydown", onKey);
     const prevBody = document.body.style.overflow;

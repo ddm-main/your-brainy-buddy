@@ -17,6 +17,7 @@ import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
 import type { Quote } from "@/lib/market/types";
 import { OrderTicket } from "@/components/market/OrderTicket";
 import { Return1DCell } from "@/components/hud/DataTable";
+import { PriceSourceChip } from "@/components/market/PriceSourceChip";
 
 type Item = { id: string; watchlist_id: string; symbol: string; exchange: string };
 type List = { id: string; name: string };
@@ -86,14 +87,14 @@ export function WatchlistPanel({
 
   const quoteKeys = useMemo(() => items.map((i) => `${i.exchange}:${i.symbol}`), [items]);
   useEffect(() => { subscribeSymbolsForTicks(quoteKeys); }, [quoteKeys]);
-  const { data: quotesData, isFetching: quotesFetching, refetch: refetchQuotes } = useQuotes(quoteKeys);
+  const { data: quotesData, dataUpdatedAt: quotesUpdatedAt, isFetching: quotesFetching, isError: quotesError, refetch: refetchQuotes } = useQuotes(quoteKeys);
   const restQuotes = useMemo(() => {
     const map: Record<string, Quote> = {};
     for (const q of quotesData?.quotes ?? []) map[quoteKey(q.exchange, q.symbol)] = q;
     return map;
   }, [quotesData]);
   const liveTicks = useLiveTickStore((s) => s.ticks);
-  const quotes = useMemo(() => mergeLiveQuotes(restQuotes, liveTicks), [restQuotes, liveTicks]);
+  const quotes = useMemo(() => mergeLiveQuotes(restQuotes, liveTicks, quotesUpdatedAt), [restQuotes, liveTicks, quotesUpdatedAt]);
 
   const addVerified = async (opt: SymbolOption) => {
     if (!activeId) return;
@@ -154,6 +155,7 @@ export function WatchlistPanel({
 
   const headerActions = (
     <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, justifyContent: "flex-end" }}>
+      <PriceSourceChip compact stale={quotesError} />
       <div style={{ width: 220 }}>
         <SymbolSearchInput value={newSym} onChange={setNewSym}
           placeholder={adding ? "adding…" : "Search & add symbol…"}

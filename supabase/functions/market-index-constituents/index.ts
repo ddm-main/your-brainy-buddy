@@ -2,6 +2,13 @@
 // niftyindices.com, persists them to market_index_members, and joins latest scores.
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
+import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
+
+// Every call re-runs persistMembers' delete+upsert against market_index_members
+// (and market_stocks/market_data) regardless of the 5-min CSV cache — worth
+// gating against a runaway/abusive client even though upstream scraping is
+// already capped by the in-memory cache.
+const limiter = createMarketLimiter(30, 60_000);
 
 const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" };
 
@@ -159,6 +166,7 @@ Deno.serve(async (req) => {
     } else {
       const auth = await requireUserId(req);
       if ("error" in auth) return new Response("unauthorized", { status: 401, headers: corsFor(req) });
+      const rl = limiter.guard(req, auth.userId); if (rl) return rl;
     }
 
     const { slug, all } = await req.json().catch(() => ({}));

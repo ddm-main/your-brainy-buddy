@@ -56,6 +56,12 @@ export class KotakError extends Error {
   }
 }
 
+// Thrown by withKotakSession(..., { retryOnAuthError: false }) when a 401/403
+// hits mid-request for an order-mutating call. Whether the order reached the
+// broker before the auth error is genuinely unknown — callers must NOT treat
+// this the same as a clean rejection (which is safe to let a caller retry).
+export class KotakAmbiguousOrderError extends KotakError {}
+
 // rate_limit column on market_api_settings documents the user's Kotak tier
 // but nothing enforces it client-side — Kotak's APIM gateway is the actual
 // throttle. On 429, back off and retry rather than surfacing an error (the
@@ -170,11 +176,29 @@ export async function kotakLogin(
 
 
 // Login using the stored TOTP secret (unattended path).
+// totp() generates a code for exactly the current 30s window with no
+// clock-skew tolerance. If the edge runtime's clock has drifted from
+// Kotak's server clock near a window boundary, the code we submit can land
+// in the wrong window and get rejected even though the secret itself is
+// fine. Since we're generating (not verifying) a code, there's no way to
+// know the skew direction in advance — try the adjacent windows before
+// giving up, mirroring the ±1-step tolerance a normal TOTP verifier would
+// apply. Runs at most once/day per user (market-kotak-refresh cron), so the
+// extra attempts on a real failure are negligible.
 export async function kotakAutoLogin(s: KotakSettings): Promise<KotakSession> {
   const secret = await dec(s.totp_secret_enc);
   if (!secret) throw new KotakError("TOTP secret not configured", 400);
-  const code = await totp(secret);
-  return kotakLogin(s, code);
+  const now = Date.now();
+  let lastErr: unknown;
+  for (const offsetMs of [0, -30_000, 30_000]) {
+    try {
+      const code = await totp(secret, { timeMs: now + offsetMs });
+      return await kotakLogin(s, code);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
 }
 
 async function sessionHeaders(s: KotakSettings): Promise<Record<string, string>> {
@@ -590,7 +614,7 @@ export async function persistSession(
 // the fresh tokens minted by the winner.
 const reloginLocks: Map<string, Promise<void>> = new Map();
 
-async function withReloginLock<T>(settingsId: string, fn: () => Promise<T>): Promise<T> {
+export async function withReloginLock<T>(settingsId: string, fn: () => Promise<T>): Promise<T> {
   const prev = reloginLocks.get(settingsId) ?? Promise.resolve();
   let release: () => void = () => {};
   const gate = new Promise<void>((r) => { release = r; });
@@ -604,11 +628,19 @@ export async function withKotakSession<T>(
   s: KotakSettings,
   encrypt: (v: string) => Promise<string>,
   fn: (s: KotakSettings) => Promise<T>,
+  opts: { retryOnAuthError?: boolean } = {},
 ): Promise<T> {
+  // retryOnAuthError=false for order-mutating calls (place/modify/cancel/
+  // convert): a 401 from Kotak's gateway doesn't reliably mean "the order
+  // wasn't accepted" — silently re-logging in and replaying the identical
+  // order body risks placing it twice. Reads default to true since retrying
+  // a GET is always safe.
+  const retryOnAuthError = opts.retryOnAuthError ?? true;
   try {
     return await fn(s);
   } catch (e) {
-    if (e instanceof KotakError && (e.status === 401 || e.status === 403) && s.totp_secret_enc) {
+    if (!(e instanceof KotakError) || (e.status !== 401 && e.status !== 403)) throw e;
+    if (retryOnAuthError && s.totp_secret_enc) {
       const fresh: KotakSettings = await withReloginLock(s.id, async () => {
         // Another concurrent call may have already refreshed the session
         // while we waited on the lock. Re-read; if the persisted token is
@@ -632,11 +664,15 @@ export async function withKotakSession<T>(
       });
       return await fn(fresh);
     }
-    if (e instanceof KotakError && (e.status === 401 || e.status === 403)) {
-      await svc
-        .from("market_api_settings")
-        .update({ connection_status: "expired", last_error: "Session expired — re-login required" })
-        .eq("id", s.id);
+    await svc
+      .from("market_api_settings")
+      .update({ connection_status: "expired", last_error: "Session expired — re-login required" })
+      .eq("id", s.id);
+    if (!retryOnAuthError) {
+      throw new KotakAmbiguousOrderError(
+        "Kotak session expired mid-request — this order may or may not have reached the broker. Check Orders/Trades before resubmitting; do not retry blindly. Reconnect Kotak in Market → Config once verified.",
+        e.status, e.body,
+      );
     }
     throw e;
   }

@@ -9,6 +9,7 @@
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { getActiveProvider, type FundsSnapshot } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
+import { KotakAmbiguousOrderError } from "../_shared/market/kotakClient.ts";
 import { z } from "npm:zod";
 
 const OrderSchema = z.object({
@@ -24,6 +25,11 @@ const OrderSchema = z.object({
   disclosedQuantity: z.number().int().nonnegative().optional(),
   amo: z.boolean().optional(),
   skipMarginCheck: z.boolean().optional(),
+  // Client-generated, stable across retries of the same order intent (see
+  // OrderTicket.tsx — regenerated only when the ticket is reopened for a
+  // new order). Lets a network-timeout retry or double-click be answered
+  // with the original result instead of placing the order twice.
+  idempotencyKey: z.string().min(8).max(128).optional(),
 });
 
 // 60 orders / minute per user — well beyond any human, catches runaway
@@ -68,10 +74,61 @@ Deno.serve(async (req) => {
   }
 
   const svc = svcClient();
+
+  // Idempotency: claim the intent before touching the broker. A repeat call
+  // with the same key either replays the stored result (already placed) or
+  // is rejected as still in-flight — it never reaches provider.placeOrder()
+  // twice.
+  let intentId: string | null = null;
+  if (input.idempotencyKey) {
+    const { data: inserted, error: insErr } = await svc
+      .from("market_order_intents")
+      .insert({ user_id: auth.userId, idempotency_key: input.idempotencyKey, request: input })
+      .select("id")
+      .single();
+    if (insErr) {
+      if (insErr.code === "23505") {
+        const { data: existing } = await svc
+          .from("market_order_intents")
+          .select("id,status,broker_order_id,broker_status")
+          .eq("user_id", auth.userId).eq("idempotency_key", input.idempotencyKey)
+          .maybeSingle();
+        if (existing?.status === "placed") {
+          return jsonResponse(req, { ok: true, order_id: existing.broker_order_id, status: existing.broker_status, replayed: true });
+        }
+        if (existing?.status === "pending") {
+          return errorResponse(req, "This order is already being placed — check Orders before resubmitting.", 409);
+        }
+        if (existing?.status === "ambiguous") {
+          return errorResponse(req, "The last attempt under this order ticket hit a session error mid-request and it's unknown whether the broker received it. Check Orders/Trades to confirm before placing a fresh order.", 409);
+        }
+        // status === "failed": the prior attempt never reached the broker
+        // (or was cleanly rejected before placement); legitimate to retry
+        // under the same key. Re-claim it.
+        if (existing) {
+          await svc.from("market_order_intents").update({ status: "pending", error: null }).eq("id", existing.id);
+          intentId = existing.id;
+        }
+      } else {
+        return errorResponse(req, "Could not record order intent — try again.", 502);
+      }
+    } else {
+      intentId = inserted.id;
+    }
+  }
+
+  // Any early return past this point that isn't a successful placement must
+  // release the intent row (mark it 'failed') so a legitimate retry under
+  // the same key isn't blocked forever by a row stuck 'pending'.
+  const failIntent = async (message: string, status: number) => {
+    if (intentId) await svc.from("market_order_intents").update({ status: "failed", error: message }).eq("id", intentId);
+    return errorResponse(req, message, status);
+  };
+
   try {
     const { provider } = await getActiveProvider(svc, auth.userId);
     if (provider.name !== "kotak_neo") {
-      return errorResponse(req, "Order placement requires an active Kotak Neo connection. Connect it in Market → Config.", 400);
+      return await failIntent("Order placement requires an active Kotak Neo connection. Connect it in Market → Config.", 400);
     }
 
     // Funds guardrail — buys only. Uses today's snapshot; refreshes if missing/stale.
@@ -106,7 +163,7 @@ Deno.serve(async (req) => {
         const notional = input.quantity * refPrice;
         const marginNeeded = notional / leverage;
         if (funds?.available_margin != null && funds.available_margin > 0 && marginNeeded > funds.available_margin) {
-          return errorResponse(req, `Insufficient margin: ${input.product} order needs ₹${marginNeeded.toFixed(0)} (notional ₹${notional.toFixed(0)} at ${leverage}× leverage) but only ₹${funds.available_margin.toFixed(0)} available. Set skipMarginCheck to override.`, 400);
+          return await failIntent(`Insufficient margin: ${input.product} order needs ₹${marginNeeded.toFixed(0)} (notional ₹${notional.toFixed(0)} at ${leverage}× leverage) but only ₹${funds.available_margin.toFixed(0)} available. Set skipMarginCheck to override.`, 400);
         }
       }
     }
@@ -124,8 +181,18 @@ Deno.serve(async (req) => {
       disclosedQuantity: input.disclosedQuantity,
       amo: input.amo,
     });
+    if (intentId) {
+      await svc.from("market_order_intents")
+        .update({ status: "placed", broker_order_id: result.orderId, broker_status: result.status })
+        .eq("id", intentId);
+    }
     return jsonResponse(req, { ok: true, order_id: result.orderId, status: result.status });
   } catch (e) {
-    return errorResponse(req, e instanceof Error ? e.message : String(e), 502);
+    const message = e instanceof Error ? e.message : String(e);
+    if (e instanceof KotakAmbiguousOrderError) {
+      if (intentId) await svc.from("market_order_intents").update({ status: "ambiguous", error: message }).eq("id", intentId);
+      return errorResponse(req, message, 502);
+    }
+    return await failIntent(message, 502);
   }
 });

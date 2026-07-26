@@ -4,8 +4,9 @@
 // structured recommendation (buy/hold/wait/avoid + entry/SL/targets/rationale).
 // Cached in memory table `market_stock_ai` with 6h TTL — see the migration
 // that adds that table. This function creates the row on first hit.
-import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
+import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient, SHARED_CACHE_USER_ID } from "../_shared/market/common.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
+import { sanitizeAiTrade } from "../_shared/market/aiTradeValidation.ts";
 
 // Fast, cheap default with a stronger fallback. `openai/gpt-5.5` (the old
 // value) is NOT a valid Lovable AI Gateway model id and every call was 400ing
@@ -28,6 +29,7 @@ interface AiPayload {
   holding_period_days: number | null;
   rationale: string;              // 2–4 sentences
   risks: string[];                // short bullets
+  plausibility_flags?: string[];  // entry/stop_loss/target fields dropped by sanitizeAiTrade
 }
 
 const SYSTEM = `You are JARVIS, Deepak's Indian equities trading analyst.
@@ -117,6 +119,7 @@ function normalizeAiPayload(p: any): AiPayload {
     holding_period_days: p.holding_period_days ?? p.holdingPeriodDays ?? null,
     rationale: String(p.rationale ?? p.reasoning ?? "").slice(0, 600),
     risks: Array.isArray(p.risks) ? p.risks.slice(0, 4).map((r: unknown) => String(r).slice(0, 160)) : [],
+    plausibility_flags: Array.isArray(p.plausibility_flags) ? p.plausibility_flags.map((f: unknown) => String(f)) : undefined,
   };
 }
 
@@ -146,6 +149,22 @@ Deno.serve(async (req) => {
       if (cached && Date.now() - new Date(cached.computed_at).getTime() < TTL_MS) {
         return jsonResponse(req, { payload: normalizeAiPayload(cached.payload), cached: true, computed_at: cached.computed_at });
       }
+      // The nightly cron (market-ai-recommend) already scores every symbol
+      // under SHARED_CACHE_USER_ID — check that before spending a fresh LLM
+      // call. Previously these two paths never shared a cache at all: an
+      // on-demand click re-paid for a symbol the nightly job scored hours
+      // earlier, and the two payload shapes could disagree on verdict for
+      // the same symbol at the same time. normalizeAiPayload already
+      // reconciles the shape difference (recommendation/entry_price vs
+      // verdict/entry).
+      const { data: sharedCached } = await svc.from("market_stock_ai")
+        .select("payload, computed_at")
+        .eq("user_id", SHARED_CACHE_USER_ID).eq("symbol", symbol).eq("exchange", exchange)
+        .order("computed_at", { ascending: false })
+        .limit(1).maybeSingle();
+      if (sharedCached && Date.now() - new Date(sharedCached.computed_at).getTime() < TTL_MS) {
+        return jsonResponse(req, { payload: normalizeAiPayload(sharedCached.payload), cached: true, computed_at: sharedCached.computed_at });
+      }
     }
 
     const { data: score } = await svc.from("market_stock_scores")
@@ -174,7 +193,13 @@ ${fund?.payload ? `\nFundamentals: ${JSON.stringify(fund.payload).slice(0, 800)}
     const apiKey = Deno.env.get("LOVABLE_API_KEY");
     if (!apiKey) return errorResponse(req, "LOVABLE_API_KEY not configured", 500);
 
-    const payload = await callAi(apiKey, prompt);
+    const raw = await callAi(apiKey, prompt);
+    const closePrice = score.close != null ? Number(score.close) : null;
+    const sane = sanitizeAiTrade({ verdict: raw.verdict, entry: raw.entry, stop_loss: raw.stop_loss, targets: raw.targets }, closePrice);
+    const payload: AiPayload = {
+      ...raw, entry: sane.entry, stop_loss: sane.stop_loss, targets: sane.targets,
+      plausibility_flags: sane.flags.length ? sane.flags : undefined,
+    };
     const computed_at = new Date().toISOString();
     // Upsert on the unique (user_id, symbol, exchange) index so the cache
     // table stays one-row-per-user-per-stock instead of growing forever.

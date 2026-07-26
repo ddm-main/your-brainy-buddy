@@ -618,6 +618,10 @@ export function ad(candles: CandleDto[]): Num[] {
 export function aroon(candles: CandleDto[], period = 14): { up: Num[]; down: Num[] } {
   const n = candles.length;
   const up: Num[] = new Array(n).fill(null), down: Num[] = new Array(n).fill(null);
+  // Divides by (period - 1) below — period=1 (e.g. a saved layout from
+  // before the picker enforced a min of 2) would produce NaN/Infinity for
+  // every bar rather than a merely-degenerate-but-finite result.
+  if (period < 2) return { up, down };
   // Window is exactly `period` bars (TradingView convention).
   for (let i = period - 1; i < n; i++) {
     let hi = -Infinity, lo = Infinity, hIdx = i, lIdx = i;

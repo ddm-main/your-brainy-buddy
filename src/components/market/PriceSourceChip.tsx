@@ -10,11 +10,17 @@
 // once at the app shell. Panels just render this chip.
 import { useLiveTickStore } from "@/lib/market/liveTickStore";
 
-export function PriceSourceChip({ compact = false }: { compact?: boolean }) {
+export function PriceSourceChip({ compact = false, stale = false }: { compact?: boolean; stale?: boolean }) {
   const connected = useLiveTickStore((s) => s.connected);
   const relayAlive = useLiveTickStore((s) => s.relayAlive);
 
-  const { label, tone } = relayAlive
+  // `stale` — caller-supplied: the REST quote/index query it's paired with
+  // is in react-query error state. Previously nothing surfaced this; a
+  // failing market-quotes call just froze the last good price forever with
+  // no visible signal. Takes priority over the relay-derived label.
+  const { label, tone } = stale
+    ? { label: "stale", tone: "var(--err, #ef4444)" }
+    : relayAlive
     ? { label: "push · kotak", tone: "var(--ok)" }
     : connected
     ? { label: "live · kotak", tone: "var(--accent-soft)" }
@@ -24,7 +30,9 @@ export function PriceSourceChip({ compact = false }: { compact?: boolean }) {
     <span
       className="hud-label"
       title={
-        relayAlive
+        stale
+          ? "Price refresh is failing — the value shown is the last one that loaded successfully."
+          : relayAlive
           ? "Relay is pushing live ticks over Realtime."
           : connected
           ? "Realtime channel joined; waiting for relay ticks. Prices refresh via REST."

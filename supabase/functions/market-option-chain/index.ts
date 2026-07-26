@@ -6,6 +6,12 @@
 // approximation (Indian equities' dividend yields are small; for index
 // options this is standard practice on Kite/Streak too).
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
+import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
+
+// Scrapes nseindia.com per request (session-cookie priming + fetch) — a
+// tighter ceiling than the batch-quote endpoints since runaway polling here
+// risks NSE IP-blocking, not just wasted Kotak/Yahoo quota.
+const limiter = createMarketLimiter(30, 60_000);
 
 const HEADERS: HeadersInit = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
@@ -114,6 +120,7 @@ Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
   const auth = await requireUserId(req);
   if ("error" in auth) return new Response("unauthorized", { status: 401, headers: corsFor(req) });
+  const rl = limiter.guard(req, auth.userId); if (rl) return rl;
 
   try {
     const b = await req.json().catch(() => ({}));
@@ -150,7 +157,11 @@ Deno.serve(async (req) => {
       await svc.from("market_option_chain_snapshots").insert({
         user_id: auth.userId,
         symbol,
-        expiry: new Date(chosenExpiry).toISOString().slice(0, 10),
+        // Explicit IST offset (same anchor as yearsToExpiry) — parsing
+        // "25-Jul-2026" with implicit local-runtime-TZ (as this line
+        // previously did) can shift the persisted date by one day
+        // depending on the edge runtime's default timezone.
+        expiry: new Date(chosenExpiry + " 15:30:00 GMT+0530").toISOString().slice(0, 10),
         underlying_price: underlying || null,
         payload: { rows, pcr, total_call_oi: totalCallOI, total_put_oi: totalPutOI },
       });

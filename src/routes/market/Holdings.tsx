@@ -1,6 +1,6 @@
 // Market Holdings — manual CRUD + Kotak sync + live quotes
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { HudModal } from "@/components/hud/HudModal";
@@ -29,6 +29,7 @@ type ScoreMap = Record<string, { breakout_score: number | null; prebreakout_scor
 const empty = { symbol: "", exchange: "NSE", quantity: "", avg_price: "", buy_date: "", investment_type: "long_term", notes: "" };
 
 export default function Holdings() {
+  const nav = useNavigate();
   const push = useUi((s) => s.push);
   const qc = useQueryClient();
   const { data: rows = [] } = useHoldings();
@@ -78,14 +79,14 @@ export default function Holdings() {
   // Live quotes: same shared 1s market-hours hook every other page uses.
   const quoteKeys = useMemo(() => rows.map((h) => `${h.exchange}:${h.symbol}`), [rows]);
   useEffect(() => { subscribeSymbolsForTicks(quoteKeys); }, [quoteKeys]);
-  const { data: quotesData, isFetching: quotesFetching, refetch: refetchQuotes } = useQuotes(quoteKeys);
+  const { data: quotesData, dataUpdatedAt: quotesUpdatedAt, isFetching: quotesFetching, refetch: refetchQuotes } = useQuotes(quoteKeys);
   const restQuotes = useMemo(() => {
     const map: Record<string, import("@/lib/market/types").Quote> = {};
     for (const q of quotesData?.quotes ?? []) map[quoteKey(q.exchange, q.symbol)] = q;
     return map;
   }, [quotesData]);
   const liveTicks = useLiveTickStore((s) => s.ticks);
-  const quotes = useMemo(() => mergeLiveQuotes(restQuotes, liveTicks), [restQuotes, liveTicks]);
+  const quotes = useMemo(() => mergeLiveQuotes(restQuotes, liveTicks, quotesUpdatedAt), [restQuotes, liveTicks, quotesUpdatedAt]);
 
   const add = async () => {
     if (!form.symbol.trim() || !form.quantity || !form.avg_price) { push("Symbol, quantity, avg price required", "warn"); return; }
@@ -274,7 +275,7 @@ export default function Holdings() {
                       })()}
                     </td>
                     <td style={td}>
-                      <ScoreBadge score={scores[quoteKey(h.exchange, h.symbol)]?.breakout_score} components={scores[quoteKey(h.exchange, h.symbol)]?.score_components?.breakout} label="breakout components" />
+                      <ScoreBadge score={scores[quoteKey(h.exchange, h.symbol)]?.breakout_score} components={scores[quoteKey(h.exchange, h.symbol)]?.score_components?.breakout} label="breakout components" onClick={() => nav(`/market/ai/${h.symbol}`)} />
                     </td>
                     <td style={td}><Chip tone={q?.stale ? "warn" : h.source === "manual" ? "neutral" : "accent"}>{q?.stale ? "stale" : h.source}</Chip></td>
                     <td style={td}>

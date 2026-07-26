@@ -6,6 +6,9 @@
 // Reads from public.market_index_watch; falls back to a default 6 when empty.
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { getActiveProvider } from "../_shared/market/provider.ts";
+import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
+
+const limiter = createMarketLimiter(300, 60_000);
 
 const DEFAULTS = [
   { symbol: "^NSEI",               name: "Nifty 50",   region: "IN", nse_symbol: "NIFTY",     fno_enabled: true,  constituents_slug: "nifty50" },
@@ -21,6 +24,7 @@ Deno.serve(async (req) => {
   try {
     const auth = await requireUserId(req);
     if ("error" in auth) return new Response("unauthorized", { status: 401, headers: corsFor(req) });
+    const rl = limiter.guard(req, auth.userId); if (rl) return rl;
 
     const svc = svcClient();
     const [watchRes, breadthRes] = await Promise.all([

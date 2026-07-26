@@ -3,7 +3,7 @@
 // authenticated user for their own row ("Refresh session" button).
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
-import { KOTAK_SETTINGS_COLS, type KotakSettings, KotakError, kotakAutoLogin, persistSession } from "../_shared/market/kotakClient.ts";
+import { KOTAK_SETTINGS_COLS, type KotakSettings, KotakError, kotakAutoLogin, persistSession, withReloginLock } from "../_shared/market/kotakClient.ts";
 import { encryptValue } from "../_shared/market/provider.ts";
 
 Deno.serve(async (req) => {
@@ -33,7 +33,12 @@ Deno.serve(async (req) => {
     const results: Array<{ user_id: string; ok: boolean; error?: string; greeting_name?: string | null }> = [];
     for (const row of (data ?? []) as KotakSettings[]) {
       try {
-        const sess = await kotakAutoLogin(row);
+        // Same per-settings-row mutex withKotakSession's 401 auto-relogin
+        // uses — without it, this cron sweep and a user-triggered
+        // market-kotak-login-start for the same row could both log in
+        // concurrently and race to persist the session (last write wins,
+        // no optimistic concurrency check).
+        const sess = await withReloginLock(row.id, () => kotakAutoLogin(row));
         await persistSession(svc, row, sess, encryptValue);
         results.push({ user_id: row.user_id, ok: true, greeting_name: sess.greetingName });
       } catch (e) {

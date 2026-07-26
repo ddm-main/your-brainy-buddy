@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "./api";
+import { nseOpenNow } from "./liveTickStore";
 import type {
   ApiSettings,
   BreadthDaily,
@@ -19,12 +20,10 @@ import type {
   TopMoverRow,
 } from "./types";
 
-// NSE market hours (IST 09:15–15:30) ≈ UTC 03:45–10:00 — poll faster during them.
+// NSE market hours (IST 09:15–15:30) — poll faster during them. See
+// nseOpenNow() in liveTickStore.ts, the single shared implementation.
 export function marketOpen(): boolean {
-  const now = new Date();
-  const utcMin = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const day = now.getUTCDay();
-  return day >= 1 && day <= 5 && utcMin >= 225 && utcMin <= 600;
+  return nseOpenNow();
 }
 
 // Brief window right after close where we keep slow-polling to catch the

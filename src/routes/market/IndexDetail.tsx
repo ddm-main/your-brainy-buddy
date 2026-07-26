@@ -344,6 +344,7 @@ function FnOPanel({ nseSymbol }: { nseSymbol: string }) {
 }
 
 function ConstituentsPanel({ slug, onRow }: { slug: string; onRow: (sym: string) => void }) {
+  const nav = useNavigate();
   const { data, isLoading } = useIndexConstituents(slug);
   const members = data?.members ?? [];
 
@@ -392,8 +393,8 @@ function ConstituentsPanel({ slug, onRow }: { slug: string; onRow: (sym: string)
     { header: "RVol", accessorKey: "rel_volume", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue(), 1) },
     { header: "RSI", accessorKey: "rsi14", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue(), 0) },
     { header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },
-      cell: ({ getValue }) => <ScoreBadge score={getValue() as number | null} label="breakout score" /> },
-  ], [liveByKey]);
+      cell: ({ row }) => <ScoreBadge score={row.original.breakout_score as number | null} label="breakout score" onClick={() => nav(`/market/ai/${row.original.symbol}`)} /> },
+  ], [liveByKey, nav]);
 
   return (
     <HudPanel flow title="Constituents" index="MK.IDX.M">
