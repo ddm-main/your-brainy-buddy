@@ -5,7 +5,7 @@
 // separate workers reading unfired events; this fn only detects and records.
 import { corsFor, preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret, istTradeDate, isTradingHoliday } from "../_shared/market/cron.ts";
-import { getActiveProvider } from "../_shared/market/provider.ts";
+import { getReadProvider } from "../_shared/market/provider.ts";
 
 function marketOpenNow(): boolean {
   const d = new Date();
@@ -41,7 +41,7 @@ Deno.serve(async (req) => {
     for (const [userId, userAlerts] of byUser) {
       const keys = [...new Set(userAlerts.map((a) => `${a.exchange}:${a.symbol}`))];
       try {
-        const { provider } = await getActiveProvider(svc, userId);
+        const { provider } = await getReadProvider(svc, userId);
         const rows = await provider.getQuotes(keys);
         for (const r of rows) {
           const [exchange, symbol] = r.key.split(":");
