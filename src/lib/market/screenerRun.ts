@@ -190,153 +190,198 @@ async function resolveUniverseFilter(
   return fetchIndexMemberSet(key);
 }
 
-export function useScreenerData(universe: UniverseId, enabled = true) {
+function toScreenerRow(s: any, idxSets: { NIFTY50: Set<string>; BANKNIFTY: Set<string>; FINNIFTY: Set<string> }): ScreenerRow {
+  const num = (v: any): number | null => (v == null || Number.isNaN(Number(v))) ? null : Number(v);
+  return {
+    symbol: s.symbol,
+    exchange: s.exchange,
+    trade_date: s.trade_date ?? null,
+    sector:       s.sector ?? null,
+    sub_sector:   s.sub_sector ?? s.industry ?? s.sector ?? null,
+    company_name: s.company_name ?? null,
+    market_cap:   num(s.market_cap),
+    is_nifty500:  Boolean(s.is_nifty500),
+    industry:     s.industry ?? null,
+    data_provenance: s.data_provenance ?? null,
+    in_nifty50:   idxSets.NIFTY50.has(s.symbol),
+    in_banknifty: idxSets.BANKNIFTY.has(s.symbol),
+    in_finnifty:  idxSets.FINNIFTY.has(s.symbol),
+    instrument_type:   s.instrument_type ?? null,
+
+    ltp:               num(s.close ?? s.ltp),
+    previous_close:    num(s.previous_close),
+    change_abs:        num(s.change_abs),
+    change_pct:        num(s.change_pct),
+    change_pct_raw:    (() => {
+      const close = num(s.close ?? s.ltp);
+      const prev = num(s.previous_close);
+      if (close == null || prev == null || prev <= 0) return num(s.change_pct);
+      return ((close - prev) / prev) * 100;
+    })(),
+
+    pe:                num(s.pe_ttm ?? s.pe),
+    pb:                num(s.pb),
+    peg:               num(s.peg),
+    eps:               num(s.eps_ttm ?? s.eps),
+    book_value:        num(s.book_value),
+    dividend_yield:    num(s.dividend_yield),
+    roe:               num(s.roe),
+    roce:              num(s.roce),
+    debt_equity:       num(s.debt_to_equity ?? s.debt_equity),
+    current_ratio:     num(s.current_ratio),
+    quick_ratio:       num(s.quick_ratio),
+    sales:             num(s.revenue_ttm_cr ?? s.sales),
+    net_profit:        num(s.profit_ttm_cr ?? s.net_profit),
+    sales_growth:      num(s.revenue_growth_yoy ?? s.sales_growth),
+    profit_growth:     num(s.profit_growth_yoy ?? s.profit_growth),
+    eps_growth:        num(s.eps_growth_yoy ?? s.eps_growth),
+    promoter_holding:  num(s.promoter_holding),
+    dii_holding:       num(s.dii_holding),
+    fii_holding:       num(s.fii_holding),
+    institutional_holding: (() => {
+      const d = num(s.dii_holding);
+      const f = num(s.fii_holding);
+      if (d == null && f == null) return null;
+      return (d ?? 0) + (f ?? 0);
+    })(),
+    high_52w:          num(s.high_52w),
+    low_52w:           num(s.low_52w),
+    ret_5d:            num(s.ret_5d),
+    ret_21d:           num(s.ret_21d),
+    ret_ytd:           num(s.ret_ytd),
+    fno_enabled:       s.fno_enabled ?? null,
+    sme:               s.sme ?? null,
+
+    volume:            num(s.volume),
+    rel_volume:        num(s.rel_volume),
+    vol_avg30:         num(s.vol_avg30),
+    vol_gt_avg30:      s.vol_gt_avg30 ?? null,
+
+    ema_20:            num(s.ema20 ?? s.ema_20),
+    ema_50:            num(s.ema50 ?? s.ema_50),
+    ema_100:           num(s.ema100 ?? s.ema_100),
+    ema_200:           num(s.ema200 ?? s.ema_200),
+    rsi:               num(s.rsi14 ?? s.rsi),
+    macd:              num(s.macd),
+    macd_signal:       num(s.macd_signal),
+    macd_hist:         num(s.macd_hist),
+    adx:               num(s.adx14 ?? s.adx),
+    atr:               num(s.atr14 ?? s.atr),
+    atr_pct:           num(s.atr_pct),
+    bb_upper:          num(s.bb_upper),
+    bb_lower:          num(s.bb_lower),
+    bb_width:          num(s.bb_width),
+    bb_squeeze:        s.bb_squeeze ?? null,
+    pct_from_52w_high: num(s.pct_from_52w_high),
+    above_ema_200:     s.above_ema200 ?? s.above_ema_200 ?? null,
+    higher_lows:       s.higher_lows ?? null,
+    near_resistance:   s.near_resistance ?? null,
+    resistance_level:  num(s.resistance_level),
+    support_level:     num(s.support_level),
+    sector_strength:   num(s.sector_strength),
+    rel_strength_nifty: num(s.rel_strength_nifty),
+    breakout_score:    s.breakout_score ?? null,
+    prebreakout_score: s.prebreakout_score ?? null,
+    score_components:  s.score_components ?? null,
+    swing_score:        s.swing_score ?? null,
+    swing_components:   s.swing_components ?? null,
+    intraday_score:      s.intraday_score ?? null,
+    intraday_components: s.intraday_components ?? null,
+    avg_turnover_cr:     num(s.avg_turnover_cr),
+    is_liquid_tradable:  s.is_liquid_tradable ?? null,
+  };
+}
+
+async function fetchIndexMembershipSets(symbols: string[]) {
+  const idxSets = { NIFTY50: new Set<string>(), BANKNIFTY: new Set<string>(), FINNIFTY: new Set<string>() };
+  for (let i = 0; i < symbols.length; i += 500) {
+    const slice = symbols.slice(i, i + 500);
+    const { data } = await supabase
+      .from("market_index_members")
+      .select("symbol, index_key")
+      .in("symbol", slice)
+      .in("index_key", ["NIFTY50", "BANKNIFTY", "FINNIFTY"]);
+    (data ?? []).forEach((m: any) => {
+      const k = m.index_key as keyof typeof idxSets;
+      if (idxSets[k]) idxSets[k].add(m.symbol);
+    });
+  }
+  return idxSets;
+}
+
+/** Coverage/date metadata returned by the back-date run. `as_of` is the
+ *  trading session actually used (the requested date snaps back over
+ *  weekends/holidays); the skip counts explain any shortfall vs the universe. */
+export interface AsofMeta {
+  as_of: string;
+  requested_as_of: string;
+  earliest_as_of: string | null;
+  universe_size: number;
+  count: number;
+  skipped_no_history: number;
+  skipped_short_history: number;
+}
+
+const asofMetaCache = new Map<string, AsofMeta>();
+const asofKey = (universe: UniverseId, asOf: string) => `${universe}|${asOf}`;
+
+/** Read the metadata of the most recent back-date run for this universe/date.
+ *  Populated by `useScreenerData`'s query function. */
+export function getAsofMeta(universe: UniverseId, asOf: string | null): AsofMeta | null {
+  if (!asOf) return null;
+  return asofMetaCache.get(asofKey(universe, asOf)) ?? null;
+}
+
+export function useScreenerData(universe: UniverseId, asOfDate: string | null = null, enabled = true) {
   return useQuery({
-    queryKey: ["market", "screener-rows-v3", universe],
+    queryKey: ["market", "screener-rows-v3", universe, asOfDate ?? "latest"],
     queryFn: async (): Promise<ScreenerRow[]> => {
+      // Back-date branch — delegate compute to the edge function.
+      if (asOfDate) {
+        const { data, error } = await supabase.functions.invoke("market-screener-asof", {
+          body: { as_of: asOfDate, universe },
+        });
+        // functions.invoke surfaces a generic FunctionsHttpError; the useful
+        // message (e.g. "history starts 2024-07-18") is in the JSON body.
+        if (error) {
+          const detail = await (error as any)?.context?.json?.().catch(() => null);
+          throw new Error(detail?.error ?? error.message);
+        }
+        const payload = data as any;
+        if (payload?.error) throw new Error(payload.error);
+        asofMetaCache.set(asofKey(universe, asOfDate), {
+          as_of: payload?.as_of ?? asOfDate,
+          requested_as_of: payload?.requested_as_of ?? asOfDate,
+          earliest_as_of: payload?.earliest_as_of ?? null,
+          universe_size: Number(payload?.universe_size ?? 0),
+          count: Number(payload?.count ?? 0),
+          skipped_no_history: Number(payload?.skipped_no_history ?? 0),
+          skipped_short_history: Number(payload?.skipped_short_history ?? 0),
+        });
+        const rows: any[] = payload?.rows ?? [];
+        if (rows.length === 0) return [];
+        const idxSets = await fetchIndexMembershipSets(rows.map((r) => r.symbol));
+        return rows.map((r) => toScreenerRow(r, idxSets));
+      }
+
+      // Live/latest branch — existing fast path.
       const [universeSet, allRows] = await Promise.all([
         resolveUniverseFilter(universe),
         fetchScreenerRows(),
       ]);
       const filtered = applyUniverseFilter(allRows, universeSet);
       if (filtered.length === 0) return [];
-      const symbols = filtered.map((r) => r.symbol);
-
-      // Batch index memberships
-      const members: any[] = [];
-      for (let i = 0; i < symbols.length; i += 500) {
-        const slice = symbols.slice(i, i + 500);
-        const { data } = await supabase
-          .from("market_index_members")
-          .select("symbol, index_key")
-          .in("symbol", slice)
-          .in("index_key", ["NIFTY50", "BANKNIFTY", "FINNIFTY"]);
-        members.push(...(data ?? []));
-      }
-      const idxSets = { NIFTY50: new Set<string>(), BANKNIFTY: new Set<string>(), FINNIFTY: new Set<string>() };
-      members.forEach((m: any) => {
-        const k = m.index_key as keyof typeof idxSets;
-        if (idxSets[k]) idxSets[k].add(m.symbol);
-      });
-
-      const num = (v: any): number | null => (v == null || Number.isNaN(Number(v))) ? null : Number(v);
-      return filtered.map((s): ScreenerRow => ({
-        symbol: s.symbol,
-        exchange: s.exchange,
-        trade_date: s.trade_date ?? null,
-        sector:       s.sector ?? null,
-        sub_sector:   s.sub_sector ?? s.industry ?? s.sector ?? null,
-        company_name: s.company_name ?? null,
-        market_cap:   num(s.market_cap),
-        is_nifty500:  Boolean(s.is_nifty500),
-        industry:     s.industry ?? null,
-        data_provenance: s.data_provenance ?? null,
-        in_nifty50:   idxSets.NIFTY50.has(s.symbol),
-        in_banknifty: idxSets.BANKNIFTY.has(s.symbol),
-        in_finnifty:  idxSets.FINNIFTY.has(s.symbol),
-        // Preserve NULL so unknown-type rows are scoped as "all" only,
-        // never silently pulled into equity-only coverage denominators.
-        instrument_type:   s.instrument_type ?? null,
-
-        // view uses `close`; client model uses `ltp`
-        ltp:               num(s.close ?? s.ltp),
-        previous_close:    num(s.previous_close),
-        change_abs:        num(s.change_abs),
-        change_pct:        num(s.change_pct),
-        change_pct_raw:    (() => {
-          const close = num(s.close ?? s.ltp);
-          const prev = num(s.previous_close);
-          if (close == null || prev == null || prev <= 0) return num(s.change_pct);
-          return ((close - prev) / prev) * 100;
-        })(),
-
-        // view uses `pe_ttm`, `eps_ttm`, `debt_to_equity`, `*_growth_yoy`
-        pe:                num(s.pe_ttm ?? s.pe),
-        pb:                num(s.pb),
-        peg:               num(s.peg),
-        eps:               num(s.eps_ttm ?? s.eps),
-        book_value:        num(s.book_value),
-        dividend_yield:    num(s.dividend_yield),
-        roe:               num(s.roe),
-        roce:              num(s.roce),
-        debt_equity:       num(s.debt_to_equity ?? s.debt_equity),
-        current_ratio:     num(s.current_ratio),
-        quick_ratio:       num(s.quick_ratio),
-        sales:             num(s.revenue_ttm_cr ?? s.sales),
-        net_profit:        num(s.profit_ttm_cr ?? s.net_profit),
-        sales_growth:      num(s.revenue_growth_yoy ?? s.sales_growth),
-        profit_growth:     num(s.profit_growth_yoy ?? s.profit_growth),
-        eps_growth:        num(s.eps_growth_yoy ?? s.eps_growth),
-        promoter_holding:  num(s.promoter_holding),
-        // Keep DII and FII strictly separate — silently substituting FII when
-        // DII is null misrepresents the column. Callers wanting a combined
-        // figure should sum explicitly (see `institutional_holding` below).
-        dii_holding:       num(s.dii_holding),
-        fii_holding:       num(s.fii_holding),
-        institutional_holding: (() => {
-          const d = num(s.dii_holding);
-          const f = num(s.fii_holding);
-          if (d == null && f == null) return null;
-          return (d ?? 0) + (f ?? 0);
-        })(),
-        high_52w:          num(s.high_52w),
-        low_52w:           num(s.low_52w),
-        ret_5d:            num(s.ret_5d),
-        ret_21d:           num(s.ret_21d),
-        ret_ytd:           num(s.ret_ytd),
-        fno_enabled:       s.fno_enabled ?? null,
-        sme:               s.sme ?? null,
-
-        // view uses `rsi14`, `adx14`, `atr14`, `ema20`..`ema200`
-        volume:            num(s.volume),
-        rel_volume:        num(s.rel_volume),
-        vol_avg30:         num(s.vol_avg30),
-        // Trust the view's own computed value (market_screener_rows already
-        // derives this from the same volume/vol_avg30 columns) instead of a
-        // third independent re-derivation — this, a since-superseded SQL
-        // migration, and the view were three separate implementations of
-        // the same boolean, a drift risk if any one of them changes.
-        vol_gt_avg30:      s.vol_gt_avg30 ?? null,
-
-        ema_20:            num(s.ema20 ?? s.ema_20),
-        ema_50:            num(s.ema50 ?? s.ema_50),
-        ema_100:           num(s.ema100 ?? s.ema_100),
-        ema_200:           num(s.ema200 ?? s.ema_200),
-        rsi:               num(s.rsi14 ?? s.rsi),
-        macd:              num(s.macd),
-        macd_signal:       num(s.macd_signal),
-        macd_hist:         num(s.macd_hist),
-        adx:               num(s.adx14 ?? s.adx),
-        atr:               num(s.atr14 ?? s.atr),
-        atr_pct:           num(s.atr_pct),
-        bb_upper:          num(s.bb_upper),
-        bb_lower:          num(s.bb_lower),
-        bb_width:          num(s.bb_width),
-        bb_squeeze:        s.bb_squeeze ?? null,
-        pct_from_52w_high: num(s.pct_from_52w_high),
-        above_ema_200:     s.above_ema200 ?? s.above_ema_200 ?? null,
-        higher_lows:       s.higher_lows ?? null,
-        near_resistance:   s.near_resistance ?? null,
-        resistance_level:  num(s.resistance_level),
-        support_level:     num(s.support_level),
-        sector_strength:   num(s.sector_strength),
-        rel_strength_nifty: num(s.rel_strength_nifty),
-        breakout_score:    s.breakout_score ?? null,
-        prebreakout_score: s.prebreakout_score ?? null,
-        score_components:  s.score_components ?? null,
-        swing_score:        s.swing_score ?? null,
-        swing_components:   s.swing_components ?? null,
-        intraday_score:      s.intraday_score ?? null,
-        intraday_components: s.intraday_components ?? null,
-        avg_turnover_cr:     num(s.avg_turnover_cr),
-        is_liquid_tradable:  s.is_liquid_tradable ?? null,
-      }));
-
+      const idxSets = await fetchIndexMembershipSets(filtered.map((s) => s.symbol));
+      return filtered.map((s) => toScreenerRow(s, idxSets));
     },
-    staleTime: 60_000,
+    // A back-date run is deterministic and expensive — cache it for the session.
+    staleTime: asOfDate ? Infinity : 60_000,
+    gcTime: asOfDate ? 30 * 60_000 : undefined,
+    retry: false,
     enabled,
   });
 }
+
 
 /** Distinct sector list from the loaded rows — memoised on rows identity so
  *  the sidebar's enum picker doesn't rebuild the Set on every render. */

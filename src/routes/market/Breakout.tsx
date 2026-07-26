@@ -56,10 +56,17 @@ function daysAgo(dateStr: string): number {
 
 // Tiny score-trend sparkline (0-100 scaled).
 function Sparkline({ points }: { points: number[] }) {
-  if (points.length < 2) return <span style={{ color: "var(--text-muted)" }}>—</span>;
+  if (points.length === 0) return <span style={{ color: "var(--text-muted)" }}>—</span>;
   const w = 64, h = 18, max = 100, min = 0;
-  const step = w / (points.length - 1);
   const y = (v: number) => h - ((v - min) / (max - min)) * h;
+  if (points.length === 1) {
+    return (
+      <svg width={w} height={h} style={{ display: "block" }}>
+        <circle cx={w / 2} cy={y(points[0])} r={2} fill="var(--accent)" />
+      </svg>
+    );
+  }
+  const step = w / (points.length - 1);
   const d = points.map((p, i) => `${i === 0 ? "M" : "L"}${(i * step).toFixed(1)},${y(p).toFixed(1)}`).join(" ");
   const up = points[points.length - 1] >= points[0];
   return (
@@ -69,10 +76,20 @@ function Sparkline({ points }: { points: number[] }) {
   );
 }
 
+// Carry filters over from the Screener page — same localStorage key it
+// persists to, so switching sub-tabs inherits the current filter set.
+const SCREENER_STATE_KEY = "screener.state.v2";
+function readScreenerActive(): ActiveFilter[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SCREENER_STATE_KEY) ?? "null");
+    return Array.isArray(raw?.active) ? (raw.active as ActiveFilter[]) : [];
+  } catch { return []; }
+}
+
 function BreakoutInner() {
   const nav = useNavigate();
   const [view, setView] = useState<View>("open");
-  const [active, setActive] = useState<ActiveFilter[]>([]);
+  const [active, setActive] = useState<ActiveFilter[]>(() => readScreenerActive());
 
   const { data: episodes = [], isFetching: epFetching, error } = useBreakoutTracker(view === "all");
   const { data: srRows = [], isFetching: srFetching } = useScreenerData("all");
@@ -85,24 +102,33 @@ function BreakoutInner() {
     return m;
   }, [srRows]);
 
-  // The most recent detection date present — drives the "New today" view.
+  // "New today" should mean *today* (IST) — not just the max detection date
+  // across whatever episodes we're holding, which on a weekend would silently
+  // pin the label to Friday's list.
+  const todayIst = todayIstDateString();
   const latestDetected = useMemo(
     () => episodes.reduce<string | null>((a, e) => (a == null || e.first_detected_date > a ? e.first_detected_date : a), null),
     [episodes],
   );
+  const newDayLabel = latestDetected && latestDetected < todayIst ? latestDetected : todayIst;
 
   const relayAlive = useRelayAlive();
   const liveTicks = useLiveTickStore((s) => s.ticks);
 
-  // Subscribe visible symbols to the live-tick relay (debounced/​capped inside).
-  useEffect(() => {
-    const keys = episodes.slice(0, 100).map((e) => quoteKey(e.exchange, e.symbol));
-    subscribeSymbolsForTicks(keys);
-  }, [episodes]);
+  // Subscribe visible symbols to the live-tick relay. Key the effect on the
+  // sorted symbol list (not the episodes array identity) so react-query
+  // refetches don't churn the relay every time the same set of symbols
+  // arrives as a new array reference.
+  const tickKeys = useMemo(
+    () => episodes.slice(0, 100).map((e) => quoteKey(e.exchange, e.symbol)).sort(),
+    [episodes],
+  );
+  const tickKeysSig = tickKeys.join(",");
+  useEffect(() => { subscribeSymbolsForTicks(tickKeys); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tickKeysSig]);
 
   const rows = useMemo<Row[]>(() => {
     return episodes
-      .filter((e) => (view === "new" ? e.first_detected_date === latestDetected : true))
+      .filter((e) => (view === "new" ? e.first_detected_date === newDayLabel : true))
       .map((e) => {
         const sr = srBySymbol.get(e.symbol) ?? null;
         const tick = liveTicks[quoteKey(e.exchange, e.symbol)];
@@ -117,12 +143,20 @@ function BreakoutInner() {
           company_name: sr?.company_name ?? null,
         };
       })
-      // Reuse the Screener filter catalog against the joined screener row.
+      // Reuse the Screener filter catalog. When the live screener row is
+      // missing (symbol dropped from the current universe), fall back to a
+      // synthetic row built from the episode's own fields so tracked
+      // breakouts don't silently disappear the moment any filter is added.
       .filter((r) => {
-        if (!r.sr) return active.length === 0; // no screener row → only when unfiltered
-        return active.every((af) => filterMatches(r.sr as any, af, latestTradeDate));
+        const target = r.sr ?? ({
+          symbol: r.symbol, exchange: r.exchange,
+          sector: r.sector, industry: null,
+          market_cap: r.market_cap, close: r.current_close, ltp: r.current_close,
+          breakout_score: r.last_score, trade_date: r.last_evaluated_date,
+        } as any);
+        return active.every((af) => filterMatches(target, af, latestTradeDate));
       });
-  }, [episodes, view, latestDetected, srBySymbol, liveTicks, active, latestTradeDate]);
+  }, [episodes, view, newDayLabel, srBySymbol, liveTicks, active, latestTradeDate]);
 
   // ---- Data staleness banner (same logic as Screener) ----
   const isDataStale = useMemo(() => {

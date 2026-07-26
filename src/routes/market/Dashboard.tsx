@@ -149,7 +149,7 @@ export default function MarketDashboard() {
   const { data: topBreakouts = [] } = useStockScores({ orderBy: "breakout_score", limit: 60 });
   const { data: preBreakouts = [] } = useStockScores({ orderBy: "prebreakout_score", limit: 10 });
   const usingSavedScreen = Boolean(selectedScreen);
-  const { data: savedScreenerRows = [], isFetching: savedScreenerFetching } = useScreenerData(selectedScreenState.universe, usingSavedScreen);
+  const { data: savedScreenerRows = [], isFetching: savedScreenerFetching } = useScreenerData(selectedScreenState.universe, null, usingSavedScreen);
 
   const hasActiveFilters = selectedScreenState.active.length > 0;
   const matchingBreakouts = useMemo<BreakoutDisplayRow[]>(() => {
@@ -157,7 +157,11 @@ export default function MarketDashboard() {
     const active = selectedScreenState.active;
     const latestDate = latestTradeDateOf(savedScreenerRows);
     const source = savedScreenerRows.filter((s) => active.every((af) => filterMatches(s as any, af, latestDate)));
-    return [...source].sort(bySavedScreenerDefault(active));
+    // Always sort Top Breakouts high → low by breakout score, regardless of
+    // which filters are active. (Previously a change-based filter silently
+    // switched the default sort to 1D Return.)
+    void bySavedScreenerDefault;
+    return [...source].sort(byBreakoutDesc);
   }, [savedScreenerRows, selectedScreenState.active, usingSavedScreen, hasActiveFilters]);
 
   const filteredBreakouts = matchingBreakouts;
@@ -473,6 +477,7 @@ export default function MarketDashboard() {
           onRowClick={(r) => nav(`/market/analysis/${r.symbol}`)}
           numbered
           maxHeight="100%"
+          initialSort={[{ id: "breakout_score", desc: true }]}
           emptyLabel={savedScreenerFetching ? "loading" : !usingSavedScreen ? "select a screener" : !hasActiveFilters ? "add filters to your screener" : "no matches"}
         />
       </HudPanel>

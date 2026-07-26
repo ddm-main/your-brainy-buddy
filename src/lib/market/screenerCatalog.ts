@@ -355,12 +355,8 @@ export type UniverseId =
 // screener with no error. Exposing them only once that sync gap is closed.
 export const UNIVERSES: Array<{ id: UniverseId; label: string }> = [
   { id: "all",         label: "All Stocks" },
-  { id: "nifty500",    label: "Nifty 500" },
   { id: "nifty50",     label: "Nifty 50" },
-  { id: "banknifty",   label: "Bank Nifty" },
-  { id: "finnifty",    label: "Fin Nifty" },
-  { id: "fno",         label: "F&O" },
-  { id: "sme",         label: "SME" },
+  { id: "nifty500",    label: "Nifty 500" },
 ];
 
 // ----- Curated presets — Tickertape / Screener.in inspired -----

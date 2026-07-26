@@ -3222,6 +3222,7 @@ export type Database = {
           filters: Json
           id: string
           name: string
+          scope: string
           sort: Json | null
           updated_at: string
           user_id: string
@@ -3232,6 +3233,7 @@ export type Database = {
           filters?: Json
           id?: string
           name: string
+          scope?: string
           sort?: Json | null
           updated_at?: string
           user_id: string
@@ -3242,6 +3244,7 @@ export type Database = {
           filters?: Json
           id?: string
           name?: string
+          scope?: string
           sort?: Json | null
           updated_at?: string
           user_id?: string
@@ -3305,6 +3308,30 @@ export type Database = {
           r2?: number | null
           sample_n?: number | null
           weight?: number
+        }
+        Relationships: []
+      }
+      market_screener_favorites: {
+        Row: {
+          created_at: string
+          filter_id: string
+          id: string
+          sort_order: number
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          filter_id: string
+          id?: string
+          sort_order?: number
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          filter_id?: string
+          id?: string
+          sort_order?: number
+          user_id?: string
         }
         Relationships: []
       }
@@ -5323,7 +5350,23 @@ export type Database = {
           tokens: number
         }[]
       }
+      market_asof_candles: {
+        Args: { _as_of: string; _bars?: number; _symbols: string[] }
+        Returns: {
+          candles: Json
+          symbol: string
+        }[]
+      }
       market_cron_call: { Args: { fn_name: string }; Returns: number }
+      market_history_backfill_candidates: {
+        Args: { _limit?: number; _min_bars?: number }
+        Returns: {
+          bars: number
+          exchange: string
+          symbol: string
+          yahoo_symbol: string
+        }[]
+      }
       purge_old_jarvis_interactions: { Args: never; Returns: undefined }
       purge_old_ticker_trace: { Args: never; Returns: undefined }
       refresh_market_top_movers: { Args: never; Returns: undefined }

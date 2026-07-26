@@ -8,6 +8,7 @@ import { useAiStatus } from "@/store/aiStatusStore";
 import { useNotifications } from "@/store/notificationStore";
 import { useAccessStore, type AppSection } from "@/store/accessStore";
 import { motion, AnimatePresence } from "framer-motion";
+import { MARKET_GROUPS } from "@/routes/market/nav";
 
 const NAV: { to: string; label: string; section: AppSection }[] = [
   { to: "/", label: "HUD", section: "hud" },
@@ -17,13 +18,15 @@ const NAV: { to: string; label: string; section: AppSection }[] = [
   { to: "/projects", label: "Projects", section: "projects" },
 ];
 
+
 export default function TopBar() {
   const loc = useLocation();
   const navigate = useNavigate();
   const role = useAccessStore((s) => s.role);
   const sections = useAccessStore((s) => s.sections);
   const resetAccess = useAccessStore((s) => s.reset);
-  const canConfig = role === "admin" || sections.has("config");
+  // Admins keep a safety net to /config so they can't lock themselves out of the admin panel.
+  const canConfig = sections.has("config") || role === "admin";
 
   const [email, setEmail] = useState<string | null>(null);
   useEffect(() => {
@@ -138,42 +141,72 @@ export default function TopBar() {
         </div>
       </Link>
 
-      <nav style={{ display: "flex", gap: 4 }}>
-        {NAV.filter((n) => role === "admin" || sections.has(n.section)).map((n) => {
-          const active = n.to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(n.to);
-          return (
-            <NavLink
-              key={n.to}
-              to={n.to}
-              style={{
-                padding: "6px 14px",
-                fontFamily: "var(--font-hud)",
-                fontSize: 11,
-                letterSpacing: "0.24em",
-                textTransform: "uppercase",
-                textDecoration: "none",
-                color: active ? "var(--accent)" : "var(--text-dim)",
-                border: `1px solid ${active ? "var(--edge-strong)" : "transparent"}`,
-                background: active ? "rgba(53, 214, 237, 0.08)" : "transparent",
-                borderRadius: 2,
-                position: "relative",
-                transition: "all 200ms",
-              }}
-            >
-              {n.label}
-              {active && (
-                <motion.span
-                  layoutId="nav-active"
-                  style={{
-                    position: "absolute", left: 0, right: 0, bottom: -1, height: 1,
-                    background: "var(--accent)", boxShadow: "0 0 6px var(--accent)",
-                  }}
-                />
-              )}
-            </NavLink>
-          );
-        })}
+      <nav style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
+        {(() => {
+          const onMarket = loc.pathname.startsWith("/market");
+          const baseNav = NAV.filter((n) => sections.has(n.section));
+          // On /market, replace the single "Market" chip with its group tabs
+          // to reclaim vertical space from the in-page sub-nav.
+          const items: { to: string; label: string; end?: boolean; key: string; isActive: (p: string) => boolean }[] = [];
+          for (const n of baseNav) {
+            if (onMarket && n.to === "/market") {
+              for (const g of MARKET_GROUPS) {
+                items.push({
+                  key: `mg-${g.key}`,
+                  to: g.to,
+                  label: g.label,
+                  end: g.to === "/market",
+                  isActive: (p) => g.match(p),
+                });
+              }
+            } else {
+              items.push({
+                key: n.to,
+                to: n.to,
+                label: n.label,
+                end: n.to === "/",
+                isActive: (p) => (n.to === "/" ? p === "/" : p.startsWith(n.to)),
+              });
+            }
+          }
+          return items.map((it) => {
+            const active = it.isActive(loc.pathname);
+            return (
+              <NavLink
+                key={it.key}
+                to={it.to}
+                end={it.end}
+                style={{
+                  padding: "6px 14px",
+                  fontFamily: "var(--font-hud)",
+                  fontSize: 11,
+                  letterSpacing: "0.24em",
+                  textTransform: "uppercase",
+                  textDecoration: "none",
+                  color: active ? "var(--accent)" : "var(--text-dim)",
+                  border: `1px solid ${active ? "var(--edge-strong)" : "transparent"}`,
+                  background: active ? "rgba(53, 214, 237, 0.08)" : "transparent",
+                  borderRadius: 2,
+                  position: "relative",
+                  transition: "all 200ms",
+                }}
+              >
+                {it.label}
+                {active && (
+                  <motion.span
+                    layoutId="nav-active"
+                    style={{
+                      position: "absolute", left: 0, right: 0, bottom: -1, height: 1,
+                      background: "var(--accent)", boxShadow: "0 0 6px var(--accent)",
+                    }}
+                  />
+                )}
+              </NavLink>
+            );
+          });
+        })()}
       </nav>
+
 
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         {/* System-health chip only surfaces when something is actually down. */}

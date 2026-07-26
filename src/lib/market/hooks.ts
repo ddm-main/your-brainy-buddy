@@ -466,6 +466,49 @@ export function useScreenerMutations() {
   return { save, remove };
 }
 
+// Per-user favorite filter IDs for the Screener's Add Filter picker.
+export function useFavoriteFilters() {
+  return useQuery({
+    queryKey: ["market", "screener-favorites"],
+    queryFn: async (): Promise<string[]> => {
+      const { data, error } = await (supabase as any)
+        .from("market_screener_favorites")
+        .select("filter_id, sort_order, created_at")
+        .order("sort_order", { ascending: true })
+        .order("created_at", { ascending: true });
+      if (error) throw error;
+      return (data ?? []).map((r: any) => r.filter_id as string);
+    },
+  });
+}
+
+export function useFavoriteFilterMutations() {
+  const qc = useQueryClient();
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["market", "screener-favorites"] });
+  const toggle = useMutation({
+    mutationFn: async ({ filterId, isFav }: { filterId: string; isFav: boolean }) => {
+      const { data: session } = await supabase.auth.getSession();
+      const userId = session.session?.user.id;
+      if (!userId) throw new Error("Not signed in");
+      if (isFav) {
+        const { error } = await (supabase as any)
+          .from("market_screener_favorites")
+          .delete()
+          .eq("user_id", userId)
+          .eq("filter_id", filterId);
+        if (error) throw error;
+      } else {
+        const { error } = await (supabase as any)
+          .from("market_screener_favorites")
+          .insert({ user_id: userId, filter_id: filterId, sort_order: Math.floor(Date.now() / 1000) });
+        if (error && (error as any).code !== "23505") throw error;
+      }
+    },
+    onSuccess: invalidate,
+  });
+  return { toggle };
+}
+
 export function useFundamentals(symbol: string | undefined, exchange = "NSE") {
   return useQuery({
     queryKey: ["market", "fundamentals", symbol ?? "", exchange],

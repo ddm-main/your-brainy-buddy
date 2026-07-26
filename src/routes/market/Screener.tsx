@@ -13,8 +13,8 @@ import { DataTable, deriveChangeAbs, fmtInt, fmtNum, PctCell, Return1DCell } fro
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { AddToWatchlistButton } from "@/components/market/AddToWatchlistButton";
 
-import { useSavedScreeners, useScreenerMutations, useQuotes, useMarketSettings } from "@/lib/market/hooks";
-import { useScreenerData, useScreenerSectors, useScreenerIndustries, type ScreenerRow } from "@/lib/market/screenerRun";
+import { useSavedScreeners, useScreenerMutations, useQuotes, useMarketSettings, useFavoriteFilters, useFavoriteFilterMutations } from "@/lib/market/hooks";
+import { useScreenerData, useScreenerSectors, useScreenerIndustries, getAsofMeta, type AsofMeta, type ScreenerRow } from "@/lib/market/screenerRun";
 import { todayIstDateString } from "@/lib/market/liveSnapshot";
 import { quoteKey } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
@@ -39,7 +39,7 @@ import {
   type FilterDef,
   type UniverseId,
 } from "@/lib/market/screenerCatalog";
-import { AlertTriangle, Check, Database, Download, Plus, RotateCcw, Save, Search, X } from "lucide-react";
+import { AlertTriangle, Check, Database, Download, Plus, RotateCcw, Save, Search, Star, X } from "lucide-react";
 import ErrorBoundary from "@/components/hud/ErrorBoundary";
 import { safeStorage } from "@/lib/safeStorage";
 
@@ -187,6 +187,9 @@ function ScreenerInner() {
     return v1 ? { ...v1, savedId: null } : null;
   }, []);
   const [universe, setUniverse] = useState<UniverseId>(persisted?.universe ?? "all");
+  // Back-date mode: when set, the screener runs against this trading date.
+  // Technicals are recomputed from OHLCV; fundamentals use the latest snapshot.
+  const [asOfDate, setAsOfDate] = useState<string | null>(null);
   const [active, setActive] = useState<ActiveFilter[]>(() => normalizeActiveFilters(persisted?.active ?? []));
   const [visibleCols, setVisibleCols] = useState<string[]>(() => {
     const parsed = safeStorage.getJSON<string[] | null>(COLS_STORE_KEY, null);
@@ -209,7 +212,14 @@ function ScreenerInner() {
   });
   useEffect(() => { safeStorage.set(PAGE_SIZE_KEY, String(pageSize)); }, [pageSize]);
 
-  const { data: rows = [], isFetching, error } = useScreenerData(universe);
+  const { data: rows = [], isFetching, error } = useScreenerData(universe, asOfDate);
+  // Coverage/date telemetry for the back-date run — recomputed whenever the
+  // run settles so the rail can explain snapping and skipped symbols.
+  const asOfMeta = useMemo(
+    () => (asOfDate && !isFetching ? getAsofMeta(universe, asOfDate) : null),
+    [universe, asOfDate, isFetching, rows],
+  );
+
   const sectorList = useScreenerSectors(rows);
   const industryList = useScreenerIndustries(rows);
   const { data: saved = [] } = useSavedScreeners();
@@ -901,6 +911,9 @@ function ScreenerInner() {
       <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 8, alignItems: "stretch", flex: 1, minHeight: 0 }}>
         <div style={{ minHeight: 0, overflow: "auto" }}>
           <FilterRail rows={rows} active={active} onAdd={addFilter} onChange={setFilterValue} onClear={removeFilter}
+            asOfDate={asOfDate} onAsOfDateChange={setAsOfDate}
+            asOfMeta={asOfMeta} asOfLoading={!!asOfDate && isFetching}
+            asOfError={asOfDate && error ? (error instanceof Error ? error.message : String(error)) : null}
             sectorList={sectorList} industryList={industryList}
             universe={universe} onUniverseChange={setUniverse} />
         </div>
@@ -1049,14 +1062,18 @@ function ScreenerInner() {
 // filters the user has explicitly added (each editable inline, removable),
 // with a "+ Add Filter" picker below to bring in more.
 // ============================================================================
-function FilterRail({ rows, active, onAdd, onChange, onClear, sectorList, industryList, universe, onUniverseChange }: {
+function FilterRail({ rows, active, onAdd, onChange, onClear, sectorList, industryList, universe, onUniverseChange, asOfDate, onAsOfDateChange, asOfMeta, asOfLoading, asOfError }: {
   rows: ScreenerRow[]; active: ActiveFilter[];
   onAdd: (id: string) => void;
   onChange: (id: string, patch: Partial<ActiveFilter>) => void;
   onClear: (id: string) => void;
   sectorList: string[]; industryList: string[];
   universe: UniverseId; onUniverseChange: (u: UniverseId) => void;
+  asOfDate: string | null; onAsOfDateChange: (d: string | null) => void;
+  asOfMeta: AsofMeta | null; asOfLoading: boolean; asOfError: string | null;
 }) {
+  const snapped = !!asOfMeta && asOfMeta.as_of !== asOfMeta.requested_as_of;
+  const skipped = asOfMeta ? asOfMeta.skipped_no_history + asOfMeta.skipped_short_history : 0;
   return (
     <HudPanel flow title="Filters"
       actions={<span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)" }}>{active.length} active</span>}
@@ -1071,7 +1088,52 @@ function FilterRail({ rows, active, onAdd, onChange, onClear, sectorList, indust
             </button>
           ))}
         </div>
+        <div style={{ ...labelStyle, marginTop: 10 }}>As of date {asOfDate ? "(back-date)" : "(live)"}</div>
+        <div style={{ display: "flex", gap: 4, marginTop: 4, alignItems: "center" }}>
+          <input
+            type="date"
+            value={asOfDate ?? ""}
+            min={asOfMeta?.earliest_as_of ?? undefined}
+            max={new Date().toISOString().slice(0, 10)}
+            onChange={(e) => onAsOfDateChange(e.target.value || null)}
+            style={{ ...inputStyle, padding: "4px 6px", fontSize: 12, flex: 1 }}
+          />
+          {asOfDate && (
+            <button className="hud-btn" data-variant="ghost" data-size="sm" onClick={() => onAsOfDateChange(null)}>Live</button>
+          )}
+        </div>
+        {asOfDate && (
+          <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4, lineHeight: 1.4 }}>
+            {asOfLoading ? (
+              <span style={{ color: "var(--warn, #d29a2b)" }}>
+                recomputing technicals for the whole universe — this takes a few seconds…
+              </span>
+            ) : asOfError ? (
+              <span style={{ color: "var(--danger, #ff6a6a)" }}>{asOfError}</span>
+            ) : (
+              <>
+                <div>Filters apply to that session's closing values. Technicals recomputed from stored OHLCV; fundamentals use the latest snapshot.</div>
+                {snapped && (
+                  <div style={{ color: "var(--warn, #d29a2b)", marginTop: 2 }}>
+                    {asOfMeta!.requested_as_of} was not a trading day — using {asOfMeta!.as_of}.
+                  </div>
+                )}
+                {asOfMeta && (
+                  <div style={{ marginTop: 2 }}>
+                    {asOfMeta.count} of {asOfMeta.universe_size} stocks priced
+                    {skipped > 0 && (
+                      <span style={{ color: "var(--warn, #d29a2b)" }}>
+                        {" "}· {skipped} skipped (history still backfilling)
+                      </span>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
       </div>
+
 
       <div style={{ display: "flex", flexDirection: "column", gap: 14, paddingRight: 4 }}>
         {active.length === 0 ? (
@@ -1107,6 +1169,9 @@ function AddFilterPicker({ activeIds, onPick, rows }: {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
   const pos = useAnchoredPos(triggerRef, open, "right", 300);
+  const { data: favIds = [] } = useFavoriteFilters();
+  const { toggle: toggleFav } = useFavoriteFilterMutations();
+  const favSet = useMemo(() => new Set(favIds), [favIds]);
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
@@ -1118,6 +1183,40 @@ function AddFilterPicker({ activeIds, onPick, rows }: {
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
   const term = q.trim().toLowerCase();
+  // One pass over the rows instead of one per rendered filter row.
+  const latest = useMemo(() => latestTradeDateOf(rows), [rows]);
+
+  const renderRow = (f: FilterDef) => {
+    const cov = coverageOf(rows as any[], f.id, latest);
+    const pct = cov.total ? Math.round((cov.has / cov.total) * 100) : 0;
+    const covTone: "ok" | "warn" | "err" | undefined = pct >= 90 ? undefined : pct >= 50 ? "warn" : "err";
+    const isFav = favSet.has(f.id);
+    return (
+      <div key={f.id}
+        style={{ ...popoverItem, padding: "6px 8px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, cursor: "pointer" }}
+        onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(53,214,237,0.08)")}
+        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+        onClick={() => { onPick(f.id); setOpen(false); }}
+        title={f.hint}
+      >
+        <span>{f.label}</span>
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {rows.length > 0 && f.kind !== "boolean" && covTone && <Chip tone={covTone}>{pct}%</Chip>}
+          <button
+            aria-label={isFav ? "Unstar filter" : "Star filter"}
+            onClick={(e) => { e.stopPropagation(); toggleFav.mutate({ filterId: f.id, isFav }); }}
+            style={{ background: "transparent", border: "none", cursor: "pointer", padding: 2, display: "flex", alignItems: "center", color: isFav ? "var(--accent, #f5c542)" : "var(--text-muted)" }}
+          >
+            <Star size={12} fill={isFav ? "currentColor" : "none"} />
+          </button>
+        </span>
+      </div>
+    );
+  };
+
+  const favFilters = favIds
+    .map((id) => FILTER_BY_ID[id])
+    .filter((f): f is FilterDef => !!f && !activeIds.has(f.id) && (!term || f.label.toLowerCase().includes(term)));
 
   return (
     <div ref={ref} style={{ position: "relative" }}>
@@ -1132,30 +1231,41 @@ function AddFilterPicker({ activeIds, onPick, rows }: {
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="search filters…" autoFocus
               style={{ ...inputStyle, padding: "6px 8px 6px 24px", fontSize: 12, width: "100%" }} />
           </div>
+          {favFilters.length > 0 ? (
+            <div>
+              <div style={{ padding: "4px 8px", fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.2em", textTransform: "uppercase", borderBottom: "1px solid var(--edge)", display: "flex", alignItems: "center", gap: 4 }}>
+                <Star size={10} fill="currentColor" style={{ color: "var(--accent, #f5c542)" }} /> Favorites
+                <button
+                  onClick={(e) => { e.stopPropagation(); favFilters.forEach((f) => onPick(f.id)); setOpen(false); }}
+                  title="Add every favorite filter at once"
+                  style={{ marginLeft: "auto", background: "transparent", border: "none", cursor: "pointer", color: "var(--accent, #f5c542)", fontFamily: "inherit", fontSize: 9, letterSpacing: "0.15em", textTransform: "uppercase", padding: 0 }}
+                >
+                  add all
+                </button>
+              </div>
+              {favFilters.map(renderRow)}
+            </div>
+          ) : (
+            !term && (
+              <div style={{ padding: "6px 8px", fontSize: 10, color: "var(--text-dim)", borderBottom: "1px solid var(--edge)", display: "flex", alignItems: "center", gap: 4 }}>
+                <Star size={10} /> star a filter to pin it here
+              </div>
+            )
+          )}
           {CATEGORIES.map((cat) => {
             const inCat = FILTERS.filter((f) => f.category === cat.id && !activeIds.has(f.id) && (!term || f.label.toLowerCase().includes(term)));
             if (inCat.length === 0) return null;
             return (
               <div key={cat.id}>
                 <div style={{ padding: "4px 8px", fontFamily: "var(--font-hud)", fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.2em", textTransform: "uppercase", borderBottom: "1px solid var(--edge)" }}>{cat.label}</div>
-                {inCat.map((f) => {
-                  const cov = coverageOf(rows as any[], f.id, latestTradeDateOf(rows));
-                  const pct = cov.total ? Math.round((cov.has / cov.total) * 100) : 0;
-                  const covTone: "ok" | "warn" | "err" | undefined = pct >= 90 ? undefined : pct >= 50 ? "warn" : "err";
-                  return (
-                    <button key={f.id} onClick={() => { onPick(f.id); setOpen(false); }}
-                      title={f.hint}
-                      style={{ ...popoverItem, padding: "6px 8px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}
-                      onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(53,214,237,0.08)")}
-                      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-                      <span>{f.label}</span>
-                      {rows.length > 0 && f.kind !== "boolean" && covTone && <Chip tone={covTone}>{pct}%</Chip>}
-                    </button>
-                  );
-                })}
+                {inCat.map(renderRow)}
               </div>
             );
           })}
+          {term && favFilters.length === 0 && FILTERS.every((f) => activeIds.has(f.id) || !f.label.toLowerCase().includes(term)) && (
+            <div style={{ padding: "10px 8px", fontSize: 11, color: "var(--text-dim)" }}>no filter matches “{q.trim()}”</div>
+          )}
+
         </div>,
         document.body,
       )}

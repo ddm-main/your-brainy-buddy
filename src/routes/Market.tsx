@@ -1,4 +1,5 @@
-// Market — top-tab layout mirroring Finance (no left sidebar).
+// Market — group tabs live in the global TopBar; only the second-level
+// SubTabStrip renders here.
 import { useEffect, useRef } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { lazy, Suspense } from "react";
@@ -7,6 +8,8 @@ import { useMarketAutoSync } from "@/lib/market/useAutoSync";
 import { useRealtimeTicks } from "@/lib/market/useRealtimeTicks";
 import { KotakReconnectModal } from "@/components/market/KotakReconnectModal";
 import { useAccessStore } from "@/store/accessStore";
+import { MARKET_GROUPS, MARKET_SUBS, type MarketSub } from "@/routes/market/nav";
+
 
 const Dashboard = lazy(() => import("@/routes/market/Dashboard"));
 const Holdings = lazy(() => import("@/routes/market/Holdings"));
@@ -25,34 +28,8 @@ const Orders = lazy(() => import("@/routes/market/Orders"));
 const GTT = lazy(() => import("@/routes/market/GTT"));
 
 
-type Sub = { to: string; label: string };
-type Group = {
-  key: string; label: string; to: string;
-  match: (p: string) => boolean;
-  subs: Sub[];
-};
+type Sub = MarketSub;
 
-const GROUPS: Group[] = [
-  { key: "overview", label: "Overview", to: "/market",
-    match: (p) => p === "/market" || p === "/market/" || /^\/market\/index\//.test(p), subs: [] },
-  { key: "screener", label: "Screener", to: "/market/screener",
-    match: (p) => /^\/market\/screener/.test(p), subs: [] },
-  { key: "breakout", label: "Breakout", to: "/market/breakout",
-    match: (p) => /^\/market\/breakout/.test(p), subs: [] },
-  { key: "portfolio", label: "Portfolio", to: "/market/portfolio",
-    match: (p) => /^\/market\/(portfolio|holdings|positions|orders|gtt)/.test(p),
-    subs: [
-      { to: "/market/portfolio", label: "Overview" },
-      { to: "/market/holdings", label: "Holdings" },
-      { to: "/market/positions", label: "Positions" },
-      { to: "/market/orders", label: "Orders" },
-      { to: "/market/gtt", label: "GTT" },
-    ] },
-  { key: "autotrade", label: "AutoTrade", to: "/market/autotrade",
-    match: (p) => /^\/market\/autotrade/.test(p), subs: [] },
-  { key: "settings", label: "Config", to: "/market/settings",
-    match: (p) => /^\/market\/settings/.test(p), subs: [] },
-];
 
 const tabBase: React.CSSProperties = {
   padding: "6px 12px", fontFamily: "var(--font-hud)", fontSize: 10,
@@ -63,10 +40,15 @@ const tabBase: React.CSSProperties = {
 function SubTabStrip({ subs, currentPath }: { subs: Sub[]; currentPath: string }) {
   const nav = useNavigate();
   const refs = useRef<(HTMLAnchorElement | null)[]>([]);
-  const activeIdx = Math.max(
-    0,
-    subs.findIndex((s) => currentPath === s.to || currentPath.startsWith(s.to + "/")),
-  );
+  // Prefer exact match; otherwise longest startsWith so nested paths select
+  // the deeper sub-tab even when it shares a prefix with a sibling.
+  const exact = subs.findIndex((s) => currentPath === s.to);
+  const activeIdx = exact >= 0
+    ? exact
+    : Math.max(0, subs
+        .map((s, i) => (currentPath.startsWith(s.to + "/") ? { i, len: s.to.length } : null))
+        .filter((x): x is { i: number; len: number } => x != null)
+        .sort((a, b) => b.len - a.len)[0]?.i ?? 0);
 
   const onKey = (e: React.KeyboardEvent, idx: number) => {
     let next = idx;
@@ -105,10 +87,9 @@ function SubTabStrip({ subs, currentPath }: { subs: Sub[]; currentPath: string }
 export default function Market() {
   const loc = useLocation();
   const isAdmin = useAccessStore((s) => s.role === "admin");
-  // Market → Config is per-user (broker connection); everyone sees it.
-  const groups = GROUPS;
-  const activeGroup = groups.find((g) => g.match(loc.pathname)) ?? groups[0];
-  useEffect(() => { document.title = `Market · ${activeGroup.label}`; }, [activeGroup.key]);
+  const activeGroup = MARKET_GROUPS.find((g) => g.match(loc.pathname)) ?? MARKET_GROUPS[0];
+  const activeSubs = MARKET_SUBS[activeGroup.key] ?? [];
+  useEffect(() => { document.title = `Market · ${activeGroup.label}`; }, [activeGroup.key, activeGroup.label]);
   useMarketAutoSync();
   useRealtimeTicks();
   void isAdmin;
@@ -117,23 +98,10 @@ export default function Market() {
   return (
     <div style={{ padding: 12, height: "100%", display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
       <KotakReconnectModal />
-      <div role="tablist" aria-label="Market sections" style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-        {groups.map((g) => {
-          const active = g.key === activeGroup.key;
-          return (
-            <NavLink key={g.key} to={g.to} end={g.to === "/market"} role="tab" aria-selected={active}
-              style={{
-                ...tabBase,
-                border: `1px solid ${active ? "var(--edge-strong)" : "var(--edge)"}`,
-                background: active ? "rgba(53,214,237,0.08)" : "transparent",
-                color: active ? "var(--accent)" : "var(--text-dim)",
-              }}>{g.label}</NavLink>
-          );
-        })}
-      </div>
-      {activeGroup.subs.length > 0 && (
-        <SubTabStrip subs={activeGroup.subs} currentPath={loc.pathname} />
+      {activeSubs.length > 0 && (
+        <SubTabStrip subs={activeSubs} currentPath={loc.pathname} />
       )}
+
       <div style={{ flex: 1, minHeight: 0, minWidth: 0, overflow: "auto" }}>
         <ErrorBoundary key={loc.pathname}>
           <Suspense fallback={<div className="hud-label">loading…</div>}>
@@ -145,7 +113,8 @@ export default function Market() {
               <Route path="orders" element={<Orders />} />
               <Route path="gtt" element={<GTT />} />
               <Route path="screener" element={<Screener />} />
-              <Route path="breakout" element={<Breakout />} />
+              <Route path="screener/breakout" element={<Breakout />} />
+              <Route path="breakout" element={<Navigate to="/market/screener/breakout" replace />} />
               <Route path="analysis" element={<Navigate to="/market/screener" replace />} />
               <Route path="analysis/:symbol" element={<Analysis />} />
               <Route path="backtesting" element={<Backtesting />} />

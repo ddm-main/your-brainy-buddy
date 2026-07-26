@@ -5,7 +5,9 @@ export default function AccessGate({ section, children }: { section: AppSection;
   const { ready, sections, role } = useAccessStore();
   const loc = useLocation();
   if (!ready) return null;
-  if (sections.has(section)) return <>{children}</>;
+  // Admins retain access to /config as a self-lockout safety net; every other
+  // section gates strictly on granted `sections`.
+  if (sections.has(section) || (role === "admin" && section === "config")) return <>{children}</>;
   const fallback = sections.has("market") ? "/market" : (Array.from(sections)[0] ? `/${Array.from(sections)[0]}` : "/");
   if (loc.pathname === fallback) return null;
   return <Navigate to={fallback} replace />;
