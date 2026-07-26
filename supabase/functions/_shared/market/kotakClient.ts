@@ -50,6 +50,51 @@ function firstNonEmpty(...values: unknown[]): string {
   return "";
 }
 
+function looksLikeDynamicKotakBase(value: unknown): string {
+  const text = firstNonEmpty(value).replace(/\/+$/, "");
+  if (!text) return "";
+  try {
+    const host = new URL(text).hostname.toLowerCase();
+    // Post-login API hosts are data-center hosts like e21/e41. The old
+    // gateway/default host is not safe for order/report calls after v2 login.
+    return /^e\d{2}\.kotaksecurities\.com$/.test(host) ? text : "";
+  } catch {
+    return "";
+  }
+}
+
+function hsServerIdFromBaseUrl(baseUrl: string): string {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase();
+    const match = host.match(/^e(\d)\d\.kotaksecurities\.com$/);
+    return match ? `server${match[1]}` : "";
+  } catch {
+    return "";
+  }
+}
+
+function authPayloadSummary(payload: unknown): string {
+  const data = (payload as any)?.data ?? {};
+  const summary = {
+    hasToken: !!data?.token,
+    hasSid: !!data?.sid,
+    hasRid: !!data?.rid,
+    hsServerId: firstNonEmpty(data?.hsServerId) || null,
+    baseUrl: firstNonEmpty(data?.baseUrl) || null,
+    dataCenter: firstNonEmpty(data?.dataCenter) || null,
+    kType: firstNonEmpty(data?.kType) || null,
+    status: firstNonEmpty(data?.status) || null,
+  };
+  return JSON.stringify(summary);
+}
+
+function combinedAuthSummary(login: unknown, validate: unknown): string {
+  return JSON.stringify({
+    login: JSON.parse(authPayloadSummary(login)),
+    validate: JSON.parse(authPayloadSummary(validate)),
+  });
+}
+
 
 // Next midnight IST expressed in UTC — Kotak sessions die around then.
 export function nextIstMidnightIso(): string {
@@ -144,7 +189,7 @@ export async function kotakLogin(
   const viewToken = login?.data?.token;
   const viewSid = login?.data?.sid;
   if (!viewToken || !viewSid) {
-    throw new KotakError("Kotak login: no token in response", 502, JSON.stringify(login).slice(0, 500));
+    throw new KotakError("Kotak login: no token in response", 502, authPayloadSummary(login));
   }
 
   const validate = await kotakFetch(`${LOGIN_HOST}/login/1.0/tradeApiValidate`, {
@@ -160,21 +205,30 @@ export async function kotakLogin(
   });
   const editToken = validate?.data?.token;
   const editSid = validate?.data?.sid;
-  // Kotak's MPIN validate payload often includes hsServerId as an empty
-  // string, while the preceding TOTP login payload carries the real server
-  // id (server2/server4/etc.). Using `??` here persisted "" and dropped the
-  // required `sId` query param from order/trade/position calls, which Kotak
-  // can surface as a misleading 404. Always pick the first non-empty value.
-  const hsServerId = firstNonEmpty(validate?.data?.hsServerId, login?.data?.hsServerId);
-  const baseUrl = firstNonEmpty(validate?.data?.baseUrl).replace(/\/+$/, "");
+  const baseUrl = firstNonEmpty(
+    validate?.data?.baseUrl,
+    looksLikeDynamicKotakBase(s.base_url),
+  ).replace(/\/+$/, "");
+  // Kotak's v2 docs/examples disagree with production: TOTP login usually
+  // carries hsServerId, MPIN validate often sends it blank, and some live
+  // accounts now send it blank in BOTH responses while still returning a
+  // dynamic baseUrl such as https://e41.kotaksecurities.com. The SDK needs an
+  // sId (`server4` for e41, `server2` for e21, etc.) for order/report APIs, so
+  // derive it from the data-center host when Kotak omits it.
+  const hsServerId = firstNonEmpty(
+    validate?.data?.hsServerId,
+    login?.data?.hsServerId,
+    hsServerIdFromBaseUrl(baseUrl),
+    s.hs_server_id,
+  );
   if (!editToken || !editSid) {
-    throw new KotakError("Kotak validate: no session token", 502, JSON.stringify(validate).slice(0, 500));
+    throw new KotakError("Kotak validate: no session token", 502, authPayloadSummary(validate));
   }
   if (!baseUrl) {
-    throw new KotakError("Kotak validate: no baseUrl in response", 502, JSON.stringify(validate).slice(0, 500));
+    throw new KotakError("Kotak validate: no baseUrl in response", 502, authPayloadSummary(validate));
   }
   if (!hsServerId) {
-    throw new KotakError("Kotak validate: no hsServerId in response", 502, JSON.stringify({ login, validate }).slice(0, 500));
+    throw new KotakError("Kotak validate: no hsServerId in response", 502, combinedAuthSummary(login, validate));
   }
 
   return {
@@ -228,11 +282,12 @@ async function sessionHeaders(s: KotakSettings): Promise<Record<string, string>>
 }
 
 function appendSId(s: KotakSettings): string {
-  return s.hs_server_id ? `?sId=${encodeURIComponent(s.hs_server_id)}` : "";
+  const sid = firstNonEmpty(s.hs_server_id, hsServerIdFromBaseUrl(apiBase(s)));
+  return sid ? `?sId=${encodeURIComponent(sid)}` : "";
 }
 
 function requireServerId(s: KotakSettings): void {
-  if (!String(s.hs_server_id ?? "").trim()) {
+  if (!firstNonEmpty(s.hs_server_id, hsServerIdFromBaseUrl(apiBase(s)))) {
     throw new KotakError("Kotak session is missing server id — reconnect required", 401);
   }
 }
@@ -630,7 +685,7 @@ export async function persistSession(
   sess: KotakSession,
   encrypt: (v: string) => Promise<string>,
 ): Promise<void> {
-  await svc
+  const { error } = await svc
     .from("market_api_settings")
     .update({
       view_token_enc: await encrypt(sess.viewToken),
@@ -647,10 +702,12 @@ export async function persistSession(
       last_error: null,
     })
     .eq("id", s.id);
+  if (error) throw new KotakError(`Could not persist Kotak session: ${error.message}`, 500);
   // reflect in the in-memory object so follow-up calls in the same invocation work
   s.sid = sess.editSid;
   s.hs_server_id = sess.hsServerId;
   s.base_url = sess.apiBase;
+  s.session_token_enc = await encrypt(sess.editToken);
   s.connection_status = "connected";
 }
 
@@ -669,9 +726,10 @@ export async function withReloginLock<T>(settingsId: string, fn: () => Promise<T
   const prev = reloginLocks.get(settingsId) ?? Promise.resolve();
   let release: () => void = () => {};
   const gate = new Promise<void>((r) => { release = r; });
-  reloginLocks.set(settingsId, prev.then(() => gate));
+  const chained = prev.then(() => gate);
+  reloginLocks.set(settingsId, chained);
   try { await prev; return await fn(); }
-  finally { release(); if (reloginLocks.get(settingsId) === gate) reloginLocks.delete(settingsId); }
+  finally { release(); if (reloginLocks.get(settingsId) === chained) reloginLocks.delete(settingsId); }
 }
 
 export async function withKotakSession<T>(
@@ -701,7 +759,7 @@ export async function withKotakSession<T>(
           .eq("id", s.id).maybeSingle();
         if (latest && latest.connection_status === "connected"
           && latest.session_token_enc && latest.session_token_enc !== s.session_token_enc
-          && String(latest.hs_server_id ?? "").trim()) {
+          && firstNonEmpty(latest.hs_server_id, hsServerIdFromBaseUrl(String(latest.base_url ?? "")))) {
           return { ...s, ...latest } as KotakSettings;
         }
         const sess = await kotakAutoLogin(s);
