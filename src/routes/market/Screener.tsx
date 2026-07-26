@@ -88,10 +88,16 @@ const COLUMNS: ColSpec[] = [
 ];
 // Explicit, in this exact order — not derived from COLUMNS' declaration
 // order (which is grouped by category for the column picker, not display
-// intent) so the default view is guaranteed Stock, LTP, 1D Return, 52W,
-// MCAP, Breakout regardless of how COLUMNS gets reordered later.
-const DEFAULT_COLS = ["symbol", "close", "change_pct", "pct_from_52w_high", "market_cap", "breakout_score"];
-const COLS_STORE_KEY = "screener.visibleCols.v3";
+// intent). Every user (not just whoever customised their own localStorage)
+// lands on the same full default view: Stock, MCAP, LTP, 1D Return, Volume,
+// RVol, PE, ROE, 52w Δ, Breakout.
+const DEFAULT_COLS = [
+  "symbol", "market_cap", "close", "change_pct", "volume",
+  "rel_volume", "pe", "roe", "pct_from_52w_high", "breakout_score",
+];
+// v4: bumped so browsers holding the old 6-column v3 selection pick up the
+// current default instead of rendering a stale, narrower table.
+const COLS_STORE_KEY = "screener.visibleCols.v4";
 const HIDE_ILLIQUID_KEY = "screener.hideIlliquid.v1";
 const PAGE_SIZE_KEY  = "screener.pageSize.v2";
 const DEFAULT_SAVED_KEY = "market.screener.defaultSavedId";
