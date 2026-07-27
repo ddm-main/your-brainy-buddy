@@ -62,9 +62,12 @@ export default function IndexDetail() {
 
   const { data: candlesData, isLoading: candlesLoading } = useCandles(symbol, tf, "NSE");
   const candles: CandleDto[] = candlesData?.candles ?? [];
+  const visibleStudyCount = useMemo(() => studies.filter((s) => s.visible).length, [studies]);
 
+  const price = quote?.price ?? null;
   const chgPct = quote?.change_pct ?? null;
-  const chgAbs = quote?.change_abs ?? null;
+  const chgAbs = quote?.change_abs ?? deriveChangeAbs(price, chgPct);
+
 
   const tvS = tvSymbolFor(symbol, region);
   const [tvExch, tvSym] = tvS.includes(":") ? tvS.split(":") : ["NSE", tvS];
