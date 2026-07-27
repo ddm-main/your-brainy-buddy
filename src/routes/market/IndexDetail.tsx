@@ -12,11 +12,10 @@ import { ChartToolbar, DEFAULT_SETTINGS, isIntraday, type ChartSettings } from "
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
 import { NewAlertModal, StockAlertsPanel } from "@/components/market/StockAlerts";
 import { DEFAULT_STUDIES, makeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
-import { TradingViewChart, tvInterval } from "@/components/market/TradingViewChart";
 import { FullscreenShell } from "@/components/market/FullscreenShell";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { useCandles, useIndexConstituents, useIndexWatch, useIndices, useOptionChain, useQuotes } from "@/lib/market/hooks";
-import { findPreset, tvSymbolFor } from "@/lib/market/indices";
+import { findPreset } from "@/lib/market/indices";
 import { bollinger, ema, macd, rsi, sma } from "@/lib/market/chartIndicators";
 import type { CandleDto, IndexConstituent } from "@/lib/market/types";
 import { useNotifications } from "@/store/notificationStore";
@@ -62,15 +61,14 @@ export default function IndexDetail() {
   // Persist chart state per symbol so a refresh doesn't reset TF to "1D"
   // (Analysis.tsx does the same via STATE_STORE — parity fix).
   const stateKey = `jarvis.chart.state.index.${symbol}`;
-  type Persisted = { tf: string; chartType: ChartType; tvMode: boolean; studies: Study[]; settings: ChartSettings };
+  type Persisted = { tf: string; chartType: ChartType; studies: Study[]; settings: ChartSettings };
   const initial = useMemo<Persisted>(() => {
-    const dflt: Persisted = { tf: "1D", chartType: "candles", tvMode: false, studies: DEFAULT_STUDIES, settings: DEFAULT_SETTINGS };
+    const dflt: Persisted = { tf: "1D", chartType: "candles", studies: DEFAULT_STUDIES, settings: DEFAULT_SETTINGS };
     try {
       const raw = JSON.parse(localStorage.getItem(stateKey) ?? "{}");
       return {
         tf: typeof raw.tf === "string" ? raw.tf : dflt.tf,
         chartType: raw.chartType === "line" || raw.chartType === "area" || raw.chartType === "candles" ? raw.chartType : dflt.chartType,
-        tvMode: !!raw.tvMode,
         studies: Array.isArray(raw.studies) ? raw.studies : dflt.studies,
         settings: raw.settings ? { ...DEFAULT_SETTINGS, ...raw.settings } : dflt.settings,
       };
@@ -81,7 +79,6 @@ export default function IndexDetail() {
   const [tab, setTab] = useState<Tab>("chart");
   const [tf, setTf] = useState(initial.tf);
   const [chartType, setChartType] = useState<ChartType>(initial.chartType);
-  const [tvMode, setTvMode] = useState(initial.tvMode);
   const [fs, setFs] = useState(false);
   const [studies, setStudies] = useState<Study[]>(initial.studies);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -99,9 +96,9 @@ export default function IndexDetail() {
   // Persist on every change so a refresh restores the exact chart state.
   useEffect(() => {
     try {
-      localStorage.setItem(stateKey, JSON.stringify({ tf, chartType, tvMode, studies, settings } satisfies Persisted));
+      localStorage.setItem(stateKey, JSON.stringify({ tf, chartType, studies, settings } satisfies Persisted));
     } catch { /* quota / private mode — safe to ignore */ }
-  }, [stateKey, tf, chartType, tvMode, studies, settings]);
+  }, [stateKey, tf, chartType, studies, settings]);
 
   // Indices are composites — Kotak/Yahoo both report 0 volume for them, so the
   // volume study just renders a flat "Volume 0" line. Auto-hide it here rather
@@ -122,13 +119,7 @@ export default function IndexDetail() {
   const chgAbs = quote?.change_abs ?? deriveChangeAbs(price, chgPct);
 
 
-  const tvS = tvSymbolFor(symbol, region);
-  const [tvExch, tvSym] = tvS.includes(":") ? tvS.split(":") : ["NSE", tvS];
-  // TradingView's free widget doesn't carry NSE — those symbols render a wrong
-  // fallback (Apple). Only offer TradingView when the mapped exchange is one the
-  // widget actually serves (BSE / global exchanges).
-  const tvSupported = tvExch.toUpperCase() !== "NSE";
-  const showTv = tvMode && tvSupported;
+
 
   const handleScreenshot = useCallback(() => {
     const wrap = chartWrapRef.current;
@@ -241,11 +232,6 @@ export default function IndexDetail() {
                 totalStudyCount={studies.length}
                 settings={settings}
                 onSettings={(u) => setSettings(u)}
-                tvMode={tvMode}
-                onTvMode={(v) => {
-                  if (v && !tvSupported) { notify("TradingView widget unavailable for NSE indices — showing native chart"); return; }
-                  setTvMode(v);
-                }}
                 onFullscreen={() => setFs(true)}
                 onAlert={() => setAlertModalOpen(true)}
                 onScreenshot={handleScreenshot}
@@ -256,9 +242,7 @@ export default function IndexDetail() {
                 intraday={isIntraday(tf)}
               />
               <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0 }}>
-                {showTv ? (
-                  <TradingViewChart symbol={tvSym} exchange={tvExch} interval={tvInterval(tf)} />
-                ) : candlesLoading ? (
+                {candlesLoading ? (
                   <div className="hud-label" style={{ padding: 24, textAlign: "center" }}>loading chart…</div>
                 ) : candles.length === 0 ? (
                   <EmptyState hint="try a different timeframe or check the symbol">no chart data</EmptyState>

@@ -7,7 +7,7 @@ import {
   classifyRegime, breakoutScore, preBreakoutScore,
   evaluateLiquidity, swingScore, intradayScore,
   BREAKOUT_QUALIFY_SCORE, SCORE_TREND_CAP,
-  breakoutFollowThroughScore, nextEpisodeStatus,
+  breakoutFollowThroughScore, nextEpisodeStatus, scoreDistribution,
   type AdvancedSignals, type BreakoutStatus,
 } from "../_shared/market/scoring.ts";
 import type { IndicatorSnapshot, WeeklySnapshot } from "../_shared/market/indicators.ts";
@@ -67,6 +67,12 @@ function snapFromRow(r: any): IndicatorSnapshot {
     rsPercentile: r.rs_percentile ?? null,
     closeInRangePct: r.close_in_range_pct ?? null,
     breakoutFreshnessDays: r.breakout_freshness_days ?? null,
+    // Persisted by market-pipeline-eod (which has the candles); without these
+    // the refinement pass would silently re-score on a weaker pivot.
+    pivotLevel: r.pivot_level ?? null,
+    pivotTouches: r.pivot_touches ?? null,
+    volDryUpRatio: r.vol_dryup_ratio ?? null,
+
     ema20Series: [],
     ema50Series: [],
     ema200Series: [],
@@ -154,6 +160,22 @@ Deno.serve(async (req) => {
       if (!data || data.length < 1000) break;
     }
     if (rows.length === 0) return jsonResponse(req, { ok: true, note: "no trade data yet — run market-pipeline-eod first" });
+
+    // Only the latest session may feed breadth/sector/RS aggregates and the
+    // breakout tracker. Symbols whose EOD sync failed keep an older
+    // trade_date; including them would mix stale closes into today's numbers
+    // and open tracker episodes dated today with a stale entry price.
+    let latestTradeDate: string | null = null;
+    for (const r of rows) {
+      const td = typeof r.trade_date === "string" ? r.trade_date : null;
+      if (td && (latestTradeDate == null || td > latestTradeDate)) latestTradeDate = td;
+    }
+    const totalRows = rows.length;
+    const freshRows = latestTradeDate ? rows.filter((r) => r.trade_date === latestTradeDate) : rows;
+    const staleSkipped = totalRows - freshRows.length;
+    rows.length = 0;
+    rows.push(...freshRows);
+    if (rows.length === 0) return jsonResponse(req, { ok: true, note: "no rows for the latest trade date", stale_skipped: staleSkipped });
 
     // ---- Breadth ----
     const advances = rows.filter((r) => (r.change_pct ?? 0) > 0).length;
@@ -327,6 +349,7 @@ Deno.serve(async (req) => {
           swing_components: sw.components,
           intraday_score: is.score,
           intraday_components: is.components,
+          context_complete: true,
           computed_at: nowIso,
         }).eq("symbol", r.symbol).eq("exchange", r.exchange);
         if (!error) updated++;
@@ -462,14 +485,37 @@ Deno.serve(async (req) => {
       }).then(() => {}, () => {});
     }
 
+    // ---- Threshold calibration telemetry ----
+    // Record where today's universe actually sits versus the fixed 70/55/40
+    // bands, so the bands can be judged against the live distribution instead
+    // of assumed. Never allowed to fail the run.
+    const dist = scoreDistribution(scored.filter((x) => x.liquidityOk).map((x) => x.breakout));
+    try {
+      const calRows = [
+        ["breakout_p50", dist.p50], ["breakout_p70", dist.p70], ["breakout_p90", dist.p90],
+        ["breakout_max", dist.max],
+        ["breakout_pct_above_strong", dist.pct_at_or_above_strong],
+        ["breakout_pct_above_moderate", dist.pct_at_or_above_moderate],
+      ].filter(([, v]) => v != null).map(([component, weight]) => ({
+        model_version: `breakout_v2:${today}`,
+        component: component as string,
+        weight: Number(weight),
+        sample_n: dist.n,
+      }));
+      if (calRows.length) await svc.from("market_scoring_calibration").insert(calRows);
+    } catch { /* telemetry only */ }
+
     return jsonResponse(req, {
       ok: true,
       trade_date: today,
       stocks: rows.length,
+      latest_trade_date: latestTradeDate,
+      stale_skipped: staleSkipped,
       breadth: { advances, declines, regime, pct_above_ema50: Math.round(pctAboveEma50) },
       sectors: sectorRows.length,
       rescored: updated,
       breakout_tracking: tracking,
+      score_distribution: dist,
     });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);

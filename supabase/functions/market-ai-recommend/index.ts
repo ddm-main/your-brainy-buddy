@@ -8,6 +8,11 @@ import { createLovableAiGatewayProvider } from "../_shared/ai-gateway.ts";
 import { sanitizeAiTrade, type AiVerdict } from "../_shared/market/aiTradeValidation.ts";
 import { generateText, NoObjectGeneratedError, Output } from "npm:ai";
 import { z } from "npm:zod";
+import { SCORE_BAND_STRONG, SCORE_BAND_MODERATE, SCORE_BAND_WEAK } from "../_shared/market/scoring.ts";
+
+// Per-run universe cap — highest breakout scores first so the cap keeps the
+// names that actually matter, and the response reports what was dropped.
+const AI_UNIVERSE_CAP = 500;
 
 function hashScore(s: Record<string, unknown>): string {
   const key = [s.close, s.rsi14, s.macd, s.ema20, s.ema50, s.ema200, s.atr_pct, s.breakout_score, s.prebreakout_score].join("|");
@@ -35,8 +40,11 @@ Deno.serve(async (req) => {
   try {
     const svc = svcClient();
     const { data: scores } = await svc.from("market_stock_scores")
-      .select("*").order("computed_at", { ascending: false }).limit(500);
+      .select("*").order("breakout_score", { ascending: false, nullsFirst: false }).limit(AI_UNIVERSE_CAP);
     if (!scores?.length) return jsonResponse(req, { ok: true, updated: 0 });
+    const { count: universeCount } = await svc.from("market_stock_scores")
+      .select("symbol", { count: "exact", head: true });
+    const droppedFromUniverse = Math.max(0, (universeCount ?? 0) - scores.length);
 
     // Dedupe by score_hash — skip if AI row with same hash already exists.
     const { data: existing } = await svc.from("market_stock_ai")
@@ -64,7 +72,7 @@ Rules:
 - stop_loss at 1.5× ATR below entry for long ideas.
 - targets: 2-3 levels using 1R/2R/3R risk multiples.
 - holding_period_days: 7-90 for swing.
-- recommendation must reflect breakout_score>=70 → Buy, 55-70 → Hold, 40-55 → Wait, <40 → Avoid.
+- recommendation must reflect breakout_score>=${SCORE_BAND_STRONG} → Buy, ${SCORE_BAND_MODERATE}-${SCORE_BAND_STRONG} → Hold, ${SCORE_BAND_WEAK}-${SCORE_BAND_MODERATE} → Wait, <${SCORE_BAND_WEAK} → Avoid.
 - Rationale ≤ 200 chars, no fluff.`;
 
       try {
@@ -120,7 +128,7 @@ Rules:
         updated++;
       } catch (e) { failed++; if (failed <= 3) console.error("ai_recommend_fail", s.symbol, e instanceof Error ? e.message : String(e)); }
     }
-    return jsonResponse(req, { ok: true, updated, failed, total_candidates: todo.length });
+    return jsonResponse(req, { ok: true, updated, failed, total_candidates: todo.length, universe_cap: AI_UNIVERSE_CAP, dropped_from_universe: droppedFromUniverse });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }

@@ -13,6 +13,8 @@ import {
   LineSeries,
   LineStyle,
   PriceScaleMode,
+  CrosshairMode,
+
   type IChartApi,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
@@ -122,7 +124,9 @@ export interface CandleChartSettings {
   logScale: boolean;
   priceLine: boolean;
   sessionBreaks: boolean;
+  magnet?: boolean;
 }
+
 
 export function CandleChart({
   candles,
@@ -139,6 +143,7 @@ export function CandleChart({
   onEditStudy,
   onRemoveStudy,
   source,
+  visibleBars = null,
 }: {
   candles: CandleDto[];
   priceLines?: Array<{ price: number; label: string; color: string }>;
@@ -160,7 +165,12 @@ export function CandleChart({
   onRemoveStudy?: (id: string) => void;
   /** Primary data provider that served the candles ("kotak_neo" | "yahoo"). Renders a small provenance chip in the header. */
   source?: "kotak_neo" | "yahoo" | null;
+  /** Initial visible window in bars (newest-first). `null` fits the whole
+   * series. The full series stays loaded either way — this only sets the
+   * viewport, so scrolling left still reveals the older history. */
+  visibleBars?: number | null;
 }) {
+
 
   const ref = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -178,10 +188,11 @@ export function CandleChart({
   // intraday charts roll to a fresh bar instead of stretching one monster bar.
   const medianGapRef = useRef<number>(0);
   const [liveBar, setLiveBar] = useState<CandleDto | null>(null);
-  const s = settings ?? { grid: true, logScale: false, priceLine: true, sessionBreaks: false };
+  const s = settings ?? { grid: true, logScale: false, priceLine: true, sessionBreaks: false, magnet: false };
   // Deconstructed so effect dep can be primitive and stable across parent
   // renders when the settings object identity changes but values don't.
-  const { grid: sGrid, logScale: sLog, priceLine: sPriceLine, sessionBreaks: sSessionBreaks } = s;
+  const { grid: sGrid, logScale: sLog, priceLine: sPriceLine, sessionBreaks: sSessionBreaks, magnet: sMagnet } = s;
+
 
 
   // Memoize per-study compute keyed by (candles reference, study JSON) so
@@ -349,9 +360,16 @@ export function CandleChart({
         rightOffset: sSessionBreaks ? 0 : 5,
       },
       crosshair: {
+        // Normal = free-floating crosshair: the horizontal line and its price
+        // label follow the exact cursor y instead of snapping to the hovered
+        // bar's nearest OHLC value (LWC's default Magnet behaviour, which made
+        // hovering a candle's body read back its close). TradingView ships the
+        // free crosshair by default and exposes magnet as an opt-in mode.
+        mode: sMagnet ? CrosshairMode.Magnet : CrosshairMode.Normal,
         vertLine: { color: "rgba(53,214,237,0.4)", labelBackgroundColor: "#0a2733" },
         horzLine: { color: "rgba(53,214,237,0.4)", labelBackgroundColor: "#0a2733" },
       },
+
     });
     chartRef.current = chart;
 
@@ -370,11 +388,22 @@ export function CandleChart({
       priceSeries = chart.addSeries(BarSeries, { upColor: UP, downColor: DOWN, thinBars: false });
       priceSeries.setData(data.map((c) => ({ time: toTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })));
     } else if (chartType === "line") {
-      priceSeries = chart.addSeries(LineSeries, { color: "#35d6ed", lineWidth: 2 });
+      // Line/area plot a single value per bar, so a crosshair marker dot on the
+      // series is the industry-standard readout (candles/bars don't use one).
+      priceSeries = chart.addSeries(LineSeries, {
+        color: "#35d6ed", lineWidth: 2,
+        crosshairMarkerVisible: true, crosshairMarkerRadius: 3,
+        crosshairMarkerBorderColor: "#35d6ed", crosshairMarkerBackgroundColor: "#041016",
+      });
       priceSeries.setData(data.map((c) => ({ time: toTime(c.time), value: c.close })));
     } else if (chartType === "area") {
-      priceSeries = chart.addSeries(AreaSeries, { lineColor: "#35d6ed", lineWidth: 2, topColor: "rgba(53,214,237,0.25)", bottomColor: "rgba(53,214,237,0.02)" });
+      priceSeries = chart.addSeries(AreaSeries, {
+        lineColor: "#35d6ed", lineWidth: 2, topColor: "rgba(53,214,237,0.25)", bottomColor: "rgba(53,214,237,0.02)",
+        crosshairMarkerVisible: true, crosshairMarkerRadius: 3,
+        crosshairMarkerBorderColor: "#35d6ed", crosshairMarkerBackgroundColor: "#041016",
+      });
       priceSeries.setData(data.map((c) => ({ time: toTime(c.time), value: c.close })));
+
     } else {
       priceSeries = chart.addSeries(CandlestickSeries, {
         upColor: UP, downColor: DOWN, borderUpColor: UP, borderDownColor: DOWN,
@@ -637,9 +666,13 @@ export function CandleChart({
     });
 
     // preserve view across param edits; fit only on a new candle set
-    const candlesKey = `${data.length}:${data[0] ? String(data[0].time) : ""}:${data[data.length - 1] ? String(data[data.length - 1].time) : ""}`;
+    const candlesKey = `${data.length}:${data[0] ? String(data[0].time) : ""}:${data[data.length - 1] ? String(data[data.length - 1].time) : ""}:${visibleBars ?? "all"}`;
     if (candlesKey === candlesKeyRef.current && rangeRef.current) {
       chart.timeScale().setVisibleLogicalRange(rangeRef.current);
+    } else if (visibleBars && data.length > visibleBars) {
+      // Deep series stay fully loaded; the viewport just opens on the most
+      // recent `visibleBars` so a 20-year chart isn't squashed by default.
+      chart.timeScale().setVisibleLogicalRange({ from: data.length - visibleBars, to: data.length - 1 });
     } else {
       chart.timeScale().fitContent();
     }
@@ -664,7 +697,7 @@ export function CandleChart({
       priceSeriesRef.current = null;
       volumeSeriesRef.current = null;
     };
-  }, [candles, computed, priceLines, height, fill, chartType, intraday, sGrid, sLog, sPriceLine, sSessionBreaks]);
+  }, [candles, computed, priceLines, height, fill, chartType, intraday, sGrid, sLog, sPriceLine, sSessionBreaks, sMagnet, visibleBars]);
 
 
   // ---- live tick: move/extend the rightmost bar without rebuilding the chart ----

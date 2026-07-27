@@ -103,6 +103,9 @@ export interface ScreenerRow {
   intraday_components: Record<string, number> | null;
   avg_turnover_cr: number | null;
   is_liquid_tradable: boolean | null;
+  // false while only the neutral-context EOD pass has run (sector/RS/regime
+  // not yet applied) — the badge marks such scores provisional.
+  context_complete: boolean | null;
 }
 
 
@@ -289,6 +292,7 @@ function toScreenerRow(s: any, idxSets: { NIFTY50: Set<string>; BANKNIFTY: Set<s
     intraday_components: s.intraday_components ?? null,
     avg_turnover_cr:     num(s.avg_turnover_cr),
     is_liquid_tradable:  s.is_liquid_tradable ?? null,
+    context_complete:    s.context_complete ?? null,
   };
 }
 

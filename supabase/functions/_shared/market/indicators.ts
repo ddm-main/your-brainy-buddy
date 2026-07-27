@@ -337,6 +337,48 @@ export function supportResistance(
   return { support, resistance, supportTouches, resistanceTouches, supportFallback, resistanceFallback };
 }
 
+// The breakout pivot proper: the strongest clustered swing-high level that
+// price has already cleared (at or below the last close), rather than a blind
+// rolling-N high. A level touched 3+ times is a real base ceiling; a rolling
+// high can be a single spike bar. Returns null when no cleared cluster exists
+// within `maxAtrsBelow` ATRs of price (i.e. nothing meaningful was broken).
+export function resistancePivot(
+  candles: Candle[],
+  lookback = 250,
+  maxAtrsBelow = 6,
+): { level: number | null; touches: number; atrsAbove: number | null } {
+  const window = candles.slice(-lookback);
+  if (window.length < 20) return { level: null, touches: 0, atrsAbove: null };
+  const lastClose = window[window.length - 1].close;
+  const atrV = lastDefined(atr(window, 14)) ?? lastClose * 0.02;
+  if (!(atrV > 0)) return { level: null, touches: 0, atrsAbove: null };
+  const band = Math.max(0.003, (0.5 * atrV) / lastClose);
+  const clusters = clusterPivots(findPivots(window, "high", 3), band, window.length);
+  const cleared = clusters
+    .filter((c) => c.price <= lastClose && (lastClose - c.price) / atrV <= maxAtrsBelow)
+    // prefer the strongest (touches + recency); tie-break to the higher level
+    .sort((a, b) => b.strength - a.strength || b.price - a.price)[0];
+  if (!cleared) return { level: null, touches: 0, atrsAbove: null };
+  return {
+    level: cleared.price,
+    touches: cleared.touches,
+    atrsAbove: (lastClose - cleared.price) / atrV,
+  };
+}
+
+// Volume dry-up: mean volume of the last 5 completed-plus-current sessions
+// relative to the 20-session mean. < 1 means supply is drying up inside the
+// base — a classic pre-breakout tell. Null when history is too short.
+export function volumeDryUpRatio(volumes: number[], shortN = 5, longN = 20): number | null {
+  if (volumes.length < longN) return null;
+  const shortAvg = volumes.slice(-shortN).reduce((a, b) => a + b, 0) / shortN;
+  const longAvg = volumes.slice(-longN).reduce((a, b) => a + b, 0) / longN;
+  if (!(longAvg > 0)) return null;
+  return shortAvg / longAvg;
+}
+
+
+
 function lastDefined(series: (number | null)[]): number | null {
   for (let i = series.length - 1; i >= 0; i--) if (series[i] != null) return series[i];
   return null;
@@ -390,6 +432,9 @@ export function breakoutFreshnessDays(candles: Candle[], period = 20, lookback =
     let h = -Infinity;
     for (const c of win) if (c.high > h) h = c.high;
     if (candles[i].close > h) {
+      // The breakout only counts if price is STILL above the pivot it cleared —
+      // a breakout that has since failed back below the level is not "fresh".
+      if (candles[candles.length - 1].close <= h) return null;
       // Check that the previous session did NOT close above the same-shifted high.
       if (k === lookback - 1) return k;
       const prevWin = candles.slice(i - period - 1, i - 1);
@@ -418,7 +463,7 @@ export function baseMetrics(candles: Candle[], window = 30): {
   const slice = candles.slice(-window);
   const closes = slice.map((c) => c.close);
   const mean = closes.reduce((a, b) => a + b, 0) / closes.length;
-  if (mean === 0) return { tightness: null, depthPct: null, durationDays: window };
+  if (mean === 0) return { tightness: null, depthPct: null, durationDays: null };
   const variance = closes.reduce((a, b) => a + (b - mean) ** 2, 0) / closes.length;
   const sd = Math.sqrt(variance);
   const tightness = sd / mean; // lower = tighter
@@ -432,7 +477,9 @@ export function baseMetrics(candles: Candle[], window = 30): {
     if (Math.abs((candles[i].close - mean) / mean) * 100 <= band) duration++;
     else break;
   }
-  return { tightness, depthPct, durationDays: duration || window };
+  // A real 0 means "no base at all" (price is outside the band today) — it must
+  // stay 0, not fall back to `window` and score as a mature base.
+  return { tightness, depthPct, durationDays: duration };
 }
 
 
@@ -556,6 +603,10 @@ export interface IndicatorSnapshot {
   rsPercentile?: number | null;       // 0..100 vs universe over 55 sessions
   closeInRangePct?: number | null;    // 0..100 — where today closed within its daily range
   breakoutFreshnessDays?: number | null; // sessions since 20d high was first cleared; 0 = today
+  pivotLevel?: number | null;         // strongest cleared swing-high cluster (real base ceiling)
+  pivotTouches?: number | null;       // how many swing highs formed that cluster
+  volDryUpRatio?: number | null;      // 5D avg volume / 20D avg volume; <1 = drying up
+
   // series for chart overlays (aligned to candles)
   ema20Series: (number | null)[];
   ema50Series: (number | null)[];
@@ -634,6 +685,9 @@ export function computeSnapshot(candles: Candle[]): IndicatorSnapshot | null {
   const freshness = breakoutFreshnessDays(candles, 20, 10);
   const cir = closeInRangePct(last);
   const base = baseMetrics(candles, 30);
+  const pivot = resistancePivot(candles, 250);
+  const dryUp = volumeDryUpRatio(volumes, 5, 20);
+
 
   return {
     close,
@@ -681,6 +735,10 @@ export function computeSnapshot(candles: Candle[]): IndicatorSnapshot | null {
     baseDurationDays: base.durationDays,
     closeInRangePct: cir,
     breakoutFreshnessDays: freshness,
+    pivotLevel: pivot.level,
+    pivotTouches: pivot.touches,
+    volDryUpRatio: dryUp,
+
     ema20Series: e20,
     ema50Series: e50,
     ema200Series: e200,

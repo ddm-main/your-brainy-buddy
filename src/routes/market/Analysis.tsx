@@ -5,12 +5,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
+import { pickNsePreferredListing } from "@/lib/market/exchangePreference";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
-import { TradingViewChart, tvInterval } from "@/components/market/TradingViewChart";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
-import { ChartToolbar, DEFAULT_SETTINGS, isIntraday, type ChartSettings } from "@/components/market/ChartToolbar";
+import { ChartToolbar, DEFAULT_SETTINGS, isIntraday, rangeToBars, type ChartRange, type ChartSettings } from "@/components/market/ChartToolbar";
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
 import { NewAlertModal, StockAlertsPanel } from "@/components/market/StockAlerts";
 import { DEFAULT_STUDIES, makeStudy, normalizeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
@@ -26,7 +26,7 @@ import { RefreshCw } from "lucide-react";
 
 const STATE_STORE = "jarvis.analysis.state.v5";
 const LAYOUTS_STORE = "jarvis.analysis.layouts.v1";
-// Per-symbol chart preferences (TF/chartType/tvMode) — lets users keep
+// Per-symbol chart preferences (TF/chartType) — lets users keep
 // e.g. NIFTY on 1h and RELIANCE on 15m. Falls back to STATE_STORE.
 const TF_STORE_PREFIX = "jarvis.analysis.tf.";
 const tfKey = (exch: string, sym: string | undefined) =>
@@ -36,17 +36,17 @@ const tfKey = (exch: string, sym: string | undefined) =>
 type Persisted = {
   tf: string;
   chartType: ChartType;
-  tvMode: boolean;
   studies: Study[];
   settings: ChartSettings;
+  range: ChartRange;
 };
 
 const defaultState: Persisted = {
   tf: "1D",
   chartType: "candles",
-  tvMode: false,
   studies: DEFAULT_STUDIES,
   settings: DEFAULT_SETTINGS,
+  range: "1Y",
 };
 
 // Drop studies whose type no longer exists and backfill missing params/colours.
@@ -83,34 +83,50 @@ export default function Analysis() {
   const nav = useNavigate();
   const { symbol } = useParams();
   const qc = useQueryClient();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const exchange = (searchParams.get("exchange") ?? "NSE").toUpperCase() === "BSE" ? "BSE" : "NSE";
-  const setExchange = (ex: "NSE" | "BSE") => {
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev);
-      if (ex === "NSE") next.delete("exchange"); else next.set("exchange", ex);
-      return next;
-    }, { replace: true });
-  };
+  const [searchParams] = useSearchParams();
+  // Exchange is resolved automatically: NSE when the symbol is listed there,
+  // BSE only when it isn't. An explicit ?exchange= param (deep links from other
+  // screens) still wins. No manual toggle — one listing, one chart.
+  const paramExchange = searchParams.get("exchange")?.toUpperCase();
+  const forcedExchange: "NSE" | "BSE" | null =
+    paramExchange === "BSE" ? "BSE" : paramExchange === "NSE" ? "NSE" : null;
+  const { data: listedExchange } = useQuery({
+    queryKey: ["market", "listing-exchange", symbol?.toUpperCase()],
+    enabled: !!symbol && !forcedExchange,
+    staleTime: 60 * 60 * 1000,
+    queryFn: async () => {
+      const { data } = await supabase
+        .from("market_stocks")
+        .select("exchange")
+        .eq("symbol", symbol!.toUpperCase())
+        .eq("is_active", true);
+      const rows = (data ?? []) as { exchange: string }[];
+      return pickNsePreferredListing(rows)?.exchange?.toUpperCase() === "BSE" ? "BSE" : "NSE";
+    },
+  });
+  const exchange: "NSE" | "BSE" = forcedExchange ?? listedExchange ?? "NSE";
+
   const initial = useMemo(loadState, []);
-  // Per-symbol TF/chartType/tvMode override wins over the global state so
+  // Per-symbol TF/chartType override wins over the global state so
   // switching between symbols keeps each one's preferred view.
   const perSymbolInitial = useMemo(() => {
     try {
       const raw = localStorage.getItem(tfKey(exchange, symbol));
       if (!raw) return null;
-      return JSON.parse(raw) as { tf?: string; chartType?: ChartType; tvMode?: boolean };
+      return JSON.parse(raw) as { tf?: string; chartType?: ChartType };
     } catch { return null; }
     // symbol/exchange change → recompute; safe: state below re-inits from this.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, exchange]);
   const [tf, setTf] = useState(perSymbolInitial?.tf ?? initial.tf);
   const [chartType, setChartType] = useState<ChartType>(perSymbolInitial?.chartType ?? initial.chartType);
-  const [tvMode, setTvMode] = useState(perSymbolInitial?.tvMode ?? initial.tvMode);
   const [fs, setFs] = useState(false);
   const [studies, setStudies] = useState<Study[]>(initial.studies);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [settings, setSettings] = useState<ChartSettings>(initial.settings);
+  // Viewport range for daily/weekly/monthly charts. The full series is always
+  // fetched; this only decides how much of it is visible on load.
+  const [range, setRange] = useState<ChartRange>(initial.range ?? "1Y");
   const [alertModalOpen, setAlertModalOpen] = useState(false);
   const chartWrapRef = useRef<HTMLDivElement>(null);
   const notify = useNotifications((s) => s.add);
@@ -132,12 +148,12 @@ export default function Analysis() {
   const saveLayout = useCallback((name: string) => {
     try {
       const all = JSON.parse(localStorage.getItem(LAYOUTS_STORE) ?? "{}");
-      all[name] = { tf, chartType, tvMode, studies, settings };
+      all[name] = { tf, chartType, studies, settings };
       localStorage.setItem(LAYOUTS_STORE, JSON.stringify(all));
       setSavedLayouts(Object.keys(all));
       notify(`Layout "${name}" saved`);
     } catch { notify("Could not save layout"); }
-  }, [tf, chartType, tvMode, studies, settings, notify]);
+  }, [tf, chartType, studies, settings, notify]);
   const loadLayout = useCallback((name: string) => {
     try {
       const all = JSON.parse(localStorage.getItem(LAYOUTS_STORE) ?? "{}");
@@ -145,7 +161,6 @@ export default function Analysis() {
       if (!l) return;
       if (l.tf) setTf(l.tf);
       if (l.chartType) setChartType(l.chartType);
-      if (typeof l.tvMode === "boolean") setTvMode(l.tvMode);
       if (Array.isArray(l.studies)) setStudies(loadStudies(l.studies));
       if (l.settings) setSettings({ ...DEFAULT_SETTINGS, ...l.settings });
       notify(`Layout "${name}" loaded`);
@@ -161,26 +176,26 @@ export default function Analysis() {
   }, []);
 
   useEffect(() => {
-    const payload: Persisted = { tf, chartType, tvMode, studies, settings };
+    const payload: Persisted = { tf, chartType, studies, settings, range };
     localStorage.setItem(STATE_STORE, JSON.stringify(payload));
-  }, [tf, chartType, tvMode, studies, settings]);
+  }, [tf, chartType, studies, settings, range]);
 
-  // Per-symbol chart prefs (TF/chartType/tvMode). Written on change AND on
+  // Per-symbol chart prefs (TF/chartType). Written on change AND on
   // beforeunload so a fast refresh right after switching TF still catches it.
   useEffect(() => {
     if (!symbol) return;
     const key = tfKey(exchange, symbol);
-    const payload = { tf, chartType, tvMode };
+    const payload = { tf, chartType };
     try { localStorage.setItem(key, JSON.stringify(payload)); } catch { /* quota */ }
     const onBeforeUnload = () => {
       try {
         localStorage.setItem(key, JSON.stringify(payload));
-        localStorage.setItem(STATE_STORE, JSON.stringify({ tf, chartType, tvMode, studies, settings }));
+        localStorage.setItem(STATE_STORE, JSON.stringify({ tf, chartType, studies, settings }));
       } catch { /* noop */ }
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [symbol, exchange, tf, chartType, tvMode, studies, settings]);
+  }, [symbol, exchange, tf, chartType, studies, settings]);
 
   // F toggles fullscreen when not typing in an input
   useEffect(() => {
@@ -343,17 +358,10 @@ export default function Analysis() {
           style={{ flex: 1, minHeight: 0 }}
           actions={
             <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-              {candleData?.provider && (
-                <Chip tone={candleData.provider === "kotak_neo" ? "ok" : "accent"}>
-                  {candleData.provider === "kotak_neo" ? "kotak" : "yahoo"}
-                </Chip>
-              )}
-              {(["NSE", "BSE"] as const).map((ex) => (
-                <Btn key={ex} size="sm" variant={exchange === ex ? "primary" : "ghost"} onClick={() => setExchange(ex)}>
-                  {ex}
-                </Btn>
-              ))}
+              {/* Provider provenance is shown on the chart itself ("yahoo · delayed") — no duplicate chip here. */}
+              <Chip tone="neutral">{exchange}</Chip>
             </div>
+
           }
         >
           <FullscreenShell fullscreen={fs} onExit={() => setFs(false)} title={`${sym} · ${tf}`}>
@@ -370,8 +378,6 @@ export default function Analysis() {
               totalStudyCount={studies.length}
               settings={settings}
               onSettings={(u) => setSettings(u)}
-              tvMode={tvMode}
-              onTvMode={setTvMode}
               onFullscreen={() => setFs(true)}
               onAlert={() => setAlertModalOpen(true)}
               alertCount={alertCount}
@@ -381,11 +387,11 @@ export default function Analysis() {
               onDeleteLayout={deleteLayout}
               savedLayouts={savedLayouts}
               intraday={isIntraday(tf)}
+              range={range}
+              onRange={setRange}
             />
             <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0 }}>
-              {tvMode ? (
-                <TradingViewChart symbol={sym} exchange={exchange} interval={tvInterval(tf)} />
-              ) : error ? (
+              {error ? (
                 <EmptyState hint={String((error as Error).message ?? "")}>chart unavailable</EmptyState>
               ) : isLoading || !candleData ? (
                 <div className="hud-label" style={{ padding: 24, textAlign: "center" }}>loading candles…</div>
@@ -406,6 +412,7 @@ export default function Analysis() {
                   onEditStudy={setEditingId}
                   onRemoveStudy={removeStudy}
                   source={candleData.provider ?? null}
+                  visibleBars={isIntraday(tf) ? null : rangeToBars(range, tf)}
                 />
 
 

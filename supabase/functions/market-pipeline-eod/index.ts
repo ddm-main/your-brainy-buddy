@@ -200,6 +200,10 @@ Deno.serve(async (req) => {
             base_duration_days: snap.baseDurationDays ?? null,
             close_in_range_pct: snap.closeInRangePct ?? null,
             breakout_freshness_days: snap.breakoutFreshnessDays ?? null,
+            pivot_level: snap.pivotLevel ?? null,
+            pivot_touches: snap.pivotTouches ?? null,
+            vol_dryup_ratio: snap.volDryUpRatio ?? null,
+
             breakout_score: bs.score,
             prebreakout_score: ps.score,
             score_components: { breakout: bs.components, prebreakout: ps.components },
@@ -221,6 +225,9 @@ Deno.serve(async (req) => {
             swing_components: sw.components,
             intraday_score: is.score,
             intraday_components: is.components,
+            // Neutral-context preliminary write; market-pipeline-aggregates
+            // recomputes with real sector/RS/regime context and flips this true.
+            context_complete: false,
             computed_at: new Date().toISOString(),
           }, { onConflict: "symbol,exchange" });
 

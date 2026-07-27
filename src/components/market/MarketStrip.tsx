@@ -1,12 +1,11 @@
 // Compact one-line HUD strip pinned above the Market dashboard rows.
-// Surfaces key indices (incl. GIFT Nifty), A/D breadth (drill-down),
-// and FII / DII net flows as independent chips.
+// Surfaces key indices (incl. GIFT Nifty) and A/D breadth (drill-down).
 // Push ticks from the Kotak WS relay are overlaid on top of REST quotes for
 // the four index symbols so NIFTY/BANKNIFTY/SENSEX/VIX go realtime the
 // moment the relay is up. Auto-refreshes via useIndices polling — no manual button.
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useIndices, useBreadth, useFiiDiiLatest } from "@/lib/market/hooks";
+import { useIndices, useBreadth } from "@/lib/market/hooks";
 import { isFreshTick, useLiveTickStore, useTicksRevision} from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
 import { BreadthDetailsDialog } from "@/components/market/BreadthDetailsDialog";
@@ -35,7 +34,6 @@ export function MarketStrip({ actions }: Props) {
   const nav = useNavigate();
   const { data: indicesData, dataUpdatedAt: indicesUpdatedAt, isError: indicesError } = useIndices() as { data: any; dataUpdatedAt: number; isError: boolean };
   const { data: breadth } = useBreadth();
-  const { data: fiiDii } = useFiiDiiLatest();
   const [breadthOpen, setBreadthOpen] = useState(false);
 
   const _ticksRev_pushTicks = useTicksRevision();
@@ -73,22 +71,11 @@ export function MarketStrip({ actions }: Props) {
 
   const ad = breadth ? { adv: breadth.advances ?? 0, dec: breadth.declines ?? 0 } : null;
   const breadthDate = (breadth as any)?.trade_date ?? null;
-  // fii_net_cr / dii_net_cr on market_breadth_daily are never populated by any
-  // job — read the table the FII/DII sync actually writes, falling back to the
-  // breadth columns if they ever do get filled.
-  const fiiCr = fiiDii?.fii_net ?? breadth?.fii_net_cr ?? null;
-  const diiCr = fiiDii?.dii_net ?? breadth?.dii_net_cr ?? null;
-  const flowDate = fiiDii?.activity_date ?? null;
   const todayIst = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
   const breadthStale = breadthDate && breadthDate !== todayIst;
-  const flowStale = flowDate && flowDate !== todayIst;
   const adTitle = breadthDate
     ? `Advances / Declines for ${breadthDate}${breadthStale ? " (last trading session)" : ""} · click for breadth details`
     : "Market breadth unavailable";
-  const flowTitle = (who: string) =>
-    flowDate
-      ? `${who} net cash flow (₹ crore) for ${flowDate}${flowStale ? " (last trading session)" : ""} · click for details`
-      : `${who} net cash flow unavailable — the daily NSE FII/DII feed has not returned data yet`;
 
 
   return (
@@ -150,53 +137,6 @@ export function MarketStrip({ actions }: Props) {
           </>
         ) : (
           <span style={{ color: "var(--text-dim)" }}>—</span>
-        )}
-      </button>
-
-
-      {/* FII — its own chip */}
-      <button
-        onClick={() => setBreadthOpen(true)}
-        className="focus-outline"
-        aria-label="Open FII/DII details"
-        title={flowTitle("FII")}
-        style={{
-          display: "inline-flex", gap: 6, alignItems: "baseline",
-          background: "transparent", border: 0, padding: "2px 4px",
-          margin: 0, cursor: "pointer", font: "inherit", color: "inherit",
-          borderRadius: 2, opacity: fiiCr != null && flowStale ? 0.55 : 1,
-        }}
-      >
-        <span style={{ color: "var(--text-muted)" }}>FII</span>
-        {fiiCr == null ? (
-          <span style={{ color: "var(--text-dim)" }}>n/a</span>
-        ) : (
-          <span style={{ color: fiiCr >= 0 ? "var(--ok)" : "var(--danger)", fontVariantNumeric: "tabular-nums" }}>
-            {fiiCr >= 0 ? "+" : ""}{fmtNum(fiiCr, 0)}cr
-          </span>
-        )}
-      </button>
-
-      {/* DII — its own chip */}
-      <button
-        onClick={() => setBreadthOpen(true)}
-        className="focus-outline"
-        aria-label="Open FII/DII details"
-        title={flowTitle("DII")}
-        style={{
-          display: "inline-flex", gap: 6, alignItems: "baseline",
-          background: "transparent", border: 0, padding: "2px 4px",
-          margin: 0, cursor: "pointer", font: "inherit", color: "inherit",
-          borderRadius: 2, opacity: diiCr != null && flowStale ? 0.55 : 1,
-        }}
-      >
-        <span style={{ color: "var(--text-muted)" }}>DII</span>
-        {diiCr == null ? (
-          <span style={{ color: "var(--text-dim)" }}>n/a</span>
-        ) : (
-          <span style={{ color: diiCr >= 0 ? "var(--ok)" : "var(--danger)", fontVariantNumeric: "tabular-nums" }}>
-            {diiCr >= 0 ? "+" : ""}{fmtNum(diiCr, 0)}cr
-          </span>
         )}
       </button>
 

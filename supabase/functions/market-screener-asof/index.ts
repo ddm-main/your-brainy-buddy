@@ -57,6 +57,30 @@ async function fetchSnapshots(svc: any, symbols: string[]): Promise<Map<string, 
   return out;
 }
 
+// Historical market context for the as-of date. Using today's sector strength
+// / relative strength (as this function used to) leaks future information into
+// a historical screen. Sector strength comes from the daily sector table;
+// regime from the daily breadth table. Relative strength vs Nifty is not
+// stored per-date anywhere, so it stays null rather than borrowing today's.
+async function fetchAsOfContext(svc: any, asOf: string): Promise<{
+  sectorStrength: Map<string, number>;
+  regime: string | null;
+  available: boolean;
+}> {
+  const sectorStrength = new Map<string, number>();
+  const [{ data: sectors }, { data: breadth }] = await Promise.all([
+    svc.from("market_sector_strength_daily").select("sector,strength_rank").eq("trade_date", asOf),
+    svc.from("market_breadth_daily").select("regime").eq("trade_date", asOf).maybeSingle(),
+  ]);
+  const ranked = (sectors ?? []).filter((r: any) => r.strength_rank != null);
+  const n = ranked.length;
+  for (const r of ranked) {
+    sectorStrength.set(r.sector ?? "Unknown", n > 1 ? 1 - (Number(r.strength_rank) - 1) / (n - 1) : 0.5);
+  }
+  const regime = breadth?.regime ?? null;
+  return { sectorStrength, regime, available: n > 0 || regime != null };
+}
+
 async function resolveTradingDate(svc: any, asOf: string): Promise<{ resolved: string | null; earliest: string | null }> {
   const [{ data: onOrBefore }, { data: earliestRow }] = await Promise.all([
     svc.from("market_daily_prices").select("trade_date").eq("exchange", "NSE")
@@ -156,9 +180,10 @@ Deno.serve(async (req) => {
       return jsonResponse(req, { as_of: asOf, requested_as_of: requested, earliest_as_of: earliest, universe, count: 0, rows: [] });
     }
 
-    const [snapshots, priceMap] = await Promise.all([
+    const [snapshots, priceMap, asOfCtx] = await Promise.all([
       fetchSnapshots(svc, symbols),
       fetchDailyPrices(svc, symbols, asOf, 260),
+      fetchAsOfContext(svc, asOf),
     ]);
 
     // Coverage telemetry — with a shallow price history most symbols are
@@ -181,9 +206,10 @@ Deno.serve(async (req) => {
 
       const ind = computeSnapshot(candles); if (!ind) continue;
       const ctx: MarketContext = {
-        sectorStrength: snap.sector_strength ?? null,
-        regime: null,
-        relStrengthNifty: snap.rel_strength_nifty ?? null,
+        sectorStrength: asOfCtx.sectorStrength.get(snap.sector ?? "Unknown") ?? null,
+        regime: asOfCtx.regime,
+        // Not stored historically — null scores 0 rather than leaking today's value.
+        relStrengthNifty: null,
         deliveryPct: null,
       };
       const bo = breakoutScore(ind, ctx);
@@ -206,7 +232,12 @@ Deno.serve(async (req) => {
         is_nifty500: !!snap.is_nifty500,
         fno_enabled: !!snap.fno_enabled,
         sme: !!snap.sme,
-        data_provenance: { asof: asOf, fundamentals: "latest_snapshot", technicals: "recomputed" },
+        data_provenance: {
+          asof: asOf,
+          fundamentals: "latest_snapshot",
+          technicals: "recomputed",
+          market_context: asOfCtx.available ? "historical" : "unavailable",
+        },
 
         trade_date: new Date(last.time * 1000).toISOString().slice(0, 10),
         close: last.close,
@@ -246,8 +277,8 @@ Deno.serve(async (req) => {
         resistance_level: ind.resistance,
         support_level: ind.support,
 
-        sector_strength: snap.sector_strength ?? null,
-        rel_strength_nifty: snap.rel_strength_nifty ?? null,
+        sector_strength: ctx.sectorStrength,
+        rel_strength_nifty: null,
         breakout_score: bo.score,
         prebreakout_score: pb.score,
         score_components: { breakout: bo.components, prebreakout: pb.components },
@@ -288,6 +319,7 @@ Deno.serve(async (req) => {
       universe_size: symbols.length,
       skipped_no_history: skippedNoHistory,
       skipped_short_history: skippedShortHistory,
+      market_context: asOfCtx.available ? "historical" : "unavailable",
       rows,
     });
   } catch (e) {

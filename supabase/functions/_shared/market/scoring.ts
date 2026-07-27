@@ -29,17 +29,29 @@ export function breakoutScore(s: IndicatorSnapshot, ctx: MarketContext): ScoreRe
   const c: Record<string, number> = {};
 
   // --- Trigger & momentum (25) ---
-  // Real breakout trigger = close above rolling N-day high, magnitude in ATRs.
-  // Falls back to pctFrom52wHigh when rolling highs are unavailable.
-  const pivot = s.rollingHigh20 ?? null;
+  // Real breakout trigger = close above the base pivot, magnitude in ATRs.
+  // The pivot is the strongest CLUSTERED swing-high level price has cleared
+  // (a ceiling touched 3+ times is a real base; a rolling-20 high can be one
+  // spike bar). We take whichever of the two is higher so a genuine new high
+  // is never scored against a stale cluster, and scale the trigger by pivot
+  // quality: a 1-touch level earns 80% of the points, 3+ touches earn 100%.
+  const clusterPivot = s.pivotLevel ?? null;
+  const rollPivot = s.rollingHigh20 ?? null;
+  const pivot = clusterPivot != null && rollPivot != null
+    ? Math.max(clusterPivot, rollPivot)
+    : (clusterPivot ?? rollPivot);
+  const usingCluster = clusterPivot != null && (rollPivot == null || clusterPivot >= rollPivot);
+  const touches = usingCluster ? (s.pivotTouches ?? 0) : 0;
+  const pivotQuality = usingCluster ? 0.8 + 0.2 * ramp(touches, 1, 3) : 0.8;
   const atr = s.atr14 ?? null;
   if (pivot != null && s.close != null && atr != null && atr > 0) {
     const atrsAbove = (s.close - pivot) / atr;
-    c.trigger = ramp(atrsAbove, 0, 1) * 10;
+    c.trigger = ramp(atrsAbove, 0, 1) * 10 * pivotQuality;
   } else {
     const pf = s.pctFrom52wHigh;
-    c.trigger = pf == null ? 0 : ramp(pf, -15, 0) * 10;
+    c.trigger = pf == null ? 0 : ramp(pf, -15, 0) * 10 * 0.8;
   }
+
   // Close-in-range: at high of the day = full 3pts, at low = 0.
   const cir = s.closeInRangePct;
   c.close_in_range = cir == null ? 0 : ramp(cir, 40, 90) * 3;
@@ -62,12 +74,13 @@ export function breakoutScore(s: IndicatorSnapshot, ctx: MarketContext): ScoreRe
   c.base_duration = bDur == null ? 0 : ramp(bDur, 10, 30) * 4;           // ≥30 sessions full
 
   // --- Volume/participation (20) ---
+  // Delivery% is not ingested for any exchange we support, so the old 6-pt
+  // `delivery` factor was always 0 and capped the gross score at 84. Those 6
+  // points are redistributed into volume/OBV; the bucket still totals 20.
   const rv = s.relVolume ?? 0;
-  c.volume = ramp(rv, 1, 3) * 10;
+  c.volume = ramp(rv, 1, 3) * 14;
   const obv = s.obvSlope20 ?? null;
-  c.obv = obv == null ? 0 : ramp(obv, 0, 1) * 4;
-  const dp = ctx.deliveryPct;
-  c.delivery = dp == null ? 0 : ramp(dp, 30, 70) * 6;
+  c.obv = obv == null ? 0 : ramp(obv, 0, 1) * 6;
 
   // --- Trend (10) ---
   c.above_ema200 = s.aboveEma200 ? 5 : 0;
@@ -84,12 +97,14 @@ export function breakoutScore(s: IndicatorSnapshot, ctx: MarketContext): ScoreRe
   c.rsi = clamp(rsiScore, 0, 5);
 
   // --- RS & context (15) ---
+  // Unknown context scores 0, never a consolation credit — otherwise the
+  // context-free EOD pass hands every stock free points.
   const rs = ctx.relStrengthNifty;
-  c.rel_strength = rs == null ? 2 : ramp(rs, -5, 15) * 5;
+  c.rel_strength = rs == null ? 0 : ramp(rs, -5, 15) * 5;
   // RS percentile vs universe (0..100). Full at 90+, none at ≤50.
-  const rsP = ctx.relStrengthNifty != null && s.rsPercentile == null ? null : s.rsPercentile;
+  const rsP = s.rsPercentile;
   c.rs_percentile = rsP == null ? 0 : ramp(rsP, 50, 90) * 3;
-  c.sector_strength = ctx.sectorStrength == null ? 2 : ctx.sectorStrength * 4;
+  c.sector_strength = ctx.sectorStrength == null ? 0 : ctx.sectorStrength * 4;
   c.breadth = ctx.regime === "bullish" ? 3 : ctx.regime === "neutral" ? 1.5 : 0;
 
   // --- Risk penalties (subtract; floor 0) ---
@@ -118,24 +133,32 @@ export function breakoutScore(s: IndicatorSnapshot, ctx: MarketContext): ScoreRe
 export function preBreakoutScore(s: IndicatorSnapshot, ctx: MarketContext): ScoreResult {
   const c: Record<string, number> = {};
 
-  // Bollinger squeeze (25)
-  c.bb_squeeze = s.bbSqueeze ? 25 : 0;
+  // Bollinger squeeze (22)
+  c.bb_squeeze = s.bbSqueeze ? 22 : 0;
 
-  // ATR contraction (15)
-  c.atr_contraction = s.atrContracting ? 15 : 0;
+  // ATR contraction (13)
+  c.atr_contraction = s.atrContracting ? 13 : 0;
 
   // Higher lows (20)
   c.higher_lows = s.higherLows ? 20 : 0;
 
-  // Within 3% below resistance (20)
+  // Within ATR-scaled band below resistance (20)
   c.near_resistance = s.nearResistance ? 20 : 0;
 
-  // Quiet volume during base: rel volume 0.5–1.1 is constructive (max 10)
+  // Quiet volume during the base (max 10), graded rather than a cliff edge:
+  // ~0.75× the 20D average is ideal; heavy volume inside a base is churn, and
+  // a total volume vacuum (<0.3×) means nobody is watching the name.
   const rv = s.relVolume;
-  c.quiet_volume = rv != null && rv >= 0.4 && rv <= 1.15 ? 10 : 0;
+  c.quiet_volume = rv == null ? 0 : clamp(10 * (1 - Math.abs(rv - 0.75) / 0.75), 0, 10);
+
+  // Volume dry-up (max 5): 5D average volume shrinking versus the 20D average
+  // is the classic pre-breakout supply exhaustion tell. 0.6× or less = full.
+  const dry = s.volDryUpRatio ?? null;
+  c.volume_dryup = dry == null ? 0 : (1 - ramp(dry, 0.6, 1)) * 5;
 
   // Trend filter: above 200 EMA adds conviction (10)
   c.above_ema200 = s.aboveEma200 ? 10 : 0;
+
 
   let total = Object.values(c).reduce((a, b) => a + b, 0);
   // Bearish regime dampens expectations
@@ -144,6 +167,41 @@ export function preBreakoutScore(s: IndicatorSnapshot, ctx: MarketContext): Scor
   const components = Object.fromEntries(Object.entries(c).map(([k, v]) => [k, Math.round(v * 10) / 10]));
   return { score: Math.round(clamp(total, 0, 100)), components };
 }
+
+// ---- Threshold calibration -------------------------------------------------
+// The 70/55/40 bands are fixed absolutes, so in a weak tape almost nothing
+// qualifies and in a hot tape everything does. This reports where the day's
+// universe actually sits, so the bands can be sanity-checked (and, later,
+// adapted) against the live distribution instead of assumed.
+export interface ScoreDistribution {
+  n: number;
+  p50: number | null;
+  p70: number | null;
+  p90: number | null;
+  max: number | null;
+  pct_at_or_above_strong: number;
+  pct_at_or_above_moderate: number;
+}
+function percentile(sorted: number[], p: number): number | null {
+  if (!sorted.length) return null;
+  const idx = clamp(Math.round((p / 100) * (sorted.length - 1)), 0, sorted.length - 1);
+  return sorted[idx];
+}
+export function scoreDistribution(scores: number[]): ScoreDistribution {
+  const vals = scores.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  const n = vals.length;
+  const share = (t: number) => (n === 0 ? 0 : Math.round((vals.filter((v) => v >= t).length / n) * 1000) / 10);
+  return {
+    n,
+    p50: percentile(vals, 50),
+    p70: percentile(vals, 70),
+    p90: percentile(vals, 90),
+    max: n ? vals[n - 1] : null,
+    pct_at_or_above_strong: share(SCORE_BAND_STRONG),
+    pct_at_or_above_moderate: share(SCORE_BAND_MODERATE),
+  };
+}
+
 
 export function classifyRegime(pctAboveEma50: number | null, avgRsi: number | null): string {
   if (pctAboveEma50 == null || avgRsi == null) return "neutral";
@@ -161,20 +219,10 @@ export function classifyRegime(pctAboveEma50: number | null, avgRsi: number | nu
 // scores land in new columns; nothing here overwrites the live
 // breakout_score/prebreakout_score values.
 //
-// Known issues in the v2 functions above, deliberately NOT fixed in place
-// (fixing them would change the live score for every existing consumer —
-// see the safety note above) — instead corrected here in v3:
-//   - `rs_percentile`'s guard ternary (line ~90) is a no-op; functionally
-//     just `s.rsPercentile`. v3 computes it directly, no dead conditional.
-//   - preBreakoutScore's quiet_volume comment claims a 0.5–1.1 band; the
-//     code actually checks 0.4–1.15. v3's equivalent factor documents the
-//     band it actually uses.
-//   - breakoutScore's `delivery` component (max 6pts) always contributes 0
-//     — `deliveryPct` is hardcoded null at both pipeline call sites, and
-//     wiring real delivery% would need a new NSE "security-wise delivery
-//     position" report ingestion (a separate file from the bhavcopy this
-//     codebase already syncs) — out of scope here. v3 has no delivery
-//     component; its weight is folded into volume/participation instead.
+// The v2 issues previously listed here (dead rs_percentile ternary, the
+// always-zero `delivery` component, free points for unknown RS/sector
+// context, the mis-documented quiet_volume band) have now been fixed in
+// place above; v3 keeps its own, independently weighted factors.
 // ============================================================================
 
 import type { WeeklySnapshot } from "./indicators.ts";
@@ -543,3 +591,12 @@ export function nextEpisodeStatus(inp: EpisodeTickInput): EpisodeTickResult {
   }
   return { status: inp.status === "extended" ? "extended" : "active", belowThresholdDays, returnPct };
 }
+
+// ============================================================================
+// Score display / decision bands — single source of truth. Alerts, the AI
+// recommendation prompt and the UI badge all import these instead of
+// hardcoding their own copies.
+// ============================================================================
+export const SCORE_BAND_STRONG = BREAKOUT_QUALIFY_SCORE; // 70+  strong / buy
+export const SCORE_BAND_MODERATE = 55;                   // 55-69 moderate / hold
+export const SCORE_BAND_WEAK = 40;                       // 40-54 weak / wait

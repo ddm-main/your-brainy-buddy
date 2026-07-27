@@ -1,10 +1,11 @@
 // 0–100 score chip with color ramp and component-breakdown tooltip.
 import { useState } from "react";
+import { SCORE_BAND_STRONG, SCORE_BAND_MODERATE, SCORE_BAND_WEAK } from "@/lib/market/scoreBands";
 
 function rampColor(score: number): string {
-  if (score >= 70) return "var(--ok)";
-  if (score >= 50) return "var(--accent)";
-  if (score >= 30) return "var(--warn)";
+  if (score >= SCORE_BAND_STRONG) return "var(--ok)";
+  if (score >= SCORE_BAND_MODERATE) return "var(--accent)";
+  if (score >= SCORE_BAND_WEAK) return "var(--warn)";
   return "var(--danger)";
 }
 
@@ -12,11 +13,15 @@ export function ScoreBadge({
   score,
   components,
   label,
+  provisional,
   onClick,
 }: {
   score: number | null | undefined;
   components?: Record<string, number> | null;
   label?: string;
+  // True while only the neutral-context EOD pass has written this score —
+  // sector strength / relative strength / regime are not in it yet.
+  provisional?: boolean;
   // Default is hover-tooltip only (unchanged). When provided, the badge also
   // becomes clickable — stopPropagation so a badge nested in a clickable
   // table row navigates to ITS target, not the row's.
@@ -47,11 +52,13 @@ export function ScoreBadge({
           background: "rgba(0,0,0,0.25)",
           cursor: onClick ? "pointer" : undefined,
         }}
-        title={onClick ? "Open AI score analysis" : undefined}
+        title={provisional
+          ? "Provisional — computed before market context (sector/RS/regime) was applied"
+          : onClick ? "Open AI score analysis" : undefined}
       >
-        {score}
+        {score}{provisional ? "*" : ""}
       </span>
-      {open && components && Object.keys(components).length > 0 && (
+      {open && (provisional || (components && Object.keys(components).length > 0)) && (
         <span
           style={{
             position: "absolute",
@@ -75,7 +82,12 @@ export function ScoreBadge({
               {label}
             </span>
           )}
-          {Object.entries(components)
+          {provisional && (
+            <span style={{ display: "block", color: "var(--warn)", marginBottom: 6 }}>
+              Provisional — market context not applied yet
+            </span>
+          )}
+          {Object.entries(components ?? {})
             .sort((a, b) => b[1] - a[1])
             .map(([k, v]) => (
               <span key={k} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "1px 0" }}>

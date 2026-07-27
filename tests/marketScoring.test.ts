@@ -134,11 +134,11 @@ describe("breakoutScore", () => {
     expect(s - w).toBeGreaterThan(40);
   });
 
-  it("degrades gracefully when delivery % is unavailable", () => {
+  it("ignores delivery % entirely (component removed)", () => {
     const withD = breakoutScore(baseSnap, { ...neutralCtx, deliveryPct: 60 });
     const withoutD = breakoutScore(baseSnap, neutralCtx);
-    expect(withD.score).toBeGreaterThanOrEqual(withoutD.score);
-    expect(withoutD.components.delivery).toBe(0);
+    expect(withD.score).toBe(withoutD.score);
+    expect(withoutD.components.delivery).toBeUndefined();
   });
 
   it("penalizes overbought RSI relative to a healthy zone", () => {
@@ -185,18 +185,61 @@ describe("breakoutScore", () => {
 });
 
 describe("preBreakoutScore", () => {
-  it("rewards squeeze + higher lows + near resistance", () => {
+  it("rewards squeeze + higher lows + near resistance + drying volume", () => {
     const coiled: IndicatorSnapshot = {
       ...baseSnap,
       bbSqueeze: true,
       atrContracting: true,
       higherLows: true,
       nearResistance: true,
-      relVolume: 0.8,
+      relVolume: 0.75,
+      volDryUpRatio: 0.5,
     };
     const r = preBreakoutScore(coiled, neutralCtx);
     expect(r.score).toBe(100);
   });
+
+  it("grades quiet volume instead of using a hard band", () => {
+    const mk = (rv: number) => preBreakoutScore({ ...baseSnap, relVolume: rv }, neutralCtx).components.quiet_volume;
+    expect(mk(0.75)).toBe(10);
+    expect(mk(1.1)).toBeGreaterThan(0);
+    expect(mk(1.1)).toBeLessThan(10);
+    expect(mk(2)).toBe(0);
+  });
+
+  it("credits volume dry-up only when recent volume is below the 20D average", () => {
+    const c = (v: number | null) => preBreakoutScore({ ...baseSnap, volDryUpRatio: v }, neutralCtx).components.volume_dryup;
+    expect(c(0.5)).toBe(5);
+    expect(c(1.2)).toBe(0);
+    expect(c(null)).toBe(0);
+  });
+});
+
+describe("clustered pivot", () => {
+  it("prefers the clustered resistance level and scales the trigger by touches", () => {
+    const common = { ...baseSnap, close: 110, atr14: 2, rollingHigh20: 100 };
+    const oneTouch = breakoutScore({ ...common, pivotLevel: 100, pivotTouches: 1 }, neutralCtx).components.trigger;
+    const manyTouch = breakoutScore({ ...common, pivotLevel: 100, pivotTouches: 4 }, neutralCtx).components.trigger;
+    expect(manyTouch).toBeGreaterThan(oneTouch);
+    expect(manyTouch).toBe(10);
+  });
+
+  it("never scores against a stale cluster below a genuine new high", () => {
+    const withCluster = breakoutScore(
+      { ...baseSnap, close: 110, atr14: 2, rollingHigh20: 108, pivotLevel: 90, pivotTouches: 5 },
+      neutralCtx,
+    ).components.trigger;
+    const noCluster = breakoutScore(
+      { ...baseSnap, close: 110, atr14: 2, rollingHigh20: 108, pivotLevel: null, pivotTouches: null },
+      neutralCtx,
+    ).components.trigger;
+    expect(withCluster).toBe(noCluster);
+  });
+});
+
+describe("preBreakoutScore regime & extremes", () => {
+
+
 
   it("dampens in a bearish regime", () => {
     const coiled: IndicatorSnapshot = {
@@ -486,5 +529,53 @@ describe("nextEpisodeStatus", () => {
   it("resets the sub-threshold counter when the score recovers above threshold", () => {
     const r = nextEpisodeStatus({ ...open, close: 103, score: BREAKOUT_QUALIFY_SCORE + 1, belowThresholdDays: 2 });
     expect(r.belowThresholdDays).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regressions for the 2026-07 breakout-scoring audit fixes.
+// ---------------------------------------------------------------------------
+describe("breakout scoring audit fixes", () => {
+  const fullCtx: MarketContext = {
+    sectorStrength: 1,
+    regime: "bullish",
+    relStrengthNifty: 20,
+    deliveryPct: null,
+  };
+
+  it("no longer emits a dead `delivery` component", () => {
+    const { components } = breakoutScore(baseSnap, fullCtx);
+    expect(components.delivery).toBeUndefined();
+  });
+
+  it("keeps participation worth 20 points via volume+obv alone", () => {
+    const { components } = breakoutScore(
+      { ...baseSnap, relVolume: 3, obvSlope20: 1 },
+      fullCtx,
+    );
+    expect(components.volume + components.obv).toBeCloseTo(20, 5);
+  });
+
+  it("awards zero — not free points — when RS/sector context is unknown", () => {
+    const nullCtx: MarketContext = {
+      sectorStrength: null, regime: null, relStrengthNifty: null, deliveryPct: null,
+    };
+    const { components } = breakoutScore({ ...baseSnap, rsPercentile: null }, nullCtx);
+    expect(components.rel_strength).toBe(0);
+    expect(components.sector_strength).toBe(0);
+    expect(components.rs_percentile).toBe(0);
+  });
+
+  it("still credits rs_percentile when relStrengthNifty is missing", () => {
+    const { components } = breakoutScore(
+      { ...baseSnap, rsPercentile: 90 },
+      { sectorStrength: null, regime: null, relStrengthNifty: null, deliveryPct: null },
+    );
+    expect(components.rs_percentile).toBeCloseTo(3, 5);
+  });
+
+  it("scores a base_duration of 0 as no base at all", () => {
+    const { components } = breakoutScore({ ...baseSnap, baseDurationDays: 0 }, fullCtx);
+    expect(components.base_duration).toBe(0);
   });
 });

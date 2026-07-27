@@ -517,17 +517,22 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
         // source we have.
         return yahoo.getOHLCV(symbol, exchange, range, interval);
       }
-      // range like "2y","60d","30d"; interval like "1d","1h","15m"
+      // range like "2y","60d","30d","max"; interval like "1d","1h","15m"
       const now = Math.floor(Date.now() / 1000);
+      const YEAR = 365 * 86400;
       const rangeSec: Record<string, number> = {
         "1d": 86400, "5d": 5 * 86400, "30d": 30 * 86400, "60d": 60 * 86400,
-        "1y": 365 * 86400, "2y": 730 * 86400,
+        "1y": YEAR, "2y": 2 * YEAR,
         // Previously missing — any caller requesting "5y"/"10y" (e.g. the
         // backtester) silently fell through to the `?? 730 * 86400` default
         // below and got capped at 2 years of Kotak candles with no error.
-        "5y": 5 * 365 * 86400, "10y": 10 * 365 * 86400,
+        "5y": 5 * YEAR, "10y": 10 * YEAR,
+        // Full listed history. Kotak truncates long spans, so this is fetched
+        // in ≤2y windows below and topped up from Yahoo when it comes back short.
+        "max": 40 * YEAR,
       };
-      const fromEpoch = now - (rangeSec[range] ?? 730 * 86400);
+      const wanted = rangeSec[range] ?? 2 * YEAR;
+      const fromEpoch = now - wanted;
       // Full Kotak interval map — the old fallthrough silently returned daily
       // bars for 1m / 3m / 30m / 2h / 4h / 1w / 1mo, so the UI showed the
       // wrong grain and volume looked "missing" on those TFs.
@@ -537,25 +542,77 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
         "1d": "D", "1wk": "W", "1mo": "M",
       };
       const kotakInterval = kotakIntervalMap[interval] ?? "D";
+      const isDailyGrain = kotakInterval === "D" || kotakInterval === "W" || kotakInterval === "M";
       // Server-side resample buckets for TFs Kotak doesn't emit natively.
       const resampleFactor = interval === "2h" ? 2 : interval === "4h" ? 4 : interval === "3m" ? 3 : interval === "2m" ? 2 : 1;
       const t0 = Date.now();
+
+      // Kotak's /charts/v2/history silently truncates long windows, so deep
+      // daily/weekly/monthly history is requested in ≤2-year slices and
+      // merged. Intraday keeps the single-shot request.
+      const fetchKotak = async (): Promise<Candle[]> => {
+        const WINDOW = 2 * YEAR;
+        if (!isDailyGrain || wanted <= WINDOW) {
+          return await withKotakSession(svc, s, encryptValue, (ss) =>
+            kotakCandles(ss, token, seg, fromEpoch, now, kotakInterval));
+        }
+        const byTime = new Map<number, Candle>();
+        let to = now;
+        while (to > fromEpoch) {
+          const from = Math.max(fromEpoch, to - WINDOW);
+          let slice: Candle[] = [];
+          try {
+            slice = await withKotakSession(svc, s, encryptValue, (ss) =>
+              kotakCandles(ss, token, seg, from, to, kotakInterval));
+          } catch (err) {
+            // Partial history beats none: stop widening on the first failure
+            // but keep whatever earlier windows returned.
+            if (byTime.size === 0) throw err;
+            break;
+          }
+          // Kotak returns nothing before the listing date — stop walking back.
+          if (slice.length === 0) break;
+          for (const c of slice) byTime.set(c.time, c);
+          to = from - 1;
+        }
+        return [...byTime.values()].sort((a, b) => a.time - b.time);
+      };
+
       try {
-        const raw = await withKotakSession(svc, s, encryptValue, (ss) => kotakCandles(ss, token, seg, fromEpoch, now, kotakInterval));
+        const raw = await fetchKotak();
         if (raw.length === 0) {
           const reason = `empty candles for ${exchange}:${symbol} (seg=${seg})`;
           logProviderHealth(svc, "kotak_neo", "getOHLCV", false, Date.now() - t0, reason);
-          const isIntraday = kotakInterval !== "D" && kotakInterval !== "W" && kotakInterval !== "M";
+          const isIntraday = !isDailyGrain;
           // Intraday during market hours must NOT silently fall to Yahoo.
           // For daily/weekly/monthly, Yahoo backfill for missing long history
           // is still fine — that's data Kotak doesn't provide anyway.
           if (isIntraday && nseOpenNow()) throw new Error(`kotak returned no ${interval} candles`);
           return yahoo.getOHLCV(symbol, exchange, range, interval);
         }
-        const c = resampleFactor > 1 ? resampleCandles(raw, resampleFactor) : raw;
+        let c = resampleFactor > 1 ? resampleCandles(raw, resampleFactor) : raw;
+        // Depth sanity check: when the caller asked for deep history and
+        // Kotak came back materially short (its equity archive is shallow),
+        // merge Yahoo's longer series in rather than serving a stub chart.
+        if (isDailyGrain && wanted > 2 * YEAR) {
+          const oldest = c[0]?.time ?? now;
+          const covered = now - oldest;
+          if (covered < Math.min(wanted, 3 * YEAR) * 0.9) {
+            try {
+              const deep = await yahoo.getOHLCV(symbol, exchange, range, interval);
+              if (deep.length > c.length) {
+                const merged = new Map<number, Candle>();
+                for (const d of deep) merged.set(d.time, d);
+                for (const k of c) merged.set(k.time, k); // Kotak wins on overlap
+                c = [...merged.values()].sort((a, b) => a.time - b.time);
+              }
+            } catch { /* keep the Kotak series */ }
+          }
+        }
         logProviderHealth(svc, "kotak_neo", "getOHLCV", true, Date.now() - t0);
         return c;
       } catch (e) {
+
         logProviderHealth(svc, "kotak_neo", "getOHLCV", false, Date.now() - t0, e instanceof Error ? e.message : String(e));
         const isIntraday = kotakInterval !== "D" && kotakInterval !== "W" && kotakInterval !== "M";
         // A 404 means the charts route isn't available on this session's

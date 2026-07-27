@@ -22,6 +22,26 @@ export const TIMEFRAMES = [
   { key: "1M", label: "1M", intraday: false },
 ] as const;
 
+// Viewport ranges for non-intraday charts. These only move the visible
+// window — the full series stays loaded, so panning left still reveals
+// everything the provider returned.
+export const CHART_RANGES = [
+  { key: "1Y", label: "1Y", years: 1 },
+  { key: "3Y", label: "3Y", years: 3 },
+  { key: "5Y", label: "5Y", years: 5 },
+  { key: "ALL", label: "All", years: null },
+] as const;
+
+export type ChartRange = typeof CHART_RANGES[number]["key"];
+
+// Approximate bar counts per timeframe for a given number of years.
+export function rangeToBars(range: ChartRange, tf: string): number | null {
+  const years = CHART_RANGES.find((r) => r.key === range)?.years ?? null;
+  if (years == null) return null;
+  const perYear = tf === "1M" ? 12 : tf === "1W" ? 52 : 250;
+  return Math.round(years * perYear);
+}
+
 export function isIntraday(tf: string): boolean {
   return TIMEFRAMES.find((t) => t.key === tf)?.intraday ?? false;
 }
@@ -39,6 +59,9 @@ export interface ChartSettings {
   logScale: boolean;
   priceLine: boolean;
   sessionBreaks: boolean;
+  // Crosshair magnet. Off = free-floating crosshair (TradingView default):
+  // the price label tracks the exact cursor y. On = snap to nearest OHLC.
+  magnet: boolean;
 }
 
 export const DEFAULT_SETTINGS: ChartSettings = {
@@ -46,7 +69,9 @@ export const DEFAULT_SETTINGS: ChartSettings = {
   logScale: false,
   priceLine: true,
   sessionBreaks: false,
+  magnet: false,
 };
+
 
 export interface ChartToolbarProps {
   symbol: string;
@@ -63,8 +88,6 @@ export interface ChartToolbarProps {
   totalStudyCount?: number;
   settings?: ChartSettings;
   onSettings?: (updater: (prev: ChartSettings) => ChartSettings) => void;
-  tvMode: boolean;
-  onTvMode: (v: boolean) => void;
   onFullscreen: () => void;
   onAlert: () => void;
   /** Optional badge count of active alerts (rendered on the Alert button). */
@@ -76,14 +99,17 @@ export interface ChartToolbarProps {
   savedLayouts?: string[];
   /** True for intraday timeframes (drives VWAP availability in picker). */
   intraday?: boolean;
+  range?: ChartRange;
+  onRange?: (v: ChartRange) => void;
 }
 
 export function ChartToolbar({
   symbol, exchange = "NSE", tf, onTf, chartType, onChartType, onAddStudy, onResetStudies,
   studyCount = 0, totalStudyCount,
-  settings, onSettings, tvMode, onTvMode, onFullscreen, onAlert, alertCount = 0, onScreenshot,
+  settings, onSettings, onFullscreen, onAlert, alertCount = 0, onScreenshot,
   onSaveLayout, onLoadLayout, onDeleteLayout, savedLayouts = [],
   intraday = false,
+  range = "1Y", onRange,
 }: ChartToolbarProps) {
   const activeType = CHART_TYPES.find((c) => c.key === chartType) ?? CHART_TYPES[0];
   const total = totalStudyCount ?? studyCount;
@@ -106,10 +132,27 @@ export function ChartToolbar({
         )}
       </Menu>
 
+      {!intraday && onRange && (
+        <>
+          <Divider />
+          <Menu label={CHART_RANGES.find((r) => r.key === range)?.label ?? "1Y"} width={160}>
+            {(close) => (
+              <MenuGroup title="Range">
+                {CHART_RANGES.map((r) => (
+                  <MenuItem key={r.key} selected={range === r.key} onClick={() => { onRange(r.key); close(); }}>
+                    {r.label}
+                  </MenuItem>
+                ))}
+              </MenuGroup>
+            )}
+          </Menu>
+        </>
+      )}
+
       <Divider />
 
       {/* Chart type */}
-      <Menu label={activeType.label} icon={activeType.icon} width={180} disabled={tvMode} title={tvMode ? "Switch off TradingView to change chart type" : undefined}>
+      <Menu label={activeType.label} icon={activeType.icon} width={180}>
         {(close) => (
           <MenuGroup title="Chart type">
             {CHART_TYPES.map((c) => (
@@ -130,8 +173,6 @@ export function ChartToolbar({
         label={<span>Indicators{countLabel && <span className="mk-menu-count">{countLabel}</span>}</span>}
         icon={<Activity size={12} />}
         width={320}
-        disabled={tvMode}
-        title={tvMode ? "Indicators live in TradingView UI while TV mode is on" : undefined}
       >
         <IndicatorPicker onAddStudy={onAddStudy} intraday={intraday} />
       </Menu>
@@ -200,11 +241,13 @@ export function ChartToolbar({
 
       {/* Settings */}
       {onSettings && (
-        <Menu label="Settings" icon={<Settings size={12} />} width={210} disabled={tvMode} title={tvMode ? "Chart settings apply to Native mode" : undefined}>
+        <Menu label="Settings" icon={<Settings size={12} />} width={210}>
           <MenuGroup title="Display">
             <MenuItem checkbox selected={s.grid} onClick={() => onSettings((p) => ({ ...p, grid: !p.grid }))}>Grid lines</MenuItem>
             <MenuItem checkbox selected={s.priceLine} onClick={() => onSettings((p) => ({ ...p, priceLine: !p.priceLine }))}>Price line</MenuItem>
             <MenuItem checkbox selected={s.sessionBreaks} onClick={() => onSettings((p) => ({ ...p, sessionBreaks: !p.sessionBreaks }))}>Session breaks</MenuItem>
+            <MenuItem checkbox selected={s.magnet} onClick={() => onSettings((p) => ({ ...p, magnet: !p.magnet }))}>Magnet crosshair</MenuItem>
+
           </MenuGroup>
           <MenuDivider />
           <MenuGroup title="Scale">
@@ -255,21 +298,6 @@ export function ChartToolbar({
 
       <div style={{ flex: 1, minWidth: 8 }} />
 
-      {/* Native / TV segmented */}
-      <div className="mk-seg" role="group" aria-label="Chart engine" title="TV mode delegates chart type, indicators & settings to the TradingView embed">
-        <button
-          type="button"
-          className={`mk-seg-btn ${!tvMode ? "is-on" : ""}`}
-          onClick={() => onTvMode(false)}
-          title="Native chart (client-side indicators)"
-        >Native</button>
-        <button
-          type="button"
-          className={`mk-seg-btn ${tvMode ? "is-on" : ""}`}
-          onClick={() => onTvMode(true)}
-          title="TradingView embed (real-time)"
-        >TV</button>
-      </div>
     </div>
   );
 }

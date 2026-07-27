@@ -3674,6 +3674,7 @@ export type Database = {
           close_adjusted: number | null
           close_in_range_pct: number | null
           computed_at: string
+          context_complete: boolean
           delivery_pct: number | null
           depth_imbalance: number | null
           dist_from_pivot_atr: number | null
@@ -3699,6 +3700,8 @@ export type Database = {
           pcr: number | null
           pct_from_52w_high: number | null
           pe_ttm: number | null
+          pivot_level: number | null
+          pivot_touches: number | null
           prebreakout_score: number | null
           prev_close_adjusted: number | null
           price_source: string | null
@@ -3728,6 +3731,7 @@ export type Database = {
           trade_date: string | null
           vol_avg20: number | null
           vol_avg30: number | null
+          vol_dryup_ratio: number | null
           volume: number | null
           volume_bse: number | null
           volume_nse: number | null
@@ -3756,6 +3760,7 @@ export type Database = {
           close_adjusted?: number | null
           close_in_range_pct?: number | null
           computed_at?: string
+          context_complete?: boolean
           delivery_pct?: number | null
           depth_imbalance?: number | null
           dist_from_pivot_atr?: number | null
@@ -3781,6 +3786,8 @@ export type Database = {
           pcr?: number | null
           pct_from_52w_high?: number | null
           pe_ttm?: number | null
+          pivot_level?: number | null
+          pivot_touches?: number | null
           prebreakout_score?: number | null
           prev_close_adjusted?: number | null
           price_source?: string | null
@@ -3810,6 +3817,7 @@ export type Database = {
           trade_date?: string | null
           vol_avg20?: number | null
           vol_avg30?: number | null
+          vol_dryup_ratio?: number | null
           volume?: number | null
           volume_bse?: number | null
           volume_nse?: number | null
@@ -3838,6 +3846,7 @@ export type Database = {
           close_adjusted?: number | null
           close_in_range_pct?: number | null
           computed_at?: string
+          context_complete?: boolean
           delivery_pct?: number | null
           depth_imbalance?: number | null
           dist_from_pivot_atr?: number | null
@@ -3863,6 +3872,8 @@ export type Database = {
           pcr?: number | null
           pct_from_52w_high?: number | null
           pe_ttm?: number | null
+          pivot_level?: number | null
+          pivot_touches?: number | null
           prebreakout_score?: number | null
           prev_close_adjusted?: number | null
           price_source?: string | null
@@ -3892,6 +3903,7 @@ export type Database = {
           trade_date?: string | null
           vol_avg20?: number | null
           vol_avg30?: number | null
+          vol_dryup_ratio?: number | null
           volume?: number | null
           volume_bse?: number | null
           volume_nse?: number | null

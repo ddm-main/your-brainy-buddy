@@ -68,11 +68,11 @@ export function overviewColumnMap<TRow extends Record<string, any>>(onScoreClick
     ret_ytd: { header: "YTD %", accessorKey: "ret_ytd", meta: { align: "right" } as any, cell: ({ getValue }: any) => <PctCell value={getValue() as number | null} /> },
     breakout_score: {
       header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" } as any,
-      cell: ({ row }: any) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" onClick={onScoreClick ? () => onScoreClick(row.original.symbol) : undefined} />,
+      cell: ({ row }: any) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" provisional={row.original.context_complete === false} onClick={onScoreClick ? () => onScoreClick(row.original.symbol) : undefined} />,
     },
     prebreakout_score: {
       header: "Pre-BO", accessorKey: "prebreakout_score", meta: { align: "right" } as any,
-      cell: ({ row }: any) => <ScoreBadge score={row.original.prebreakout_score} components={row.original.score_components?.prebreakout} label="pre-breakout components" onClick={onScoreClick ? () => onScoreClick(row.original.symbol) : undefined} />,
+      cell: ({ row }: any) => <ScoreBadge score={row.original.prebreakout_score} components={row.original.score_components?.prebreakout} label="pre-breakout components" provisional={row.original.context_complete === false} onClick={onScoreClick ? () => onScoreClick(row.original.symbol) : undefined} />,
     },
     actions: {
       id: "actions", header: "", enableSorting: false, meta: { align: "right" } as any,

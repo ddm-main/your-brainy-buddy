@@ -6,6 +6,7 @@
 import { corsFor, preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret, istTradeDate, isTradingHoliday } from "../_shared/market/cron.ts";
 import { getReadProvider } from "../_shared/market/provider.ts";
+import { BREAKOUT_QUALIFY_SCORE } from "../_shared/market/scoring.ts";
 
 function marketOpenNow(): boolean {
   const d = new Date();
@@ -84,7 +85,7 @@ Deno.serve(async (req) => {
         case "rsi_above": fires = sc?.rsi14 != null && Number(sc.rsi14) > (a.threshold ?? 0); val = sc?.rsi14 ? Number(sc.rsi14) : null; break;
         case "rsi_below": fires = sc?.rsi14 != null && Number(sc.rsi14) < (a.threshold ?? 0); val = sc?.rsi14 ? Number(sc.rsi14) : null; break;
         case "ema_cross_up": fires = sc?.ema20 != null && sc?.ema50 != null && Number(sc.ema20) > Number(sc.ema50); val = sc?.ema20 ? Number(sc.ema20) : null; break;
-        case "breakout": fires = sc?.breakout_score != null && Number(sc.breakout_score) >= (a.threshold ?? 70); val = sc?.breakout_score ? Number(sc.breakout_score) : null; break;
+        case "breakout": fires = sc?.breakout_score != null && Number(sc.breakout_score) >= (a.threshold ?? BREAKOUT_QUALIFY_SCORE); val = sc?.breakout_score ? Number(sc.breakout_score) : null; break;
       }
       if (fires) {
         firedIds.push(a.id);

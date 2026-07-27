@@ -1,6 +1,6 @@
 // market-history-backfill — deepens market_daily_prices history.
 //
-// The nightly EOD pipeline fetches 2y of candles but only persists the last
+// The nightly EOD pipeline fetches candles but only persists the last
 // ~30 sessions, which is enough for the live screener yet far too shallow for
 // the Screener's back-date mode (EMA50/100/200, 52-week levels, YTD returns
 // all need hundreds of bars). This worker drains the set of NSE symbols with
@@ -14,7 +14,9 @@ import { getServiceProvider } from "../_shared/market/provider.ts";
 
 const DEFAULT_CHUNK = 40;
 const CONCURRENCY = 4;
-const DEFAULT_MIN_BARS = 260;
+// ~3y of sessions: anything shallower is assumed to be truncated by the old
+// 2y fetch cap and gets re-fetched at full listed depth.
+const DEFAULT_MIN_BARS = 750;
 
 interface Body { limit?: number; min_bars?: number }
 
@@ -31,7 +33,7 @@ Deno.serve(async (req) => {
 
     const body: Body = req.method === "POST" ? await req.json().catch(() => ({})) : {};
     const limit = Math.max(1, Math.min(Number(body.limit ?? DEFAULT_CHUNK) || DEFAULT_CHUNK, 100));
-    const minBars = Math.max(60, Math.min(Number(body.min_bars ?? DEFAULT_MIN_BARS) || DEFAULT_MIN_BARS, 600));
+    const minBars = Math.max(60, Math.min(Number(body.min_bars ?? DEFAULT_MIN_BARS) || DEFAULT_MIN_BARS, 5000));
 
     const svc = svcClient();
     const { data: candidates, error } = await svc.rpc("market_history_backfill_candidates", {
@@ -54,7 +56,7 @@ Deno.serve(async (req) => {
         const stock = queue.shift();
         if (!stock) break;
         try {
-          const candles = await provider.getOHLCV(stock.symbol, stock.exchange ?? "NSE", "2y", "1d");
+          const candles = await provider.getOHLCV(stock.symbol, stock.exchange ?? "NSE", "max", "1d");
           if (candles.length === 0) throw new Error("no candles");
           const rows = candles.map((c) => ({
             symbol: stock.symbol,
