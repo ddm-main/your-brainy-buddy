@@ -647,6 +647,7 @@ export function useOptionChain(symbol: string | undefined, expiry?: string) {
       symbol: string; expiry: string; expiries: string[]; underlying: number;
       pcr: number | null; total_call_oi: number; total_put_oi: number;
       rows: Array<{ strike: number; call: any; put: any }>;
+      cached?: boolean; captured_at?: string; warning?: string;
     }>("market-option-chain", { symbol, expiry }),
     enabled: !!symbol,
     refetchInterval: liveInterval(60_000, false),
