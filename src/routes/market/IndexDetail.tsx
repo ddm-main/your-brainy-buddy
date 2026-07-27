@@ -116,182 +116,252 @@ export default function IndexDetail() {
     } catch { notify("Could not save layout"); }
   }, [notify, symbol, tf, chartType, studies, settings]);
 
+  const stats = useIndexTechnicals(candles);
+
+  const wideTabs: Tab[] = [
+    ...(cSlug ? (["constituents"] as Tab[]) : []),
+    ...(fno && nseSymbol ? (["fno"] as Tab[]) : []),
+  ];
+  const activeWide = wideTabs.includes(tab) ? tab : wideTabs[0];
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <HudPanel flow title={name} index="MK.IDX" actions={
-        <Btn size="sm" onClick={() => nav("/market")}><ArrowLeft size={11} style={{ marginRight: 4 }} /> back</Btn>
-      }>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
-          <span style={{ fontFamily: "var(--font-display)", fontSize: 30, color: "var(--text)" }}>
-            {quote ? Number(quote.price).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"}
-          </span>
-          <span style={{ fontSize: 14 }}>
-            <Return1DCell abs={chgAbs} pct={chgPct} />
-          </span>
-          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{symbol} · {region}</span>
-          {fno && <Chip tone="accent">F&O</Chip>}
-        </div>
-
-        <div role="tablist" style={{ display: "flex", gap: 4, marginTop: 12, borderBottom: "1px solid var(--edge)" }}>
-          {(["chart", "technicals", "fno", "constituents"] as Tab[]).map((t) => {
-            const disabled = (t === "fno" && !fno) || (t === "constituents" && !cSlug);
-            const active = tab === t;
-            return (
-              <button key={t} disabled={disabled} role="tab" aria-selected={active}
-                onClick={() => setTab(t)}
-                style={{
-                  padding: "6px 12px", background: "transparent", border: 0,
-                  borderBottom: `2px solid ${active ? "var(--accent)" : "transparent"}`,
-                  color: disabled ? "var(--text-muted)" : active ? "var(--accent)" : "var(--text-dim)",
-                  fontSize: 11, letterSpacing: "0.15em", textTransform: "uppercase",
-                  cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.5 : 1,
+    <>
+      <div className="mk-anl-grid">
+        {/* Chart column — fills the viewport height */}
+        <div className="mk-anl-chart" style={{ display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
+          <HudPanel
+            title={name}
+            index="MK.IDX.C"
+            live={candlesLoading ? "warn" : "ok"}
+            style={{ flex: 1, minHeight: 0 }}
+            actions={
+              <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                {candlesData?.provider && (
+                  <Chip tone={candlesData.provider === "kotak_neo" ? "ok" : "accent"}>
+                    {candlesData.provider === "kotak_neo" ? "kotak" : "yahoo"}
+                  </Chip>
+                )}
+                <Btn size="sm" onClick={() => nav("/market")}><ArrowLeft size={11} style={{ marginRight: 4 }} /> back</Btn>
+              </div>
+            }
+          >
+            <FullscreenShell fullscreen={fs} onExit={() => setFs(false)} title={`${name} · ${tf}`}>
+              <ChartToolbar
+                symbol={symbol}
+                tf={tf}
+                onTf={setTf}
+                chartType={chartType}
+                onChartType={setChartType}
+                onAddStudy={addStudy}
+                onResetStudies={resetStudies}
+                studyCount={visibleStudyCount}
+                totalStudyCount={studies.length}
+                settings={settings}
+                onSettings={(u) => setSettings(u)}
+                tvMode={tvMode}
+                onTvMode={(v) => {
+                  if (v && !tvSupported) { notify("TradingView widget unavailable for NSE indices — showing native chart"); return; }
+                  setTvMode(v);
                 }}
-                title={t === "fno" && !fno ? "Not available for this index" : t === "constituents" && !cSlug ? "Only for Indian indices" : ""}>
-                {t === "fno" ? "F&O" : t}
-              </button>
-            );
-          })}
+                onFullscreen={() => setFs(true)}
+                onAlert={() => setAlertModalOpen(true)}
+                onScreenshot={handleScreenshot}
+                onSaveLayout={handleSaveLayout}
+                onLoadLayout={handleLoadLayout}
+                onDeleteLayout={handleDeleteLayout}
+                savedLayouts={savedLayouts}
+                intraday={isIntraday(tf)}
+              />
+              <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0 }}>
+                {showTv ? (
+                  <TradingViewChart symbol={tvSym} exchange={tvExch} interval={tvInterval(tf)} />
+                ) : candlesLoading ? (
+                  <div className="hud-label" style={{ padding: 24, textAlign: "center" }}>loading chart…</div>
+                ) : candles.length === 0 ? (
+                  <EmptyState hint="try a different timeframe or check the symbol">no chart data</EmptyState>
+                ) : (
+                  <CandleChart
+                    candles={candles} fill chartType={chartType}
+                    studies={studies}
+                    intraday={isIntraday(tf)}
+                    livePrice={quote?.price ?? null}
+                    onToggleStudy={toggleStudy}
+                    onEditStudy={setEditingId}
+                    onRemoveStudy={removeStudy}
+                    source={candlesData?.provider ?? null}
+                  />
+                )}
+              </div>
+            </FullscreenShell>
+            <IndicatorSettingsModal study={editing} onChange={updateStudy} onRemove={removeStudy} onClose={() => setEditingId(null)} />
+          </HudPanel>
         </div>
-      </HudPanel>
 
-      {tab === "chart" && (
-        <HudPanel flow title="Chart" index="MK.IDX.C" style={{ flex: 1, minHeight: 0 }}>
-          <FullscreenShell fullscreen={fs} onExit={() => setFs(false)} title={`${name} · ${tf}`}>
-            <ChartToolbar
-              symbol={symbol}
-              tf={tf}
-              onTf={setTf}
-              chartType={chartType}
-              onChartType={setChartType}
-              onAddStudy={addStudy}
-              onResetStudies={resetStudies}
-              studyCount={studies.length}
-              settings={settings}
-              onSettings={(u) => setSettings(u)}
-              tvMode={tvMode}
-              onTvMode={(v) => {
-                if (v && !tvSupported) { notify("TradingView widget unavailable for NSE indices — showing native chart"); return; }
-                setTvMode(v);
-              }}
-              onFullscreen={() => setFs(true)}
-              onAlert={() => setAlertModalOpen(true)}
-              onScreenshot={handleScreenshot}
-              onSaveLayout={handleSaveLayout}
-            />
-            <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0 }}>
-              {showTv ? (
-                <TradingViewChart symbol={tvSym} exchange={tvExch} interval={tvInterval(tf)} />
-              ) : candlesLoading ? (
-                <div className="hud-label" style={{ padding: 24, textAlign: "center" }}>loading chart…</div>
-              ) : candles.length === 0 ? (
-                <EmptyState hint="try a different timeframe or check the symbol">no chart data</EmptyState>
-              ) : (
-                <CandleChart
-                  candles={candles} fill chartType={chartType}
-                  studies={studies}
-                  intraday={tf !== "1D"}
-                  livePrice={quote?.price ?? null}
-                  onToggleStudy={toggleStudy}
-                  onEditStudy={setEditingId}
-                  onRemoveStudy={removeStudy}
-                  source={candlesData?.provider ?? null}
-                />
-
-              )}
+        {/* Right rail — scrolls independently */}
+        <div className="mk-anl-rail">
+          <HudPanel flow title="Quote" index="A1">
+            <div style={{ fontFamily: "var(--font-display)", fontSize: 26, color: "var(--accent)" }}>
+              {price != null ? price.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"}
             </div>
-          </FullscreenShell>
-          <IndicatorSettingsModal study={editing} onChange={updateStudy} onRemove={removeStudy} onClose={() => setEditingId(null)} />
-        </HudPanel>
-      )}
+            <div style={{ fontSize: 13 }}>
+              <Return1DCell abs={chgAbs} pct={chgPct} />
+            </div>
+            <div style={{ display: "flex", gap: 6, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.1em" }}>{symbol} · {region}</span>
+              {fno && <Chip tone="accent">F&O</Chip>}
+            </div>
+          </HudPanel>
 
-      {tab === "technicals" && (
-        <TechnicalsPanel candles={candles} loading={candlesLoading} />
-      )}
+          <StockAlertsPanel symbol={symbol} exchange="NSE" />
 
-      {tab === "fno" && fno && nseSymbol && (
-        <FnOPanel nseSymbol={nseSymbol} />
-      )}
+          <HudPanel flow title="Indicators (Daily)" index="A4">
+            {candlesLoading ? <div className="hud-label">loading…</div> : !stats ? <EmptyState>not enough history</EmptyState> : (
+              <>
+                <Row label="RSI (14)" mono>{stats.rsi14 == null ? "—" : stats.rsi14.toFixed(1)}</Row>
+                <Row label="MACD" mono>{fmtNum(stats.macd, 2)} / {fmtNum(stats.macdSig, 2)}</Row>
+                <Row label="MACD Hist" mono>
+                  <span style={{ color: (stats.macdHist ?? 0) >= 0 ? "var(--ok)" : "var(--danger)" }}>{fmtNum(stats.macdHist, 2)}</span>
+                </Row>
+                <Row label="EMA 20/50/200" mono>
+                  <span style={{ fontSize: 10 }}>{fmtNum(stats.ema20v, 0)} / {fmtNum(stats.ema50v, 0)} / {fmtNum(stats.ema200v, 0)}</span>
+                </Row>
+                <Row label="SMA 20" mono>{fmtNum(stats.sma20v)}</Row>
+                <Row label="Bollinger U/L" mono>
+                  <span style={{ fontSize: 10 }}>{fmtNum(stats.bbU, 0)} / {fmtNum(stats.bbL, 0)}</span>
+                </Row>
+                {stats.avgVol > 0 && <Row label="Avg Vol (20d)" mono>{fmtInt(stats.avgVol)}</Row>}
+                {stats.last.volume > 0 && <Row label="Volume" mono>{fmtInt(stats.last.volume)}</Row>}
+              </>
+            )}
+          </HudPanel>
 
-      {tab === "constituents" && cSlug && (
-        <ConstituentsPanel slug={cSlug} onRow={(s) => nav(`/market/analysis/${s}`)} />
+          <HudPanel flow title="Range & Strength" index="A5">
+            {candlesLoading ? <div className="hud-label">loading…</div> : !stats ? <EmptyState>not enough history</EmptyState> : (
+              <>
+                <Row label="Open" mono>{fmtNum(stats.last.open)}</Row>
+                <Row label="Prev Close" mono>{fmtNum(stats.prev.close)}</Row>
+                <Row label="Day High" mono>{fmtNum(stats.last.high)}</Row>
+                <Row label="Day Low" mono>{fmtNum(stats.last.low)}</Row>
+                <Row label="Day Change" mono>
+                  <Return1DCell abs={stats.dayAbs} pct={stats.dayPct} />
+                </Row>
+                <Row label="52W High" mono>{fmtNum(stats.hi52)}</Row>
+                <Row label="52W Low" mono>{fmtNum(stats.lo52)}</Row>
+                <Row label="From 52W High" mono>
+                  <span style={{ color: stats.fromHi > -5 ? "var(--ok)" : "var(--text)" }}>{stats.fromHi.toFixed(2)}%</span>
+                </Row>
+                <Row label="From 52W Low" mono>
+                  <span style={{ color: "var(--ok)" }}>+{stats.fromLo.toFixed(2)}%</span>
+                </Row>
+              </>
+            )}
+          </HudPanel>
+
+          {fno && nseSymbol && <FnOSummary nseSymbol={nseSymbol} />}
+        </div>
+      </div>
+
+      {/* Wide, table-shaped views live under the workbench */}
+      {wideTabs.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div role="tablist" style={{ display: "flex", gap: 4, borderBottom: "1px solid var(--edge)", marginBottom: 10 }}>
+            {wideTabs.map((t) => {
+              const active = activeWide === t;
+              return (
+                <button key={t} role="tab" aria-selected={active} onClick={() => setTab(t)}
+                  style={{
+                    padding: "6px 12px", background: "transparent", border: 0,
+                    borderBottom: `2px solid ${active ? "var(--accent)" : "transparent"}`,
+                    color: active ? "var(--accent)" : "var(--text-dim)",
+                    fontSize: 11, letterSpacing: "0.15em", textTransform: "uppercase", cursor: "pointer",
+                  }}>
+                  {t === "fno" ? "F&O chain" : t}
+                </button>
+              );
+            })}
+          </div>
+          {activeWide === "fno" && fno && nseSymbol && <FnOPanel nseSymbol={nseSymbol} />}
+          {activeWide === "constituents" && cSlug && (
+            <ConstituentsPanel slug={cSlug} onRow={(s) => nav(`/market/analysis/${s}`)} />
+          )}
+        </div>
       )}
 
       {alertModalOpen && (
         <NewAlertModal symbol={symbol} exchange="NSE" onClose={() => setAlertModalOpen(false)}
           onCreated={() => setAlertModalOpen(false)} />
       )}
-    </div>
+    </>
   );
 }
 
-function TechnicalsPanel({ candles, loading }: { candles: CandleDto[]; loading: boolean }) {
-  const stats = useMemo(() => {
+// Shared daily technical readout for the rail panels.
+function useIndexTechnicals(candles: CandleDto[]) {
+  return useMemo(() => {
     if (candles.length < 2) return null;
-    const closes = candles.map((c) => c.close);
     const last = candles[candles.length - 1];
     const prev = candles[candles.length - 2];
     const win = candles.slice(-252);
     const hi52 = Math.max(...win.map((c) => c.high));
     const lo52 = Math.min(...win.map((c) => c.low));
-    const ema20v = ema(candles, 20).at(-1) ?? null;
-    const ema50v = ema(candles, 50).at(-1) ?? null;
-    const ema200v = ema(candles, 200).at(-1) ?? null;
-    const sma20v = sma(candles, 20).at(-1) ?? null;
     const bb = bollinger(candles, 20, 2);
-    const rsi14 = rsi(candles, 14).at(-1) ?? null;
     const macdv = macd(candles);
     const vols = candles.slice(-20).map((c) => c.volume).filter((v) => v > 0);
     const avgVol = vols.length ? vols.reduce((a, b) => a + b, 0) / vols.length : 0;
+    const dayAbs = last.close - prev.close;
     return {
-      last, prev, hi52, lo52, ema20v, ema50v, ema200v, sma20v,
-      bbU: bb.upper.at(-1) ?? null, bbL: bb.lower.at(-1) ?? null, bbM: bb.mid.at(-1) ?? null,
-      rsi14,
-      macd: macdv.macd.at(-1) ?? null, macdSig: macdv.signal.at(-1) ?? null, macdHist: macdv.hist.at(-1) ?? null,
-      avgVol, closes,
+      last, prev, hi52, lo52,
+      ema20v: ema(candles, 20).at(-1) ?? null,
+      ema50v: ema(candles, 50).at(-1) ?? null,
+      ema200v: ema(candles, 200).at(-1) ?? null,
+      sma20v: sma(candles, 20).at(-1) ?? null,
+      bbU: bb.upper.at(-1) ?? null,
+      bbL: bb.lower.at(-1) ?? null,
+      rsi14: rsi(candles, 14).at(-1) ?? null,
+      macd: macdv.macd.at(-1) ?? null,
+      macdSig: macdv.signal.at(-1) ?? null,
+      macdHist: macdv.hist.at(-1) ?? null,
+      avgVol,
+      dayAbs,
+      dayPct: prev.close ? (dayAbs / prev.close) * 100 : 0,
+      fromHi: hi52 ? ((last.close - hi52) / hi52) * 100 : 0,
+      fromLo: lo52 ? ((last.close - lo52) / lo52) * 100 : 0,
     };
   }, [candles]);
+}
 
-  if (loading) return <HudPanel flow title="Technicals" index="MK.IDX.T"><div className="hud-label">loading…</div></HudPanel>;
-  if (!stats) return <HudPanel flow title="Technicals" index="MK.IDX.T"><EmptyState>not enough history</EmptyState></HudPanel>;
-
-  const { last, prev, hi52, lo52, ema20v, ema50v, ema200v, sma20v, bbU, bbL, rsi14, macd: m, macdSig, macdHist, avgVol } = stats;
-  const fromHi = hi52 ? ((last.close - hi52) / hi52) * 100 : 0;
-  const fromLo = lo52 ? ((last.close - lo52) / lo52) * 100 : 0;
-  const dayAbs = last.close - prev.close;
-  const dayPct = prev.close ? (dayAbs / prev.close) * 100 : 0;
-
-  const signal = (v: number | null, ref: number | null) =>
-    v == null || ref == null ? null : v > ref ? "above" : "below";
-  const tone = (s: string | null) => s === "above" ? "ok" : s === "below" ? "err" : undefined;
-
+function Row({ label, children, mono }: { label: string; children: React.ReactNode; mono?: boolean }) {
   return (
-    <HudPanel flow title="Technicals" index="MK.IDX.T">
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 8 }}>
-        <Stat label="Open" value={fmtNum(last.open)} />
-        <Stat label="Prev Close" value={fmtNum(prev.close)} />
-        <Stat label="Day High" value={fmtNum(last.high)} />
-        <Stat label="Day Low" value={fmtNum(last.low)} />
-        <Stat label="Day Change" value={`${dayAbs >= 0 ? "+" : ""}${fmtNum(dayAbs)} (${dayPct.toFixed(2)}%)`} tone={dayAbs >= 0 ? "ok" : "err"} />
-        <Stat label="52W High" value={fmtNum(hi52)} />
-        <Stat label="52W Low" value={fmtNum(lo52)} />
-        <Stat label="From 52W High" value={`${fromHi >= 0 ? "+" : ""}${fromHi.toFixed(2)}%`} tone={fromHi >= -5 ? "ok" : undefined} />
-        <Stat label="From 52W Low" value={`${fromLo >= 0 ? "+" : ""}${fromLo.toFixed(2)}%`} tone="ok" />
-        {last.volume > 0 && <Stat label="Volume" value={fmtInt(last.volume)} />}
-        {avgVol > 0 && <Stat label="Avg Vol (20d)" value={fmtInt(avgVol)} />}
-        <Stat label="EMA 20" value={fmtNum(ema20v)} tone={tone(signal(last.close, ema20v))} />
-        <Stat label="EMA 50" value={fmtNum(ema50v)} tone={tone(signal(last.close, ema50v))} />
-        <Stat label="EMA 200" value={fmtNum(ema200v)} tone={tone(signal(last.close, ema200v))} />
-        <Stat label="SMA 20" value={fmtNum(sma20v)} tone={tone(signal(last.close, sma20v))} />
-        <Stat label="Bollinger Upper" value={fmtNum(bbU)} />
-        <Stat label="Bollinger Lower" value={fmtNum(bbL)} />
-        <Stat label="RSI 14" value={rsi14 == null ? "—" : rsi14.toFixed(1)} tone={rsi14 == null ? undefined : rsi14 > 70 ? "err" : rsi14 < 30 ? "ok" : undefined} />
-        <Stat label="MACD" value={m == null ? "—" : m.toFixed(2)} />
-        <Stat label="MACD Signal" value={macdSig == null ? "—" : macdSig.toFixed(2)} />
-        <Stat label="MACD Hist" value={macdHist == null ? "—" : macdHist.toFixed(2)} tone={macdHist == null ? undefined : macdHist >= 0 ? "ok" : "err"} />
-      </div>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0", borderBottom: "1px solid var(--edge)", fontSize: 12 }}>
+      <span className="hud-label" style={{ color: "var(--text-dim)" }}>{label}</span>
+      <span style={mono ? { fontVariantNumeric: "tabular-nums", color: "var(--text)" } : undefined}>{children}</span>
+    </div>
+  );
+}
+
+function FnOSummary({ nseSymbol }: { nseSymbol: string }) {
+  const { data, isLoading, error } = useOptionChain(nseSymbol);
+  return (
+    <HudPanel flow title="F&O Snapshot" index="A7">
+      {isLoading ? <div className="hud-label">loading option chain…</div>
+        : error || !data ? <EmptyState hint={String((error as any)?.message ?? "")}>option chain unavailable</EmptyState>
+        : (
+          <>
+            <Row label="Spot" mono>{fmtNum(data.underlying)}</Row>
+            <Row label="PCR (OI)" mono>
+              <span style={{ color: data.pcr == null ? "var(--text)" : data.pcr > 1 ? "var(--ok)" : "var(--danger)" }}>
+                {data.pcr == null ? "—" : data.pcr.toFixed(2)}
+              </span>
+            </Row>
+            <Row label="Total Call OI" mono>{fmtInt(data.total_call_oi)}</Row>
+            <Row label="Total Put OI" mono>{fmtInt(data.total_put_oi)}</Row>
+            <Row label="Expiry" mono>{data.expiry}</Row>
+          </>
+        )}
     </HudPanel>
   );
 }
+
 
 function FnOPanel({ nseSymbol }: { nseSymbol: string }) {
   const { data, isLoading, error } = useOptionChain(nseSymbol);
