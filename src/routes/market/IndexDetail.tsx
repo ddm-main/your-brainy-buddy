@@ -113,8 +113,10 @@ export default function IndexDetail() {
   const readLayouts = useCallback((): Record<string, any> => {
     try { return JSON.parse(localStorage.getItem(layoutKey) ?? "{}"); } catch { return {}; }
   }, [layoutKey]);
-  const [savedLayouts, setSavedLayouts] = useState<string[]>([]);
-  useEffect(() => { setSavedLayouts(Object.keys(readLayouts())); }, [readLayouts]);
+  const [savedLayouts, setSavedLayouts] = useState<string[]>(() => {
+    try { return Object.keys(JSON.parse(localStorage.getItem(layoutKey) ?? "{}")); } catch { return []; }
+  });
+
 
   const handleSaveLayout = useCallback((name: string) => {
     try {
