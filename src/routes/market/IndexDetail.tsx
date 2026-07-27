@@ -5,7 +5,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
-import { DataTable, deriveChangeAbs, fmtInt, fmtNum, PctCell, Return1DCell } from "@/components/hud/DataTable";
+import { DataTable, deriveChangeAbs, fmtInt, fmtNum, Return1DCell } from "@/components/hud/DataTable";
 import type { ColumnDef } from "@tanstack/react-table";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
 import { ChartToolbar, DEFAULT_SETTINGS, isIntraday, type ChartSettings } from "@/components/market/ChartToolbar";
