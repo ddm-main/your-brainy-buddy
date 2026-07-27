@@ -7,6 +7,8 @@
 // options this is standard practice on Kite/Streak too).
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
+import { nseFetch } from "../_shared/market/nseClient.ts";
+
 
 // Scrapes nseindia.com per request (session-cookie priming + fetch) — a
 // tighter ceiling than the batch-quote endpoints since runaway polling here
@@ -94,41 +96,49 @@ function summarize(leg: any, kind: "CE" | "PE", underlying: number, strike: numb
   };
 }
 
-async function fetchNseOptionChain(symbol: string): Promise<any> {
-  const isIndex = INDEX_SYMBOLS.has(symbol);
-  const sym = encodeURIComponent(symbol);
-  // NSE retired /api/option-chain-indices|equities (now 404) in favour of the
-  // v3 endpoint used by the current option-chain page. Legacy paths are kept
-  // as a fallback in case the rollout is partial.
-  const endpoints = isIndex
-    ? [
-        `https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol=${sym}`,
-        `https://www.nseindia.com/api/option-chain-indices?symbol=${sym}`,
-      ]
-    : [
-        `https://www.nseindia.com/api/option-chain-v3?type=Equity&symbol=${sym}`,
-        `https://www.nseindia.com/api/option-chain-equities?symbol=${sym}`,
-      ];
-
-  // Prime session cookies
-  const home = await fetch("https://www.nseindia.com/option-chain", { headers: HEADERS });
-  const cookies = home.headers.get("set-cookie") ?? "";
-  const cookieHeader = cookies
-    .split(/,(?=[^ ]+=)/)
-    .map((c) => c.split(";")[0].trim())
-    .filter(Boolean)
-    .join("; ");
-
-  let lastError = "";
-  for (const endpoint of endpoints) {
-    const r = await fetch(endpoint, { headers: { ...HEADERS, cookie: cookieHeader } });
-    if (!r.ok) { lastError = `HTTP ${r.status}`; continue; }
-    const j = await r.json().catch(() => null);
-    if (!j?.records) { lastError = "no records"; continue; }
-    return j;
-  }
-  throw new Error(`NSE option chain ${symbol}: ${lastError || "unavailable"}`);
+async function nseJson(url: string): Promise<any | null> {
+  const r = await nseFetch(url, {
+    Accept: "application/json, text/plain, */*",
+    Referer: "https://www.nseindia.com/option-chain",
+  });
+  if (!r || !r.ok) return null;
+  return await r.json().catch(() => null);
 }
+
+// Returns { records, filtered } shaped payload regardless of endpoint used.
+async function fetchNseOptionChain(symbol: string, expiry: string | null): Promise<any> {
+  const isIndex = INDEX_SYMBOLS.has(symbol);
+  const type = isIndex ? "Indices" : "Equity";
+  const sym = encodeURIComponent(symbol);
+
+  // 1) Legacy endpoint (returns every expiry in one payload) — still live for
+  //    many symbols and gives us the full expiryDates list for free.
+  const legacy = await nseJson(
+    `https://www.nseindia.com/api/option-chain-${isIndex ? "indices" : "equities"}?symbol=${sym}`,
+  );
+  if (legacy?.records?.data?.length) return legacy;
+
+  // 2) v3 requires an explicit expiry; discover the expiry list first.
+  const info = await nseJson(`https://www.nseindia.com/api/option-chain-contract-info?symbol=${sym}`);
+  const expiries: string[] = info?.expiryDates ?? info?.records?.expiryDates ?? [];
+  const chosen = (expiry && expiries.includes(expiry) ? expiry : expiries[0]) ?? expiry;
+  if (!chosen) throw new Error(`NSE option chain ${symbol}: no expiries available (NSE unreachable)`);
+
+  const v3 = await nseJson(
+    `https://www.nseindia.com/api/option-chain-v3?type=${type}&symbol=${sym}&expiry=${encodeURIComponent(chosen)}`,
+  );
+  const data = v3?.records?.data ?? v3?.data ?? null;
+  if (!data?.length) throw new Error(`NSE option chain ${symbol}: unavailable`);
+
+  return {
+    records: {
+      data,
+      expiryDates: expiries.length ? expiries : [chosen],
+      underlyingValue: v3?.records?.underlyingValue ?? v3?.underlyingValue ?? 0,
+    },
+  };
+}
+
 
 
 Deno.serve(async (req) => {
@@ -142,10 +152,11 @@ Deno.serve(async (req) => {
     const symbol = String(b?.symbol ?? "NIFTY").toUpperCase();
     const expiry = b?.expiry ? String(b.expiry) : null;
 
-    const j = await fetchNseOptionChain(symbol);
+    const j = await fetchNseOptionChain(symbol, expiry);
     const records = j.records;
     const expiries: string[] = records.expiryDates ?? [];
-    const chosenExpiry = expiry ?? expiries[0] ?? null;
+    const chosenExpiry = (expiry && expiries.includes(expiry) ? expiry : expiries[0]) ?? expiry ?? null;
+
     if (!chosenExpiry) return errorResponse(req, "no expiries available", 502);
 
     const underlying = Number(records.underlyingValue ?? 0);
