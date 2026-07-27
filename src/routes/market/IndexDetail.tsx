@@ -109,17 +109,42 @@ export default function IndexDetail() {
     }, "image/png");
   }, [tf, symbol, notify]);
 
+  const layoutKey = `jarvis.chart.layouts.index.${symbol}`;
+  const readLayouts = useCallback((): Record<string, any> => {
+    try { return JSON.parse(localStorage.getItem(layoutKey) ?? "{}"); } catch { return {}; }
+  }, [layoutKey]);
+  const [savedLayouts, setSavedLayouts] = useState<string[]>([]);
+  useEffect(() => { setSavedLayouts(Object.keys(readLayouts())); }, [readLayouts]);
+
   const handleSaveLayout = useCallback((name: string) => {
     try {
-      const key = `jarvis.chart.layouts.index.${symbol}`;
-      const all = JSON.parse(localStorage.getItem(key) ?? "{}");
+      const all = readLayouts();
       all[name] = { tf, chartType, studies, settings };
-      localStorage.setItem(key, JSON.stringify(all));
+      localStorage.setItem(layoutKey, JSON.stringify(all));
+      setSavedLayouts(Object.keys(all));
       notify(`Layout "${name}" saved`);
     } catch { notify("Could not save layout"); }
-  }, [notify, symbol, tf, chartType, studies, settings]);
+  }, [notify, layoutKey, readLayouts, tf, chartType, studies, settings]);
+
+  const handleLoadLayout = useCallback((name: string) => {
+    const l = readLayouts()[name];
+    if (!l) return;
+    if (l.tf) setTf(l.tf);
+    if (l.chartType) setChartType(l.chartType);
+    if (Array.isArray(l.studies)) setStudies(l.studies);
+    if (l.settings) setSettings({ ...DEFAULT_SETTINGS, ...l.settings });
+    notify(`Layout "${name}" loaded`);
+  }, [readLayouts, notify]);
+
+  const handleDeleteLayout = useCallback((name: string) => {
+    const all = readLayouts();
+    delete all[name];
+    localStorage.setItem(layoutKey, JSON.stringify(all));
+    setSavedLayouts(Object.keys(all));
+  }, [readLayouts, layoutKey]);
 
   const stats = useIndexTechnicals(candles);
+
 
   const wideTabs: Tab[] = [
     ...(cSlug ? (["constituents"] as Tab[]) : []),
