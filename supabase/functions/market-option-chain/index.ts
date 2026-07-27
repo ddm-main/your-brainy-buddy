@@ -96,9 +96,19 @@ function summarize(leg: any, kind: "CE" | "PE", underlying: number, strike: numb
 
 async function fetchNseOptionChain(symbol: string): Promise<any> {
   const isIndex = INDEX_SYMBOLS.has(symbol);
-  const endpoint = isIndex
-    ? `https://www.nseindia.com/api/option-chain-indices?symbol=${encodeURIComponent(symbol)}`
-    : `https://www.nseindia.com/api/option-chain-equities?symbol=${encodeURIComponent(symbol)}`;
+  const sym = encodeURIComponent(symbol);
+  // NSE retired /api/option-chain-indices|equities (now 404) in favour of the
+  // v3 endpoint used by the current option-chain page. Legacy paths are kept
+  // as a fallback in case the rollout is partial.
+  const endpoints = isIndex
+    ? [
+        `https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol=${sym}`,
+        `https://www.nseindia.com/api/option-chain-indices?symbol=${sym}`,
+      ]
+    : [
+        `https://www.nseindia.com/api/option-chain-v3?type=Equity&symbol=${sym}`,
+        `https://www.nseindia.com/api/option-chain-equities?symbol=${sym}`,
+      ];
 
   // Prime session cookies
   const home = await fetch("https://www.nseindia.com/option-chain", { headers: HEADERS });
@@ -109,12 +119,17 @@ async function fetchNseOptionChain(symbol: string): Promise<any> {
     .filter(Boolean)
     .join("; ");
 
-  const r = await fetch(endpoint, { headers: { ...HEADERS, cookie: cookieHeader } });
-  if (!r.ok) throw new Error(`NSE option chain ${symbol}: HTTP ${r.status}`);
-  const j = await r.json();
-  if (!j?.records) throw new Error(`NSE option chain ${symbol}: no records`);
-  return j;
+  let lastError = "";
+  for (const endpoint of endpoints) {
+    const r = await fetch(endpoint, { headers: { ...HEADERS, cookie: cookieHeader } });
+    if (!r.ok) { lastError = `HTTP ${r.status}`; continue; }
+    const j = await r.json().catch(() => null);
+    if (!j?.records) { lastError = "no records"; continue; }
+    return j;
+  }
+  throw new Error(`NSE option chain ${symbol}: ${lastError || "unavailable"}`);
 }
+
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
