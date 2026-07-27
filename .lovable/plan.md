@@ -1,37 +1,54 @@
-## Findings (verified)
+## Goal
 
-**1. FII/DII shows `n/a`** — `fii_dii_activity` table is empty. Cron `market-fii-dii-sync` runs Mon–Fri 12:00 UTC and pg_cron says "succeeded" (Jul 22/23/24), but that only means the HTTP POST returned a response — the function itself is almost certainly returning `no rows` / `nse_unreachable_*` / `nse_parse_fail` because `www.nseindia.com` blocks Supabase Edge egress (Cloudflare bot-wall), so the cookie prime + `/api/fiidiiTradeReact` fetch never yields a usable body. No rows have ever landed.
+Make `/market/index/:symbol` (Nifty 50, Bank Nifty, global indices) look and behave like the stock analysis page (`/market/analysis/:symbol`): a full-height chart on the left and a scrolling rail of readout panels on the right — instead of today's short stacked panels with a tab strip.
 
-**2. A/D looks off on weekends** — `market_breadth_latest.trade_date = 2026-07-26` (Sun) with `computed_at` from today; breadth job ran on a non-trading day and overwrote Friday's session with a stale/degenerate snapshot. Strip shows this without any as-of context, so the numbers read as "wrong for today".
+## Current state (verified)
 
-**3. Price update speed** — REST `useIndices` polls every 1 s and `quoteCache` TTL is 800 ms, which is fine. The real gap is that the Kotak WS relay's index push ticks aren't reaching the strip: `subscribeSymbolsForTicks(["NSE:^NSEI", …])` sends Yahoo-style symbols the relay doesn't recognise as Kotak instrument tokens for indices, so no push ticks overlay and the strip only moves at the REST cadence.
+- `src/routes/market/IndexDetail.tsx` renders a plain vertical stack: header panel with price + 4 tabs (chart / technicals / F&O / constituents), then one panel per tab. The chart is not viewport-height, and technicals/F&O/constituents are only reachable by switching tabs.
+- `src/routes/market/Analysis.tsx` uses `.mk-anl-grid` (chart column + `.mk-anl-rail`, defined in `src/styles.css:1503-1525`, collapsing to one column under 1180px) with rail panels: Quote (A1), Alerts (A9), Depth, Breakout Intelligence (A3), Indicators Daily (A4), Range & Strength (A5), AI Verdict (A6).
 
----
+## Layout to build
 
-## Plan
+```text
++---------------------------- mk-idx-grid ----------------------------+
+| MK.IDX.C  Chart (full height)              | A1 Quote               |
+|  toolbar: 1D / candles / indicators /      |   price, +chg (chg%)   |
+|  alert / layouts / settings / more         |   ^NSEI · IN · F&O     |
+|                                            | A9 Alerts              |
+|  candles + volume, fullscreen shell        | A4 Indicators (Daily)  |
+|                                            | A5 Range & Strength    |
+|                                            | A7 F&O Snapshot        |
++--------------------------------------------+------------------------+
+| Wide tabs under chart: F&O chain | Constituents  (only when avail.)  |
++---------------------------------------------------------------------+
+```
 
-### A. Fix FII/DII sync (`supabase/functions/market-fii-dii-sync/index.ts`)
-1. Try NSE first (kept for when it works), but on any non-2xx / empty-array / parse fail, fall back to **Moneycontrol's public FII/DII endpoint** (`api.moneycontrol.com/mcapi/v1/fno/marketStats/fii-dii-activity` — JSON, no cookies) and, if that also fails, to the **NSE archives CSV** (`archives.nseindia.com/content/fo/fii_stats_<DD-MMM-YYYY>.csv` / cash equivalent) which is served without the bot wall.
-2. Normalize all three sources into the same `{ activity_date, segment:'CASH', fii_*, dii_*, net_buy_inr_cr, source }` row and upsert.
-3. Add structured logging (`console.info({ source, ok, status, rows })`) so future failures are visible in edge-function logs.
-4. Add a one-shot backfill call at deploy time (invoke manually once) to populate the last ~10 sessions.
+## Changes
 
-### B. Make A/D honest on non-trading days
-1. `useBreadth()` → change query to `market_breadth_daily` ordered by `trade_date desc` with `advances + declines > 0` filter (skip Sat/Sun degenerate rows), take latest. Drop reliance on `market_breadth_latest` view when it points at a non-trading day.
-2. `MarketStrip` A/D chip: append the session date in the tooltip (`title="A/D for <trade_date>"`) and dim the chip when `trade_date !== today IST` so stale sessions are visibly stale, not silently wrong.
-3. Same treatment for FII/DII chip tooltip (already partly there — keep the date, dim when >1 trading day old).
+1. **Restructure `IndexDetail.tsx`**
+   - Replace the stacked wrapper with the grid used by Analysis (new `.mk-idx-grid` alias reusing the `.mk-anl-*` rules, or reuse `.mk-anl-grid`/`.mk-anl-rail` directly so responsive behaviour is identical).
+   - Left column: single `HudPanel` (`MK.IDX.C`) with `flex: 1; minHeight: 0`, containing `FullscreenShell` + `ChartToolbar` + `CandleChart`, exactly like Analysis (chart fills the viewport, no longer a squat box).
+   - Move the index name / back button into the chart panel header + rail Quote panel, dropping the separate tall header panel.
 
-### C. Faster live index prices
-1. In `Apps/relay/kotak-ws-relay.mjs` (and its symbol→token resolver): map the four index pseudo-symbols (`^NSEI`, `^BSESN`, `^NSEBANK`, `^INDIAVIX`) to their Kotak Neo index instrument tokens (NIFTY 50, NIFTY BANK, SENSEX, INDIA VIX) so `subscribeSymbolsForTicks(["NSE:^NSEI", …])` actually subscribes upstream and pushes ticks.
-2. `MarketStrip`: keep the existing tick-overlay path; verify `pushTicks["NSE:^NSEI"]` starts flowing after the relay change (watchdog + `relayAlive` already handle staleness).
-3. `useIndices` refetch stays at 1 s during market hours as a REST safety net; drop `quoteCache` `LIVE_TTL_MS` from 800 → 500 ms so the REST poll returns a genuinely new print on every tick even under coalescing.
+2. **Right rail panels** (reuse the existing `Row`/`Stat` helpers and `HudPanel flow`)
+   - `A1 Quote`: big price, `Return1DCell` with abs + pct, symbol · region chips, F&O chip, provider/stale chip.
+   - `A9 Alerts`: reuse `StockAlertsPanel` for the index symbol (currently the index page only has a "new alert" modal, no list).
+   - `A4 Indicators (Daily)`: RSI / MACD / EMA20-50-200 / SMA20 / Bollinger / Volume / Avg Vol — computed from the same `TechnicalsPanel` stats memo, extracted into a reusable `useIndexTechnicals(candles)` hook.
+   - `A5 Range & Strength`: Open / Prev close / Day H-L / Day change / 52W high-low / % from 52W high & low.
+   - `A7 F&O Snapshot` (only when the index has F&O): Spot, PCR, total call/put OI, expiry from `useOptionChain`.
 
-### D. Verification
-- Manually invoke `market-fii-dii-sync` after deploy; confirm row appears in `fii_dii_activity` and strip shows FII/DII values.
-- Query `market_breadth_daily` for the latest weekday and confirm A/D chip renders that session's numbers with a dated tooltip.
-- Open `/market`, watch the four index chips for sub-second updates during market hours; confirm `PriceSourceChip` shows `push · kotak`.
+3. **Wide content below the chart**: keep a slim tab strip for the two table-shaped views that don't fit a 360px rail — **F&O option chain** and **Constituents** — rendered full width under the chart column, shown only when available (`fno && nseSymbol`, `cSlug`) and defaulting to Constituents for Indian indices, F&O chain otherwise. The old "technicals" tab disappears because its content now lives in the rail.
 
-### Technical notes
-- No schema changes required.
-- No new secrets required (Moneycontrol + NSE archives are unauthenticated).
-- All changes are additive/backward-compatible with existing readers of `fii_dii_activity` and `market_breadth_daily`.
+## Bug fixes found while auditing this page
+
+- Index chart currently always requests exchange `"NSE"`; global indices (`^GSPC`, `^IXIC`) should not send an NSE exchange hint — pass exchange only for `region === "IN"`.
+- `deriveChangeAbs` fallback isn't applied on the index header, so when the quote returns only `change_pct` the absolute value shows `—`; mirror the Analysis behaviour (`dayChange ?? deriveChangeAbs(price, pct)`).
+- Chart layouts save (`handleSaveLayout`) has no load/delete counterpart on this page — wire `onLoadLayout` / `onDeleteLayout` / `savedLayouts` like Analysis so the Layouts menu isn't half-functional.
+- `intraday` is never passed to `ChartToolbar` / `CandleChart` on this page, so intraday timeframes render with daily axis formatting — pass `isIntraday(tf)`.
+- Unused imports left after the refactor (`ScoreBadge`, `useQuotes`, live tick helpers if unused) get cleaned up; verify with a typecheck/lint pass.
+
+## Verification
+
+- Typecheck + lint clean.
+- Playwright screenshot of `/market/index/%5ENSEI` at 1576×997 (chart fills height, rail visible) and at ~1100px width (single-column stack).
+- Check a global index (`^GSPC`) renders without F&O/Constituents tabs and without an NSE exchange hint.
