@@ -152,10 +152,11 @@ Deno.serve(async (req) => {
     const symbol = String(b?.symbol ?? "NIFTY").toUpperCase();
     const expiry = b?.expiry ? String(b.expiry) : null;
 
-    const j = await fetchNseOptionChain(symbol);
+    const j = await fetchNseOptionChain(symbol, expiry);
     const records = j.records;
     const expiries: string[] = records.expiryDates ?? [];
-    const chosenExpiry = expiry ?? expiries[0] ?? null;
+    const chosenExpiry = (expiry && expiries.includes(expiry) ? expiry : expiries[0]) ?? expiry ?? null;
+
     if (!chosenExpiry) return errorResponse(req, "no expiries available", 502);
 
     const underlying = Number(records.underlyingValue ?? 0);
