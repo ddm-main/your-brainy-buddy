@@ -7,6 +7,8 @@
 // options this is standard practice on Kite/Streak too).
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
+import { nseFetch } from "../_shared/market/nseClient.ts";
+
 
 // Scrapes nseindia.com per request (session-cookie priming + fetch) — a
 // tighter ceiling than the batch-quote endpoints since runaway polling here
