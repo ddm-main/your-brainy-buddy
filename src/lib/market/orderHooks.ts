@@ -125,8 +125,21 @@ export function useMarketOrderMutations() {
     qc.invalidateQueries({ queryKey: ["market", "realized-daily"] });
   };
   const place = useMutation({
-    mutationFn: (input: PlaceOrderInput) =>
-      callMarketFn<{ ok: boolean; order_id: string; status: string }>("market-order-place", input as unknown as Record<string, unknown>),
+    mutationFn: async (input: PlaceOrderInput) => {
+      const r = await callMarketFn<{ ok: boolean; order_id?: string; status?: string; error?: string; code?: string; session_expired?: boolean; retryable?: boolean; verification_required?: boolean }>(
+        "market-order-place",
+        input as unknown as Record<string, unknown>,
+      );
+      // The ambiguous-broker-session case is returned as HTTP 200 with
+      // ok:false so the platform runtime tracker doesn't flag it as an
+      // Edge Function crash. Re-throw as MarketFunctionError so the ticket's
+      // existing recovery branch handles it uniformly.
+      if (r && r.ok === false) {
+        const { MarketFunctionError } = await import("@/lib/market/api");
+        throw new MarketFunctionError(r.error || "Order status unknown", 409, r as unknown as Record<string, unknown>);
+      }
+      return r as { ok: true; order_id: string; status: string };
+    },
     onSuccess: invalidate,
   });
   const modify = useMutation({

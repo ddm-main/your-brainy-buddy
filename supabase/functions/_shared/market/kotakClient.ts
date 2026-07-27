@@ -4,6 +4,7 @@
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { decryptStatementPassword, type StatementPasswordRule } from "../crypto.ts";
+import { isKotakSessionFailure } from "./kotakErrorClassifier.ts";
 import { totp } from "./totp.ts";
 
 const NEO_FIN_KEY = "neotradeapi";
@@ -114,6 +115,15 @@ export class KotakError extends Error {
 // broker before the auth error is genuinely unknown — callers must NOT treat
 // this the same as a clean rejection (which is safe to let a caller retry).
 export class KotakAmbiguousOrderError extends KotakError {}
+
+function isKotakSessionError(error: KotakError): boolean {
+  // A 403 from an order endpoint can be a broker/business rejection (for
+  // example, SELL quantity or product restrictions), not an expired token.
+  // Bare "unauthorised" is too broad because Kotak also uses it for RMS/
+  // business rejections. The pure helper only matches explicit token/session
+  // expiry/invalid/missing language.
+  return isKotakSessionFailure(error.status, `${error.message} ${error.body ?? ""}`);
+}
 
 // rate_limit column on market_api_settings documents the user's Kotak tier
 // but nothing enforces it client-side — Kotak's APIM gateway is the actual
@@ -271,15 +281,26 @@ export async function kotakAutoLogin(s: KotakSettings): Promise<KotakSession> {
   throw lastErr;
 }
 
+// Post-login calls need BOTH the session pair (Auth/Sid) AND the app
+// credential (Authorization: <consumer key> + neo-fin-key). Omitting the
+// consumer key made every /script-details quote call return
+// `{"error":true,"message":"unauthorised"}` with a perfectly valid session —
+// verified against the live gateway: identical request 401s without it and
+// 200s with it. Portfolio routes happen to accept the session alone, but
+// sending the full set everywhere is what Kotak's own SDK does.
 async function sessionHeaders(s: KotakSettings): Promise<Record<string, string>> {
   const editToken = await dec(s.session_token_enc);
   if (!editToken || !s.sid) throw new KotakError("No active Kotak session", 401);
-  return {
+  const h: Record<string, string> = {
     Auth: editToken,
     Sid: s.sid,
     accept: "*/*",
+    "neo-fin-key": NEO_FIN_KEY,
   };
+  if (s.consumer_key) h.Authorization = s.consumer_key;
+  return h;
 }
+
 
 function appendSId(s: KotakSettings): string {
   const sid = firstNonEmpty(s.hs_server_id, hsServerIdFromBaseUrl(apiBase(s)));
@@ -542,25 +563,29 @@ function kotakOrderTypeCode(t: PlaceOrderInput["orderType"]): string {
   }
 }
 
-function orderBody(input: PlaceOrderInput) {
+// Kotak Neo Trade API uses short field names (matches the official
+// kotak-neo-api Python SDK place_order payload). Long snake_case keys
+// like `exchange_segment` return "400: body invalid".
+function orderBody(input: PlaceOrderInput): Record<string, string> {
   const needsTrigger = input.orderType === "SL" || input.orderType === "SL-M";
   const needsPrice = input.orderType === "LIMIT" || input.orderType === "SL";
-  return {
-    exchange_segment: input.exchangeSegment,
-    product: input.product,
-    order_type: kotakOrderTypeCode(input.orderType),
-    price: needsPrice ? String(input.price ?? 0) : "0",
-    quantity: String(input.quantity),
-    validity: input.validity ?? "DAY",
-    trading_symbol: input.tradingSymbol,
-    transaction_type: input.transactionType === "BUY" ? "B" : "S",
-    amo: input.amo ? "YES" : "NO",
-    disclosed_quantity: String(input.disclosedQuantity ?? 0),
-    market_protection: "0",
+  const body: Record<string, string> = {
+    am: input.amo ? "YES" : "NO",
+    dq: String(input.disclosedQuantity ?? 0),
+    es: input.exchangeSegment,
+    mp: "0",
+    pc: input.product,
     pf: "N",
-    trigger_price: needsTrigger ? String(input.triggerPrice ?? 0) : "0",
-    ...(input.instrumentToken ? { scrip_token: input.instrumentToken } : {}),
+    pr: needsPrice ? String(input.price ?? 0) : "0",
+    pt: kotakOrderTypeCode(input.orderType),
+    qt: String(input.quantity),
+    rt: input.validity ?? "DAY",
+    tp: needsTrigger ? String(input.triggerPrice ?? 0) : "0",
+    ts: input.tradingSymbol,
+    tt: input.transactionType === "BUY" ? "B" : "S",
   };
+  if (input.instrumentToken) body.tk = input.instrumentToken;
+  return body;
 }
 
 // Parse the /quick/user/limits payload into a normalized funds snapshot.
@@ -620,12 +645,22 @@ export function parseKotakLimits(j: any): KotakFundsSnapshot {
 }
 
 
+// Kotak Neo Trade API expects order endpoints as application/x-www-form-urlencoded
+// with the JSON payload wrapped in a `jData` field (mirrors the official
+// kotak-neo-api Python SDK). Posting raw JSON returns "400: body invalid".
+function jDataForm(payload: Record<string, unknown>): string {
+  const params = new URLSearchParams();
+  params.set("jData", JSON.stringify(payload));
+  return params.toString();
+}
+
 export async function kotakPlaceOrder(s: KotakSettings, input: PlaceOrderInput): Promise<KotakOrderResult> {
+  requireServerId(s);
   const h = await sessionHeaders(s);
-  const j = await kotakFetch(`${apiBase(s)}/quick/order/rule/ms/place`, {
+  const j = await kotakFetch(routeUrl(s, "quick/order/rule/ms/place"), {
     method: "POST",
-    headers: { ...h, "Content-Type": "application/json" },
-    body: JSON.stringify(orderBody(input)),
+    headers: { ...h, "Content-Type": "application/x-www-form-urlencoded" },
+    body: jDataForm(orderBody(input)),
   });
   const orderId = String(j?.nOrdNo ?? j?.data?.nOrdNo ?? j?.orderId ?? "");
   const status = String(j?.stat ?? j?.stCode ?? "");
@@ -634,11 +669,14 @@ export async function kotakPlaceOrder(s: KotakSettings, input: PlaceOrderInput):
 }
 
 export async function kotakCancelOrder(s: KotakSettings, orderId: string): Promise<KotakOrderResult> {
+  requireServerId(s);
   const h = await sessionHeaders(s);
-  const j = await kotakFetch(`${apiBase(s)}/quick/order/rule/ms/cancel`, {
+  // Official Neo API v2 route (the previous rule/ms alias is not part of
+  // the SDK contract and can return a misleading gateway auth error).
+  const j = await kotakFetch(routeUrl(s, "quick/order/cancel"), {
     method: "POST",
-    headers: { ...h, "Content-Type": "application/json" },
-    body: JSON.stringify({ order_id: orderId }),
+    headers: { ...h, "Content-Type": "application/x-www-form-urlencoded" },
+    body: jDataForm({ on: orderId, am: "NO" }),
   });
   return { orderId, status: String(j?.stat ?? j?.stCode ?? ""), raw: j };
 }
@@ -648,17 +686,18 @@ export async function kotakModifyOrder(
   orderId: string,
   changes: Partial<Pick<PlaceOrderInput, "quantity" | "price" | "orderType" | "triggerPrice" | "validity">>,
 ): Promise<KotakOrderResult> {
+  requireServerId(s);
   const h = await sessionHeaders(s);
-  const body: Record<string, string> = { order_id: orderId };
-  if (changes.quantity != null) body.quantity = String(changes.quantity);
-  if (changes.price != null) body.price = String(changes.price);
-  if (changes.triggerPrice != null) body.trigger_price = String(changes.triggerPrice);
-  if (changes.validity) body.validity = changes.validity;
-  if (changes.orderType) body.order_type = kotakOrderTypeCode(changes.orderType);
-  const j = await kotakFetch(`${apiBase(s)}/quick/order/rule/ms/modify`, {
+  const body: Record<string, string> = { on: orderId, nOrdNo: orderId };
+  if (changes.quantity != null) body.qt = String(changes.quantity);
+  if (changes.price != null) body.pr = String(changes.price);
+  if (changes.triggerPrice != null) body.tp = String(changes.triggerPrice);
+  if (changes.validity) body.rt = changes.validity;
+  if (changes.orderType) body.pt = kotakOrderTypeCode(changes.orderType);
+  const j = await kotakFetch(routeUrl(s, "quick/order/rule/ms/modify"), {
     method: "POST",
-    headers: { ...h, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    headers: { ...h, "Content-Type": "application/x-www-form-urlencoded" },
+    body: jDataForm(body),
   });
   return { orderId, status: String(j?.stat ?? j?.stCode ?? ""), raw: j };
 }
@@ -748,7 +787,7 @@ export async function withKotakSession<T>(
   try {
     return await fn(s);
   } catch (e) {
-    if (!(e instanceof KotakError) || (e.status !== 401 && e.status !== 403)) throw e;
+    if (!(e instanceof KotakError) || !isKotakSessionError(e)) throw e;
     if (retryOnAuthError && s.totp_secret_enc) {
       const fresh: KotakSettings = await withReloginLock(s.id, async () => {
         // Another concurrent call may have already refreshed the session
@@ -774,16 +813,20 @@ export async function withKotakSession<T>(
       });
       return await fn(fresh);
     }
-    await svc
-      .from("market_api_settings")
-      .update({ connection_status: "expired", last_error: "Session expired — re-login required" })
-      .eq("id", s.id);
     if (!retryOnAuthError) {
+      // Do not mark the entire broker disconnected from a non-retryable order
+      // mutation. The order outcome may be ambiguous, but expiring the session
+      // here causes a global Kotak fallback/reconnect loop. A later read-only
+      // call can safely prove and persist session expiry.
       throw new KotakAmbiguousOrderError(
         "Kotak session expired mid-request — this order may or may not have reached the broker. Check Orders/Trades before resubmitting; do not retry blindly. Reconnect Kotak in Market → Config once verified.",
         e.status, e.body,
       );
     }
+    await svc
+      .from("market_api_settings")
+      .update({ connection_status: "expired", last_error: "Session expired — re-login required" })
+      .eq("id", s.id);
     throw e;
   }
 }
@@ -819,10 +862,11 @@ export async function kotakConvertPosition(
     tPrd: input.toProduct,
   };
   if (input.instrumentToken) body.tk = input.instrumentToken;
-  const j = await kotakFetch(`${apiBase(s)}/quick/order/rule/ms/pos-conversion`, {
+  requireServerId(s);
+  const j = await kotakFetch(routeUrl(s, "quick/order/rule/ms/pos-conversion"), {
     method: "POST",
-    headers: { ...h, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    headers: { ...h, "Content-Type": "application/x-www-form-urlencoded" },
+    body: jDataForm(body),
   });
   return { status: String(j?.stat ?? j?.stCode ?? ""), raw: j };
 }

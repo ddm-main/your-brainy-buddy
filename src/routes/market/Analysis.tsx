@@ -18,7 +18,7 @@ import { fmtNum, fmtInt, fmtPct, Return1DCell, deriveChangeAbs } from "@/compone
 import { useBreadth, useCandles, useCorporateActions, useDepth, useFundamentals, useMarketNews, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores, useSyncNewsAndActions } from "@/lib/market/hooks";
 import { MarketDepthLadder } from "@/components/market/MarketDepthLadder";
 import { computeLiveScore } from "@/lib/market/liveSnapshot";
-import { usePreferLiveTick } from "@/lib/market/useRealtimeTicks";
+import { subscribeSymbolsForTicks, usePreferLiveTick } from "@/lib/market/useRealtimeTicks";
 import { getTrustedDayChange } from "@/lib/market/pnl";
 import { FullscreenShell } from "@/components/market/FullscreenShell";
 import { useNotifications } from "@/store/notificationStore";
@@ -26,6 +26,11 @@ import { RefreshCw } from "lucide-react";
 
 const STATE_STORE = "jarvis.analysis.state.v5";
 const LAYOUTS_STORE = "jarvis.analysis.layouts.v1";
+// Per-symbol chart preferences (TF/chartType/tvMode) — lets users keep
+// e.g. NIFTY on 1h and RELIANCE on 15m. Falls back to STATE_STORE.
+const TF_STORE_PREFIX = "jarvis.analysis.tf.";
+const tfKey = (exch: string, sym: string | undefined) =>
+  `${TF_STORE_PREFIX}${(exch || "NSE").toUpperCase()}:${(sym || "").toUpperCase()}`;
 
 
 type Persisted = {
@@ -47,13 +52,24 @@ const defaultState: Persisted = {
 // Drop studies whose type no longer exists and backfill missing params/colours.
 function loadStudies(saved: unknown): Study[] {
   if (!Array.isArray(saved)) return DEFAULT_STUDIES;
-  const out = saved.map((s) => normalizeStudy(s as Study)).filter((s): s is Study => s != null);
+  // Wrap per-item so ONE bad entry can't nuke the whole state and reset TF
+  // to 1D on refresh.
+  const out: Study[] = [];
+  for (const s of saved) {
+    try {
+      const n = normalizeStudy(s as Study);
+      if (n) out.push(n);
+    } catch { /* skip malformed study */ }
+  }
+  // Self-heal: ensure a volume study is always present so it renders on
+  // every chart even for old saved states created before volume was default.
+  if (!out.some((x) => x.type === "volume")) out.unshift(makeStudy("volume"));
   return out;
 }
 
 function loadState(): Persisted {
   try {
-    const raw = JSON.parse(localStorage.getItem(STATE_STORE) ?? "{}");
+    const raw = JSON.parse(localStorage.getItem(STATE_STORE) ?? "{}") as Partial<Persisted>;
     return {
       ...defaultState,
       ...raw,
@@ -77,9 +93,20 @@ export default function Analysis() {
     }, { replace: true });
   };
   const initial = useMemo(loadState, []);
-  const [tf, setTf] = useState(initial.tf);
-  const [chartType, setChartType] = useState<ChartType>(initial.chartType);
-  const [tvMode, setTvMode] = useState(initial.tvMode);
+  // Per-symbol TF/chartType/tvMode override wins over the global state so
+  // switching between symbols keeps each one's preferred view.
+  const perSymbolInitial = useMemo(() => {
+    try {
+      const raw = localStorage.getItem(tfKey(exchange, symbol));
+      if (!raw) return null;
+      return JSON.parse(raw) as { tf?: string; chartType?: ChartType; tvMode?: boolean };
+    } catch { return null; }
+    // symbol/exchange change → recompute; safe: state below re-inits from this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, exchange]);
+  const [tf, setTf] = useState(perSymbolInitial?.tf ?? initial.tf);
+  const [chartType, setChartType] = useState<ChartType>(perSymbolInitial?.chartType ?? initial.chartType);
+  const [tvMode, setTvMode] = useState(perSymbolInitial?.tvMode ?? initial.tvMode);
   const [fs, setFs] = useState(false);
   const [studies, setStudies] = useState<Study[]>(initial.studies);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -137,6 +164,23 @@ export default function Analysis() {
     const payload: Persisted = { tf, chartType, tvMode, studies, settings };
     localStorage.setItem(STATE_STORE, JSON.stringify(payload));
   }, [tf, chartType, tvMode, studies, settings]);
+
+  // Per-symbol chart prefs (TF/chartType/tvMode). Written on change AND on
+  // beforeunload so a fast refresh right after switching TF still catches it.
+  useEffect(() => {
+    if (!symbol) return;
+    const key = tfKey(exchange, symbol);
+    const payload = { tf, chartType, tvMode };
+    try { localStorage.setItem(key, JSON.stringify(payload)); } catch { /* quota */ }
+    const onBeforeUnload = () => {
+      try {
+        localStorage.setItem(key, JSON.stringify(payload));
+        localStorage.setItem(STATE_STORE, JSON.stringify({ tf, chartType, tvMode, studies, settings }));
+      } catch { /* noop */ }
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [symbol, exchange, tf, chartType, tvMode, studies, settings]);
 
   // F toggles fullscreen when not typing in an input
   useEffect(() => {
@@ -201,6 +245,10 @@ export default function Analysis() {
   const { data: scores = [] } = useStockScores({ symbol: sym, limit: 1 });
   const score = scores[0];
   const { data: quotesData } = useQuotes(sym ? [`${exchange}:${sym}`] : []);
+  useEffect(() => {
+    if (!sym) return;
+    subscribeSymbolsForTicks([`${exchange}:${sym}`]);
+  }, [exchange, sym]);
   const restQuote = quotesData?.quotes?.[0];
   const preferred = usePreferLiveTick(sym ? `${exchange}:${sym}` : null, restQuote ? { ltp: restQuote.ltp, change_pct: restQuote.change_pct } : null);
   // `quote` keeps its REST shape (source/stale/day_change) for the rest of the
@@ -351,8 +399,8 @@ export default function Analysis() {
                   chartType={chartType}
                   studies={studies}
                   intraday={isIntraday(tf)}
-                  livePrice={quote?.ltp || null}
-                  liveVolume={(quote as any)?.volume ?? null}
+                  livePrice={!staleLive ? (quote?.ltp ?? null) : null}
+                  liveVolume={!staleLive ? ((quote as any)?.volume ?? null) : null}
                   settings={settings}
                   onToggleStudy={toggleStudy}
                   onEditStudy={setEditingId}

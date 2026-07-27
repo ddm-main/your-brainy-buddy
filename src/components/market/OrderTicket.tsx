@@ -2,12 +2,14 @@
 // Supports MARKET / LIMIT / SL / SL-M, product MIS / CNC / NRML, DAY / IOC,
 // and displays live LTP + notional + margin usage as the user types.
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { HudModal } from "@/components/hud/HudModal";
 import { Btn, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { useQuotes } from "@/lib/market/hooks";
 import { useFunds, useMarketOrderMutations, type PlaceOrderInput } from "@/lib/market/orderHooks";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
+import { MarketFunctionError } from "@/lib/market/api";
 
 type Side = "BUY" | "SELL";
 type OrderType = "MARKET" | "LIMIT" | "SL" | "SL-M";
@@ -30,7 +32,9 @@ export function OrderTicket({
   const [validity, setValidity] = useState<"DAY" | "IOC">("DAY");
   const [disclosedQty, setDisclosedQty] = useState("");
   const [amo, setAmo] = useState(false);
+  const [orderError, setOrderError] = useState<{ title: string; message: string; meta?: string } | null>(null);
   const push = useUi((s) => s.push);
+  const queryClient = useQueryClient();
   const { place } = useMarketOrderMutations();
   const { data: fundsResp } = useFunds();
   const funds = fundsResp?.funds ?? null;
@@ -43,6 +47,7 @@ export function OrderTicket({
   useEffect(() => {
     if (open) {
       setSide(initialSide); setQty(defaultQty ? String(defaultQty) : "1");
+      setOrderError(null);
       idempotencyKeyRef.current = crypto.randomUUID();
     }
   }, [open, initialSide, defaultQty]);
@@ -99,6 +104,7 @@ export function OrderTicket({
     // wired up. Same pattern as the large-notional/close-position-drift
     // confirms: block by default, let the user explicitly override.
     if (marginWarning && !confirm(`${marginWarning}. Place order anyway?`)) return;
+    setOrderError(null);
     const input: PlaceOrderInput = {
       symbol, exchange, side, quantity: q, orderType, product, validity,
       price: price ? snapToTick(Number(price)) : undefined,
@@ -111,7 +117,38 @@ export function OrderTicket({
       const r = await place.mutateAsync(input);
       push(`Order placed · ${r.order_id}`, "ok");
       onClose();
-    } catch (e) { push(toSafeError(e, "Order failed").message, "err"); }
+    } catch (e) {
+      if (e instanceof MarketFunctionError && e.code === "KOTAK_ORDER_STATUS_UNKNOWN") {
+        // Do not close or reset this ticket and, critically, do not generate
+        // a new idempotency key. Refresh the broker books so the user can
+        // verify the uncertain result, then surface the existing reconnect
+        // flow. Re-submission remains blocked by the ambiguous intent row.
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ["market", "broker-orders"] }),
+          queryClient.invalidateQueries({ queryKey: ["market", "broker-trades"] }),
+          queryClient.invalidateQueries({ queryKey: ["market", "settings"] }),
+        ]);
+        const message = e.message || "Order status unknown — verify Orders and Trades before placing another order.";
+        setOrderError({
+          title: "Verify order status",
+          message,
+          meta: e.sessionExpired ? "Broker session needs reconnect after verification" : "Reconnect not opened automatically",
+        });
+        if (e.sessionExpired) window.dispatchEvent(new Event("kotak:reconnect"));
+        push(e.sessionExpired
+          ? "Order status unknown — verify Orders and Trades before reconnecting or placing another order."
+          : "Order status unknown — verify Orders and Trades before placing another order.",
+          "warn",
+        );
+        return;
+      }
+      const safe = toSafeError(e, "Order failed");
+      const meta = e instanceof MarketFunctionError
+        ? [`HTTP ${e.status}`, e.code].filter(Boolean).join(" · ")
+        : undefined;
+      setOrderError({ title: "Order failed", message: safe.message, meta });
+      push(safe.message, "err");
+    }
   };
 
   const sideStyle = (s: Side): React.CSSProperties => ({
@@ -188,6 +225,13 @@ export function OrderTicket({
         )}
         {tickHint && (
           <div className="hud-label" style={{ color: "var(--warn, #d97706)" }}>{tickHint}</div>
+        )}
+        {orderError && (
+          <div style={{ border: "1px solid var(--danger)", padding: 10, display: "flex", flexDirection: "column", gap: 5 }}>
+            <div className="hud-label" style={{ color: "var(--danger)" }}>{orderError.title}</div>
+            <div style={{ fontSize: 12, lineHeight: 1.5, color: "var(--text)" }}>{orderError.message}</div>
+            {orderError.meta && <div className="hud-label" style={{ color: "var(--text-dim)" }}>{orderError.meta}</div>}
+          </div>
         )}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           <label>

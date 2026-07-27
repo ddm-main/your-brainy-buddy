@@ -191,7 +191,20 @@ Deno.serve(async (req) => {
     const message = e instanceof Error ? e.message : String(e);
     if (e instanceof KotakAmbiguousOrderError) {
       if (intentId) await svc.from("market_order_intents").update({ status: "ambiguous", error: message }).eq("id", intentId);
-      return errorResponse(req, message, 502);
+      // Return HTTP 200 with an `ok: false` structured payload. A non-2xx
+      // status here would be flagged by the platform runtime tracker as an
+      // Edge Function failure (surfacing a blank-screen error toast), even
+      // though the client handles this state gracefully. The recoverable
+      // nature is encoded in the body; the client checks `ok` explicitly.
+      return jsonResponse(req, {
+        ok: false,
+        error: "Order status unknown after Kotak returned an auth response on the order endpoint. Verify Orders and Trades before placing another order; reconnect only if broker books fail to load.",
+        code: "KOTAK_ORDER_STATUS_UNKNOWN",
+        session_expired: false,
+        auth_uncertain: true,
+        retryable: false,
+        verification_required: true,
+      }, 200);
     }
     return await failIntent(message, 502);
   }

@@ -8,48 +8,78 @@ export interface LiveTick {
 
 interface LiveTickStore {
   ticks: Record<string, LiveTick>;
+  // Monotonic counter bumped once per store write (applyTicks / upsertTick).
+  // Consumers that need "something changed" subscribe to this cheap number
+  // instead of the whole ticks map, so React equality-compares an integer
+  // rather than a fresh object reference on every relay flush (~10 Hz).
+  revision: number;
   connected: boolean;
-  // True once the Kotak WS relay has announced itself on the shared channel
-  // (via a `hello` broadcast or any incoming tick). Used to distinguish
-  // "push · kotak" (relay running, ticks flowing) from "live · kotak" (REST
-  // only). Reset when the Realtime channel tears down.
   relayAlive: boolean;
-  // epoch ms of the last hello/tick received. relayAlive was previously only
-  // ever set true and never re-checked — if the relay process died or lost
-  // its Kotak upstream after even one successful message, this flag (and
-  // every "push · kotak" chip reading it) stayed green forever with zero
-  // ticks actually flowing. useRealtimeTicks' watchdog compares this against
-  // RELAY_STALE_MS to flip relayAlive back to false.
   lastRelayMessageAt: number | null;
   upsertTick: (key: string, tick: Omit<LiveTick, "receivedAt">) => void;
+  applyTicks: (batch: Array<{ symbol: string; exchange?: string; ltp: number; change_pct: number | null }>) => void;
   setConnected: (v: boolean) => void;
   setRelayAlive: (v: boolean) => void;
   markRelayMessage: () => void;
 }
 
-// Keyed by "EXCHANGE:SYMBOL" (see quoteKey in src/lib/market/pnl.ts) — one
-// shared store for every push tick the relay delivers over Realtime, so any
-// component can read the latest price for a symbol without its own subscription.
 export const useLiveTickStore = create<LiveTickStore>((set) => ({
   ticks: {},
+  revision: 0,
   connected: false,
   relayAlive: false,
   lastRelayMessageAt: null,
   upsertTick: (key, tick) =>
-    set((s) => ({ ticks: { ...s.ticks, [key]: { ...tick, receivedAt: Date.now() } } })),
+    set((s) => ({
+      ticks: { ...s.ticks, [key]: { ...tick, receivedAt: Date.now() } },
+      revision: s.revision + 1,
+    })),
+  applyTicks: (batch) => {
+    if (!batch.length) return;
+    const now = Date.now();
+    set((s) => {
+      const next = { ...s.ticks };
+      let touched = 0;
+      for (const t of batch) {
+        if (!t?.symbol || !Number.isFinite(t.ltp)) continue;
+        const key = `${(t.exchange ?? "NSE").toUpperCase()}:${t.symbol.toUpperCase()}`;
+        next[key] = { ltp: t.ltp, change_pct: t.change_pct ?? null, receivedAt: now };
+        touched++;
+      }
+      if (!touched) return s;
+      return { ticks: next, revision: s.revision + 1 };
+    });
+  },
   setConnected: (v) => set({ connected: v }),
   setRelayAlive: (v) => set({ relayAlive: v }),
   markRelayMessage: () => set({ relayAlive: true, lastRelayMessageAt: Date.now() }),
 }));
 
-// How long relayAlive is trusted without a fresh hello/tick before the
-// watchdog in useRealtimeTicks flips it back to false.
-export const RELAY_STALE_MS = 90_000;
+// Cheap subscription for parents that need to recompute on any tick flush but
+// don't care about a specific key. Combine with useLiveTickStore.getState()
+// inside a useMemo instead of subscribing to the full ticks record.
+export function useTicksRevision(): number {
+  return useLiveTickStore((s) => s.revision);
+}
 
-// Freshness thresholds. Thin-volume stocks may only tick every ~30-60s from
-// Kotak, so a 5s window was hiding real ticks. Off-hours we relax further so
-// the last known tick still shows as "live" until we get a REST refresh.
-export const TICK_FRESH_MS = 30_000;
+// Per-key selector — components that only need one symbol's tick can use
+// this to avoid re-rendering on any other symbol's update. Existing
+// `s.ticks` reads still work; new code should prefer this hook.
+export function useTick(key: string | null | undefined): LiveTick | undefined {
+  return useLiveTickStore((s) => (key ? s.ticks[key] : undefined));
+}
+
+// How long relayAlive is trusted without a fresh hello/tick before the
+// watchdog in useRealtimeTicks flips it back to false. 30s (was 90s) so a
+// dead relay stops falsely showing "push · kotak" for a minute and a half.
+export const RELAY_STALE_MS = 30_000;
+
+// Freshness thresholds. During hours the 1s REST poll is the fallback, so
+// keep the "fresh push tick" window short — a thin symbol whose last push
+// arrived 5s ago should defer to the newer REST value instead of pinning
+// the row on a stale tick. Off-hours we relax further so the last known
+// tick still shows as "live" until we get a REST refresh.
+export const TICK_FRESH_MS = 5_000;
 export const TICK_FRESH_MS_OFF_HOURS = 5 * 60_000;
 
 // Single source of truth for "is NSE in its regular cash session right
@@ -97,12 +127,15 @@ export function mergeLiveQuotes<T extends { ltp: number; change_pct?: number | n
   restFetchedAt?: number,
 ): Record<string, T> {
   const out: Record<string, T> = { ...restByKey };
-  for (const [key, tick] of Object.entries(ticks)) {
+  // Iterate the (bounded) rest keys, not the full tick map — the relay may be
+  // pushing hundreds of symbols site-wide while any single panel only cares
+  // about the 20-200 it's currently rendering. Old code was O(ticks); this
+  // is O(restByKey) which cuts per-flush merge cost by 10-100x on Screener.
+  for (const key of Object.keys(restByKey)) {
+    const tick = ticks[key];
     if (!isFreshTick(tick)) continue;
     if (restFetchedAt != null && tick.receivedAt < restFetchedAt) continue;
-    const base = out[key];
-    if (!base) continue;
-    out[key] = { ...base, ltp: tick.ltp, change_pct: tick.change_pct };
+    out[key] = { ...out[key], ltp: tick.ltp, change_pct: tick.change_pct };
   }
   return out;
 }

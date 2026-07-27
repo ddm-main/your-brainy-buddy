@@ -16,7 +16,7 @@ import { toSafeError } from "@/lib/errors";
 import { Download, Plus, Repeat, ShoppingCart, Trash2, X } from "lucide-react";
 import type { Position, Quote } from "@/lib/market/types";
 import { positionPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
-import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { isFreshTick, useLiveTickStore, useTicksRevision} from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
 import { PriceSourceChip } from "@/components/market/PriceSourceChip";
 import { OrderTicket } from "@/components/market/OrderTicket";
@@ -47,7 +47,9 @@ export default function Positions() {
   const keys = useMemo(() => [...new Set(open.map((p) => `${p.exchange}:${p.symbol}`))], [open]);
   useEffect(() => { subscribeSymbolsForTicks(keys); }, [keys]);
   const { data: quotesData } = useQuotes(keys);
-  const liveTicks = useLiveTickStore((s) => s.ticks);
+  const _ticksRev_liveTicks = useTicksRevision();
+  const liveTicks = useLiveTickStore.getState().ticks;
+  void _ticksRev_liveTicks; // re-render on any tick flush; read fresh map above
   const quoteMap = useMemo(() => {
     const m = new Map<string, Quote>();
     for (const q of quotesData?.quotes ?? []) m.set(quoteKey(q.exchange, q.symbol), q);

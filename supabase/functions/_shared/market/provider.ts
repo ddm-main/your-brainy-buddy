@@ -171,6 +171,21 @@ async function getSettingsRows(svc: SupabaseClient, userId: string): Promise<Set
   return rows;
 }
 
+async function getFreshSettingsRow(
+  svc: SupabaseClient,
+  settingsId: string,
+): Promise<KotakSettings> {
+  const { data, error } = await svc
+    .from("market_api_settings")
+    .select(KOTAK_SETTINGS_COLS)
+    .eq("id", settingsId)
+    .single();
+  if (error || !data) {
+    throw new Error(`Could not reload the current Kotak session: ${error?.message ?? "settings missing"}`);
+  }
+  return data as KotakSettings;
+}
+
 let tokenMapCache: { map: Map<string, TokenEntry>; expiresAt: number } | null = null;
 const TOKEN_MAP_TTL_MS = 60_000;
 
@@ -182,19 +197,44 @@ type TokenEntry = { token: string; segment: string };
 async function getTokenMap(svc: SupabaseClient): Promise<Map<string, TokenEntry>> {
   if (tokenMapCache && tokenMapCache.expiresAt > Date.now()) return tokenMapCache.map;
   const { data } = await svc
-    .from("market_stocks").select("symbol,exchange,token,kotak_segment")
+    .from("market_stocks").select("symbol,exchange,token,kotak_segment,instrument_type")
     .in("exchange", ["NSE", "BSE"]).not("token", "is", null);
   const map = new Map<string, TokenEntry>(
-    (data ?? []).map((r: any) => [
-      `${r.exchange}:${r.symbol}`,
-      {
-        token: String(r.token),
-        segment: r.kotak_segment || (r.exchange === "BSE" ? "bse_cm" : "nse_cm"),
-      },
-    ]),
+    (data ?? []).map((r: any) => {
+      const isIdx = String(r.instrument_type ?? "").toUpperCase() === "INDEX"
+        || String(r.symbol ?? "").startsWith("^");
+      const defaultSeg = isIdx
+        ? (r.exchange === "BSE" ? "bse_indices" : "nse_indices")
+        : (r.exchange === "BSE" ? "bse_cm" : "nse_cm");
+      return [
+        `${r.exchange}:${r.symbol}`,
+        { token: String(r.token), segment: r.kotak_segment || defaultSeg },
+      ];
+    }),
   );
   tokenMapCache = { map, expiresAt: Date.now() + TOKEN_MAP_TTL_MS };
   return map;
+}
+
+// Aggregate N consecutive base bars into one — used server-side when a UI TF
+// (2h/4h/3m) isn't a Kotak-native interval. Preserves OHLC semantics and
+// sums volume, so the resulting series is safe for indicators and volume pane.
+function resampleCandles(rows: Candle[], factor: number): Candle[] {
+  if (factor <= 1 || rows.length === 0) return rows;
+  const out: Candle[] = [];
+  for (let i = 0; i < rows.length; i += factor) {
+    const bucket = rows.slice(i, i + factor);
+    if (bucket.length === 0) continue;
+    out.push({
+      time: bucket[0].time,
+      open: bucket[0].open,
+      high: bucket.reduce((m, b) => Math.max(m, b.high), -Infinity),
+      low: bucket.reduce((m, b) => Math.min(m, b.low), Infinity),
+      close: bucket[bucket.length - 1].close,
+      volume: bucket.reduce((s, b) => s + (b.volume ?? 0), 0),
+    });
+  }
+  return out;
 }
 
 // ---------- Provider health logging ----------
@@ -251,8 +291,16 @@ function yahooProvider(svc: SupabaseClient): MarketProvider {
         throw e;
       }
     },
-    getOHLCV(symbol, exchange, range, interval) {
-      return yahooChartRetry(toYahooSymbol(symbol, exchange), range, interval);
+    async getOHLCV(symbol, exchange, range, interval) {
+      // Yahoo accepts 1m/2m/5m/15m/30m/60m/90m/1h/1d/5d/1wk/1mo/3mo only.
+      // 3m -> resample from 1m, 2h/4h -> resample from 60m. 1h passes as 60m.
+      const yInterval = interval === "3m" ? "1m"
+        : interval === "2h" || interval === "4h" ? "60m"
+        : interval === "1h" ? "60m"
+        : interval;
+      const factor = interval === "3m" ? 3 : interval === "2h" ? 2 : interval === "4h" ? 4 : 1;
+      const raw = await yahooChartRetry(toYahooSymbol(symbol, exchange), range, yInterval);
+      return factor > 1 ? resampleCandles(raw, factor) : raw;
     },
     async getDepth() {
       return { bids: [], asks: [], ltp: null, source: "unavailable" };
@@ -312,91 +360,161 @@ const parseKotakDate = (obj: any): string | null => {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 };
 
+// In-isolate circuit breaker for Kotak getQuotes. After N consecutive batch
+// failures, skip Kotak briefly and serve Yahoo per-symbol instead of hammering
+// a failing endpoint every 1s poll. Auto-resets after the cooldown.
+let kotakFailStreak = 0;
+let kotakBreakerOpenUntil = 0;
+const KOTAK_FAIL_THRESHOLD = 3;
+const KOTAK_BREAKER_COOLDOWN_MS = 5_000;
+function kotakBreakerOpen(): boolean { return Date.now() < kotakBreakerOpenUntil; }
+function kotakBreakerRecordSuccess(): void { kotakFailStreak = 0; kotakBreakerOpenUntil = 0; }
+function kotakBreakerRecordFailure(): void {
+  kotakFailStreak += 1;
+  if (kotakFailStreak >= KOTAK_FAIL_THRESHOLD) kotakBreakerOpenUntil = Date.now() + KOTAK_BREAKER_COOLDOWN_MS;
+}
+
 export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProvider {
   const yahoo = yahooProvider(svc);
+  // NSE regular session (IST 09:15–15:30, Mon–Fri). During this window we
+  // MUST NOT quietly serve Yahoo (15-min delayed) prices in place of Kotak —
+  // that turns a broker outage into silent bad ticks. Off-hours Yahoo is
+  // still allowed for coverage of long history and instruments Kotak doesn't
+  // carry (indices, obscure segments).
+  const nseOpenNow = (now = new Date()): boolean => {
+    const day = now.getUTCDay();
+    if (day === 0 || day === 6) return false;
+    const utcMin = now.getUTCHours() * 60 + now.getUTCMinutes();
+    return utcMin >= 225 && utcMin <= 600;
+  };
   return {
     name: "kotak_neo",
     async getQuotes(keys) {
-      // Resolve instrument tokens from the cached market_stocks map; unresolved keys fall back to Yahoo.
+      // Resolve instrument tokens from the cached market_stocks map; unresolved keys fall back to Yahoo per-symbol.
       const parsed = keys.map((k) => ({ key: k, ...parseKey(k) }));
       const tokenBySymbol = await getTokenMap(svc);
       const withToken = parsed.filter((p) => tokenBySymbol.has(`${p.exchange}:${p.symbol}`));
       const without = parsed.filter((p) => !tokenBySymbol.has(`${p.exchange}:${p.symbol}`));
 
       const out: QuoteRow[] = [];
+      // Split batches by Kotak segment. One 500 on nse_indices used to fail
+      // the equity batch too — a poll-wide collapse to 0 across the UI.
       if (withToken.length > 0) {
-        const t0 = Date.now();
-        try {
-          const entryFor = (p: { exchange: string; symbol: string }) =>
-            tokenBySymbol.get(`${p.exchange}:${p.symbol}`)!;
-          const neoSymbols = withToken.map((p) => {
-            const e = entryFor(p);
-            return `${e.segment}|${e.token}`;
-          });
-          // Wrapped in withKotakSession so a mid-day expired token auto-relogs-in
-          // and retries once, instead of silently falling the whole batch to Yahoo.
-          const rows = await withKotakSession(svc, s, encryptValue, (ss) => kotakQuotes(ss, neoSymbols, "all"));
-          logProviderHealth(svc, "kotak_neo", "getQuotes", true, Date.now() - t0);
-          // Keyed by "segment|token" — bare token numbers aren't unique across
-          // segments (nse_cm vs bse_cm vs nse_indices each have their own namespace).
-          const byToken = new Map<string, any>();
-          for (const r of rows) {
-            const segTok = String(r?.symbol ?? r?.tk ?? r?.instrumentToken ?? "").match(/^([a-z]+_[a-z]+)\|(.+)$/);
-            if (segTok) byToken.set(`${segTok[1]}|${segTok[2]}`, r);
+        const bySeg = new Map<string, typeof withToken>();
+        for (const p of withToken) {
+          const seg = tokenBySymbol.get(`${p.exchange}:${p.symbol}`)!.segment;
+          const arr = bySeg.get(seg) ?? [];
+          arr.push(p); bySeg.set(seg, arr);
+        }
+        const segResults = await Promise.all(Array.from(bySeg.entries()).map(async ([_seg, group]) => {
+          const t0 = Date.now();
+          const rows: QuoteRow[] = [];
+          const failed: typeof group = [];
+          if (kotakBreakerOpen()) {
+            // Circuit is open — skip Kotak, let per-symbol Yahoo fallback below handle it.
+            for (const p of group) failed.push(p);
+            return { rows, failed };
           }
-          for (const p of withToken) {
-            const e = entryFor(p);
-            const r = byToken.get(`${e.segment}|${e.token}`);
-            if (!r) continue;
-            const price = firstNum(r, ["last_traded_price", "ltp", "lastPrice", "last_price", "lp"]);
-            const prevClose = firstNum(r, [
-              "previous_close",
-              "prev_close",
-              "previousClose",
-              "prevClose",
-              "ohlc.close",
-              "ohlc.c",
-              "closing_price",
-              "close",
-              "c",
-            ]);
-            if (!price) continue;
-            out.push({
-              key: p.key,
-              price,
-              previous_close: prevClose,
-              change_abs: prevClose ? price - prevClose : null,
-              change_pct: prevClose ? ((price - prevClose) / prevClose) * 100 : null,
-              volume: num(r.volume ?? r.vol_traded_today) || null,
-              source: "kotak",
-              as_of: parseKotakDate(r),
-              previous_close_as_of: null,
-              high_52w: firstNum(r, ["hgh_52w_val", "high_52w", "52wkHigh", "yearHigh", "year_high"]),
-              low_52w: firstNum(r, ["lw_52w_val", "low_52w", "52wkLow", "yearLow", "year_low"]),
-            });
+          try {
+            const entryFor = (p: { exchange: string; symbol: string }) =>
+              tokenBySymbol.get(`${p.exchange}:${p.symbol}`)!;
+            const neoSymbols = group.map((p) => { const e = entryFor(p); return `${e.segment}|${e.token}`; });
+            const raw = await withKotakSession(svc, s, encryptValue, (ss) => kotakQuotes(ss, neoSymbols, "all"));
+            logProviderHealth(svc, "kotak_neo", "getQuotes", true, Date.now() - t0);
+            kotakBreakerRecordSuccess();
+            const byNeoSymbol = new Map<string, any>();
+            const byTokenOnly = new Map<string, any>();
+            for (const r of raw) {
+              const rawNeoSymbol = String(
+                r?.symbol ?? r?.neoSymbol ?? r?.neosymbol ?? r?.pSymbolName ?? "",
+              ).trim();
+              const rawToken = String(
+                r?.tk ?? r?.token ?? r?.instrumentToken ?? r?.instrument_token ?? r?.pSymbol ?? "",
+              ).trim();
+              const segTok = rawNeoSymbol.match(/^([a-z]+_[a-z]+)\|(.+)$/i);
+              if (segTok) {
+                const normalized = `${segTok[1].toLowerCase()}|${segTok[2]}`;
+                byNeoSymbol.set(normalized, r);
+                byTokenOnly.set(String(segTok[2]), r);
+              } else if (rawNeoSymbol) {
+                byTokenOnly.set(rawNeoSymbol.includes("|") ? String(rawNeoSymbol.split("|").pop()) : rawNeoSymbol, r);
+              }
+              const tokenOnly = rawToken.includes("|") ? rawToken.split("|").pop() : rawToken;
+              if (tokenOnly) byTokenOnly.set(String(tokenOnly), r);
+            }
+            for (const p of group) {
+              const e = entryFor(p);
+              const r = byNeoSymbol.get(`${e.segment}|${e.token}`) ?? byTokenOnly.get(String(e.token));
+              if (!r) { failed.push(p); continue; }
+              const price = firstNum(r, ["last_traded_price", "ltp", "lastPrice", "last_price", "lp"]);
+              const prevClose = firstNum(r, [
+                "previous_close", "prev_close", "previousClose", "prevClose",
+                "ohlc.close", "ohlc.c", "closing_price", "close", "c",
+              ]);
+              if (!price) { failed.push(p); continue; }
+              rows.push({
+                key: p.key,
+                price,
+                previous_close: prevClose,
+                change_abs: prevClose ? price - prevClose : null,
+                change_pct: prevClose ? ((price - prevClose) / prevClose) * 100 : null,
+                volume: num(r.volume ?? r.vol_traded_today) || null,
+                source: "kotak",
+                as_of: parseKotakDate(r),
+                previous_close_as_of: null,
+                high_52w: firstNum(r, ["hgh_52w_val", "high_52w", "52wkHigh", "yearHigh", "year_high"]),
+                low_52w: firstNum(r, ["lw_52w_val", "low_52w", "52wkLow", "yearLow", "year_low"]),
+              });
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logProviderHealth(svc, "kotak_neo", "getQuotes", false, Date.now() - t0, msg);
+            kotakBreakerRecordFailure();
+            console.error("[market] kotak getQuotes batch failed — per-symbol yahoo fallback:", msg);
+            for (const p of group) failed.push(p);
           }
-        } catch (err) {
-          // whole Kotak quote batch failed — let Yahoo cover everything
-          console.error("kotak quote batch failed, falling back to yahoo", err);
-          logProviderHealth(svc, "kotak_neo", "getQuotes", false, Date.now() - t0, err instanceof Error ? err.message : String(err));
-          return yahoo.getQuotes(keys);
+          return { rows, failed };
+        }));
+        for (const r of segResults) out.push(...r.rows);
+        // Any Kotak-tokened symbol Kotak couldn't quote falls to Yahoo per-symbol
+        // (source tagged "yahoo" so PriceSourceChip can show delayed if needed).
+        const failedKeys = segResults.flatMap((r) => r.failed.map((p) => p.key));
+        if (failedKeys.length > 0) {
+          try { out.push(...(await yahoo.getQuotes(failedKeys))); }
+          catch (e) { console.error("[market] yahoo per-symbol fallback failed:", e); }
         }
       }
+      // Symbols with no Kotak token — always use Yahoo. Kotak-primary means
+      // "use Yahoo only for coverage Kotak doesn't provide", which is exactly
+      // this case (indices/products missing from Kotak's scrip master).
       const covered = new Set(out.map((o) => o.key));
-      const remaining = [...without.map((p) => p.key), ...withToken.map((p) => p.key).filter((k) => !covered.has(k))];
-      if (remaining.length > 0) out.push(...(await yahoo.getQuotes(remaining)));
+      const remaining = without.map((p) => p.key).filter((k) => !covered.has(k));
+      if (remaining.length > 0) {
+        try { out.push(...(await yahoo.getQuotes(remaining))); }
+        catch (e) { console.error("[market] yahoo coverage fallback failed:", e); }
+      }
       return out;
     },
     // Kotak historical candles when we have an instrument token; else Yahoo.
     async getOHLCV(symbol, exchange, range, interval) {
       const { data: stock } = await svc
-        .from("market_stocks").select("token,kotak_segment")
+        .from("market_stocks").select("token,kotak_segment,instrument_type")
         .eq("symbol", symbol).eq("exchange", exchange)
         .not("token", "is", null).maybeSingle();
       const token = stock?.token as string | undefined;
-      const seg = (stock?.kotak_segment as string | undefined) || (exchange === "BSE" ? "bse_cm" : "nse_cm");
+      const isIndex = (stock?.instrument_type as string | undefined)?.toUpperCase() === "INDEX"
+        || symbol.startsWith("^");
+      // Indices live under nse_indices / bse_indices in Kotak's scrip master.
+      // Falling through to nse_cm returned empty and forced Yahoo (delayed).
+      const defaultSeg = isIndex
+        ? (exchange === "BSE" ? "bse_indices" : "nse_indices")
+        : (exchange === "BSE" ? "bse_cm" : "nse_cm");
+      const seg = (stock?.kotak_segment as string | undefined) || defaultSeg;
       if (!token) {
         logProviderHealth(svc, "kotak_neo", "getOHLCV", false, 0, `no token for ${exchange}:${symbol} — using yahoo`);
+        // Coverage gap Kotak's scrip master doesn't fill (mostly indices).
+        // Yahoo is allowed here regardless of market state — it's the only
+        // source we have.
         return yahoo.getOHLCV(symbol, exchange, range, interval);
       }
       // range like "2y","60d","30d"; interval like "1d","1h","15m"
@@ -410,21 +528,48 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
         "5y": 5 * 365 * 86400, "10y": 10 * 365 * 86400,
       };
       const fromEpoch = now - (rangeSec[range] ?? 730 * 86400);
-      const kotakInterval = interval === "1d" ? "D" : interval === "1h" ? "60" : interval === "15m" ? "15" : interval === "5m" ? "5" : "D";
+      // Full Kotak interval map — the old fallthrough silently returned daily
+      // bars for 1m / 3m / 30m / 2h / 4h / 1w / 1mo, so the UI showed the
+      // wrong grain and volume looked "missing" on those TFs.
+      const kotakIntervalMap: Record<string, string> = {
+        "1m": "1", "2m": "1", "3m": "1", "5m": "5", "15m": "15", "30m": "30",
+        "60m": "60", "1h": "60", "2h": "60", "4h": "60",
+        "1d": "D", "1wk": "W", "1mo": "M",
+      };
+      const kotakInterval = kotakIntervalMap[interval] ?? "D";
+      // Server-side resample buckets for TFs Kotak doesn't emit natively.
+      const resampleFactor = interval === "2h" ? 2 : interval === "4h" ? 4 : interval === "3m" ? 3 : interval === "2m" ? 2 : 1;
       const t0 = Date.now();
       try {
-        const c = await withKotakSession(svc, s, encryptValue, (ss) => kotakCandles(ss, token, seg, fromEpoch, now, kotakInterval));
-        if (c.length === 0) {
-          logProviderHealth(svc, "kotak_neo", "getOHLCV", false, Date.now() - t0, `empty candles for ${exchange}:${symbol} — using yahoo`);
+        const raw = await withKotakSession(svc, s, encryptValue, (ss) => kotakCandles(ss, token, seg, fromEpoch, now, kotakInterval));
+        if (raw.length === 0) {
+          const reason = `empty candles for ${exchange}:${symbol} (seg=${seg})`;
+          logProviderHealth(svc, "kotak_neo", "getOHLCV", false, Date.now() - t0, reason);
+          const isIntraday = kotakInterval !== "D" && kotakInterval !== "W" && kotakInterval !== "M";
+          // Intraday during market hours must NOT silently fall to Yahoo.
+          // For daily/weekly/monthly, Yahoo backfill for missing long history
+          // is still fine — that's data Kotak doesn't provide anyway.
+          if (isIntraday && nseOpenNow()) throw new Error(`kotak returned no ${interval} candles`);
           return yahoo.getOHLCV(symbol, exchange, range, interval);
         }
+        const c = resampleFactor > 1 ? resampleCandles(raw, resampleFactor) : raw;
         logProviderHealth(svc, "kotak_neo", "getOHLCV", true, Date.now() - t0);
         return c;
       } catch (e) {
         logProviderHealth(svc, "kotak_neo", "getOHLCV", false, Date.now() - t0, e instanceof Error ? e.message : String(e));
+        const isIntraday = kotakInterval !== "D" && kotakInterval !== "W" && kotakInterval !== "M";
+        // A 404 means the charts route isn't available on this session's
+        // base URL (Kotak plan / route family), not a live-data failure —
+        // Yahoo is the only source then, even intraday during market hours.
+        const status = (e as { status?: number } | null)?.status;
+        const routeMissing = status === 404;
+        // Same rule as above: strict for live intraday, permissive for
+        // historical/EOD tail-filling.
+        if (isIntraday && nseOpenNow() && !routeMissing) throw e;
         return yahoo.getOHLCV(symbol, exchange, range, interval);
       }
     },
+
     async getDepth(symbol, exchange) {
       const { data: stock } = await svc
         .from("market_stocks").select("token,kotak_segment")
@@ -544,13 +689,25 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
     async placeOrder(input) {
       const seg = input.exchange === "BSE" ? "bse_cm" : "nse_cm";
       const { data: stock } = await svc
-        .from("market_stocks").select("token")
+        .from("market_stocks").select("token,series")
         .eq("symbol", input.symbol).eq("exchange", input.exchange)
         .not("token", "is", null).maybeSingle();
       const token = stock?.token as string | undefined;
-      const result = await withKotakSession(svc, s, encryptValue, (ss) => kotakPlaceOrder(ss, {
+      // Validate/refresh the broker session with a read-only request before
+      // touching the order endpoint. A reconnect can happen in a different
+      // warm isolate while this provider still holds the old 10-second
+      // settings-cache entry; reloading after the preflight guarantees the
+      // mutation uses the token that is currently persisted. We still never
+      // replay the mutation itself: a 401 after POST remains ambiguous.
+      await withKotakSession(svc, s, encryptValue, (ss) => kotakHoldings(ss));
+      const fresh = await getFreshSettingsRow(svc, s.id);
+      const series = String(stock?.series ?? "EQ").trim().toUpperCase() || "EQ";
+      const tradingSymbol = input.symbol.toUpperCase().endsWith(`-${series}`)
+        ? input.symbol
+        : `${input.symbol}-${series}`;
+      const result = await withKotakSession(svc, fresh, encryptValue, (ss) => kotakPlaceOrder(ss, {
         exchangeSegment: seg,
-        tradingSymbol: `${input.symbol}-EQ`,
+        tradingSymbol,
         instrumentToken: token,
         transactionType: input.side,
         orderType: input.orderType,
@@ -565,11 +722,15 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       return { orderId: result.orderId, status: result.status };
     },
     async modifyOrder(orderId, changes) {
-      const r = await withKotakSession(svc, s, encryptValue, (ss) => kotakModifyOrder(ss, orderId, changes), { retryOnAuthError: false });
+      await withKotakSession(svc, s, encryptValue, (ss) => kotakHoldings(ss));
+      const fresh = await getFreshSettingsRow(svc, s.id);
+      const r = await withKotakSession(svc, fresh, encryptValue, (ss) => kotakModifyOrder(ss, orderId, changes), { retryOnAuthError: false });
       return { orderId: r.orderId, status: r.status };
     },
     async cancelOrder(orderId) {
-      const r = await withKotakSession(svc, s, encryptValue, (ss) => kotakCancelOrder(ss, orderId));
+      await withKotakSession(svc, s, encryptValue, (ss) => kotakHoldings(ss));
+      const fresh = await getFreshSettingsRow(svc, s.id);
+      const r = await withKotakSession(svc, fresh, encryptValue, (ss) => kotakCancelOrder(ss, orderId), { retryOnAuthError: false });
       return { orderId: r.orderId, status: r.status };
     },
     async convertPosition(input) {
@@ -579,7 +740,9 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
         .eq("symbol", input.symbol).eq("exchange", input.exchange)
         .not("token", "is", null).maybeSingle();
       const token = stock?.token as string | undefined;
-      await withKotakSession(svc, s, encryptValue, (ss) => kotakConvertPosition(ss, {
+      await withKotakSession(svc, s, encryptValue, (ss) => kotakHoldings(ss));
+      const fresh = await getFreshSettingsRow(svc, s.id);
+      await withKotakSession(svc, fresh, encryptValue, (ss) => kotakConvertPosition(ss, {
         exchangeSegment: seg,
         tradingSymbol: `${input.symbol}-EQ`,
         instrumentToken: token,

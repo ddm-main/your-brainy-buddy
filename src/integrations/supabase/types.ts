@@ -3032,6 +3032,45 @@ export type Database = {
         }
         Relationships: []
       }
+      market_order_intents: {
+        Row: {
+          broker_order_id: string | null
+          broker_status: string | null
+          created_at: string
+          error: string | null
+          id: string
+          idempotency_key: string
+          request: Json
+          status: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          broker_order_id?: string | null
+          broker_status?: string | null
+          created_at?: string
+          error?: string | null
+          id?: string
+          idempotency_key: string
+          request: Json
+          status?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          broker_order_id?: string | null
+          broker_status?: string | null
+          created_at?: string
+          error?: string | null
+          id?: string
+          idempotency_key?: string
+          request?: Json
+          status?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       market_portfolio_notes: {
         Row: {
           created_at: string

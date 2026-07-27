@@ -13,7 +13,7 @@ import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 import { approxAnnualizedReturnPct, holdingPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 import { useHoldings, useMarketSettings, usePortfolioLastSync, useQuotes, useSyncHoldings } from "@/lib/market/hooks";
-import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { mergeLiveQuotes, useLiveTickStore, useTicksRevision} from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
 import { PriceSourceChip } from "@/components/market/PriceSourceChip";
 import { PortfolioAllocation } from "@/components/market/PortfolioAllocation";
@@ -46,10 +46,14 @@ export default function Holdings() {
   const [deleteHolding, setDeleteHolding] = useState<Holding | null>(null);
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["market", "holdings"] });
+  const scoreSymbolKey = useMemo(() => {
+    const symbols = [...new Set(rows.map((h: any) => String(h.symbol ?? "").trim().toUpperCase()).filter(Boolean))];
+    symbols.sort();
+    return symbols.join(",");
+  }, [rows]);
 
   useEffect(() => {
-    const data = rows;
-    const symbols = [...new Set(data.map((h: any) => h.symbol))];
+    const symbols = scoreSymbolKey ? scoreSymbolKey.split(",") : [];
     let active = true;
     const run = async () => {
     if (symbols.length > 0) {
@@ -74,10 +78,15 @@ export default function Holdings() {
     };
     run();
     return () => { active = false; };
-  }, [rows]);
+  }, [scoreSymbolKey]);
 
   // Live quotes: same shared 1s market-hours hook every other page uses.
-  const quoteKeys = useMemo(() => rows.map((h) => `${h.exchange}:${h.symbol}`), [rows]);
+  const quoteKeysKey = useMemo(() => {
+    const keys = rows.map((h) => `${h.exchange}:${h.symbol}`.toUpperCase());
+    keys.sort();
+    return keys.join(",");
+  }, [rows]);
+  const quoteKeys = useMemo(() => quoteKeysKey ? quoteKeysKey.split(",") : [], [quoteKeysKey]);
   useEffect(() => { subscribeSymbolsForTicks(quoteKeys); }, [quoteKeys]);
   const { data: quotesData, dataUpdatedAt: quotesUpdatedAt, isFetching: quotesFetching, refetch: refetchQuotes } = useQuotes(quoteKeys);
   const restQuotes = useMemo(() => {
@@ -85,7 +94,9 @@ export default function Holdings() {
     for (const q of quotesData?.quotes ?? []) map[quoteKey(q.exchange, q.symbol)] = q;
     return map;
   }, [quotesData]);
-  const liveTicks = useLiveTickStore((s) => s.ticks);
+  const _ticksRev_liveTicks = useTicksRevision();
+  const liveTicks = useLiveTickStore.getState().ticks;
+  void _ticksRev_liveTicks; // re-render on any tick flush; read fresh map above
   const quotes = useMemo(() => mergeLiveQuotes(restQuotes, liveTicks, quotesUpdatedAt), [restQuotes, liveTicks, quotesUpdatedAt]);
 
   const add = async () => {

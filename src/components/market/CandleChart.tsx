@@ -554,16 +554,21 @@ export function CandleChart({
       s.createPriceLine({ price, color: "rgba(127,233,255,0.28)", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: "" });
 
     // Volume gets its own sub-pane so it renders a proper K / M axis on the right.
-    for (const { study, data: c } of computed) {
-      if (!study.visible || c.g !== "volume") continue;
+    // Always render the volume pane UNLESS the user has an explicit hidden
+    // `volume` study (opt-out, not opt-in) — this keeps volume visible after
+    // TF changes, indicator resets, or on old saved states that never had a
+    // volume study added. Industry standard (TV/Kite): volume is always on.
+    const volumeStudy = computed.find(({ data: c }) => c.g === "volume");
+    const showVolume =
+      (volumeStudy && volumeStudy.study.visible) || (!volumeStudy);
+    const hasAnyVolume = data.some((c) => Number(c.volume) > 0);
+    if (showVolume && hasAnyVolume) {
       const vol = chart.addSeries(HistogramSeries, {
         priceFormat: { type: "volume" },
         priceLineVisible: false,
         lastValueVisible: true,
       }, pane);
       vol.setData(data.map((cc, i) => {
-        // Industry-standard (TV/Kite): color volume by close vs previous close,
-        // not close vs open. First bar has no prior — use open as the fallback.
         const prev = i > 0 ? data[i - 1].close : cc.open;
         const up = cc.close >= prev;
         return {
@@ -574,7 +579,6 @@ export function CandleChart({
       }));
       volumeSeriesRef.current = vol;
       pane++;
-      break;
     }
 
 
@@ -717,8 +721,15 @@ export function CandleChart({
       } catch { /* noop */ }
     }
     setLiveBar({ time: updated.rawTime, open: updated.open, high: updated.high, low: updated.low, close: updated.close, volume: updated.volume });
+    // Depend on `candles` too: after the main chart-build effect (line ~667)
+    // rebuilds the series on a candle refetch, `priceSeriesRef` is a fresh
+    // instance and internal `liveBar` state is reset. Without a candles dep
+    // here, the overlay would only re-fire when livePrice VALUE changed —
+    // so a live LTP that had already arrived would stay unapplied and the
+    // legend fell back to the EOD `candles[last]`, showing e.g. 1683.90
+    // while the Quote panel showed the live 1720.30.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [livePrice, liveVolume]);
+  }, [livePrice, liveVolume, candles]);
 
 
   // ---- legend rows (value at crosshair, else last bar) ----

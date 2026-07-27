@@ -19,7 +19,7 @@ import { useBreakoutTracker, type BreakoutEpisode, type BreakoutStatus } from "@
 import { useScreenerData, useScreenerSectors, type ScreenerRow } from "@/lib/market/screenerRun";
 import { todayIstDateString } from "@/lib/market/liveSnapshot";
 import { quoteKey } from "@/lib/market/pnl";
-import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { isFreshTick, useLiveTickStore, useTicksRevision} from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
 import {
   FILTERS, FILTER_BY_ID, filterMatches, latestTradeDateOf,
@@ -113,7 +113,9 @@ function BreakoutInner() {
   const newDayLabel = latestDetected && latestDetected < todayIst ? latestDetected : todayIst;
 
   const relayAlive = useRelayAlive();
-  const liveTicks = useLiveTickStore((s) => s.ticks);
+  const _ticksRev_liveTicks = useTicksRevision();
+  const liveTicks = useLiveTickStore.getState().ticks;
+  void _ticksRev_liveTicks; // re-render on any tick flush; read fresh map above
 
   // Subscribe visible symbols to the live-tick relay. Key the effect on the
   // sorted symbol list (not the episodes array identity) so react-query

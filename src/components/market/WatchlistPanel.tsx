@@ -12,7 +12,7 @@ import { ArrowDown, ArrowUp, ArrowUpDown, Pencil, ShoppingCart, Trash2 } from "l
 import { SymbolSearchInput, type SymbolOption } from "@/components/market/SymbolSearchInput";
 import { quoteKey } from "@/lib/market/pnl";
 import { useQuotes } from "@/lib/market/hooks";
-import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { mergeLiveQuotes, useLiveTickStore, useTicksRevision} from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
 import type { Quote } from "@/lib/market/types";
 import { OrderTicket } from "@/components/market/OrderTicket";
@@ -136,7 +136,9 @@ export function WatchlistPanel({
     for (const q of quotesData?.quotes ?? []) map[quoteKey(q.exchange, q.symbol)] = q;
     return map;
   }, [quotesData]);
-  const liveTicks = useLiveTickStore((s) => s.ticks);
+  const _ticksRev_liveTicks = useTicksRevision();
+  const liveTicks = useLiveTickStore.getState().ticks;
+  void _ticksRev_liveTicks; // re-render on any tick flush; read fresh map above
   const quotes = useMemo(() => mergeLiveQuotes(restQuotes, liveTicks, quotesUpdatedAt), [restQuotes, liveTicks, quotesUpdatedAt]);
   const batchProvider = quotesData?.provider ?? null;
 

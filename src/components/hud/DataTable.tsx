@@ -65,6 +65,11 @@ export function DataTable<T>({
     onSortingChange: onSortingChange ?? setInternalSorting,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
+    // Stable row identity so react-table reuses row objects across ticks —
+    // otherwise every push-flush re-render allocates fresh row instances,
+    // defeating any downstream cell memoization.
+    getRowId: (row: any, index) =>
+      (row?.key ?? row?.symbol ?? row?.id ?? String(index)) as string,
   });
 
   if (data.length === 0) return <EmptyState hint={emptyHint}>{emptyLabel}</EmptyState>;

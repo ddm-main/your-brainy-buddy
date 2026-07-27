@@ -1,54 +1,44 @@
-## Goal
+## What I confirmed
 
-Make `/market/index/:symbol` (Nifty 50, Bank Nifty, global indices) look and behave like the stock analysis page (`/market/analysis/:symbol`): a full-height chart on the left and a scrolling rail of readout panels on the right — instead of today's short stacked panels with a tab strip.
+- The visible runtime problem is real: `Holdings.tsx` is triggering `Maximum update depth exceeded` from an effect that depends on `rows`.
+- The SELL request returned HTTP 200 with `ok:false`, but the payload still says `session_expired:true`, so the UI opens the reconnect path and hides the broker reason behind an ambiguous warning.
+- Error visibility is weak: order failures only appear as short toasts at the bottom, and long broker messages can be visually lost behind modals/overlays.
 
-## Current state (verified)
+## Fix plan
 
-- `src/routes/market/IndexDetail.tsx` renders a plain vertical stack: header panel with price + 4 tabs (chart / technicals / F&O / constituents), then one panel per tab. The chart is not viewport-height, and technicals/F&O/constituents are only reachable by switching tabs.
-- `src/routes/market/Analysis.tsx` uses `.mk-anl-grid` (chart column + `.mk-anl-rail`, defined in `src/styles.css:1503-1525`, collapsing to one column under 1180px) with rail panels: Quote (A1), Alerts (A9), Depth, Breakout Intelligence (A3), Indicators Daily (A4), Range & Strength (A5), AI Verdict (A6).
+1. **Stop the Holdings render loop**
+   - Replace unstable `rows` object dependency usage with a stable holdings identity key.
+   - Only update `scores` / `sectors` when the fetched symbol set changes.
+   - Stabilize live quote subscription keys so `subscribeSymbolsForTicks()` does not receive a new array every render.
 
-## Layout to build
+2. **Correct ambiguous SELL error handling**
+   - In `market-order-place`, return `session_expired` based on the actual `KotakAmbiguousOrderError` classification instead of always setting it to `true`.
+   - Preserve the “do not retry blindly” behavior for true mid-request session failures.
+   - For broker/business rejections, return a normal failed order response that can be shown directly to the user without opening reconnect.
 
-```text
-+---------------------------- mk-idx-grid ----------------------------+
-| MK.IDX.C  Chart (full height)              | A1 Quote               |
-|  toolbar: 1D / candles / indicators /      |   price, +chg (chg%)   |
-|  alert / layouts / settings / more         |   ^NSEI · IN · F&O     |
-|                                            | A9 Alerts              |
-|  candles + volume, fullscreen shell        | A4 Indicators (Daily)  |
-|                                            | A5 Range & Strength    |
-|                                            | A7 F&O Snapshot        |
-+--------------------------------------------+------------------------+
-| Wide tabs under chart: F&O chain | Constituents  (only when avail.)  |
-+---------------------------------------------------------------------+
-```
+3. **Make order errors visible inside the ticket**
+   - Add persistent inline error state to `OrderTicket` above the footer/content area.
+   - Keep the modal open after failures and show the exact safe broker/app message with status/code context.
+   - Keep toasts as secondary notifications only, not the sole error surface.
 
-## Changes
+4. **Improve Kotak reconnect trigger discipline**
+   - Only dispatch `kotak:reconnect` when the backend explicitly flags a proven session expiry.
+   - Do not show the reconnect modal for generic SELL/business errors.
 
-1. **Restructure `IndexDetail.tsx`**
-   - Replace the stacked wrapper with the grid used by Analysis (new `.mk-idx-grid` alias reusing the `.mk-anl-*` rules, or reuse `.mk-anl-grid`/`.mk-anl-rail` directly so responsive behaviour is identical).
-   - Left column: single `HudPanel` (`MK.IDX.C`) with `flex: 1; minHeight: 0`, containing `FullscreenShell` + `ChartToolbar` + `CandleChart`, exactly like Analysis (chart fills the viewport, no longer a squat box).
-   - Move the index name / back button into the chart panel header + rail Quote panel, dropping the separate tall header panel.
+5. **Regression coverage**
+   - Extend the Kotak classifier test to cover the current response shape and common SELL rejection wording.
+   - Add a lightweight Holdings stability test if the existing test setup can mount route components cleanly; otherwise verify by targeted browser/runtime check after implementation.
 
-2. **Right rail panels** (reuse the existing `Row`/`Stat` helpers and `HudPanel flow`)
-   - `A1 Quote`: big price, `Return1DCell` with abs + pct, symbol · region chips, F&O chip, provider/stale chip.
-   - `A9 Alerts`: reuse `StockAlertsPanel` for the index symbol (currently the index page only has a "new alert" modal, no list).
-   - `A4 Indicators (Daily)`: RSI / MACD / EMA20-50-200 / SMA20 / Bollinger / Volume / Avg Vol — computed from the same `TechnicalsPanel` stats memo, extracted into a reusable `useIndexTechnicals(candles)` hook.
-   - `A5 Range & Strength`: Open / Prev close / Day H-L / Day change / 52W high-low / % from 52W high & low.
-   - `A7 F&O Snapshot` (only when the index has F&O): Spot, PCR, total call/put OI, expiry from `useOptionChain`.
+## Files to change
 
-3. **Wide content below the chart**: keep a slim tab strip for the two table-shaped views that don't fit a 360px rail — **F&O option chain** and **Constituents** — rendered full width under the chart column, shown only when available (`fno && nseSymbol`, `cSlug`) and defaulting to Constituents for Indian indices, F&O chain otherwise. The old "technicals" tab disappears because its content now lives in the rail.
+- `src/routes/market/Holdings.tsx`
+- `src/components/market/OrderTicket.tsx`
+- `supabase/functions/market-order-place/index.ts`
+- `supabase/functions/_shared/market/kotakClient.ts` if the ambiguous error needs a `sessionExpired` flag
+- `tests/kotakSessionClassifier.test.ts`
 
-## Bug fixes found while auditing this page
+## Validation
 
-- Index chart currently always requests exchange `"NSE"`; global indices (`^GSPC`, `^IXIC`) should not send an NSE exchange hint — pass exchange only for `region === "IN"`.
-- `deriveChangeAbs` fallback isn't applied on the index header, so when the quote returns only `change_pct` the absolute value shows `—`; mirror the Analysis behaviour (`dayChange ?? deriveChangeAbs(price, pct)`).
-- Chart layouts save (`handleSaveLayout`) has no load/delete counterpart on this page — wire `onLoadLayout` / `onDeleteLayout` / `savedLayouts` like Analysis so the Layouts menu isn't half-functional.
-- `intraday` is never passed to `ChartToolbar` / `CandleChart` on this page, so intraday timeframes render with daily axis formatting — pass `isIntraday(tf)`.
-- Unused imports left after the refactor (`ScoreBadge`, `useQuotes`, live tick helpers if unused) get cleaned up; verify with a typecheck/lint pass.
-
-## Verification
-
-- Typecheck + lint clean.
-- Playwright screenshot of `/market/index/%5ENSEI` at 1576×997 (chart fills height, rail visible) and at ~1100px width (single-column stack).
-- Check a global index (`^GSPC`) renders without F&O/Constituents tabs and without an NSE exchange hint.
+- Run the Kotak classifier regression test.
+- Verify `/market/holdings` no longer logs maximum update depth warnings.
+- Verify a SELL failure remains visible in the order ticket and does not automatically open the reconnect modal unless the backend explicitly proves session expiry.

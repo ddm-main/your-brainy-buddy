@@ -109,14 +109,15 @@ const INDEX_TOKEN_MAP = [
 async function fetchTokenMap() {
   const { data, error } = await svc
     .from("market_stocks")
-    .select("symbol,token")
+    .select("symbol,token,in_universe")
     .eq("exchange", "NSE")
-    .eq("in_universe", true)
-    .not("token", "is", null);
+    .eq("in_universe", true);
   if (error) throw error;
   const bySymbol = new Map();
   const byToken = new Map();
+  let missing = 0;
   for (const row of data ?? []) {
+    if (row.token == null) { missing += 1; continue; }
     bySymbol.set(row.symbol, row.token);
     byToken.set(String(row.token), row.symbol);
   }
@@ -124,15 +125,36 @@ async function fetchTokenMap() {
     bySymbol.set(idx.symbol, idx.token);
     byToken.set(idx.token, idx.symbol);
   }
+  if (missing > 0) {
+    log(`WARN: ${missing} universe symbols have no Kotak token — those stocks will not receive push ticks. Run Settings → Sync universe.`);
+  }
   return { bySymbol, byToken };
 }
 
+
+// Coalesce Kotak ticks into 100ms batches before broadcasting. A busy
+// symbol can emit 20+ ticks per second; broadcasting each individually blew
+// past Supabase Realtime's per-client send ceiling and dropped ticks
+// silently. One batched `ticks` message per 100ms lets every symbol update
+// keep flowing without hitting rate limits, and the client applies the
+// batch in a single store write (see liveTickStore.applyTicks) so rendering
+// cost is capped at ~10Hz regardless of tick volume.
+const BROADCAST_FLUSH_MS = 100;
+const BROADCAST_MAX_BATCH = 500;
 
 class Supervisor {
   constructor() {
     this.ws = null;
     this.channel = null;
     this.byToken = new Map();
+    // Per-token last-known change_pct. Kotak Neo sends bare-LTP delta frames
+    // after the initial snapshot; without carrying the previous change_pct
+    // forward, the UI's % column flickers to "—" between full frames.
+    this.lastChangePct = new Map();
+    // Buffer: symbol -> latest tick payload. Last write wins per symbol
+    // within a flush window so a hot ticker doesn't crowd out others.
+    this.tickBuffer = new Map();
+    this.flushTimer = null;
     this.reconnectDelay = RECONNECT_BASE_MS;
     this.silenceTimer = null;
     this.heartbeatTimer = null;
@@ -144,15 +166,33 @@ class Supervisor {
     this.tokenRefreshTimer = setInterval(() => {
       fetchTokenMap().then(({ byToken }) => { this.byToken = byToken; }).catch((e) => log("token refresh failed:", e.message));
     }, TOKEN_MAP_REFRESH_MS);
+    this.flushTimer = setInterval(() => this.flushTicks(), BROADCAST_FLUSH_MS);
     await this.connectLoop();
   }
 
   stop() {
     this.stopped = true;
     clearInterval(this.tokenRefreshTimer);
+    clearInterval(this.flushTimer);
     clearTimeout(this.silenceTimer);
     clearInterval(this.heartbeatTimer);
     this.ws?.close();
+  }
+
+  flushTicks() {
+    if (!this.channel || this.tickBuffer.size === 0) return;
+    const entries = Array.from(this.tickBuffer.values());
+    this.tickBuffer.clear();
+    // Split oversized batches into ≤ BROADCAST_MAX_BATCH chunks so a single
+    // giant message never trips Realtime's payload cap.
+    for (let i = 0; i < entries.length; i += BROADCAST_MAX_BATCH) {
+      const chunk = entries.slice(i, i + BROADCAST_MAX_BATCH);
+      this.channel.send({
+        type: "broadcast",
+        event: "ticks",
+        payload: { ticks: chunk, ts: Date.now() },
+      })?.catch((e) => log("ticks broadcast failed:", e?.message ?? e));
+    }
   }
 
   async connectLoop() {
@@ -188,7 +228,14 @@ class Supervisor {
     }
 
     if (!this.channel) {
-      this.channel = svc.channel(`market-ticks-${session.userId}`, { config: { private: true } });
+      // Shared system-feed channel: every signed-in browser subscribes here,
+      // not to `market-ticks-<theirOwnUserId>`. Previously we broadcast on
+      // `market-ticks-${session.userId}` (the FEED-OWNER's uid), so only that
+      // one account received push ticks and everyone else silently fell back
+      // to REST — the "stocks lag but indices don't" bug. RLS on
+      // realtime.messages (migration 20260728…) lets any authenticated user
+      // read this topic; service_role (this relay) bypasses RLS to write.
+      this.channel = svc.channel(`market-ticks-system`, { config: { private: true } });
       await this.channel.subscribe((status) => {
         log("broadcast channel:", status);
         // Handshake so the UI can flip the chip to "push · kotak" immediately,
@@ -198,10 +245,10 @@ class Supervisor {
             .catch((e) => log("hello broadcast failed:", e?.message ?? e));
         }
       });
-      // Clients (Dashboard, screener, watchlist) broadcast the union of
-      // on-screen symbols on `subscribe`. We're already SCRIP_SUBSed to the
-      // full universe on connect, so we just re-emit hello to confirm the
-      // relay is up and the caller can expect push ticks.
+      // Legacy `subscribe` broadcast from clients is now a no-op — the relay
+      // is already SCRIP_SUBSed to the full NSE universe on connect, so
+      // client-side symbol nomination has been redundant for a while. Kept
+      // the listener so old tabs still get a hello reply.
       this.channel.on("broadcast", { event: "subscribe" }, () => {
         this.channel?.send({ type: "broadcast", event: "hello", payload: { relay: "kotak-ws", ts: Date.now() } })
           .catch(() => { /* channel closing */ });
@@ -271,6 +318,17 @@ class Supervisor {
   handleMessage(raw) {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
+    // Kotak Neo sometimes packs multiple ticks into a single frame as an
+    // array. Previously we processed only object frames — array batches
+    // were dropped wholesale, appearing as "lag" on active symbols.
+    if (Array.isArray(msg)) {
+      for (const m of msg) this.handleTick(m);
+      return;
+    }
+    this.handleTick(msg);
+  }
+
+  handleTick(msg) {
     // Heartbeat/ack frames and anything without a token are not ticks.
     const tok = String(msg?.tk ?? "");
     if (!tok) return;
@@ -278,16 +336,20 @@ class Supervisor {
     if (!symbol) return;
     const ltp = Number(msg.ltp);
     if (!Number.isFinite(ltp) || ltp <= 0) return;
-    const changePct = msg.nc != null ? Number(msg.nc) : msg.cng != null ? Number(msg.cng) : null;
-    this.channel?.send({
-      type: "broadcast",
-      event: "tick",
-      payload: { symbol, exchange: "NSE", ltp, change_pct: Number.isFinite(changePct) ? changePct : null },
-      // Ticks fire many times a second; an unhandled rejection here (channel
-      // briefly erroring/closing mid-tick) would crash the whole process by
-      // Node's default behavior, cutting live ticks for every user until the
-      // supervisor's restart timer fires. Log and drop the tick instead.
-    })?.catch((e) => log("tick broadcast failed:", e?.message ?? e));
+    const rawPct = msg.nc != null ? Number(msg.nc) : msg.cng != null ? Number(msg.cng) : NaN;
+    // Delta frames often omit change_pct — carry the last-known value forward
+    // so the UI's % column doesn't flicker to "—" between full snapshots.
+    let changePct;
+    if (Number.isFinite(rawPct)) {
+      changePct = rawPct;
+      this.lastChangePct.set(tok, rawPct);
+    } else {
+      changePct = this.lastChangePct.get(tok) ?? null;
+    }
+    // Buffer the tick — flushTicks() ships batches on the 100ms interval.
+    // Last write wins per symbol so a rapid-fire ticker doesn't drown out
+    // slower-moving symbols within one flush window.
+    this.tickBuffer.set(symbol, { symbol, exchange: "NSE", ltp, change_pct: changePct });
   }
 }
 

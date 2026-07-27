@@ -8,15 +8,18 @@ import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 
 const limiter = createMarketLimiter(120, 60_000);
 
+// UI TF -> { provider interval, range }. Kotak-native intervals (1/5/15/30/60/D/W/M)
+// pass through as-is; non-native TFs (2h, 4h, 3m) keep the UI grain so
+// provider.ts can request the correct base and resample server-side.
 const INTRADAY: Record<string, { interval: string; range: string }> = {
   "1m": { interval: "1m", range: "7d" },
-  "3m": { interval: "2m", range: "7d" },
+  "3m": { interval: "3m", range: "7d" },
   "5m": { interval: "5m", range: "5d" },
   "15m": { interval: "15m", range: "30d" },
   "30m": { interval: "30m", range: "30d" },
-  "1h": { interval: "60m", range: "60d" },
-  "2h": { interval: "60m", range: "60d" },
-  "4h": { interval: "60m", range: "60d" },
+  "1h": { interval: "1h", range: "60d" },
+  "2h": { interval: "2h", range: "60d" },
+  "4h": { interval: "4h", range: "60d" },
   "1W": { interval: "1wk", range: "5y" },
   "1M": { interval: "1mo", range: "10y" },
 };
@@ -111,16 +114,16 @@ Deno.serve(async (req) => {
     // cache had no interval column, so 5m/15m/1h bars for the same symbol
     // collided in one (symbol,exchange,ts) keyspace and reads returned a mix.
     // The client already caches responses for 5 minutes (react-query staleTime).
-    let raw;
-    let providerName: "kotak_neo" | "yahoo" = "yahoo";
-    try {
-      const { provider } = await getReadProvider(svc, auth.userId);
-      raw = await provider.getOHLCV(symbol, exchange, cfg.range, cfg.interval);
-      providerName = provider.name === "kotak_neo" ? "kotak_neo" : "yahoo";
-    } catch {
-      raw = await yahooChartRetry(toYahooSymbol(symbol, exchange), cfg.range, cfg.interval);
-      providerName = "yahoo";
-    }
+    //
+    // NOTE: the outer Yahoo fallback that used to wrap this call has been
+    // removed. During market hours, `kotakProvider.getOHLCV` now throws for
+    // intraday when Kotak fails instead of quietly serving delayed Yahoo
+    // bars — we surface the failure to the UI (PriceSourceChip) instead of
+    // masking it. Off-hours, the provider itself still uses Yahoo internally
+    // where Kotak has no data.
+    const { provider } = await getReadProvider(svc, auth.userId);
+    const raw = await provider.getOHLCV(symbol, exchange, cfg.range, cfg.interval);
+    const providerName: "kotak_neo" | "yahoo" = provider.name === "kotak_neo" ? "kotak_neo" : "yahoo";
     const candles = raw.map((c) => ({
       time: c.time,
       open: c.open, high: c.high, low: c.low, close: c.close,

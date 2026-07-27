@@ -17,7 +17,7 @@ import {
   useTodayRealized,
 } from "@/lib/market/hooks";
 import { holdingPnl, positionPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
-import { mergeLiveQuotes, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { mergeLiveQuotes, useLiveTickStore, useTicksRevision} from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
 import { PriceSourceChip } from "@/components/market/PriceSourceChip";
 import { useFunds } from "@/lib/market/orderHooks";
@@ -67,7 +67,9 @@ export default function PortfolioOverview() {
     for (const q of quotesData?.quotes ?? []) map[quoteKey(q.exchange, q.symbol)] = q;
     return map;
   }, [quotesData]);
-  const liveTicks = useLiveTickStore((s) => s.ticks);
+  const _ticksRev_liveTicks = useTicksRevision();
+  const liveTicks = useLiveTickStore.getState().ticks;
+  void _ticksRev_liveTicks; // re-render on any tick flush; read fresh map above
   const quotes = useMemo(() => mergeLiveQuotes(restQuotes, liveTicks, quotesUpdatedAt), [restQuotes, liveTicks, quotesUpdatedAt]);
 
   // Holdings summary — uses the same null-vs-zero contract as Holdings.tsx.

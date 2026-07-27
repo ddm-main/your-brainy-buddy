@@ -67,6 +67,7 @@ export function useRealtimeTicks() {
   const { session } = useSession();
   const setConnected = useLiveTickStore((s) => s.setConnected);
   const upsertTick = useLiveTickStore((s) => s.upsertTick);
+  const applyTicks = useLiveTickStore((s) => s.applyTicks);
   const setRelayAlive = useLiveTickStore((s) => s.setRelayAlive);
   const markRelayMessage = useLiveTickStore((s) => s.markRelayMessage);
   const userId = session?.user.id;
@@ -76,13 +77,28 @@ export function useRealtimeTicks() {
     if (!userId) return;
     let cancelled = false;
 
-    const channel = supabase.channel(`market-ticks-${userId}`, { config: { private: true } });
+    // Shared system-feed channel: the Kotak relay broadcasts here, and every
+    // signed-in client listens. Previously the client channel was scoped to
+    // `market-ticks-${session.user.id}` while the relay broadcast on the
+    // FEED-OWNER's uid, so only that one account received push ticks and
+    // everyone else fell back to REST (indices still felt fast because
+    // they're on a 1s REST poll of their own; individual stocks lagged).
+    const channel = supabase.channel(`market-ticks-system`, { config: { private: true } });
     channelRef.current = channel;
     sharedChannel = channel;
     channel
+      .on("broadcast", { event: "ticks" }, ({ payload }: { payload: { ticks: Array<{ symbol: string; exchange?: string; ltp: number; change_pct: number | null }> } }) => {
+        // Batched path — the relay coalesces up to 100ms of ticks into one
+        // message so we do a single store write per flush regardless of how
+        // many symbols moved.
+        if (cancelled || !Array.isArray(payload?.ticks) || payload.ticks.length === 0) return;
+        markRelayMessage();
+        applyTicks(payload.ticks);
+      })
       .on("broadcast", { event: "tick" }, ({ payload }: { payload: TickPayload }) => {
+        // Legacy single-tick path — kept so an older relay build still works
+        // during a rolling deploy. New relays emit `ticks` batches.
         if (cancelled || !payload?.symbol || !Number.isFinite(payload.ltp)) return;
-        // Any tick confirms the relay is actively pushing.
         markRelayMessage();
         upsertTick(`${(payload.exchange ?? "NSE").toUpperCase()}:${payload.symbol.toUpperCase()}`, {
           ltp: payload.ltp,
@@ -102,16 +118,14 @@ export function useRealtimeTicks() {
 
     // Watchdog: relayAlive is only ever set true by a hello/tick above. If
     // the relay process dies or loses its Kotak upstream after even one
-    // message, nothing here would otherwise ever clear it — every
-    // PriceSourceChip would keep showing green "push · kotak" with zero
-    // ticks actually flowing. Poll well under RELAY_STALE_MS so the flip
-    // happens promptly once messages stop.
+    // message, nothing here would otherwise ever clear it. Poll every 5s
+    // (was 15s) so the "push · kotak" chip flips promptly.
     const watchdog = setInterval(() => {
       const { lastRelayMessageAt, relayAlive } = useLiveTickStore.getState();
       if (relayAlive && lastRelayMessageAt != null && Date.now() - lastRelayMessageAt > RELAY_STALE_MS) {
         setRelayAlive(false);
       }
-    }, 15_000);
+    }, 5_000);
 
     return () => {
       cancelled = true;
@@ -122,7 +136,7 @@ export function useRealtimeTicks() {
       channelRef.current = null;
       supabase.removeChannel(channel);
     };
-  }, [userId, setConnected, upsertTick, setRelayAlive, markRelayMessage]);
+  }, [userId, setConnected, upsertTick, applyTicks, setRelayAlive, markRelayMessage]);
 }
 
 export function useRelayAlive(): boolean {

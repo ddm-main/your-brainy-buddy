@@ -23,7 +23,7 @@ import { toSafeError } from "@/lib/errors";
 import { Settings2, Trash2, X } from "lucide-react";
 import type { Quote, StockScore } from "@/lib/market/types";
 import { holdingPnl, quoteKey } from "@/lib/market/pnl";
-import { isFreshTick, nseOpenNow, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { isFreshTick, nseOpenNow, useLiveTickStore, useTicksRevision} from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
 import { useEscapeClose } from "@/lib/useEscapeClose";
 import { MarketStrip } from "@/components/market/MarketStrip";
@@ -193,10 +193,12 @@ export default function MarketDashboard() {
   const scoreKeys = useMemo(() => (scoreKeysJoined ? scoreKeysJoined.split(",") : []), [scoreKeysJoined]);
   // Top Breakouts symbols rotate with filter selection, so most of them are
   // outside the Kotak WS relay's holdings/watchlist subscription set. Poll
-  // the REST batch every ~3s during market hours to make the panel feel live
-  // rather than updating once a minute.
-  const { data: scoreQuotes, isError: scoreQuotesError } = useQuotes(scoreKeys, { intervalMs: 3_000 });
-  const pushTicks = useLiveTickStore((s) => s.ticks);
+  // the Kotak-primary REST batch every second during market hours to match
+  // trading-app quote cadence.
+  const { data: scoreQuotes, isError: scoreQuotesError } = useQuotes(scoreKeys, { intervalMs: 1_000 });
+  const _ticksRev_pushTicks = useTicksRevision();
+  const pushTicks = useLiveTickStore.getState().ticks;
+  void _ticksRev_pushTicks; // re-render on any tick flush; read fresh map above
   const relayAlive = useRelayAlive();
   // Ask the Kotak WS relay to push ticks for whatever's on screen — filters
   // rotate the symbol set constantly, so a static holdings/watchlist-only
@@ -251,7 +253,7 @@ export default function MarketDashboard() {
     },
   });
 
-  // Portfolio day P&L — quote the held symbols (refreshes with the 60s quote poll).
+  // Portfolio day P&L — quote the held symbols with the same 1s live cadence.
   const { data: pfQuotes } = useQuery({
     queryKey: ["market", "dash-pf-quotes", (counts?.holdingRows ?? []).map((h) => h.symbol).join(",")],
     queryFn: async () => {
@@ -259,7 +261,8 @@ export default function MarketDashboard() {
       return callMarketFn<{ quotes: Quote[] }>("market-quotes", { symbols: keys });
     },
     enabled: (counts?.holdingRows.length ?? 0) > 0,
-    refetchInterval: 60_000,
+    refetchInterval: () => (nseOpenNow() ? 1_000 : false),
+    placeholderData: (prev: unknown) => prev as any,
   });
   const pf = useMemo(() => {
     const rows = counts?.holdingRows ?? [];

@@ -21,7 +21,7 @@ import { bollinger, ema, macd, rsi, sma } from "@/lib/market/chartIndicators";
 import type { CandleDto, IndexConstituent } from "@/lib/market/types";
 import { useNotifications } from "@/store/notificationStore";
 import { quoteKey } from "@/lib/market/pnl";
-import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { isFreshTick, useLiveTickStore, useTicksRevision} from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
 
 type Tab = "chart" | "technicals" | "fno" | "constituents";
@@ -34,7 +34,24 @@ export default function IndexDetail() {
   const { data: indicesData } = useIndices();
   const preset = findPreset(symbol);
   const watchRow = watch.find((w) => w.symbol === symbol);
-  const quote = indicesData?.quotes.find((q) => q.symbol === symbol);
+  const restQuote = indicesData?.quotes.find((q) => q.symbol === symbol);
+  const indexTickKey = symbol ? `NSE:${symbol.toUpperCase()}` : "";
+  const pushTick = useLiveTickStore((s) => (indexTickKey ? s.ticks[indexTickKey] : undefined));
+  useEffect(() => {
+    if (!indexTickKey) return;
+    subscribeSymbolsForTicks([indexTickKey]);
+  }, [indexTickKey]);
+  const quote = useMemo(() => {
+    if (isFreshTick(pushTick) && restQuote) {
+      return {
+        ...restQuote,
+        price: pushTick.ltp,
+        change_pct: pushTick.change_pct,
+        change_abs: deriveChangeAbs(pushTick.ltp, pushTick.change_pct),
+      };
+    }
+    return restQuote;
+  }, [pushTick, restQuote]);
 
   const name = quote?.name ?? watchRow?.name ?? preset?.name ?? symbol;
   const region = (quote?.region ?? watchRow?.region ?? preset?.region ?? "IN") as "IN" | "GLOBAL";
@@ -42,14 +59,33 @@ export default function IndexDetail() {
   const fno = (quote?.fno_enabled ?? watchRow?.fno_enabled ?? preset?.fno_enabled ?? false) && !!nseSymbol;
   const cSlug = quote?.constituents_slug ?? watchRow?.constituents_slug ?? preset?.constituents_slug ?? null;
 
+  // Persist chart state per symbol so a refresh doesn't reset TF to "1D"
+  // (Analysis.tsx does the same via STATE_STORE — parity fix).
+  const stateKey = `jarvis.chart.state.index.${symbol}`;
+  type Persisted = { tf: string; chartType: ChartType; tvMode: boolean; studies: Study[]; settings: ChartSettings };
+  const initial = useMemo<Persisted>(() => {
+    const dflt: Persisted = { tf: "1D", chartType: "candles", tvMode: false, studies: DEFAULT_STUDIES, settings: DEFAULT_SETTINGS };
+    try {
+      const raw = JSON.parse(localStorage.getItem(stateKey) ?? "{}");
+      return {
+        tf: typeof raw.tf === "string" ? raw.tf : dflt.tf,
+        chartType: raw.chartType === "line" || raw.chartType === "area" || raw.chartType === "candles" ? raw.chartType : dflt.chartType,
+        tvMode: !!raw.tvMode,
+        studies: Array.isArray(raw.studies) ? raw.studies : dflt.studies,
+        settings: raw.settings ? { ...DEFAULT_SETTINGS, ...raw.settings } : dflt.settings,
+      };
+    } catch { return dflt; }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stateKey]);
+
   const [tab, setTab] = useState<Tab>("chart");
-  const [tf, setTf] = useState("1D");
-  const [chartType, setChartType] = useState<ChartType>("candles");
-  const [tvMode, setTvMode] = useState(false);
+  const [tf, setTf] = useState(initial.tf);
+  const [chartType, setChartType] = useState<ChartType>(initial.chartType);
+  const [tvMode, setTvMode] = useState(initial.tvMode);
   const [fs, setFs] = useState(false);
-  const [studies, setStudies] = useState<Study[]>(DEFAULT_STUDIES);
+  const [studies, setStudies] = useState<Study[]>(initial.studies);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [settings, setSettings] = useState<ChartSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<ChartSettings>(initial.settings);
   const [alertModalOpen, setAlertModalOpen] = useState(false);
   const chartWrapRef = useRef<HTMLDivElement>(null);
   const notify = useNotifications((s) => s.add);
@@ -60,9 +96,26 @@ export default function IndexDetail() {
   const updateStudy = useCallback((u: Study) => setStudies((s) => s.map((x) => (x.id === u.id ? u : x))), []);
   const editing = studies.find((s) => s.id === editingId) ?? null;
 
+  // Persist on every change so a refresh restores the exact chart state.
+  useEffect(() => {
+    try {
+      localStorage.setItem(stateKey, JSON.stringify({ tf, chartType, tvMode, studies, settings } satisfies Persisted));
+    } catch { /* quota / private mode — safe to ignore */ }
+  }, [stateKey, tf, chartType, tvMode, studies, settings]);
+
+  // Indices are composites — Kotak/Yahoo both report 0 volume for them, so the
+  // volume study just renders a flat "Volume 0" line. Auto-hide it here rather
+  // than confuse the user; equity index proxies (with an nse_symbol like
+  // BANKNIFTY) still get real volume on constituents via other panels.
+  const isIndex = true; // this route only ever renders an index
+  const effectiveStudies = useMemo(
+    () => (isIndex ? studies.map((s) => (s.type === "volume" ? { ...s, visible: false } : s)) : studies),
+    [studies, isIndex],
+  );
+
   const { data: candlesData, isLoading: candlesLoading } = useCandles(symbol, tf, "NSE");
   const candles: CandleDto[] = candlesData?.candles ?? [];
-  const visibleStudyCount = useMemo(() => studies.filter((s) => s.visible).length, [studies]);
+  const visibleStudyCount = useMemo(() => effectiveStudies.filter((s) => s.visible).length, [effectiveStudies]);
 
   const price = quote?.price ?? null;
   const chgPct = quote?.change_pct ?? null;
@@ -212,9 +265,10 @@ export default function IndexDetail() {
                 ) : (
                   <CandleChart
                     candles={candles} fill chartType={chartType}
-                    studies={studies}
+                    studies={effectiveStudies}
                     intraday={isIntraday(tf)}
                     livePrice={quote?.price ?? null}
+                    liveVolume={(quote as any)?.volume ?? null}
                     onToggleStudy={toggleStudy}
                     onEditStudy={setEditingId}
                     onRemoveStudy={removeStudy}
@@ -459,7 +513,9 @@ function ConstituentsPanel({ slug, onRow }: { slug: string; onRow: (sym: string)
   );
   const keys = useMemo(() => (keysJoined ? keysJoined.split(",") : []), [keysJoined]);
   const { data: liveQuotes } = useQuotes(keys, { intervalMs: 2_000 });
-  const pushTicks = useLiveTickStore((s) => s.ticks);
+  const _ticksRev_pushTicks = useTicksRevision();
+  const pushTicks = useLiveTickStore.getState().ticks;
+  void _ticksRev_pushTicks; // re-render on any tick flush; read fresh map above
   useEffect(() => { subscribeSymbolsForTicks(keys); }, [keysJoined]);
   const liveByKey = useMemo(() => {
     const m = new Map<string, { ltp: number | null; change_pct: number | null; change_abs: number | null }>();

@@ -17,7 +17,7 @@ import { useSavedScreeners, useScreenerMutations, useQuotes, useMarketSettings, 
 import { useScreenerData, useScreenerSectors, useScreenerIndustries, getAsofMeta, type AsofMeta, type ScreenerRow } from "@/lib/market/screenerRun";
 import { todayIstDateString } from "@/lib/market/liveSnapshot";
 import { quoteKey } from "@/lib/market/pnl";
-import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { isFreshTick, useLiveTickStore, useTicksRevision} from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
 import { Link } from "react-router-dom";
 import { useUi } from "@/store/uiStore";
@@ -575,7 +575,7 @@ function ScreenerInner() {
   const paged = useMemo(() => sorted.slice(pageStart, pageStart + pageSize), [sorted, pageStart, pageSize]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
 
-  // ---- Live overlay for visible rows (Kotak WS push + 2s REST poll) --------
+  // ---- Live overlay for visible rows (Kotak WS push + 1s REST poll) --------
   // Filter math stays on EOD (see comment at "Screener parity is EOD-first"
   // above). But the *displayed* Price and 1D% shouldn't sit frozen at
   // yesterday's close all session — overlay live quotes on top of the
@@ -585,8 +585,10 @@ function ScreenerInner() {
     [paged],
   );
   const visibleKeys = useMemo(() => (visibleKeysJoined ? visibleKeysJoined.split(",") : []), [visibleKeysJoined]);
-  const { data: liveQuotes } = useQuotes(visibleKeys, { intervalMs: 2_000 });
-  const pushTicks = useLiveTickStore((s) => s.ticks);
+  const { data: liveQuotes } = useQuotes(visibleKeys, { intervalMs: 1_000 });
+  const _ticksRev_pushTicks = useTicksRevision();
+  const pushTicks = useLiveTickStore.getState().ticks;
+  void _ticksRev_pushTicks; // re-render on any tick flush; read fresh map above
   const relayAlive = useRelayAlive();
   useEffect(() => { subscribeSymbolsForTicks(visibleKeys); }, [visibleKeysJoined]);
   const liveByKey = useMemo(() => {

@@ -7,7 +7,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useIndices, useBreadth, useFiiDiiLatest } from "@/lib/market/hooks";
-import { isFreshTick, useLiveTickStore } from "@/lib/market/liveTickStore";
+import { isFreshTick, useLiveTickStore, useTicksRevision} from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
 import { BreadthDetailsDialog } from "@/components/market/BreadthDetailsDialog";
 import { PriceSourceChip } from "@/components/market/PriceSourceChip";
@@ -38,7 +38,9 @@ export function MarketStrip({ actions }: Props) {
   const { data: fiiDii } = useFiiDiiLatest();
   const [breadthOpen, setBreadthOpen] = useState(false);
 
-  const pushTicks = useLiveTickStore((s) => s.ticks);
+  const _ticksRev_pushTicks = useTicksRevision();
+  const pushTicks = useLiveTickStore.getState().ticks;
+  void _ticksRev_pushTicks; // re-render on any tick flush; read fresh map above
 
   // Ask the WS relay to push ticks for the indices too. Debounced upstream.
   useEffect(() => {
