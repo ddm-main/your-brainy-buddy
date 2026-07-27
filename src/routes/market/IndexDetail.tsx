@@ -371,10 +371,12 @@ function Row({ label, children, mono }: { label: string; children: React.ReactNo
 
 function FnOSummary({ nseSymbol }: { nseSymbol: string }) {
   const { data, isLoading, error } = useOptionChain(nseSymbol);
+  const hasRows = (data?.rows?.length ?? 0) > 0;
   return (
     <HudPanel flow title="F&O Snapshot" index="A7">
       {isLoading ? <div className="hud-label">loading option chain…</div>
         : error || !data ? <EmptyState hint={String((error as any)?.message ?? "")}>option chain unavailable</EmptyState>
+        : !hasRows ? <EmptyState hint={data.warning ?? "NSE returned no strikes for this expiry."}>option chain unavailable</EmptyState>
         : (
           <>
             <Row label="Spot" mono>{fmtNum(data.underlying)}</Row>
@@ -396,7 +398,7 @@ function FnOSummary({ nseSymbol }: { nseSymbol: string }) {
 function FnOPanel({ nseSymbol }: { nseSymbol: string }) {
   const { data, isLoading, error } = useOptionChain(nseSymbol);
   const rows = useMemo(() => {
-    if (!data) return [];
+    if (!data?.rows?.length) return [];
     const atmIdx = data.rows.reduce((best, r, i) => {
       const cur = data.rows[best];
       return Math.abs(r.strike - data.underlying) < Math.abs(cur.strike - data.underlying) ? i : best;
@@ -409,6 +411,7 @@ function FnOPanel({ nseSymbol }: { nseSymbol: string }) {
   if (isLoading) return <HudPanel flow title="F&O" index="MK.IDX.F"><div className="hud-label">loading option chain…</div></HudPanel>;
   if (error) return <HudPanel flow title="F&O" index="MK.IDX.F"><EmptyState hint={String((error as any)?.message ?? "")}>option chain unavailable</EmptyState></HudPanel>;
   if (!data) return null;
+  if (rows.length === 0) return <HudPanel flow title={`F&O · ${nseSymbol}`} index="MK.IDX.F"><EmptyState hint={data.warning ?? "NSE returned no strikes for this expiry."}>option chain unavailable</EmptyState></HudPanel>;
 
   return (
     <HudPanel flow title={`F&O · ${nseSymbol}`} index="MK.IDX.F">
