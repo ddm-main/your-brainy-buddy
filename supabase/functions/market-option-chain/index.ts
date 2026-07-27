@@ -163,11 +163,10 @@ async function latestCached(userId: string, symbol: string, expiry: string | nul
       .from("market_option_chain_snapshots")
       .select("expiry, underlying_price, payload, captured_at")
       .eq("user_id", userId)
-      .eq("symbol", symbol)
-      .order("captured_at", { ascending: false })
-      .limit(1);
+      .eq("symbol", symbol);
     const isoExpiry = expiryToIso(expiry);
     if (isoExpiry) q = q.eq("expiry", isoExpiry);
+    q = q.order("captured_at", { ascending: false }).limit(1);
     const { data, error } = await q;
     if (error || !data?.length) return null;
     const row = data[0] as any;
