@@ -109,7 +109,7 @@ export function ChartToolbar({
   settings, onSettings, onFullscreen, onAlert, alertCount = 0, onScreenshot,
   onSaveLayout, onLoadLayout, onDeleteLayout, savedLayouts = [],
   intraday = false,
-  range = "1Y", onRange,
+  range = "ALL", onRange,
 }: ChartToolbarProps) {
   const activeType = CHART_TYPES.find((c) => c.key === chartType) ?? CHART_TYPES[0];
   const total = totalStudyCount ?? studyCount;

@@ -71,16 +71,23 @@ Deno.serve(async (req) => {
             : null;
           if (!action_type) return null;
           let ratio_from: number | null = null, ratio_to: number | null = null, amount: number | null = null;
+          // NSE writes rupees as RS / RS. / RE (singular "Re 1/-"), so every
+          // money pattern below accepts both spellings — the old RS-only
+          // regexes dropped every "Re 1/- Per Share" dividend and every
+          // "From Rs 2/- ... To Re 1/-" face-value split.
+          const RUPEE = String.raw`\bR(?:S|E)?\.?\s*`;
           if (action_type === "split") {
-            const m = subj.match(/RS?\.?\s*(\d+(?:\.\d+)?)\s*(?:\/-)?\s*TO\s*RS?\.?\s*(\d+(?:\.\d+)?)/);
+            const m = subj.match(new RegExp(`${RUPEE}(\\d+(?:\\.\\d+)?)\\s*(?:/-)?[^0-9]*?TO\\s*${RUPEE}(\\d+(?:\\.\\d+)?)`));
             if (m) { ratio_from = Number(m[1]); ratio_to = Number(m[2]); }
           } else if (action_type === "bonus") {
             const m = subj.match(/BONUS[^0-9]*(\d+)\s*[:\-\/]\s*(\d+)/);
             if (m) { ratio_to = Number(m[1]); ratio_from = Number(m[2]); }
           } else if (action_type === "dividend") {
-            const m = subj.match(/RS?\.?\s*(\d+(?:\.\d+)?)/);
+            const m = subj.match(new RegExp(`${RUPEE}(\\d+(?:\\.\\d+)?)`))
+              ?? subj.match(/(\d+(?:\.\d+)?)\s*\/?-?\s*PER\s+SHARE/);
             if (m) amount = Number(m[1]);
           }
+
           const needsRatio = action_type === "split" || action_type === "bonus";
           const parsedOk = needsRatio ? (ratio_from != null && ratio_to != null) : action_type === "dividend" ? amount != null : true;
           if (!parsedOk) {

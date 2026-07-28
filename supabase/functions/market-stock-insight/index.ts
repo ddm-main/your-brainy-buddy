@@ -82,7 +82,9 @@ async function callAi(apiKey: string, prompt: string): Promise<AiPayload> {
   }
   return {
     verdict: (["buy", "hold", "wait", "avoid"].includes(parsed.verdict) ? parsed.verdict : "hold") as Verdict,
-    confidence: Math.max(0, Math.min(1, Number(parsed.confidence ?? 0.5))),
+    // Cap at 0.95: models routinely emit 1.0 ("certain") for an equity call
+    // that is never certain, and the UI rendered that as 100% confidence.
+    confidence: Math.max(0, Math.min(0.95, Number(parsed.confidence ?? 0.5))),
     entry: parsed.entry ?? null,
     stop_loss: parsed.stop_loss ?? null,
     targets: Array.isArray(parsed.targets) ? parsed.targets.slice(0, 3).map(Number).filter(Number.isFinite) : [],
@@ -112,7 +114,7 @@ function normalizeAiPayload(p: any): AiPayload {
   const verdict: Verdict = map[String(verdictRaw ?? "").toLowerCase()] ?? "hold";
   return {
     verdict,
-    confidence: Math.max(0, Math.min(1, Number(p.confidence ?? 0.5))),
+    confidence: Math.max(0, Math.min(0.95, Number(p.confidence ?? 0.5))),
     entry: p.entry ?? p.entry_price ?? null,
     stop_loss: p.stop_loss ?? p.stopLoss ?? null,
     targets: Array.isArray(p.targets) ? p.targets.slice(0, 3).map(Number).filter(Number.isFinite) : [],
@@ -171,12 +173,33 @@ Deno.serve(async (req) => {
       .select("*").eq("symbol", symbol).eq("exchange", exchange).maybeSingle();
     if (!score) return errorResponse(req, "no coverage — run pipeline for this symbol first", 404);
 
+    // Fundamentals: the per-user `market_fundamentals` cache is populated only
+    // for symbols someone opened the fundamentals panel on, so most verdicts
+    // used to be made fundamentals-blind. Fall back to the universe-wide
+    // `market_fundamentals_global` table before giving up.
     const { data: fund } = await svc.from("market_fundamentals")
       .select("payload, fetched_at").eq("symbol", symbol).eq("exchange", exchange)
       .order("fetched_at", { ascending: false }).limit(1).maybeSingle();
 
+    let fundText = "";
+    let fundAsOf: string | null = null;
+    if (fund?.payload) {
+      fundText = JSON.stringify(fund.payload).slice(0, 800);
+      fundAsOf = fund.fetched_at ?? null;
+    } else {
+      const { data: gf } = await svc.from("market_fundamentals_global")
+        .select("pe_ttm,price_to_book,eps_ttm,roe,roce,debt_to_equity,current_ratio,dividend_yield,revenue_growth,earnings_growth,promoter_holding,beta,market_cap,sector,industry,data_as_of,updated_at")
+        .eq("symbol", symbol).eq("exchange", exchange).maybeSingle();
+      if (gf) {
+        const { data_as_of, updated_at, ...metrics } = gf as Record<string, unknown>;
+        fundText = JSON.stringify(metrics).slice(0, 800);
+        fundAsOf = (data_as_of as string | null) ?? (updated_at as string | null) ?? null;
+      }
+    }
+
     const prompt = `Symbol: ${symbol} (${exchange})
 Sector: ${score.sector ?? "unknown"}
+Data vintage: technicals are end-of-day for ${score.trade_date ?? "an unknown session"} (today is ${new Date().toISOString().slice(0, 10)}); treat the close below as that session's close, not a live price.
 Close: ${score.close}  Change%: ${score.change_pct}
 Volume: ${score.volume}  RelVol: ${score.rel_volume}
 RSI14: ${score.rsi14}  ADX14: ${score.adx14}  ATR%: ${score.atr_pct}
@@ -187,8 +210,9 @@ Support/Resistance: ${score.support_level}/${score.resistance_level}
 Higher lows: ${score.higher_lows}  Above 200EMA: ${score.above_ema200}  Near resistance: ${score.near_resistance}
 Breakout score: ${score.breakout_score}   Pre-breakout: ${score.prebreakout_score}
 Rel strength vs Nifty: ${score.rel_strength_nifty}
-${fund?.payload ? `\nFundamentals: ${JSON.stringify(fund.payload).slice(0, 800)}` : ""}
+${fundText ? `\nFundamentals${fundAsOf ? ` (as of ${String(fundAsOf).slice(0, 10)})` : ""}: ${fundText}` : "\nFundamentals: unavailable — do not assert valuation claims."}
 `;
+
 
     const apiKey = Deno.env.get("LOVABLE_API_KEY");
     if (!apiKey) return errorResponse(req, "LOVABLE_API_KEY not configured", 500);
@@ -196,17 +220,35 @@ ${fund?.payload ? `\nFundamentals: ${JSON.stringify(fund.payload).slice(0, 800)}
     const raw = await callAi(apiKey, prompt);
     const closePrice = score.close != null ? Number(score.close) : null;
     const sane = sanitizeAiTrade({ verdict: raw.verdict, entry: raw.entry, stop_loss: raw.stop_loss, targets: raw.targets }, closePrice);
+    // A verdict with no entry, no stop and no targets carries nothing the user
+    // can act on — the model still routinely returned 1.0 ("certain") for it,
+    // which rendered as a 95% confidence chip next to an empty plan. Cap those
+    // at 0.6 so the number reflects how much the answer actually says.
+    const noLevels = sane.entry == null && sane.stop_loss == null && sane.targets.length === 0;
+    const confidence = noLevels ? Math.min(raw.confidence, 0.6) : raw.confidence;
     const payload: AiPayload = {
-      ...raw, entry: sane.entry, stop_loss: sane.stop_loss, targets: sane.targets,
+      ...raw, confidence, entry: sane.entry, stop_loss: sane.stop_loss, targets: sane.targets,
       plausibility_flags: sane.flags.length ? sane.flags : undefined,
     };
     const computed_at = new Date().toISOString();
     // Upsert on the unique (user_id, symbol, exchange) index so the cache
     // table stays one-row-per-user-per-stock instead of growing forever.
+    // The flat columns are written alongside `payload`: the nightly
+    // market-ai-recommend job and every list view read those columns, and
+    // writing only the JSON blob left them NULL — a stored verdict that no
+    // other reader could see.
     await svc.from("market_stock_ai").upsert({
       user_id: auth.userId, symbol, exchange, payload, computed_at,
+      recommendation: payload.verdict,
+      confidence: payload.confidence,
+      entry_price: payload.entry,
+      stop_loss: payload.stop_loss,
+      targets: payload.targets.length ? payload.targets : null,
+      holding_period_days: payload.holding_period_days,
+      rationale: payload.rationale || null,
     }, { onConflict: "user_id,symbol,exchange" });
     return jsonResponse(req, { payload, cached: false, computed_at });
+
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 502);
   }

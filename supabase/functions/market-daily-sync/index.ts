@@ -13,6 +13,7 @@ type StepFn =
   | "market-fundamentals-global-sync"
   | "market-shares-outstanding-sync"
   | "market-pipeline-eod"
+  | "market-rescore-from-prices"
   | "market-pipeline-aggregates"
   | "market-parity-refresh";
 
@@ -25,6 +26,7 @@ const CHAIN: Array<{ fn: StepFn; label: string; chunked: boolean }> = [
   { fn: "market-fundamentals-global-sync", label: "Fundamentals",       chunked: true  },
   { fn: "market-shares-outstanding-sync",  label: "Shares outstanding", chunked: true  },
   { fn: "market-pipeline-eod",             label: "EOD technicals",     chunked: true  },
+  { fn: "market-rescore-from-prices",       label: "Price-table rescore", chunked: false },
   { fn: "market-pipeline-aggregates",      label: "Breadth aggregates", chunked: false },
   { fn: "market-parity-refresh",           label: "Tickertape parity",  chunked: false },
 ];
@@ -94,23 +96,33 @@ Deno.serve(async (req) => {
         lastBody = null;
         error = undefined;
         try {
-          for (let i = 0; i < (step.chunked ? MAX_DRAIN_ITERATIONS : 1); i++) {
+          if (step.fn === "market-rescore-from-prices") {
             iterations++;
-            const res = await fetch(`${baseUrl}/functions/v1/${step.fn}`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "x-cron-secret": cronSecret,
-              },
-              body: "{}",
+            const { data: rows, error: rpcErr } = await svc.rpc("market_rescore_latest_from_prices", {
+              _trade_date: null,
+              _limit: 3000,
             });
-            const text = await res.text();
-            let body: unknown = text;
-            try { body = JSON.parse(text); } catch { /* keep raw text */ }
-            lastBody = body;
-            if (!res.ok) throw new Error(`${step.fn} → HTTP ${res.status}: ${text.slice(0, 300)}`);
-            if (!step.chunked) break;
-            if ((body as { drained?: boolean } | null)?.drained) break;
+            if (rpcErr) throw new Error(rpcErr.message);
+            lastBody = { rows: rows ?? null };
+          } else {
+            for (let i = 0; i < (step.chunked ? MAX_DRAIN_ITERATIONS : 1); i++) {
+              iterations++;
+              const res = await fetch(`${baseUrl}/functions/v1/${step.fn}`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "x-cron-secret": cronSecret,
+                },
+                body: "{}",
+              });
+              const text = await res.text();
+              let body: unknown = text;
+              try { body = JSON.parse(text); } catch { /* keep raw text */ }
+              lastBody = body;
+              if (!res.ok) throw new Error(`${step.fn} → HTTP ${res.status}: ${text.slice(0, 300)}`);
+              if (!step.chunked) break;
+              if ((body as { drained?: boolean } | null)?.drained) break;
+            }
           }
           break; // step succeeded
         } catch (e) {
@@ -136,6 +148,34 @@ Deno.serve(async (req) => {
       // Continue the chain even on failure — later steps (technicals, aggregates)
       // must still run so the app has fresh scores; the failure is recorded above.
     }
+
+    // Final step: rebuild the screener snapshot table. The Screener reads a
+    // precomputed table, not the multi-join view — otherwise the query blows
+    // past the 8s statement timeout and the UI shows "Results · 0".
+    {
+      const snapStart = Date.now();
+      const { data: rows, error: snapErr } = await svc.rpc("refresh_market_screener_snapshot");
+      summary.push({
+        fn: "market-screener-snapshot" as StepFn,
+        label: "Screener snapshot",
+        status: snapErr ? "failed" : "ok",
+        iterations: 1,
+        last_response: { rows: rows ?? null },
+        error: snapErr?.message,
+        duration_ms: Date.now() - snapStart,
+      });
+      await svc.from("market_ingestion_runs").insert({
+        source: "daily_sync_orchestrator",
+        stage: "market-screener-snapshot",
+        status: snapErr ? "failed" : "ok",
+        rows_ingested: typeof rows === "number" ? rows : 0,
+        duration_ms: Date.now() - snapStart,
+        metadata: { error: snapErr?.message ?? null },
+        finished_at: new Date().toISOString(),
+      });
+    }
+
+
 
     const failedSteps = summary.filter((s) => s.status === "failed");
     await svc.from("market_ingestion_runs").insert({

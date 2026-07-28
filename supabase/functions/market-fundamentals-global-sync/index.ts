@@ -248,6 +248,7 @@ Deno.serve(async (req) => {
             fii_holding: null,
             dii_holding: r?.defaultKeyStatistics?.heldPercentInstitutions?.raw != null ? r.defaultKeyStatistics.heldPercentInstitutions.raw * 100 : null,
             face_value: null,
+            beta: num(r?.summaryDetail?.beta?.raw, r?.defaultKeyStatistics?.beta?.raw),
             high_52w: num(r?.summaryDetail?.fiftyTwoWeekHigh?.raw, nse?.high52w),
             low_52w: num(r?.summaryDetail?.fiftyTwoWeekLow?.raw, nse?.low52w),
             sync_source: r && nse ? "yahoo+nse" : r ? "yahoo" : nse ? "nse" : null,

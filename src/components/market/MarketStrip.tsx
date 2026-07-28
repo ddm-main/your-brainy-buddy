@@ -84,9 +84,9 @@ export function MarketStrip({ actions }: Props) {
       role="region"
       aria-label="Market status strip"
       style={{
-        display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap",
-        padding: "6px 10px", border: "1px solid var(--edge)", borderRadius: 3,
-        fontFamily: "var(--font-mono, var(--font-hud))", fontSize: 11,
+        display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap",
+        padding: "10px 14px", border: "1px solid var(--edge)", borderRadius: 3,
+        fontFamily: "var(--font-mono, var(--font-hud))", fontSize: 14,
         color: "var(--text-dim)", background: "rgba(53,214,237,0.02)",
       }}
     >
@@ -100,8 +100,8 @@ export function MarketStrip({ actions }: Props) {
             aria-label={`Open ${s.label} details`}
             title={`Open ${s.label} details`}
             style={{
-              display: "inline-flex", gap: 6, alignItems: "baseline",
-              background: "transparent", border: 0, padding: "2px 4px",
+              display: "inline-flex", gap: 8, alignItems: "baseline",
+              background: "transparent", border: 0, padding: "3px 6px",
               margin: 0, cursor: "pointer", font: "inherit", color: "inherit",
               borderRadius: 2,
             }}
@@ -122,8 +122,8 @@ export function MarketStrip({ actions }: Props) {
         aria-label="Open market breadth details"
         title={adTitle}
         style={{
-          display: "inline-flex", gap: 6, alignItems: "baseline",
-          background: "transparent", border: 0, padding: "2px 4px",
+          display: "inline-flex", gap: 8, alignItems: "baseline",
+          background: "transparent", border: 0, padding: "3px 6px",
           margin: 0, cursor: "pointer", font: "inherit", color: "inherit",
           borderRadius: 2, opacity: breadthStale ? 0.55 : 1,
         }}

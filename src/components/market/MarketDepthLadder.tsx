@@ -6,7 +6,19 @@ import type { DepthResponse } from "@/lib/market/hooks";
 type Level = { price: number; qty: number; orders?: number };
 
 export function MarketDepthLadder({ depth }: { depth: DepthResponse | undefined }) {
-  if (!depth || (depth.bids.length === 0 && depth.asks.length === 0)) return null;
+  if (!depth) return null;
+  // Depth is a broker-only feed: Yahoo has no order book. Rendering nothing at
+  // all made the panel look broken; say why it's empty instead.
+  if (depth.bids.length === 0 && depth.asks.length === 0) {
+    return (
+      <HudPanel flow title="Market Depth" index="A2">
+        <div className="hud-label" style={{ fontSize: 11, lineHeight: 1.6, color: "var(--text-dim)" }}>
+          Order book unavailable — depth requires a connected Kotak Neo session.
+          Connect it in <span style={{ color: "var(--accent)" }}>Settings → Broker</span>.
+        </div>
+      </HudPanel>
+    );
+  }
 
   const bids = depth.bids.slice(0, 5) as Level[];
   const asks = depth.asks.slice(0, 5) as Level[];

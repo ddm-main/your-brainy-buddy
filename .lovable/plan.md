@@ -1,34 +1,48 @@
-## What's actually wrong
+## Confirmed current state
 
-Verified against the database and the fetch path — the chart is capped at ~2 years by four separate limits:
+- The screener is stale because `market_screener_snapshot` and `market_stock_scores` are still on `2026-07-24`.
+- `market_daily_prices` already has `2026-07-28` prices for the active NSE universe, so raw price data exists.
+- The daily sync is failing on two concrete blockers:
+  - `market-nse-bhavcopy-sync` tries to upsert `exchange`, but `market_eod_nse` does not currently have that column.
+  - `refresh_market_screener_snapshot()` runs `DELETE FROM market_screener_snapshot` without a filter, and Supabase rejects it with `DELETE requires a WHERE clause`.
+- `market-pipeline-eod` marks 2,501 NSE symbols as synced today, but `market_stock_scores` has 0 rows for `2026-07-28`; this means the cursor advanced while the score table did not catch up.
 
-1. **Stored history is only 2 years.** `market_daily_prices` for NILKAMAL holds 503 NSE bars (2024-07-18 → 2026-07-27); SGMART 216. Every writer requests `"2y"`: `market-candles/index.ts:60` (`rows.length < 100 ? "2y" : "30d"`) and `market-history-backfill/index.ts:57` (`getOHLCV(..., "2y", "1d")`, with `DEFAULT_MIN_BARS = 260`). Nothing ever asks for more, so nothing deeper is ever stored.
-2. **The 1D read is capped and reads the wrong end.** `market-candles/index.ts:41-45` does `.order("trade_date", ascending: true).limit(600)` — that returns the *oldest* 600 rows, so once a symbol exceeds 600 stored bars the chart silently drops the most recent ones and can never show more than ~2.4 years.
-3. **Weekly/monthly never use Yahoo's deep history.** `1W` → `5y`, `1M` → `10y` (`market-candles/index.ts:23-24`) go straight to the provider. Kotak's `/charts/v2/history` returns whatever short window it has; the Yahoo fallback in `provider.ts:545-554` only triggers on an *empty* result, so a short-but-non-empty Kotak reply is served as-is. That is the 1M chart in the screenshot showing ~1 year of bars.
-4. **No "max" range anywhere.** `rangeSec` in `provider.ts:522-529` tops out at `10y` and Yahoo is never asked for `range=max`, which is the only way to get a stock's full listed history.
+## Plan
 
-## Fix
+1. **Repair the database pipeline blockers**
+   - Add `exchange` to `market_eod_nse` with default `NSE`.
+   - Rebuild the `market_eod_nse` primary key as `(symbol, exchange, trade_date)` so the edge function’s upsert conflict target is valid.
+   - Replace `refresh_market_screener_snapshot()` with a safe filtered delete and insert routine.
 
-**Data depth (edge functions)**
-- Add `"max"` to the Kotak `rangeSec` map (epoch 0 / listing date) and pass `range` through to Yahoo unchanged so `max` reaches `yahooChartRetry`.
-- Chunk long Kotak daily requests into ≤2-year windows and concatenate + de-duplicate, since Kotak's history endpoint truncates long spans rather than erroring.
-- `market-candles` 1D branch: request `"max"` (not `2y`) on first fill, and treat "we have < N years of history" as a refill trigger, not just `rows.length < 100`.
-- `market-history-backfill`: fetch `"max"` instead of `2y`, raise `DEFAULT_MIN_BARS` so already-shallow symbols get re-deepened, and keep the existing chunked upsert.
+2. **Add a database-side catch-up rescore**
+   - Create `market_rescore_latest_from_prices(trade_date, limit)`.
+   - It will rebuild the latest `market_stock_scores` rows directly from `market_daily_prices` for the target date, using stored candles instead of fetching provider candles again.
+   - This gives the screener a reliable recovery path when Kotak/Yahoo candle fetches fail but daily prices already landed.
 
-**Read path**
-- `market-candles` 1D: drop the oldest-600 cap — order descending with a generous limit (e.g. 10 000 rows, ~40 years), then reverse for the chart. Correctness fix independent of depth.
-- Weekly/monthly: derive `1W`/`1M` by resampling the deep stored daily series when it is deeper than what the provider returns, instead of trusting a short provider reply. Fall back to the provider only when there is no stored history.
-- Add a length sanity check: if the provider returns materially fewer bars than the requested range implies, retry via Yahoo `max` before returning.
+3. **Patch the EOD edge function**
+   - Before fetching external candles, detect symbols whose latest stored `market_daily_prices` date is newer than their `market_stock_scores` date.
+   - Prefer local-price rescore for those symbols rather than burning egress on another provider fetch.
+   - Only advance `market_stocks.last_price_sync_at` after score write/rescore succeeds.
+   - Lower EOD concurrency slightly if needed to reduce Supabase free-plan pressure.
 
-**UI**
-- `ChartToolbar.tsx`: the timeframe menu controls bar *grain* only; add a separate range/period control (1Y / 3Y / 5Y / All, default All) so the chart can zoom out to the full stored series, and pass it into `useCandles`/`market-candles`.
-- `CandleChart.tsx`: keep the initial visible window sensible (last ~6 months of bars) while the full series remains loaded and scrollable to the left — TradingView behaviour.
+4. **Patch the daily orchestrator**
+   - After EOD and before aggregates/snapshot, call the new database catch-up rescore.
+   - Keep the chain resilient: if NSE bhavcopy is delayed, it should still rescore from already-present `market_daily_prices`.
 
-**Backfill run**
-- After deploying, invoke `market-history-backfill` repeatedly until `drained: true` so existing symbols get their full history written, then verify `min(trade_date)` per symbol in `market_daily_prices`.
+5. **Run the recovery once**
+   - Trigger the new rescore for `2026-07-28`.
+   - Run aggregates.
+   - Refresh the screener snapshot.
 
-## Technical details
+6. **Verify the result**
+   - Confirm `market_stock_scores`, `market_screener_snapshot`, and the UI-visible `market_screener_rows` all report max `trade_date = 2026-07-28`.
+   - Confirm the red “Data is 4 days behind” banner disappears.
+   - Check recent ingestion logs for failures and list remaining improvements.
 
-- Files: `supabase/functions/market-candles/index.ts`, `supabase/functions/market-history-backfill/index.ts`, `supabase/functions/_shared/market/provider.ts`, `supabase/functions/_shared/market/yahooClient.ts`, `src/lib/market/hooks.ts`, `src/components/market/ChartToolbar.tsx`, `src/routes/market/Analysis.tsx`, `src/components/market/CandleChart.tsx`.
-- No schema change needed — `market_daily_prices` is already keyed on `(symbol, exchange, trade_date)` and upserts are idempotent.
-- Note: genuinely recent listings (SGMART listed 2025-09) will still show a short chart; that is correct, not a bug.
+## Required improvements after the fix
+
+- Replace provider-first scoring with a price-table-first scoring path permanently.
+- Add an ingestion invariant: do not mark a symbol “synced today” unless its score row is also updated.
+- Add a daily health check that alerts when `market_daily_prices` is newer than `market_stock_scores` or `market_screener_snapshot`.
+- Keep `market_provider_health` compact; current failures are useful, but success logs should stay sampled.
+- Consider making NSE bhavcopy the primary EOD source for close/volume, with Yahoo/Kotak only for missing symbols and deep history.

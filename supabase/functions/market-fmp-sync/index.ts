@@ -13,6 +13,7 @@ import { preflight, jsonResponse, errorResponse, svcClient } from "../_shared/ma
 import { requireCronSecret } from "../_shared/market/cron.ts";
 import { requireUserId } from "../_shared/auth.ts";
 import { fmpFundamentals } from "../_shared/market/fmpClient.ts";
+import { lowBandwidthMode } from "../_shared/market/cron.ts";
 
 const CHUNK = 35;
 const CONCURRENCY = 3;
@@ -29,6 +30,8 @@ Deno.serve(async (req) => {
 
   try {
     const svc = svcClient();
+    // Free-plan brake: skip non-essential syncs when a quota meter is hot.
+    if (await lowBandwidthMode(svc)) return jsonResponse(req, { ok: true, skipped: "low_bandwidth" });
 
     if (!Deno.env.get("FINANCIAL_MODELING_PREP_API_KEY")) {
       return jsonResponse(req, { ok: true, note: "FMP API key not configured — skipping", processed: 0 });

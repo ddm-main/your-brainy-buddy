@@ -10,11 +10,13 @@ import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
-import { ChartToolbar, DEFAULT_SETTINGS, isIntraday, rangeToBars, type ChartRange, type ChartSettings } from "@/components/market/ChartToolbar";
+import { ChartToolbar, DEFAULT_SETTINGS, isIntraday, type ChartSettings } from "@/components/market/ChartToolbar";
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
 import { NewAlertModal, StockAlertsPanel } from "@/components/market/StockAlerts";
 import { DEFAULT_STUDIES, makeStudy, normalizeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
 import { fmtNum, fmtInt, fmtPct, Return1DCell, deriveChangeAbs } from "@/components/hud/DataTable";
+import type { CorporateActionRow } from "@/lib/market/hooks";
+import { marketOpen } from "@/lib/market/hooks";
 import { useBreadth, useCandles, useCorporateActions, useDepth, useFundamentals, useMarketNews, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores, useSyncNewsAndActions } from "@/lib/market/hooks";
 import { MarketDepthLadder } from "@/components/market/MarketDepthLadder";
 import { computeLiveScore } from "@/lib/market/liveSnapshot";
@@ -38,7 +40,6 @@ type Persisted = {
   chartType: ChartType;
   studies: Study[];
   settings: ChartSettings;
-  range: ChartRange;
 };
 
 const defaultState: Persisted = {
@@ -46,7 +47,6 @@ const defaultState: Persisted = {
   chartType: "candles",
   studies: DEFAULT_STUDIES,
   settings: DEFAULT_SETTINGS,
-  range: "1Y",
 };
 
 // Drop studies whose type no longer exists and backfill missing params/colours.
@@ -124,9 +124,6 @@ export default function Analysis() {
   const [studies, setStudies] = useState<Study[]>(initial.studies);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [settings, setSettings] = useState<ChartSettings>(initial.settings);
-  // Viewport range for daily/weekly/monthly charts. The full series is always
-  // fetched; this only decides how much of it is visible on load.
-  const [range, setRange] = useState<ChartRange>(initial.range ?? "1Y");
   const [alertModalOpen, setAlertModalOpen] = useState(false);
   const chartWrapRef = useRef<HTMLDivElement>(null);
   const notify = useNotifications((s) => s.add);
@@ -176,9 +173,9 @@ export default function Analysis() {
   }, []);
 
   useEffect(() => {
-    const payload: Persisted = { tf, chartType, studies, settings, range };
+    const payload: Persisted = { tf, chartType, studies, settings };
     localStorage.setItem(STATE_STORE, JSON.stringify(payload));
-  }, [tf, chartType, studies, settings, range]);
+  }, [tf, chartType, studies, settings]);
 
   // Per-symbol chart prefs (TF/chartType). Written on change AND on
   // beforeunload so a fast refresh right after switching TF still catches it.
@@ -283,10 +280,78 @@ export default function Analysis() {
   const fund = fundData?.fundamentals as any | undefined;
   const { data: insightData, isLoading: insightLoading, error: insightError } = useStockInsight(sym);
   const refreshInsight = useRefreshStockInsight();
-  const { data: news = [] } = useMarketNews(sym, exchange);
+  const { data: news = [], error: newsError } = useMarketNews(sym, exchange);
   const { data: corpActions = [] } = useCorporateActions(sym, exchange);
   const syncNews = useSyncNewsAndActions();
   const insight = insightData?.payload;
+  const sessionOpen = marketOpen();
+  const fundAsOf = (() => {
+
+    const raw = fund?.data_as_of ?? fundData?.fetched_at;
+    if (!raw) return null;
+    return `as of ${new Date(raw).toLocaleDateString([], { day: "2-digit", month: "short" })}`;
+  })();
+
+  // Which headline metrics the provider simply doesn't carry for this symbol.
+  // Listed once as a footnote so an absent ROE reads as "not covered" rather
+  // than being mistaken for a zero.
+  const missingFundFields = useMemo(() => {
+    if (!fund) return [] as string[];
+    const checks: Array<[string, unknown]> = [
+      ["ROE", fund.roe], ["ROCE", fund.roce], ["D/E", fund.debt_to_equity],
+      ["current ratio", fund.current_ratio], ["beta", fund.beta],
+      ["rev growth", fund.revenue_growth], ["profit growth", fund.earnings_growth],
+      ["promoter holding", fund.promoter_holding],
+    ];
+    return checks.filter(([, v]) => v == null).map(([k]) => k);
+  }, [fund]);
+
+
+
+  // Day open/high/low + previous close. The quotes feed is the primary source
+  // (it carries the current session's OHL and an anchored previous close);
+  // the last daily bar is only a fallback, because that series is a session
+  // behind during market hours and has historically carried duplicate bars.
+  const dayBar = (() => {
+    const bars = dailyCandleData?.candles;
+    const last = bars?.length ? bars[bars.length - 1] : null;
+    const prev = bars && bars.length > 1 ? bars[bars.length - 2] : null;
+    const open = quote?.day_open ?? last?.open ?? null;
+    const high = quote?.day_high ?? last?.high ?? null;
+    const low = quote?.day_low ?? last?.low ?? null;
+    const prevClose = quote?.previous_close ?? prev?.close ?? null;
+    if (open == null && high == null && low == null && prevClose == null) return null;
+    return { open, high, low, prevClose, live: quote?.day_open != null && sessionOpen };
+  })();
+
+
+  // A live recompute only means "live" while the session is actually open —
+  // the panels used to show a green `live` chip at 23:00 IST. When closed,
+  // state the EOD session the numbers belong to instead.
+  const liveIntraday = !!liveScore && sessionOpen;
+  // How many calendar days behind the scores are. A stalled recompute used to
+  // be invisible: the chip said "EOD 24 Jul" in the same neutral grey whether
+  // that was yesterday or last month.
+  const scoreAgeDays = score?.trade_date
+    ? Math.floor((Date.now() - Date.parse(`${String(score.trade_date).slice(0, 10)}T00:00:00`)) / 86_400_000)
+    : null;
+  const vintageChip = liveIntraday
+    ? <Chip tone="ok">live</Chip>
+    : score?.trade_date
+      ? (
+        <Chip tone={scoreAgeDays != null && scoreAgeDays > 1 ? "warn" : "neutral"}>
+          EOD {new Date(score.trade_date as string).toLocaleDateString([], { day: "2-digit", month: "short" })}
+          {scoreAgeDays != null && scoreAgeDays > 1 ? ` · ${scoreAgeDays}d old` : ""}
+        </Chip>
+      )
+      : undefined;
+  // When the session is closed, don't blend the last live snapshot with EOD
+  // rows — read everything from the EOD score so one panel can't disagree
+  // with another about which bar it is describing.
+  const liveView = liveIntraday ? liveScore : null;
+
+
+
   const sectorRow = useMemo(
     () => sectors.find((s) => s.sector === score?.sector),
     [sectors, score],
@@ -321,16 +386,28 @@ export default function Analysis() {
     syncNews.mutate({ symbol: sym, exchange });
   }, [sym, exchange, news.length, syncNews]);
 
+  // "Last synced" for the news panel: the newest row we hold, or the
+  // timestamp the most recent manual sync reported.
+  const newsSyncedAt = (syncNews.data as { synced_at?: string } | undefined)?.synced_at
+    ?? news.map((n) => n.published_at).filter(Boolean).sort().pop()
+    ?? null;
+
+  // Per-symbol failures the sync reports while still returning HTTP 200 — the
+  // panel used to render an indefinite "no news synced yet" for these.
+  const syncNewsErrors = ((syncNews.data as { errors?: string[] } | undefined)?.errors ?? []);
+
+
+
   const priceLines = useMemo(() => {
     const lines: Array<{ price: number; label: string; color: string }> = [];
-    const r = liveScore?.snapshot.resistance ?? score?.resistance_level ?? null;
-    const s = liveScore?.snapshot.support ?? score?.support_level ?? null;
-    const rFallback = liveScore?.snapshot.resistanceFallback ?? false;
-    const sFallback = liveScore?.snapshot.supportFallback ?? false;
+    const r = liveView?.snapshot.resistance ?? score?.resistance_level ?? null;
+    const s = liveView?.snapshot.support ?? score?.support_level ?? null;
+    const rFallback = liveView?.snapshot.resistanceFallback ?? false;
+    const sFallback = liveView?.snapshot.supportFallback ?? false;
     if (r) lines.push({ price: r, label: rFallback ? "R*" : "R", color: "#ffb84d" });
     if (s) lines.push({ price: s, label: sFallback ? "S*" : "S", color: "#6bffb0" });
     return lines;
-  }, [liveScore, score]);
+  }, [liveView, score]);
 
   // No standalone "Analysis" destination — this view is always reached by
   // clicking a symbol elsewhere. A missing/invalid param sends the user back
@@ -387,8 +464,6 @@ export default function Analysis() {
               onDeleteLayout={deleteLayout}
               savedLayouts={savedLayouts}
               intraday={isIntraday(tf)}
-              range={range}
-              onRange={setRange}
             />
             <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0 }}>
               {error ? (
@@ -412,7 +487,7 @@ export default function Analysis() {
                   onEditStudy={setEditingId}
                   onRemoveStudy={removeStudy}
                   source={candleData.provider ?? null}
-                  visibleBars={isIntraday(tf) ? null : rangeToBars(range, tf)}
+                  visibleBars={null}
                 />
 
 
@@ -435,13 +510,31 @@ export default function Analysis() {
           </div>
           <div style={{ display: "flex", gap: 6, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
             {score?.sector && <Chip tone="accent">{score.sector}</Chip>}
-            {quote?.ltp && liveScore ? (
+            {/* Only claim "live" while the session is actually open — outside
+                hours the same recompute runs off the settled EOD close, and
+                labelling that as live made a two-day-old print look fresh. */}
+            {quote?.ltp && liveScore && sessionOpen ? (
               <Chip tone="ok">live · technicals updating</Chip>
-            ) : !quote?.ltp && score?.close != null ? (
-              <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.1em" }}>EOD</span>
+            ) : score?.trade_date ? (
+              <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.1em" }}>
+                EOD · {new Date(score.trade_date).toLocaleDateString([], { day: "2-digit", month: "short" })}
+              </span>
             ) : null}
             {quote?.stale && <Chip tone="warn">stale</Chip>}
           </div>
+
+          {dayBar && (
+            <div style={{ marginTop: 8 }}>
+              <Row label={dayBar.live ? "Open" : "Open (EOD)"} mono>{fmtNum(dayBar.open)}</Row>
+              <Row label={dayBar.live ? "Day High" : "High (EOD)"} mono>{fmtNum(dayBar.high)}</Row>
+              <Row label={dayBar.live ? "Day Low" : "Low (EOD)"} mono>{fmtNum(dayBar.low)}</Row>
+
+              <Row label="Prev Close" mono>{fmtNum(dayBar.prevClose)}</Row>
+            </div>
+          )}
+
+
+
         </HudPanel>
 
         <StockAlertsPanel symbol={sym} exchange={exchange} />
@@ -458,68 +551,75 @@ export default function Analysis() {
           </HudPanel>
         ) : (
         <>
-        <HudPanel flow title="Breakout Intelligence" index="A3" actions={liveScore ? <Chip tone="ok">live</Chip> : undefined}>
+        <HudPanel flow title="Breakout Intelligence" index="A3" actions={vintageChip}>
           <Row label="Breakout">
             <ScoreBadge
-              score={liveScore?.breakout.score ?? score?.breakout_score}
-              components={liveScore?.breakout.components ?? score?.score_components?.breakout}
+              score={liveView?.breakout.score ?? score?.breakout_score}
+              components={liveView?.breakout.components ?? score?.score_components?.breakout}
               label="breakout components"
               onClick={() => nav(`/market/ai/${sym}`)}
             />
           </Row>
           <Row label="Pre-Breakout">
             <ScoreBadge
-              score={liveScore?.prebreakout.score ?? score?.prebreakout_score}
-              components={liveScore?.prebreakout.components ?? score?.score_components?.prebreakout}
+              score={liveView?.prebreakout.score ?? score?.prebreakout_score}
+              components={liveView?.prebreakout.components ?? score?.score_components?.prebreakout}
               label="pre-breakout components"
               onClick={() => nav(`/market/ai/${sym}`)}
             />
           </Row>
           <Row label="Setups">
             <span style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-              {(liveScore?.snapshot.bbSqueeze ?? score?.bb_squeeze) && <Chip tone="accent">BB squeeze</Chip>}
-              {(liveScore?.snapshot.higherLows ?? score?.higher_lows) && <Chip tone="ok">higher lows</Chip>}
-              {(liveScore?.snapshot.nearResistance ?? score?.near_resistance) && <Chip tone="warn">near resistance</Chip>}
-              {(liveScore?.snapshot.aboveEma200 ?? score?.above_ema200) && <Chip tone="ok">&gt;200 EMA</Chip>}
+              {(liveView?.snapshot.bbSqueeze ?? score?.bb_squeeze) && <Chip tone="accent">BB squeeze</Chip>}
+              {(liveView?.snapshot.higherLows ?? score?.higher_lows) && <Chip tone="ok">higher lows</Chip>}
+              {(liveView?.snapshot.nearResistance ?? score?.near_resistance) && <Chip tone="warn">near resistance</Chip>}
+              {(liveView?.snapshot.aboveEma200 ?? score?.above_ema200) && <Chip tone="ok">&gt;200 EMA</Chip>}
               {!score && !liveScore && <span style={{ color: "var(--text-muted)", fontSize: 11 }}>pipeline pending</span>}
             </span>
           </Row>
           <Row label="Resistance" mono>
-            {fmtNum(liveScore?.snapshot.resistance ?? score?.resistance_level)}
-            {liveScore?.snapshot.resistanceTouches ? (
+            {fmtNum(liveView?.snapshot.resistance ?? score?.resistance_level)}
+            {liveView?.snapshot.resistanceTouches ? (
               <span style={{ color: "var(--text-muted)", fontSize: 10, marginLeft: 6 }}>
-                {liveScore.snapshot.resistanceTouches}×{liveScore.snapshot.resistanceFallback ? " • range hi" : ""}
+                {liveView!.snapshot.resistanceTouches}×{liveView!.snapshot.resistanceFallback ? " • range hi" : ""}
               </span>
             ) : null}
           </Row>
           <Row label="Support" mono>
-            {fmtNum(liveScore?.snapshot.support ?? score?.support_level)}
-            {liveScore?.snapshot.supportTouches ? (
+            {fmtNum(liveView?.snapshot.support ?? score?.support_level)}
+            {liveView?.snapshot.supportTouches ? (
               <span style={{ color: "var(--text-muted)", fontSize: 10, marginLeft: 6 }}>
-                {liveScore.snapshot.supportTouches}×{liveScore.snapshot.supportFallback ? " • range lo" : ""}
+                {liveView!.snapshot.supportTouches}×{liveView!.snapshot.supportFallback ? " • range lo" : ""}
               </span>
             ) : null}
           </Row>
         </HudPanel>
 
-        <HudPanel flow title="Indicators (Daily)" index="A4" actions={liveScore ? <Chip tone="ok">live</Chip> : undefined}>
-          <Row label="RSI (14)" mono>{fmtNum(liveScore?.snapshot.rsi14 ?? score?.rsi14, 1)}</Row>
+        <HudPanel flow title="Indicators (Daily)" index="A4" actions={vintageChip}>
+          <Row label="RSI (14)" mono>{fmtNum(liveView?.snapshot.rsi14 ?? score?.rsi14, 1)}</Row>
           <Row label="MACD" mono>
-            {fmtNum(liveScore?.snapshot.macd ?? score?.macd, 2)} / {fmtNum(liveScore?.snapshot.macdSignal ?? score?.macd_signal, 2)}
+            {fmtNum(liveView?.snapshot.macd ?? score?.macd, 2)} / {fmtNum(liveView?.snapshot.macdSignal ?? score?.macd_signal, 2)}
           </Row>
-          <Row label="ADX (14)" mono>{fmtNum(liveScore?.snapshot.adx14 ?? score?.adx14, 1)}</Row>
-          <Row label="ATR %" mono>{fmtNum(liveScore?.snapshot.atrPct ?? score?.atr_pct, 2)}</Row>
-          <Row label="BB Width" mono>{fmtNum(liveScore?.snapshot.bbWidth ?? score?.bb_width, 3)}</Row>
-          <Row label="Rel Volume" mono>{fmtNum(liveScore?.snapshot.relVolume ?? score?.rel_volume, 2)}</Row>
-          <Row label="Volume" mono>{fmtInt(liveScore?.snapshot.volume ?? score?.volume)}</Row>
+          <Row label="ADX (14)" mono>{fmtNum(liveView?.snapshot.adx14 ?? score?.adx14, 1)}</Row>
+          <Row label="ATR %" mono>{fmtNum(liveView?.snapshot.atrPct ?? score?.atr_pct, 2)}</Row>
+          <Row label="BB Width" mono>{fmtNum(liveView?.snapshot.bbWidth ?? score?.bb_width, 3)}</Row>
+          {/* Volume/RelVol from a live snapshot is the *running* intraday bar,
+              not a completed daily figure — labelling it plain "Volume" made
+              it look like it contradicted the EOD row. */}
+          <Row label={liveIntraday ? "Rel Volume (partial)" : "Rel Volume"} mono>
+            {fmtNum(liveView?.snapshot.relVolume ?? score?.rel_volume, 2)}
+          </Row>
+          <Row label={liveIntraday ? "Volume (so far today)" : "Volume"} mono>
+            {fmtInt(liveView?.snapshot.volume ?? score?.volume)}
+          </Row>
         </HudPanel>
 
-        <HudPanel flow title="Range & Strength" index="A5">
-          <Row label="52w High" mono>{fmtNum(liveScore?.snapshot.high52w ?? score?.high_52w)}</Row>
-          <Row label="52w Low" mono>{fmtNum(liveScore?.snapshot.low52w ?? score?.low_52w)}</Row>
+        <HudPanel flow title="Range & Strength" index="A5" actions={vintageChip}>
+          <Row label="52w High" mono>{fmtNum(liveView?.snapshot.high52w ?? score?.high_52w)}</Row>
+          <Row label="52w Low" mono>{fmtNum(liveView?.snapshot.low52w ?? score?.low_52w)}</Row>
           <Row label="From 52w High" mono>
-            <span style={{ color: (liveScore?.snapshot.pctFrom52wHigh ?? score?.pct_from_52w_high ?? 0) > -5 ? "var(--ok)" : "var(--text)" }}>
-              {fmtPct(liveScore?.snapshot.pctFrom52wHigh ?? score?.pct_from_52w_high, 2, false)}
+            <span style={{ color: (liveView?.snapshot.pctFrom52wHigh ?? score?.pct_from_52w_high ?? 0) > -5 ? "var(--ok)" : "var(--text)" }}>
+              {fmtPct(liveView?.snapshot.pctFrom52wHigh ?? score?.pct_from_52w_high, 2, false)}
             </span>
           </Row>
           <Row label="RS vs NIFTY" mono>{fmtNum(score?.rel_strength_nifty, 1)}</Row>
@@ -528,10 +628,11 @@ export default function Analysis() {
           </Row>
           <Row label="EMA 20/50/200" mono>
             <span style={{ fontSize: 10 }}>
-              {fmtNum(liveScore?.snapshot.ema20 ?? score?.ema20, 0)} / {fmtNum(liveScore?.snapshot.ema50 ?? score?.ema50, 0)} / {fmtNum(liveScore?.snapshot.ema200 ?? score?.ema200, 0)}
+              {fmtNum(liveView?.snapshot.ema20 ?? score?.ema20, 0)} / {fmtNum(liveView?.snapshot.ema50 ?? score?.ema50, 0)} / {fmtNum(liveView?.snapshot.ema200 ?? score?.ema200, 0)}
             </span>
           </Row>
         </HudPanel>
+
         </>
         )}
 
@@ -558,14 +659,27 @@ export default function Analysis() {
             </div>
           ) : insight ? (
             <>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
                 <Chip tone={insight.verdict === "buy" ? "ok" : insight.verdict === "avoid" ? "err" : insight.verdict === "wait" ? "warn" : "accent"}>
                   {insight.verdict.toUpperCase()}
                 </Chip>
+                {/* Confidence is capped server-side at 95% — an equity call is
+                    never certain, and the model routinely emitted 1.0. */}
                 <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
                   conf {Math.round(insight.confidence * 100)}%
                 </span>
+                {insightData?.computed_at && (
+                  <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                    · {new Date(insightData.computed_at).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                )}
               </div>
+              {insight.plausibility_flags && insight.plausibility_flags.length > 0 && (
+                <div style={{ fontSize: 10, color: "var(--warn, #ffb84d)", marginBottom: 6 }}>
+                  adjusted: {insight.plausibility_flags.join(", ")}
+                </div>
+              )}
+
               {(insight.entry || insight.stop_loss || insight.targets.length > 0) && (
                 <div style={{ display: "flex", flexDirection: "column", fontSize: 11, marginBottom: 6 }}>
                   {insight.entry != null && <Row label="Entry" mono>₹{fmtNum(insight.entry, 2)}</Row>}
@@ -596,40 +710,60 @@ export default function Analysis() {
         </HudPanel>
         ); })()}
 
-        {/* Fundamentals */}
+        {/* Fundamentals — payload units are fixed by market-fundamentals:
+            ratios are decimal fractions, ownership is percent. Do not add a
+            second rescaling here; that is what produced "ROE 1502%". */}
         {fund && (
-          <HudPanel flow title="Fundamentals" index="A7">
-            <Row label="Market Cap" mono>{fund.market_cap ? `₹${fmtNum(fund.market_cap / 1e7, 0)} Cr` : "—"}</Row>
-            <Row label="P/E (TTM)" mono>{fmtNum(fund.pe_ttm, 2)}</Row>
-            <Row label="P/B" mono>{fmtNum(fund.price_to_book, 2)}</Row>
-            <Row label="EPS (TTM)" mono>{fmtNum(fund.eps_ttm, 2)}</Row>
-            <Row label="ROE" mono>{fund.roe != null ? fmtPct(fund.roe * 100, 2, false) : "—"}</Row>
-            <Row label="Debt/Equity" mono>{fmtNum(fund.debt_to_equity, 2)}</Row>
-            <Row label="Div Yield" mono>{(() => {
-              const raw = fund.dividend_yield;
-              if (raw == null) return "—";
-              // Belt-and-braces guard against the FMP-percent-vs-Yahoo-decimal
-              // unit clash — anything > 0.5 (i.e. >50% yield) is unrealistic
-              // and must already be in percent; scale it back to decimal so
-              // the display *100 lands correctly. The edge fn does the same
-              // fix at write time; this catches any stale rows already cached.
-              const dec = raw > 0.5 ? raw / 100 : raw;
-              return fmtPct(dec * 100, 2, false);
-            })()}</Row>
-            <Row label="Beta" mono>{fmtNum(fund.beta, 2)}</Row>
+          <HudPanel flow title="Fundamentals" index="A7"
+            actions={fundAsOf ? <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.08em" }}>{fundAsOf}</span> : undefined}>
+            {/* Rows the source has no value for are omitted rather than
+                printed as a column of em-dashes — for most NSE mid-caps the
+                provider covers barely half of these fields. */}
+            {fund.market_cap != null && <Row label="Market Cap" mono>{`₹${fmtNum(fund.market_cap / 1e7, 0)} Cr`}</Row>}
+            {fund.pe_ttm != null && <Row label="P/E (TTM)" mono>{fmtNum(fund.pe_ttm, 2)}</Row>}
+            {fund.price_to_book != null && <Row label="P/B" mono>{fmtNum(fund.price_to_book, 2)}</Row>}
+            {fund.eps_ttm != null && <Row label="EPS (TTM)" mono>{fmtNum(fund.eps_ttm, 2)}</Row>}
+            {fund.book_value != null && <Row label="Book Value" mono>{fmtNum(fund.book_value, 2)}</Row>}
+            {fund.roe != null && <Row label="ROE" mono>{pctOf(fund.roe)}</Row>}
+            {fund.roce != null && <Row label="ROCE" mono>{pctOf(fund.roce)}</Row>}
+            {fund.debt_to_equity != null && <Row label="Debt/Equity" mono>{fmtNum(fund.debt_to_equity, 2)}</Row>}
+            {fund.current_ratio != null && <Row label="Current Ratio" mono>{fmtNum(fund.current_ratio, 2)}</Row>}
+            {fund.quick_ratio != null && <Row label="Quick Ratio" mono>{fmtNum(fund.quick_ratio, 2)}</Row>}
+            {fund.peg != null && <Row label="PEG" mono>{fmtNum(fund.peg, 2)}</Row>}
+            {fund.dividend_yield != null && <Row label="Div Yield" mono>{pctOf(fund.dividend_yield)}</Row>}
+            {fund.revenue_growth != null && <Row label="Rev Growth (YoY)" mono>{pctOf(fund.revenue_growth)}</Row>}
+            {fund.earnings_growth != null && <Row label="Profit Growth (YoY)" mono>{pctOf(fund.earnings_growth)}</Row>}
+            {fund.promoter_holding != null && <Row label="Promoter Holding" mono>{fmtPct(fund.promoter_holding, 2, false)}</Row>}
+            {fund.promoter_pledge != null && <Row label="Promoter Pledge" mono>{fmtPct(fund.promoter_pledge, 2, false)}</Row>}
+            {fund.fii_holding != null && <Row label="FII Holding" mono>{fmtPct(fund.fii_holding, 2, false)}</Row>}
+            {fund.dii_holding != null && <Row label="DII Holding" mono>{fmtPct(fund.dii_holding, 2, false)}</Row>}
+            {fund.beta != null && <Row label="Beta" mono>{fmtNum(fund.beta, 2)}</Row>}
             {fund.sector && <Row label="Sector">{fund.sector}</Row>}
             {fund.industry && <Row label="Industry">{fund.industry}</Row>}
+            {missingFundFields.length > 0 && (
+              <div className="hud-label" style={{ marginTop: 6, fontSize: 9, color: "var(--text-muted)", lineHeight: 1.5 }}>
+                not covered by source: {missingFundFields.join(", ")}
+              </div>
+            )}
+
           </HudPanel>
         )}
 
         {/* News & Corporate Actions — synced on demand, not on a universe-wide cron */}
         <HudPanel flow title="News & Corporate Actions" index="A8"
           actions={
-            <Btn size="sm" variant="ghost" disabled={!sym || syncNews.isPending}
-              onClick={() => sym && syncNews.mutate({ symbol: sym, exchange })}
-              aria-label="sync news and corporate actions">
-              <RefreshCw size={11} />
-            </Btn>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              {newsSyncedAt && (
+                <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.08em" }}>
+                  synced {new Date(newsSyncedAt).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                </span>
+              )}
+              <Btn size="sm" variant="ghost" disabled={!sym || syncNews.isPending}
+                onClick={() => sym && syncNews.mutate({ symbol: sym, exchange })}
+                aria-label="sync news and corporate actions">
+                <RefreshCw size={11} />
+              </Btn>
+            </div>
           }>
           {corpActions.length > 0 && (
             <div style={{ marginBottom: 10 }}>
@@ -637,16 +771,24 @@ export default function Analysis() {
               {corpActions.map((a) => (
                 <Row key={a.id} label={a.action_type} mono>
                   {a.ex_date ? new Date(a.ex_date).toLocaleDateString([], { day: "2-digit", month: "short", year: "numeric" }) : "—"}
-                  {a.details?.subject && <span style={{ color: "var(--text-dim)", marginLeft: 6, fontSize: 10 }}>{a.details.subject}</span>}
+                  {corpActionDetail(a) && (
+                    <span style={{ color: "var(--text-dim)", marginLeft: 6, fontSize: 10 }}>{corpActionDetail(a)}</span>
+                  )}
                 </Row>
               ))}
             </div>
           )}
           {news.length === 0 ? (
-            <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)" }}>
-              {syncNews.isPending ? "syncing…" : "no news synced yet — press refresh"}
+            <div className="hud-label" style={{ fontSize: 11, color: newsError || syncNews.isError ? "var(--danger)" : "var(--text-muted)" }}>
+              {syncNews.isPending ? "syncing…"
+                : newsError ? `news unavailable — ${(newsError as Error).message}`
+                : syncNews.isError ? `sync failed — ${(syncNews.error as Error).message}`
+                : syncNewsErrors.length > 0 ? `feed returned no items — ${syncNewsErrors[0]}`
+                : syncNews.isSuccess ? "no headlines found for this symbol"
+                : "no news synced yet — press refresh"}
             </div>
           ) : (
+
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {news.map((n) => (
                 <a key={n.id} href={n.url ?? undefined} target="_blank" rel="noreferrer"
@@ -660,6 +802,7 @@ export default function Analysis() {
             </div>
           )}
         </HudPanel>
+
       </div>
 
       {alertModalOpen && (
@@ -669,6 +812,20 @@ export default function Analysis() {
     </div>
   );
 }
+
+// Fundamentals payload stores ratio-style metrics as decimal fractions
+// (0.1503 = 15.03%) — scale exactly once, here.
+function pctOf(v: number | null | undefined) {
+  return v != null ? fmtPct(v * 100, 2, false) : "—";
+}
+
+// "1:2", "₹1.00/share", or the raw NSE purpose line when neither parsed.
+function corpActionDetail(a: CorporateActionRow): string | null {
+  if (a.amount != null) return `₹${a.amount.toFixed(2)}/share`;
+  if (a.ratio_from != null && a.ratio_to != null) return `${a.ratio_to}:${a.ratio_from}`;
+  return a.purpose ?? null;
+}
+
 
 function Row({ label, children, mono }: { label: string; children: React.ReactNode; mono?: boolean }) {
   return (

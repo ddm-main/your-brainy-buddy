@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS public.idx_market_daily_prices_symbol_date;
+REINDEX INDEX public.market_daily_prices_pkey;
+REINDEX INDEX public.market_daily_prices_symbol_exchange_trade_date_key;

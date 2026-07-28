@@ -12,6 +12,8 @@ import { authFetch } from "@/lib/authFetch";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { Database, Play, RefreshCw, TestTube2 } from "lucide-react";
+import DatabaseStoragePanel from "@/components/config/DatabaseStoragePanel";
+
 
 type ServiceProvider = "kotak_neo" | "yahoo" | "fmp" | "alpha_vantage" | "nse" | "bse";
 
@@ -133,7 +135,10 @@ export default function SystemDataConfig() {
           style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: "4px 6px" }}>← config</button>
       </div>
 
+      <DatabaseStoragePanel />
+
       <HudPanel title="Data Providers (System)" index="PRV" live="ok" bodyClass="overflow-visible">
+
         <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 8 }}>
           Shared providers powering the app for every user. Kotak Neo is primary; the rest are fallbacks.
         </div>

@@ -5,6 +5,10 @@ import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsF
 import { yahooChartRetry, toYahooSymbol } from "../_shared/market/yahooClient.ts";
 import { getReadProvider } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
+import { isDailyGrain, grainReason } from "../_shared/market/candleGuard.ts";
+import { loadArchivedBars } from "../_shared/market/archive.ts";
+
+
 
 const limiter = createMarketLimiter(120, 60_000);
 
@@ -14,12 +18,12 @@ const limiter = createMarketLimiter(120, 60_000);
 const INTRADAY: Record<string, { interval: string; range: string }> = {
   "1m": { interval: "1m", range: "7d" },
   "3m": { interval: "3m", range: "7d" },
-  "5m": { interval: "5m", range: "5d" },
-  "15m": { interval: "15m", range: "30d" },
-  "30m": { interval: "30m", range: "30d" },
-  "1h": { interval: "1h", range: "60d" },
-  "2h": { interval: "2h", range: "60d" },
-  "4h": { interval: "4h", range: "60d" },
+  "5m": { interval: "5m", range: "60d" },
+  "15m": { interval: "15m", range: "max" },
+  "30m": { interval: "30m", range: "max" },
+  "1h": { interval: "1h", range: "max" },
+  "2h": { interval: "2h", range: "max" },
+  "4h": { interval: "4h", range: "max" },
   "1W": { interval: "1wk", range: "max" },
   "1M": { interval: "1mo", range: "max" },
 };
@@ -65,7 +69,33 @@ const DEEP_TTL_MS = 6 * 3600_000;
 // ~3y of sessions. Below this the stored series is treated as truncated by
 // the old 2y cap and re-fetched at full depth once.
 const SHALLOW_BARS = 750;
+// Density floor: real daily NSE history has ~21 sessions/month. A stored
+// series thinner than this is sparse or wrong-grain (the old `range=max`
+// bug wrote monthly bars here) and must be re-fetched even when the raw
+// row count clears SHALLOW_BARS.
+const MIN_BARS_PER_MONTH = 12;
 const READ_LIMIT = 20_000;
+
+// The daily cache carries scars from earlier ingestion bugs: bars stamped on
+// a Saturday/Sunday (no NSE session exists for those dates) and consecutive
+// pairs sharing byte-identical open/high/low — weekly bars that leaked in and
+// got written twice. Both distort every indicator, ATR and S/R level computed
+// downstream, so strip them at read time instead of trusting the table.
+function sanitizeDaily(rows: OutCandle[]): OutCandle[] {
+  const out: OutCandle[] = [];
+  for (const c of rows) {
+    const dow = new Date(c.time + "T00:00:00Z").getUTCDay();
+    if (dow === 0 || dow === 6) continue;
+    const prev = out[out.length - 1];
+    // Identical O, H and L to the immediately preceding session is a
+    // duplicate-write artefact, not a real market day (a genuine repeat of
+    // all three to the paisa is vanishingly rare).
+    if (prev && prev.open === c.open && prev.high === c.high && prev.low === c.low) continue;
+    out.push(c);
+  }
+  return out;
+}
+
 
 async function loadDaily(
   svc: ReturnType<typeof svcClient>,
@@ -86,6 +116,21 @@ async function loadDaily(
     byDate.set(String(r.trade_date).slice(0, 10), r);
   }
 
+  // Cold bars offloaded to file storage. Merged in before the depth checks
+  // below so an archived symbol is not mistaken for a shallow one (which
+  // would re-download the whole series back into Postgres).
+  const archived = await loadArchivedBars(svc, symbol, exchange);
+  let archiveCutoff = "";
+  for (const b of archived) {
+    if (b.time > archiveCutoff) archiveCutoff = b.time;
+    if (!byDate.has(b.time)) {
+      byDate.set(b.time, {
+        trade_date: b.time, open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume,
+      });
+    }
+  }
+
+
   // Most recent expected trading day (IST, Mon–Fri; use 16:00 IST cutoff).
   const ist = new Date(Date.now() + 5.5 * 3600_000);
   const expected = new Date(ist);
@@ -100,7 +145,13 @@ async function loadDaily(
 
   const deepKey = `${exchange}:${symbol}`;
   const deepAt = deepTried.get(deepKey) ?? 0;
-  const wantDeep = byDate.size < SHALLOW_BARS && Date.now() - deepAt > DEEP_TTL_MS;
+  // Density, not just count: months covered vs bars stored.
+  const oldestCached = sortedDates[0] ?? "";
+  const monthsCovered = oldestCached && latestCached
+    ? Math.max(1, (Date.parse(latestCached) - Date.parse(oldestCached)) / 86_400_000 / 30.4375)
+    : 1;
+  const sparse = byDate.size > 0 && byDate.size / monthsCovered < MIN_BARS_PER_MONTH;
+  const wantDeep = (byDate.size < SHALLOW_BARS || sparse) && Date.now() - deepAt > DEEP_TTL_MS;
 
   let providerName: "kotak_neo" | "yahoo" = "yahoo";
   if (wantDeep || stale) {
@@ -116,30 +167,46 @@ async function loadDaily(
         candles = await yahooChartRetry(toYahooSymbol(symbol, exchange), range, "1d");
         providerName = "yahoo";
       }
+      // Never persist weekly/monthly bars into the daily table.
+      if (!isDailyGrain(candles)) {
+        await svc.from("market_provider_health").insert({
+          provider: providerName, endpoint: "market-candles",
+          ok: false, error: `${symbol}: ${grainReason(candles)}`,
+        });
+        throw new Error("wrong candle grain");
+      }
       const upserts = candles.map((c) => ({
         symbol, exchange,
         trade_date: new Date(c.time * 1000).toISOString().slice(0, 10),
         open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume ?? 0,
       }));
-      for (let i = 0; i < upserts.length; i += 500) {
+      // Never write back bars that already live in cold storage — that would
+      // silently re-inflate market_daily_prices past the free-plan budget.
+      const persistable = archiveCutoff ? upserts.filter((u) => u.trade_date > archiveCutoff) : upserts;
+      for (let i = 0; i < persistable.length; i += 500) {
         await svc.from("market_daily_prices")
-          .upsert(upserts.slice(i, i + 500), { onConflict: "symbol,exchange,trade_date" });
+          .upsert(persistable.slice(i, i + 500), { onConflict: "symbol,exchange,trade_date" });
       }
+
       for (const u of upserts) byDate.set(u.trade_date, u as unknown as DailyRow);
     } catch (e) {
       if (byDate.size === 0) throw e;
+
     }
   }
 
-  const rows: OutCandle[] = [...byDate.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([date, r]) => ({
-      time: date,
-      open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close),
-      volume: Number(r.volume ?? 0),
-    }))
-    .filter((c) => Number.isFinite(c.close));
+  const rows: OutCandle[] = sanitizeDaily(
+    [...byDate.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([date, r]) => ({
+        time: date,
+        open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close),
+        volume: Number(r.volume ?? 0),
+      }))
+      .filter((c) => Number.isFinite(c.close)),
+  );
   return { rows, provider: providerName };
+
 }
 
 

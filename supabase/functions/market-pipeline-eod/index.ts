@@ -15,7 +15,7 @@ import {
 import { getServiceProvider } from "../_shared/market/provider.ts";
 
 const CHUNK = 100;
-const CONCURRENCY = 5;
+const CONCURRENCY = 3;
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
@@ -36,6 +36,37 @@ Deno.serve(async (req) => {
 
     const today = istTradeDate();
     const cutoff = `${today}T00:00:00Z`; // one pass per IST day
+
+    // Cheap recovery path: if daily prices have already landed (NSE bhavcopy,
+    // backfill, or another provider run) but scores are behind, rebuild scores
+    // from stored prices first. This avoids burning egress on another full
+    // candle fetch and prevents a cursor from being marked fresh while the
+    // score table remains stale.
+    let localRescored = 0;
+    const [{ data: latestPrice }, { data: latestScore }] = await Promise.all([
+      svc.from("market_daily_prices").select("trade_date").eq("exchange", "NSE")
+        .order("trade_date", { ascending: false }).limit(1).maybeSingle(),
+      svc.from("market_stock_scores").select("trade_date").eq("exchange", "NSE")
+        .order("trade_date", { ascending: false }).limit(1).maybeSingle(),
+    ]);
+    const latestPriceDate = latestPrice?.trade_date as string | undefined;
+    const latestScoreDate = latestScore?.trade_date as string | undefined;
+    if (latestPriceDate && (!latestScoreDate || latestPriceDate > latestScoreDate)) {
+      const { data: rows, error: rescoreErr } = await svc.rpc("market_rescore_latest_from_prices", {
+        _trade_date: latestPriceDate,
+        _limit: 3000,
+      });
+      if (rescoreErr) {
+        await svc.from("market_provider_health").insert({
+          provider: "postgres",
+          endpoint: "market-pipeline-eod",
+          ok: false,
+          error: `price-table rescore failed: ${rescoreErr.message}`,
+        });
+      } else {
+        localRescored = typeof rows === "number" ? rows : 0;
+      }
+    }
 
     const { data: stocks, error } = await svc.from("market_stocks")
       .select("symbol,exchange,yahoo_symbol,sector,market_cap,last_price_sync_at,price_sync_attempts,price_sync_attempts_day")
@@ -97,7 +128,9 @@ Deno.serve(async (req) => {
             close: c.close,
             volume: c.volume,
           }));
-          await svc.from("market_daily_prices").upsert(priceRows, { onConflict: "symbol,exchange,trade_date" });
+          const { error: priceErr } = await svc.from("market_daily_prices")
+            .upsert(priceRows, { onConflict: "symbol,exchange,trade_date" });
+          if (priceErr) throw priceErr;
 
           // v3 — weekly confirmation (resampled from the same 2y daily candles
           // already fetched, no new data source) + advanced signals
@@ -154,7 +187,7 @@ Deno.serve(async (req) => {
           const sw = swingScore({ s: snap, ctx, weekly, adv, liquidity });
           const is = intradayScore({ s: snap, ctx, adv, liquidity, relVolumeSoFar: null, gapPct });
 
-          await svc.from("market_stock_scores").upsert({
+          const { error: scoreErr } = await svc.from("market_stock_scores").upsert({
             symbol: stock.symbol,
             exchange: stock.exchange,
             trade_date: nseTradeDate,
@@ -230,17 +263,19 @@ Deno.serve(async (req) => {
             context_complete: false,
             computed_at: new Date().toISOString(),
           }, { onConflict: "symbol,exchange" });
+          if (scoreErr) throw scoreErr;
 
           // Chart overlays: last 250 points of EMA series
           const tail = candles.slice(-250);
           const offset = candles.length - tail.length;
           const overlay = (series: (number | null)[]) =>
             tail.map((c, i) => ({ t: c.time, v: series[offset + i] }));
-          await svc.from("market_indicators_cache").upsert([
+          const { error: indicatorErr } = await svc.from("market_indicators_cache").upsert([
             { symbol: stock.symbol, exchange: stock.exchange, timeframe: "1D", indicator: "ema20", value: overlay(snap.ema20Series), computed_at: new Date().toISOString() },
             { symbol: stock.symbol, exchange: stock.exchange, timeframe: "1D", indicator: "ema50", value: overlay(snap.ema50Series), computed_at: new Date().toISOString() },
             { symbol: stock.symbol, exchange: stock.exchange, timeframe: "1D", indicator: "ema200", value: overlay(snap.ema200Series), computed_at: new Date().toISOString() },
           ], { onConflict: "symbol,exchange,timeframe,indicator" });
+          if (indicatorErr) throw indicatorErr;
 
           okCount++;
           success = true;
@@ -281,7 +316,7 @@ Deno.serve(async (req) => {
     });
     await Promise.all(workers);
 
-    return jsonResponse(req, { ok: true, processed: stocks.length, succeeded: okCount, failed: failCount, drained: stocks.length < CHUNK });
+    return jsonResponse(req, { ok: true, processed: stocks.length, succeeded: okCount, failed: failCount, local_rescored: localRescored, drained: stocks.length < CHUNK });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }

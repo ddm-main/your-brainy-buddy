@@ -28,6 +28,10 @@ export interface Quote {
   previous_close: number | null;
   change_pct: number | null;
   day_change: number | null;
+  volume?: number | null;
+  day_open?: number | null;
+  day_high?: number | null;
+  day_low?: number | null;
   source?: string | null;
   // Per-quote provider that actually served this row ("kotak" | "yahoo" |
   // "cache"). The Screener overlays intraday values on a row ONLY when this

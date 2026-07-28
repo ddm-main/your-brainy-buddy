@@ -616,6 +616,8 @@ export interface StockInsight {
   holding_period_days: number | null;
   rationale: string;
   risks: string[];
+  // Set when sanitizeAiTrade rewrote an implausible entry/stop/target.
+  plausibility_flags?: string[];
 }
 export function useStockInsight(symbol: string | undefined, exchange = "NSE") {
   return useQuery({
@@ -718,8 +720,9 @@ export function useIndexConstituents(slug: string | null | undefined) {
 
 export interface NewsRow { id: string; headline: string; url: string | null; source: string | null; published_at: string | null }
 export interface CorporateActionRow {
-  id: string; action_type: string; ex_date: string | null; record_date: string | null;
-  details: { subject?: string } | null;
+  id: string; action_type: string; ex_date: string | null;
+  ratio_from: number | null; ratio_to: number | null; amount: number | null;
+  purpose: string | null;
 }
 
 export function useMarketNews(symbol: string | undefined, exchange = "NSE") {
@@ -737,12 +740,15 @@ export function useMarketNews(symbol: string | undefined, exchange = "NSE") {
   });
 }
 
+// Reads `corporate_actions` — the table the NSE sync actually writes to. The
+// old `market_corporate_actions` name never existed in the database, so this
+// panel silently rendered empty while real dividend/split rows sat unread.
 export function useCorporateActions(symbol: string | undefined, exchange = "NSE") {
   return useQuery({
     queryKey: ["market", "corporate-actions", symbol ?? "", exchange],
     queryFn: async (): Promise<CorporateActionRow[]> => {
-      const { data, error } = await supabase.from("market_corporate_actions" as any)
-        .select("id,action_type,ex_date,record_date,details")
+      const { data, error } = await supabase.from("corporate_actions" as any)
+        .select("id,action_type,ex_date,ratio_from,ratio_to,amount,purpose")
         .eq("symbol", symbol).eq("exchange", exchange)
         .order("ex_date", { ascending: false }).limit(10);
       if (error) throw error;
@@ -751,6 +757,7 @@ export function useCorporateActions(symbol: string | undefined, exchange = "NSE"
     enabled: !!symbol,
   });
 }
+
 
 export interface PortfolioSnapshotRow {
   snapshot_date: string;
@@ -780,14 +787,22 @@ export function useSyncNewsAndActions() {
   return useMutation({
     mutationFn: async ({ symbol, exchange }: { symbol: string; exchange: string }) => {
       const body = { symbols: [{ symbol, exchange }] };
-      await Promise.all([
+      // allSettled, not all: a corporate-actions failure must not leave the
+      // panel stuck on "syncing…" when the news half succeeded (and vice
+      // versa). Only surface an error when both halves failed.
+      const results = await Promise.allSettled([
         callMarketFn("market-news-sync", body),
-        exchange === "NSE" ? callMarketFn("market-corporate-actions-sync", body) : Promise.resolve(),
+        exchange === "NSE" ? callMarketFn("market-corporate-actions-sync", body) : Promise.resolve(null),
       ]);
+      const failures = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+      if (failures.length === results.length) {
+        throw failures[0].reason instanceof Error ? failures[0].reason : new Error(String(failures[0].reason));
+      }
     },
-    onSuccess: (_d, { symbol, exchange }) => {
+    onSettled: (_d, _e, { symbol, exchange }) => {
       qc.invalidateQueries({ queryKey: ["market", "news", symbol, exchange] });
       qc.invalidateQueries({ queryKey: ["market", "corporate-actions", symbol, exchange] });
     },
   });
 }
+

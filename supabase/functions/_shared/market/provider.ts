@@ -3,6 +3,8 @@
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { encryptStatementPassword } from "../crypto.ts";
+import { isDailyGrain as hasDailyGrain } from "./candleGuard.ts";
+
 import {
   KOTAK_SETTINGS_COLS,
   type KotakSettings,
@@ -40,6 +42,9 @@ export interface QuoteRow {
   change_abs: number | null;
   change_pct: number | null;
   volume: number | null;
+  day_open?: number | null;
+  day_high?: number | null;
+  day_low?: number | null;
   source: "kotak" | "yahoo" | "cache";
   as_of?: string | null;
   previous_close_as_of?: string | null;
@@ -237,10 +242,39 @@ function resampleCandles(rows: Candle[], factor: number): Candle[] {
   return out;
 }
 
+function rangeSeconds(range: string): number {
+  const YEAR = 365 * 86400;
+  const dayMatch = range.match(/^(\d+)d$/);
+  if (dayMatch) return Number(dayMatch[1]) * 86400;
+  const yearMatch = range.match(/^(\d+)y$/);
+  if (yearMatch) return Number(yearMatch[1]) * YEAR;
+  const direct: Record<string, number> = {
+    "1d": 86400, "5d": 5 * 86400, "7d": 7 * 86400, "30d": 30 * 86400, "60d": 60 * 86400,
+    "1y": YEAR, "2y": 2 * YEAR, "5y": 5 * YEAR, "10y": 10 * YEAR, "max": 40 * YEAR,
+  };
+  return direct[range] ?? 2 * YEAR;
+}
+
+function yahooRangeFor(interval: string, requestedRange: string): string {
+  const maxByInterval: Record<string, string> = {
+    "1m": "7d", "2m": "60d", "5m": "60d", "15m": "60d", "30m": "60d",
+    "60m": "730d", "90m": "60d", "1h": "730d",
+  };
+  const cap = maxByInterval[interval];
+  if (!cap) return requestedRange;
+  return rangeSeconds(requestedRange) > rangeSeconds(cap) ? cap : requestedRange;
+}
+
 // ---------- Provider health logging ----------
 // Lightweight — one row per getQuotes call for whichever provider actually
 // served it, not every internal call. Never let a logging failure affect
 // the actual data path: fire-and-forget, errors swallowed.
+//
+// Disk budget: this table used to grow ~23k rows/day (~7 MB/day) on a 500 MB
+// free-tier database. Failures are always kept (that's what we debug with);
+// successes are sampled, since they only serve as a background heartbeat.
+const HEALTH_SUCCESS_SAMPLE = 0.05;
+
 function logProviderHealth(
   svc: SupabaseClient,
   provider: string,
@@ -249,11 +283,13 @@ function logProviderHealth(
   latencyMs: number,
   error?: string,
 ): void {
+  if (ok && Math.random() > HEALTH_SUCCESS_SAMPLE) return;
   svc.from("market_provider_health").insert({
     provider, endpoint, ok, latency_ms: Math.round(latencyMs),
     error: error ? error.slice(0, 500) : null,
   }).then(() => {}, () => {});
 }
+
 
 // ---------- Yahoo provider ----------
 
@@ -281,6 +317,9 @@ function yahooProvider(svc: SupabaseClient): MarketProvider {
             change_abs: r.change_abs,
             change_pct: r.change_pct,
             volume: r.volume ?? null,
+            day_open: r.day_open ?? null,
+            day_high: r.day_high ?? null,
+            day_low: r.day_low ?? null,
             source: "yahoo" as const,
             as_of: r.as_of ?? null,
             previous_close_as_of: r.prev_close_as_of ?? null,
@@ -299,7 +338,8 @@ function yahooProvider(svc: SupabaseClient): MarketProvider {
         : interval === "1h" ? "60m"
         : interval;
       const factor = interval === "3m" ? 3 : interval === "2h" ? 2 : interval === "4h" ? 4 : 1;
-      const raw = await yahooChartRetry(toYahooSymbol(symbol, exchange), range, yInterval);
+      const safeRange = yahooRangeFor(yInterval, range);
+      const raw = await yahooChartRetry(toYahooSymbol(symbol, exchange), safeRange, yInterval);
       return factor > 1 ? resampleCandles(raw, factor) : raw;
     },
     async getDepth() {
@@ -459,6 +499,9 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
                 change_abs: prevClose ? price - prevClose : null,
                 change_pct: prevClose ? ((price - prevClose) / prevClose) * 100 : null,
                 volume: num(r.volume ?? r.vol_traded_today) || null,
+                day_open: firstNum(r, ["open_price", "ohlc.open", "ohlc.o", "opn_pric", "open", "o"]),
+                day_high: firstNum(r, ["high_price", "ohlc.high", "ohlc.h", "hgh_pric", "high", "h"]),
+                day_low: firstNum(r, ["low_price", "ohlc.low", "ohlc.l", "lw_pric", "low", "l"]),
                 source: "kotak",
                 as_of: parseKotakDate(r),
                 previous_close_as_of: null,
@@ -520,18 +563,7 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       // range like "2y","60d","30d","max"; interval like "1d","1h","15m"
       const now = Math.floor(Date.now() / 1000);
       const YEAR = 365 * 86400;
-      const rangeSec: Record<string, number> = {
-        "1d": 86400, "5d": 5 * 86400, "30d": 30 * 86400, "60d": 60 * 86400,
-        "1y": YEAR, "2y": 2 * YEAR,
-        // Previously missing — any caller requesting "5y"/"10y" (e.g. the
-        // backtester) silently fell through to the `?? 730 * 86400` default
-        // below and got capped at 2 years of Kotak candles with no error.
-        "5y": 5 * YEAR, "10y": 10 * YEAR,
-        // Full listed history. Kotak truncates long spans, so this is fetched
-        // in ≤2y windows below and topped up from Yahoo when it comes back short.
-        "max": 40 * YEAR,
-      };
-      const wanted = rangeSec[range] ?? 2 * YEAR;
+      const wanted = rangeSeconds(range);
       const fromEpoch = now - wanted;
       // Full Kotak interval map — the old fallthrough silently returned daily
       // bars for 1m / 3m / 30m / 2h / 4h / 1w / 1mo, so the UI showed the
@@ -548,11 +580,13 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       const t0 = Date.now();
 
       // Kotak's /charts/v2/history silently truncates long windows, so deep
-      // daily/weekly/monthly history is requested in ≤2-year slices and
-      // merged. Intraday keeps the single-shot request.
+      // history is requested in ≤2-year slices and merged. Tiny intraday
+      // intervals stay short at the caller level; 15m+ can walk back to the
+      // maximum provider history instead of being capped at 30–60 days.
       const fetchKotak = async (): Promise<Candle[]> => {
         const WINDOW = 2 * YEAR;
-        if (!isDailyGrain || wanted <= WINDOW) {
+        const shouldChunk = wanted > WINDOW && (isDailyGrain || kotakInterval === "15" || kotakInterval === "30" || kotakInterval === "60");
+        if (!shouldChunk) {
           return await withKotakSession(svc, s, encryptValue, (ss) =>
             kotakCandles(ss, token, seg, fromEpoch, now, kotakInterval));
         }
@@ -600,13 +634,17 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
           if (covered < Math.min(wanted, 3 * YEAR) * 0.9) {
             try {
               const deep = await yahoo.getOHLCV(symbol, exchange, range, interval);
-              if (deep.length > c.length) {
+              // Only merge a genuinely daily series — Yahoo can answer a deep
+              // daily request with monthly bars, which must never dilute the
+              // Kotak series or reach market_daily_prices.
+              if (deep.length > c.length && hasDailyGrain(deep)) {
                 const merged = new Map<number, Candle>();
                 for (const d of deep) merged.set(d.time, d);
                 for (const k of c) merged.set(k.time, k); // Kotak wins on overlap
                 c = [...merged.values()].sort((a, b) => a.time - b.time);
               }
             } catch { /* keep the Kotak series */ }
+
           }
         }
         logProviderHealth(svc, "kotak_neo", "getOHLCV", true, Date.now() - t0);

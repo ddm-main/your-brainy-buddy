@@ -241,6 +241,13 @@ Deno.serve(async (req) => {
         // "Volume" readout. Kotak surfaces `vol_traded_today`; Yahoo
         // surfaces `regularMarketVolume`. Null when neither has coverage.
         volume: (q as any).volume ?? null,
+        // Current session's open/high/low straight from the provider. The
+        // Quote panel previously derived these from the last daily candle,
+        // which is both a session behind and vulnerable to the duplicate
+        // bars the candle cache carries.
+        day_open: stale || dayUnavailable ? null : (q as any).day_open ?? null,
+        day_high: stale || dayUnavailable ? null : (q as any).day_high ?? null,
+        day_low: stale || dayUnavailable ? null : (q as any).day_low ?? null,
         source: q.source,
         provider: (q.source === "cache" ? "cache" : String(q.source ?? provider.name)) as string,
         as_of: q.as_of ?? null,

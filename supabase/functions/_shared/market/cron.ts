@@ -75,3 +75,15 @@ export async function isTradingHoliday(
     .select("id").eq("holiday_date", dateStr).eq("exchange", exchange).maybeSingle();
   return !!data;
 }
+
+// Free-plan bandwidth brake. The nightly governor flips
+// public.system_quota_state.low_bandwidth when the project is close to a
+// Supabase free-tier ceiling; non-essential syncs should no-op until the next
+// billing cycle rather than push a meter past 80%.
+export async function lowBandwidthMode(
+  svc: { from: (t: string) => any },
+): Promise<boolean> {
+  const { data } = await svc.from("system_quota_state")
+    .select("low_bandwidth").limit(1).maybeSingle();
+  return data?.low_bandwidth === true;
+}
