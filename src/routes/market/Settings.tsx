@@ -1,5 +1,5 @@
 // Market → Config — per-user broker connection lives here. Shared data providers
-// and the pipeline stay admin-managed under Admin Panel → System Data.
+// and the pipeline stay admin-managed under Admin Panel → Market Config.
 import { Link } from "react-router-dom";
 import { LineChart } from "lucide-react";
 import BrokerConnectPanel from "@/components/market/BrokerConnectPanel";
@@ -21,7 +21,7 @@ export default function MarketSettings() {
             fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.16em", textTransform: "uppercase",
           }}
         >
-          <LineChart size={12} /> System Data →
+          <LineChart size={12} /> Market Config →
         </Link>
       )}
       <SystemFeedPanel />

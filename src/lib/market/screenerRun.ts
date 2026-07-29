@@ -15,6 +15,10 @@ export interface ScreenerRow {
   symbol: string;
   exchange: string;
   trade_date: string | null;
+  // Session the technical indicators belong to. Equals trade_date whenever the
+  // score row was computed for the displayed price session; a different (or
+  // null) value means the indicators lag the price and tech filters skip it.
+  score_trade_date: string | null;
   company_name: string | null;
   sector: string | null;
   sub_sector: string | null;
@@ -132,7 +136,8 @@ async function fetchIndexMemberSet(indexKey: string): Promise<Set<string>> {
 // columns from the wire, ~30% smaller responses than the previous `select("*")`.
 const SCREENER_COLUMNS = [
   "symbol","exchange","company_name","sector","sub_sector","industry","market_cap",
-  "is_nifty500","instrument_type","trade_date","close","previous_close","change_abs","change_pct","volume",
+  "is_nifty500","instrument_type","trade_date","score_trade_date","close","previous_close","change_abs",
+  "change_pct","change_pct_raw","volume","is_liquid_tradable","swing_score","intraday_score",
   "rel_volume","vol_avg30","vol_gt_avg30","ema20","ema50","ema100","ema200","rsi14","macd","macd_signal",
   "macd_hist","adx14","atr14","atr_pct","bb_upper","bb_lower","bb_width",
   "bb_squeeze","high_52w","low_52w","pct_from_52w_high","above_ema200",
@@ -199,6 +204,7 @@ function toScreenerRow(s: any, idxSets: { NIFTY50: Set<string>; BANKNIFTY: Set<s
     symbol: s.symbol,
     exchange: s.exchange,
     trade_date: s.trade_date ?? null,
+    score_trade_date: s.score_trade_date ?? null,
     sector:       s.sector ?? null,
     sub_sector:   s.sub_sector ?? s.industry ?? s.sector ?? null,
     company_name: s.company_name ?? null,
@@ -215,12 +221,10 @@ function toScreenerRow(s: any, idxSets: { NIFTY50: Set<string>; BANKNIFTY: Set<s
     previous_close:    num(s.previous_close),
     change_abs:        num(s.change_abs),
     change_pct:        num(s.change_pct),
-    change_pct_raw:    (() => {
-      const close = num(s.close ?? s.ltp);
-      const prev = num(s.previous_close);
-      if (close == null || prev == null || prev <= 0) return num(s.change_pct);
-      return ((close - prev) / prev) * 100;
-    })(),
+    // Served by the view from the same session's close/prev_close that
+    // `change_pct` rounds — never re-derived here, so the number the filters
+    // evaluate and the number the table renders can't drift apart.
+    change_pct_raw:    num(s.change_pct_raw) ?? num(s.change_pct),
 
     pe:                num(s.pe_ttm ?? s.pe),
     pb:                num(s.pb),

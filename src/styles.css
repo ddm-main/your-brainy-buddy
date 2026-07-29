@@ -16,6 +16,25 @@
   --warn: #ffb84d;
   --danger: #ff5f6d;
   --ok: #6bffb0;
+  /* Chart semantic tokens (see .lovable/plan.md F#21, #52). Everything
+     candle/volume/legend colour-related must go through these so the chart
+     stays theme-aware and never hard-codes hex again. */
+  --chart-up: var(--ok);
+  --chart-down: var(--danger);
+  --chart-up-fill: rgba(107, 255, 176, 0.55);
+  --chart-down-fill: rgba(255, 95, 109, 0.55);
+  --chart-up-edge: rgba(107, 255, 176, 0.35);
+  --chart-down-edge: rgba(255, 95, 109, 0.35);
+  --chart-neutral: #f7c948;
+  --chart-neutral-edge: rgba(247, 201, 72, 0.35);
+  --chart-palette-1: #35d6ed;
+  --chart-palette-2: #7fe9ff;
+  --chart-palette-3: #ffb85c;
+  --chart-palette-4: #5cff9d;
+  --chart-palette-5: #ff5c8a;
+  --chart-palette-6: #b85cff;
+  --chart-palette-7: #5c8aff;
+  --chart-palette-8: #e9ff5c;
   --jarvis-amber: #ff8a1a;
   --jarvis-amber-hot: #ffd479;
   --jarvis-amber-glow: rgba(255, 138, 26, 0.35);
@@ -1595,6 +1614,30 @@ body.is-fs-chart .hud-voicebar { display: none !important; }
   font-size: 9px;
   letter-spacing: 0.06em;
 }
+
+/* Inline segmented timeframe bar (industry standard: TV, Kite, Upstox). */
+.mk-tf-seg {
+  display: inline-flex; align-items: stretch;
+  border: 1px solid var(--edge); border-radius: var(--radius-hud);
+  background: rgba(5,15,25,0.5);
+  overflow: hidden; flex: 0 0 auto;
+}
+.mk-tf-btn {
+  padding: 4px 9px;
+  background: transparent;
+  border: 0; border-right: 1px solid var(--edge);
+  color: var(--text-dim);
+  font-family: var(--font-hud); font-size: 10px; letter-spacing: 0.08em;
+  text-transform: uppercase; cursor: pointer;
+  transition: background 120ms, color 120ms;
+}
+.mk-tf-btn:last-child { border-right: 0; }
+.mk-tf-btn:hover { background: rgba(53,214,237,0.08); color: var(--accent); }
+.mk-tf-btn.is-on {
+  background: rgba(53,214,237,0.16); color: var(--accent);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.mk-tf-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
 
 /* Menu popover */
 .mk-menu-panel {

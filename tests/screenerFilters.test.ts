@@ -221,3 +221,62 @@ describe("coverageOf — denominator is the scoped set, numerator is fields actu
     expect(c.has).toBe(2);
   });
 });
+
+describe("catalogue-edge bounds are open-ended", () => {
+  const row = (over: Record<string, any>) => ({
+    symbol: "X", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", ...over,
+  });
+
+  it("a 1D Return filter left at the catalogue range keeps a +25% mover", () => {
+    const af: ActiveFilter = { id: "change_pct", min: -20, max: 20 };
+    expect(filterMatches(row({ change_pct_raw: 25 }), af, "2026-07-22")).toBe(true);
+    expect(filterMatches(row({ change_pct_raw: -32 }), af, "2026-07-22")).toBe(true);
+  });
+
+  it("a Market Cap filter at the catalogue max keeps a larger company", () => {
+    const af: ActiveFilter = { id: "market_cap", min: 0, max: 2_500_000 };
+    expect(filterMatches(row({ market_cap: 4_000_000 }), af, "2026-07-22")).toBe(true);
+  });
+
+  it("a narrowed max is still a hard cap", () => {
+    const af: ActiveFilter = { id: "volume", min: 100_000, max: 1_000_000 };
+    expect(filterMatches(row({ volume: 4_278_354 }), af, "2026-07-22")).toBe(false);
+    expect(filterMatches(row({ volume: 500_000 }), af, "2026-07-22")).toBe(true);
+  });
+
+  it("a narrowed min is still a hard floor", () => {
+    const af: ActiveFilter = { id: "change_pct", min: 5, max: 20 };
+    expect(filterMatches(row({ change_pct_raw: 2 }), af, "2026-07-22")).toBe(false);
+  });
+
+  it("a full-range filter doesn't count rows as excluded-by-missing-data", () => {
+    const active: ActiveFilter[] = [{ id: "rsi", min: 0, max: 100 }];
+    expect(excludedByMissingData([rowWithEodNoTech, rowWithNoEod], active)).toBe(0);
+  });
+});
+
+// Regression: the screener view used to serve `change_pct` from a stale
+// `change_pct_adjusted` column while price/prev_close came from a different
+// session, so a row could pass a "≥5%" filter and render as +1.21%. The view
+// now derives both from one session; these lock the filter side of that.
+describe("display value and filtered value come from the same session", () => {
+  const session = "2026-07-29";
+
+  it("filters on change_pct_raw, which the view derives from close/prev_close", () => {
+    const prudent = {
+      symbol: "PRUDENT", exchange: "NSE", instrument_type: "EQ", trade_date: session,
+      ltp: 3089.5, previous_close: 2870, change_pct: 7.65, change_pct_raw: 7.648083,
+    };
+    expect(filterMatches(prudent, { id: "change_pct", min: 5 }, session)).toBe(true);
+    expect(Math.abs(prudent.change_pct - Math.round(prudent.change_pct_raw * 100) / 100)).toBeLessThan(0.01);
+  });
+
+  it("a row one session behind the latest price date is excluded from a return filter", () => {
+    const lagging = {
+      symbol: "ASHIKA", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-28",
+      ltp: 490.3, previous_close: 429.65, change_pct: 14.12, change_pct_raw: 14.116,
+    };
+    expect(filterMatches(lagging, { id: "change_pct", min: 5 }, session)).toBe(false);
+  });
+});
+

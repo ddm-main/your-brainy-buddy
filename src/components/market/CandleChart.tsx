@@ -8,6 +8,7 @@ import {
   createSeriesMarkers,
   AreaSeries,
   BarSeries,
+  BaselineSeries,
   CandlestickSeries,
   HistogramSeries,
   LineSeries,
@@ -31,10 +32,33 @@ import {
 import { defByType, studyLabel, type Study } from "@/lib/market/indicatorRegistry";
 import { ChartLegend, type LegendRow } from "@/components/market/ChartLegend";
 
-export type ChartType = "candles" | "bars" | "line" | "area";
+export type ChartType = "candles" | "bars" | "line" | "area" | "heikin_ashi" | "baseline";
 
-const UP = "#6bffb0";
-const DOWN = "#ff5f6d";
+// Chart colour tokens — resolved once from CSS custom properties so the whole
+// canvas stays theme-aware. lightweight-charts wants concrete strings, not
+// var(...) references, so we read them at chart-build time (see readTokens()).
+function readTokens() {
+  if (typeof window === "undefined") {
+    return {
+      up: "#6bffb0", down: "#ff5f6d",
+      upFill: "rgba(107,255,176,0.55)", downFill: "rgba(255,95,109,0.55)",
+      neutral: "#f7c948",
+    };
+  }
+  const cs = getComputedStyle(document.body);
+  const g = (name: string, fallback: string) => (cs.getPropertyValue(name).trim() || fallback);
+  return {
+    up: g("--chart-up", "#6bffb0"),
+    down: g("--chart-down", "#ff5f6d"),
+    upFill: g("--chart-up-fill", "rgba(107,255,176,0.55)"),
+    downFill: g("--chart-down-fill", "rgba(255,95,109,0.55)"),
+    neutral: g("--chart-neutral", "#f7c948"),
+  };
+}
+// Legacy inline refs for the render header — read once per render.
+const TOKENS_FALLBACK = { up: "#6bffb0", down: "#ff5f6d" };
+const UP = TOKENS_FALLBACK.up;
+const DOWN = TOKENS_FALLBACK.down;
 
 // ---- per-study compute (pure) ----
 type Computed =
@@ -163,8 +187,8 @@ export function CandleChart({
   onToggleStudy?: (id: string) => void;
   onEditStudy?: (id: string) => void;
   onRemoveStudy?: (id: string) => void;
-  /** Primary data provider that served the candles ("kotak_neo" | "yahoo"). Renders a small provenance chip in the header. */
-  source?: "kotak_neo" | "yahoo" | null;
+  /** Primary data provider that served the candles. */
+  source?: "kotak_neo" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none" | null;
   /** Initial visible window in bars (newest-first). `null` fits the whole
    * series. The full series stays loaded either way — this only sets the
    * viewport, so scrolling left still reveals the older history. */
@@ -383,10 +407,31 @@ export function CandleChart({
       });
 
     // ---- price series (pane 0) ----
+    const tk = readTokens();
     let priceSeries: ISeriesApi<any>;
+    // Heikin-Ashi: smoothed candles computed from raw OHLC. Uses the same
+    // CandlestickSeries — only the input values change. The live-tick effect
+    // still updates the raw last bar; the HA transform is a display-only
+    // aggregation, so during a live session the last HA bar drifts slightly
+    // until the next full refetch. Acceptable tradeoff — TV behaves the same.
+    let displayData = data;
+    if (chartType === "heikin_ashi") {
+      const ha: typeof data = [];
+      for (let i = 0; i < data.length; i++) {
+        const c = data[i];
+        const close = (c.open + c.high + c.low + c.close) / 4;
+        const open = i === 0
+          ? (c.open + c.close) / 2
+          : (ha[i - 1].open + ha[i - 1].close) / 2;
+        const high = Math.max(c.high, open, close);
+        const low = Math.min(c.low, open, close);
+        ha.push({ ...c, open, high, low, close });
+      }
+      displayData = ha;
+    }
     if (chartType === "bars") {
-      priceSeries = chart.addSeries(BarSeries, { upColor: UP, downColor: DOWN, thinBars: false });
-      priceSeries.setData(data.map((c) => ({ time: toTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })));
+      priceSeries = chart.addSeries(BarSeries, { upColor: tk.up, downColor: tk.down, thinBars: false });
+      priceSeries.setData(displayData.map((c) => ({ time: toTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })));
     } else if (chartType === "line") {
       // Line/area plot a single value per bar, so a crosshair marker dot on the
       // series is the industry-standard readout (candles/bars don't use one).
@@ -395,21 +440,33 @@ export function CandleChart({
         crosshairMarkerVisible: true, crosshairMarkerRadius: 3,
         crosshairMarkerBorderColor: "#35d6ed", crosshairMarkerBackgroundColor: "#041016",
       });
-      priceSeries.setData(data.map((c) => ({ time: toTime(c.time), value: c.close })));
+      priceSeries.setData(displayData.map((c) => ({ time: toTime(c.time), value: c.close })));
     } else if (chartType === "area") {
       priceSeries = chart.addSeries(AreaSeries, {
         lineColor: "#35d6ed", lineWidth: 2, topColor: "rgba(53,214,237,0.25)", bottomColor: "rgba(53,214,237,0.02)",
         crosshairMarkerVisible: true, crosshairMarkerRadius: 3,
         crosshairMarkerBorderColor: "#35d6ed", crosshairMarkerBackgroundColor: "#041016",
       });
-      priceSeries.setData(data.map((c) => ({ time: toTime(c.time), value: c.close })));
+      priceSeries.setData(displayData.map((c) => ({ time: toTime(c.time), value: c.close })));
 
-    } else {
-      priceSeries = chart.addSeries(CandlestickSeries, {
-        upColor: UP, downColor: DOWN, borderUpColor: UP, borderDownColor: DOWN,
-        wickUpColor: "rgba(107,255,176,0.6)", wickDownColor: "rgba(255,95,109,0.6)",
+    } else if (chartType === "baseline") {
+      // Baseline: split colouring above/below the series' own midpoint. TV/Kite
+      // both offer this as a "trend visualiser". Base value defaults to the
+      // mid of visible range — same behaviour as lightweight-charts default.
+      priceSeries = chart.addSeries(BaselineSeries, {
+        topLineColor: tk.up, topFillColor1: tk.upFill, topFillColor2: "rgba(107,255,176,0.02)",
+        bottomLineColor: tk.down, bottomFillColor1: tk.downFill, bottomFillColor2: "rgba(255,95,109,0.02)",
+        lineWidth: 2,
+        crosshairMarkerVisible: true, crosshairMarkerRadius: 3,
       });
-      priceSeries.setData(data.map((c) => ({ time: toTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })));
+      priceSeries.setData(displayData.map((c) => ({ time: toTime(c.time), value: c.close })));
+    } else {
+      // "candles" and "heikin_ashi" — same series, different input data.
+      priceSeries = chart.addSeries(CandlestickSeries, {
+        upColor: tk.up, downColor: tk.down, borderUpColor: tk.up, borderDownColor: tk.down,
+        wickUpColor: tk.upFill, wickDownColor: tk.downFill,
+      });
+      priceSeries.setData(displayData.map((c) => ({ time: toTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })));
     }
     priceSeries.applyOptions({ priceLineVisible: sPriceLine, lastValueVisible: sPriceLine });
     priceSeriesRef.current = priceSeries;
@@ -603,7 +660,7 @@ export function CandleChart({
         return {
           time: toTime(cc.time),
           value: cc.volume,
-          color: up ? "rgba(107,255,176,0.55)" : "rgba(255,95,109,0.55)",
+          color: up ? tk.upFill : tk.downFill,
         };
       }));
       volumeSeriesRef.current = vol;
@@ -621,14 +678,14 @@ export function CandleChart({
       if (c.g === "single") {
         if (c.hist) {
           const h = chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: true }, pane);
-          h.setData(data.flatMap((cc, i) => (c.line[i] != null ? [{ time: toTime(cc.time), value: c.line[i] as number, color: (c.line[i] as number) >= 0 ? "rgba(107,255,176,0.5)" : "rgba(255,95,109,0.5)" }] : [])));
+          h.setData(data.flatMap((cc, i) => (c.line[i] != null ? [{ time: toTime(cc.time), value: c.line[i] as number, color: (c.line[i] as number) >= 0 ? tk.upFill : tk.downFill }] : [])));
         } else {
           const s = paneLine(c.line, col[0], pane, w);
           (c.guides ?? []).forEach((g) => guide(s, g));
         }
       } else if (c.g === "macd") {
         const h = chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, pane);
-        h.setData(data.flatMap((cc, i) => (c.hist[i] != null ? [{ time: toTime(cc.time), value: c.hist[i] as number, color: (c.hist[i] as number) >= 0 ? "rgba(107,255,176,0.5)" : "rgba(255,95,109,0.5)" }] : [])));
+        h.setData(data.flatMap((cc, i) => (c.hist[i] != null ? [{ time: toTime(cc.time), value: c.hist[i] as number, color: (c.hist[i] as number) >= 0 ? tk.upFill : tk.downFill }] : [])));
         paneLine(c.macd, col[0], pane, w);
         paneLine(c.signal, col[1], pane, w);
       } else if (c.g === "dual") {
@@ -724,7 +781,7 @@ export function CandleChart({
       };
       liveBarRef.current = fresh;
       try {
-        if (chartType === "line" || chartType === "area") {
+        if (chartType === "line" || chartType === "area" || chartType === "baseline") {
           series.update({ time: fresh.seriesTime, value: close });
         } else {
           series.update({ time: fresh.seriesTime, open: fresh.open, high: fresh.high, low: fresh.low, close: fresh.close });
@@ -737,7 +794,7 @@ export function CandleChart({
     const updated = { ...base, high: Math.max(base.high, close), low: Math.min(base.low, close), close, volume: nextVol };
     liveBarRef.current = updated;
     if (livePrice != null && Number.isFinite(livePrice)) {
-      if (chartType === "line" || chartType === "area") {
+      if (chartType === "line" || chartType === "area" || chartType === "baseline") {
         series.update({ time: updated.seriesTime, value: close });
       } else {
         series.update({ time: updated.seriesTime, open: updated.open, high: updated.high, low: updated.low, close: updated.close });
@@ -749,7 +806,7 @@ export function CandleChart({
         vol.update({
           time: updated.seriesTime,
           value: updated.volume,
-          color: updated.close >= updated.open ? "rgba(107,255,176,0.55)" : "rgba(255,95,109,0.55)",
+          color: updated.close >= updated.open ? readTokens().upFill : readTokens().downFill,
         } as any);
       } catch { /* noop */ }
     }
@@ -792,7 +849,7 @@ export function CandleChart({
       // so the legend colour matches what the user sees on the chart.
       let swatch = study.colors[0];
       if (c.g === "single" && c.hist && v != null) {
-        swatch = (v as number) >= 0 ? "#6bffb0" : "#ff5f6d";
+        swatch = (v as number) >= 0 ? "var(--chart-up)" : "var(--chart-down)";
       }
       rows.push({
         id: study.id,
@@ -865,22 +922,38 @@ export function CandleChart({
           No data for this range
         </div>
       )}
-      {source && (
-        <div
-          title={source === "kotak_neo" ? "Kotak Neo — live" : "Yahoo Finance — delayed ~15m"}
-          style={{
-            position: "absolute", top: 4, right: 8, zIndex: 3, pointerEvents: "none",
-            fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.12em",
-            textTransform: "uppercase",
-            color: source === "kotak_neo" ? "#6bffb0" : "#f7c948",
-            background: "rgba(4,16,22,0.6)",
-            border: `1px solid ${source === "kotak_neo" ? "rgba(107,255,176,0.35)" : "rgba(247,201,72,0.35)"}`,
-            padding: "1px 6px", borderRadius: 2,
-          }}
-        >
-          {source === "kotak_neo" ? "kotak · live" : "yahoo · delayed"}
-        </div>
-      )}
+      {source && (() => {
+        // Tell the truth about provenance: only a Kotak read during/after the
+        // session is "live". Yahoo is delayed, cached bars are not a fresh
+        // read at all, and "none" means the broker gave us nothing.
+        const chip = source === "kotak_neo"
+          ? { text: "kotak · live", tone: "var(--chart-up)", edge: "var(--chart-up-edge)", title: "Kotak Neo — live" }
+          : source === "yahoo"
+          ? { text: "yahoo · delayed", tone: "var(--chart-neutral)", edge: "var(--chart-neutral-edge)", title: "Yahoo Finance — delayed ~15m" }
+          : source === "cache"
+          ? { text: "cached", tone: "var(--chart-neutral)", edge: "var(--chart-neutral-edge)", title: "Stored bars — no fresh broker read on this request" }
+          : source === "quote"
+          ? { text: "quote · live", tone: "var(--chart-up)", edge: "var(--chart-up-edge)", title: "Live Kotak quote — historical candles route is unavailable" }
+          : source === "quote_delayed"
+          ? { text: "quote · delayed", tone: "var(--chart-neutral)", edge: "var(--chart-neutral-edge)", title: "Seeded from a delayed quote — Kotak is unavailable" }
+          : { text: "no live feed", tone: "var(--danger)", edge: "var(--chart-down-edge)", title: "Kotak Neo is unavailable — no live data is being substituted" };
+        return (
+          <div
+            title={chip.title}
+            style={{
+              position: "absolute", top: 4, right: 8, zIndex: 3, pointerEvents: "none",
+              fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: chip.tone,
+              background: "rgba(4,16,22,0.6)",
+              border: `1px solid ${chip.edge}`,
+              padding: "1px 6px", borderRadius: 2,
+            }}
+          >
+            {chip.text}
+          </div>
+        );
+      })()}
       {l && (
         <div style={{
           position: "absolute", top: 4, left: 6, zIndex: 3, pointerEvents: "none",

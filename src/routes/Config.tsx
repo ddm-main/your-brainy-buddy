@@ -15,7 +15,7 @@ const TABS = [
   { to: "/config/email", label: "Email", adminOnly: false },
   { to: "/config/finance", label: "Finance", adminOnly: false },
   { to: "/config/projects", label: "Projects", adminOnly: false },
-  { to: "/config/system-data", label: "System Data", adminOnly: true },
+  { to: "/config/system-data", label: "Market Config", adminOnly: true },
   { to: "/config/admin", label: "Admin", adminOnly: true },
 ] as { to: string; label: string; exact?: boolean; adminOnly: boolean }[];
 
@@ -56,6 +56,8 @@ export default function Config() {
             <Route path="projects" element={<ProjectsConfig />} />
             
             {isAdmin && <Route path="system-data" element={<SystemDataConfig />} />}
+            {/* Friendlier alias for the renamed section; old links keep working. */}
+            {isAdmin && <Route path="market" element={<SystemDataConfig />} />}
             {isAdmin && <Route path="admin" element={<AdminConfig />} />}
           </Routes>
         </Suspense>

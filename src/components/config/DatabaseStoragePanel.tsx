@@ -1,10 +1,6 @@
 // Free-plan quota panel — keeps every Supabase free-tier meter under 80%.
-//
-// Four sections are metered by Supabase: database (500 MB), file storage
-// (1 GB), egress (5 GB / cycle) and monthly active users (50k). The governor
-// (public.run_daily_maintenance, twice daily) prunes, archives cold price
-// history into file storage, and escalates in three bands: normal below
-// 380 MB, aggressive above it, emergency above 430 MB.
+// Compact readout: bars for the metered sections that actually report data,
+// the archive drain progress, and the largest tables.
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import HudPanel from "@/components/hud/HudPanel";
@@ -12,7 +8,7 @@ import { Btn, Chip } from "@/components/hud/HudControls";
 import { supabase } from "@/integrations/supabase/client";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { HardDrive, Trash2, Archive } from "lucide-react";
+import { Trash2, Archive } from "lucide-react";
 
 const SAFE_PCT = 80;
 
@@ -21,8 +17,6 @@ type QuotaReport = {
   db_limit_bytes: number;
   storage_bytes: number;
   storage_limit_bytes: number;
-  egress_limit_bytes: number;
-  buckets: { name: string; objects: number; bytes: number }[];
   tables: { name: string; bytes: number }[];
   quota: {
     egress_bytes?: number;
@@ -32,12 +26,16 @@ type QuotaReport = {
   } | null;
 };
 
-type MaintenanceRow = {
-  ran_at: string;
-  mode: string;
-  total_deleted: number;
-  size_bytes: number | null;
-  duration_ms: number | null;
+type Coverage = {
+  archived: number;
+  universe: number;
+  archived_bars: number;
+  archived_bytes: number;
+  pending: number;
+  last_maintenance: {
+    ran_at: string; mode: string; total_deleted: number;
+    size_bytes: number | null; duration_ms: number | null;
+  } | null;
 };
 
 function human(bytes: number): string {
@@ -51,29 +49,29 @@ function toneFor(pct: number): "ok" | "warn" | "err" {
   return "ok";
 }
 
-function QuotaBar({ label, used, limit, note }: { label: string; used: number | null; limit: number; note?: string }) {
-  const known = used != null;
-  const pct = known ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+function QuotaBar({ label, used, limit, suffix }: {
+  label: string; used: number; limit: number; suffix?: string;
+}) {
+  const pct = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
   const tone = toneFor(pct);
   return (
-    <div style={{ marginBottom: 10 }}>
+    <div style={{ marginBottom: 6 }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, fontSize: 11, color: "var(--text-dim)" }}>
         <span className="hud-label" style={{ color: "var(--text-muted)" }}>{label}</span>
+        {suffix ? <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{suffix}</span> : null}
         <span style={{ marginLeft: "auto", fontFamily: "var(--font-hud)", color: "var(--text)" }}>
-          {known ? `${human(used!)} / ${human(limit)}` : `— / ${human(limit)}`}
+          {human(used)} / {human(limit)}
         </span>
-        <Chip tone={known ? tone : "warn"}>{known ? `${pct}%` : "n/a"}</Chip>
+        <Chip tone={tone}>{pct}%</Chip>
       </div>
-      <div style={{ marginTop: 4, height: 6, background: "rgba(255,255,255,0.06)", border: "1px solid var(--edge)", position: "relative" }}>
+      <div style={{ marginTop: 3, height: 5, background: "rgba(255,255,255,0.06)", border: "1px solid var(--edge)", position: "relative" }}>
         <div style={{
           height: "100%",
           width: `${pct}%`,
           background: tone === "err" ? "var(--danger)" : tone === "warn" ? "var(--warn, var(--accent))" : "var(--accent)",
         }} />
-        {/* 80% safety line */}
         <span style={{ position: "absolute", left: `${SAFE_PCT}%`, top: -2, bottom: -2, width: 1, background: "var(--danger)", opacity: 0.6 }} />
       </div>
-      {note ? <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 3 }}>{note}</div> : null}
     </div>
   );
 }
@@ -82,6 +80,11 @@ export default function DatabaseStoragePanel() {
   const push = useUi((s) => s.push);
   const qc = useQueryClient();
   const [busy, setBusy] = useState<null | "clean" | "archive">(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const { data: report, isLoading } = useQuery({
     queryKey: ["system", "quota-report"],
@@ -94,38 +97,12 @@ export default function DatabaseStoragePanel() {
     staleTime: 60_000,
   });
 
-  const { data: last } = useQuery({
-    queryKey: ["system", "maintenance-log"],
-    queryFn: async () => {
-      const { data, error } = await (supabase as any)
-        .from("system_maintenance_log")
-        .select("ran_at,mode,total_deleted,size_bytes,duration_ms")
-        .order("ran_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (error) throw error;
-      return data as MaintenanceRow | null;
-    },
-    staleTime: 60_000,
-  });
-
   const { data: coverage } = useQuery({
     queryKey: ["system", "archive-coverage"],
     queryFn: async () => {
       const { data, error } = await (supabase as any).rpc("archive_coverage");
       if (error) throw error;
-      return data as {
-        archived: number;
-        universe: number;
-        archived_bars: number;
-        archived_bytes: number;
-        pending: number;
-        last_maintenance: {
-          ran_at: string; mode: string; total_deleted: number;
-          size_bytes: number; duration_ms: number;
-        } | null;
-      };
-
+      return data as Coverage;
     },
     staleTime: 60_000,
   });
@@ -141,7 +118,7 @@ export default function DatabaseStoragePanel() {
     } catch (e) {
       push(toSafeError(e, "Cleanup failed").message, "err");
     } finally {
-      setBusy(null);
+      if (mounted.current) setBusy(null);
     }
   };
 
@@ -156,20 +133,23 @@ export default function DatabaseStoragePanel() {
     } catch (e) {
       push(toSafeError(e, "Archive failed").message, "err");
     } finally {
-      setBusy(null);
+      if (mounted.current) setBusy(null);
     }
   };
 
+  const dbBytes = report?.db_bytes != null ? Number(report.db_bytes) : 0;
+  const dbLimit = report?.db_limit_bytes != null ? Number(report.db_limit_bytes) : 500 * 1024 * 1024;
+  const storeBytes = report?.storage_bytes != null ? Number(report.storage_bytes) : 0;
+  const storeLimit = report?.storage_limit_bytes != null ? Number(report.storage_limit_bytes) : 1024 ** 3;
+  const dbPct = dbLimit > 0 ? Math.round((dbBytes / dbLimit) * 100) : 0;
+  const storePct = storeLimit > 0 ? Math.round((storeBytes / storeLimit) * 100) : 0;
+  const worst = Math.max(dbPct, storePct);
+  const tables = (report?.tables ?? []).slice(0, 6);
+  const biggest = tables[0]?.bytes ?? 1;
 
-  const dbBytes = report?.db_bytes ?? 0;
-  const dbLimit = report?.db_limit_bytes ?? 500 * 1024 * 1024;
-  const storeBytes = report?.storage_bytes ?? 0;
-  const storeLimit = report?.storage_limit_bytes ?? 1024 ** 3;
-  const egressLimit = report?.egress_limit_bytes ?? 5 * 1024 ** 3;
-  const egressBytes = report?.quota?.egress_bytes ? Number(report.quota.egress_bytes) : null;
-  const dbPct = Math.round((dbBytes / dbLimit) * 100);
-  const worst = Math.max(dbPct, Math.round((storeBytes / storeLimit) * 100));
-  const biggest = report?.tables?.[0]?.bytes ?? 1;
+  const archivePct = coverage?.universe ? Math.min(100, Math.round((coverage.archived / coverage.universe) * 100)) : 0;
+  const fullyArchived = !!coverage && coverage.universe > 0 && coverage.archived >= coverage.universe;
+  const lastRun = coverage?.last_maintenance ?? null;
 
   // Warn once per session when any metered section crosses the 80% line.
   const warnedRef = useRef(false);
@@ -182,8 +162,6 @@ export default function DatabaseStoragePanel() {
     if (worst < SAFE_PCT) warnedRef.current = false;
   }, [report, worst, push]);
 
-
-
   const rowStyle: React.CSSProperties = {
     display: "grid",
     gridTemplateColumns: "1fr auto",
@@ -191,80 +169,58 @@ export default function DatabaseStoragePanel() {
     alignItems: "center",
     fontSize: 11,
     color: "var(--text-dim)",
-    padding: "3px 0",
+    padding: "1px 0",
   };
 
   return (
     <HudPanel
-      title="Free-Plan Quota"
+      title="Storage & Quota"
       index="QTA"
       live={isLoading ? "warn" : worst >= SAFE_PCT ? "err" : "ok"}
       bodyClass="overflow-visible"
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-          Target: every section under {SAFE_PCT}%
-        </span>
-        <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+      actions={
+        <span style={{ display: "flex", gap: 6 }}>
           <Btn size="sm" onClick={archiveNow} disabled={busy !== null}>
-            <Archive size={11} style={{ marginRight: 4 }} />{busy === "archive" ? "archiving…" : "Archive cold history"}
+            <Archive size={11} style={{ marginRight: 4 }} />{busy === "archive" ? "archiving…" : "Archive"}
           </Btn>
           <Btn size="sm" onClick={runNow} disabled={busy !== null}>
-            <Trash2 size={11} style={{ marginRight: 4 }} />{busy === "clean" ? "cleaning…" : "Run cleanup now"}
+            <Trash2 size={11} style={{ marginRight: 4 }} />{busy === "clean" ? "cleaning…" : "Clean"}
           </Btn>
         </span>
-      </div>
-
-      <QuotaBar label="Database" used={dbBytes} limit={dbLimit} note="Hot data only — bars past the hot window live in file storage." />
+      }
+    >
+      <QuotaBar label="Database" used={dbBytes} limit={dbLimit} />
       <QuotaBar
         label="File storage"
         used={storeBytes}
         limit={storeLimit}
-        note={`${coverage?.archived ?? 0} / ${coverage?.universe ?? 0} symbols archived · statements + cold price history`}
+        suffix={coverage ? `${coverage.archived_bars.toLocaleString()} bars archived` : undefined}
       />
-      <QuotaBar label="Egress (cycle)" used={egressBytes} limit={egressLimit} note="Recorded by the governor; check Supabase for the live figure." />
-      <QuotaBar label="Monthly active users" used={null} limit={50_000} note="Single-operator app — never near the cap." />
 
       {coverage ? (
-        <div style={{ marginTop: 2, marginBottom: 8 }}>
+        <div style={{ marginTop: 2, marginBottom: 6 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 8, fontSize: 11, color: "var(--text-dim)" }}>
             <span className="hud-label" style={{ color: "var(--text-muted)" }}>Archive drain</span>
             <span style={{ marginLeft: "auto", fontFamily: "var(--font-hud)", color: "var(--text)" }}>
-              {coverage.pending > 0 ? `${coverage.pending}+ symbols pending` : "drained"}
+              {fullyArchived
+                ? "complete"
+                : `${coverage.archived.toLocaleString()} / ${coverage.universe.toLocaleString()} symbols`}
             </span>
-            <span style={{ marginLeft: "auto", fontFamily: "var(--font-hud)", color: "var(--text)" }}>
-              {coverage.pending > 0 ? `${coverage.pending} symbols pending` : "drained"}
-            </span>
-            <Chip tone={coverage.pending > 0 ? "warn" : "ok"}>
-              {coverage.universe ? Math.round((coverage.archived / coverage.universe) * 100) : 0}%
-            </Chip>
+            <Chip tone={fullyArchived ? "ok" : "warn"}>{archivePct}%</Chip>
           </div>
-          <div style={{ marginTop: 4, height: 4, background: "rgba(255,255,255,0.06)", border: "1px solid var(--edge)" }}>
-            <div style={{
-              height: "100%",
-              width: `${coverage.universe ? Math.min(100, Math.round((coverage.archived / coverage.universe) * 100)) : 0}%`,
-              background: "var(--accent)",
-            }} />
-          </div>
-          <div style={{ marginTop: 6, fontSize: 10, color: "var(--text-dim)" }}>
-            {coverage.last_maintenance
-              ? `Last cleanup ${new Date(coverage.last_maintenance.ran_at).toLocaleString()} · ${coverage.last_maintenance.mode} · ${coverage.last_maintenance.total_deleted.toLocaleString()} rows in ${Math.round(coverage.last_maintenance.duration_ms / 1000)}s`
-              : "Cleanup has never completed — check the maintenance cron."}
+          <div style={{ marginTop: 3, height: 4, background: "rgba(255,255,255,0.06)", border: "1px solid var(--edge)" }}>
+            <div style={{ height: "100%", width: `${archivePct}%`, background: "var(--accent)" }} />
           </div>
         </div>
       ) : null}
 
-      <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 2 }}>
-        <div className="hud-label" style={{ color: "var(--accent)", fontSize: 11, marginBottom: 4 }}>
-          <HardDrive size={11} style={{ marginRight: 6, verticalAlign: "middle" }} />Largest tables
-
-        </div>
-        {(report?.tables ?? []).map((t) => (
+      <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 1 }}>
+        {tables.map((t) => (
           <div key={t.name} style={rowStyle}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</span>
               <span style={{ flex: 1, height: 3, background: "rgba(53,214,237,0.12)", minWidth: 40 }}>
-                <span style={{ display: "block", height: "100%", width: `${Math.round((t.bytes / biggest) * 100)}%`, background: "var(--accent)" }} />
+                <span style={{ display: "block", height: "100%", width: `${biggest > 0 ? Math.round((t.bytes / biggest) * 100) : 0}%`, background: "var(--accent)" }} />
               </span>
             </div>
             <span style={{ fontFamily: "var(--font-hud)", color: "var(--text)" }}>{human(t.bytes)}</span>
@@ -272,23 +228,12 @@ export default function DatabaseStoragePanel() {
         ))}
       </div>
 
-      <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--edge)", fontSize: 11, color: "var(--text-muted)", lineHeight: 1.6 }}>
-        {last ? (
-          <>
-            Last run {new Date(last.ran_at).toLocaleString()} ({last.mode}) — removed{" "}
-            <span style={{ color: "var(--text)" }}>{last.total_deleted.toLocaleString()}</span> rows
-            {last.duration_ms != null ? ` in ${(last.duration_ms / 1000).toFixed(1)}s` : ""}.
-          </>
-        ) : (
-          <>No cleanup run recorded yet. The governor runs at 01:30 and 13:30 IST.</>
-        )}
-        <div>
-          Hot window: ~500 days for tracked symbols, ~260 for the rest — older bars are gzipped into the
-          <code style={{ margin: "0 4px" }}>market-archive</code> bucket and served back on demand.
-          Logs and caches keep 1–14 days.
-          {coverage ? ` Archived: ${coverage.archived_bars.toLocaleString()} bars, ${human(coverage.archived_bytes)}.` : ""}
-        </div>
-
+      <div style={{ marginTop: 8, paddingTop: 6, borderTop: "1px solid var(--edge)", fontSize: 10, color: "var(--text-muted)" }}>
+        {lastRun
+          ? `Last cleanup ${new Date(lastRun.ran_at).toLocaleString()} · ${lastRun.mode} · ${lastRun.total_deleted.toLocaleString()} rows${
+              lastRun.duration_ms != null ? ` in ${(lastRun.duration_ms / 1000).toFixed(1)}s` : ""
+            }`
+          : "Cleanup has never completed — check the maintenance cron."}
       </div>
     </HudPanel>
   );

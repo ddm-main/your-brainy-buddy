@@ -34,6 +34,8 @@ import {
   canonicalFilterId,
   latestTradeDateOf,
   isEquityRow,
+  isOpenEndedMax,
+  isOpenEndedMin,
   TECH_FRESHNESS_LAG_DAYS,
   type ActiveFilter,
   type FilterDef,
@@ -132,11 +134,14 @@ function normalizeActiveFilters(filters: ActiveFilter[]): ActiveFilter[] {
   return Array.from(byId.values());
 }
 
-function fmtBound(def: FilterDef, v: number | "" | undefined): string {
+function fmtBound(def: FilterDef, v: number | "" | undefined, side: "min" | "max"): string {
   if (v === undefined || v === "") return "*";
   const digits = def.step && def.step < 1 ? 2 : 0;
-  const num = Number(v).toLocaleString("en-IN", { maximumFractionDigits: digits });
-  const suffix = def.maxIsOpenEnded && def.max !== undefined && Number(v) === def.max ? "+" : "";
+  const n = Number(v);
+  const num = n.toLocaleString("en-IN", { maximumFractionDigits: digits });
+  // A catalogue-edge bound is open-ended — mark it so the chip doesn't read
+  // like a hard cap the filter isn't actually applying.
+  const suffix = side === "max" ? (isOpenEndedMax(def, n) ? "+" : "") : (isOpenEndedMin(def, n) ? "-" : "");
   return def.unit ? (def.unit === "₹" ? `₹${num}${suffix}` : `${num}${suffix}${def.unit === "%" || def.unit === "x" ? def.unit : " " + def.unit}`) : `${num}${suffix}`;
 }
 
@@ -146,8 +151,8 @@ function chipDesc(af: ActiveFilter): string {
   if (!def) return id;
   if (def.kind === "boolean") return af.bool === undefined ? def.label : `${def.label}: ${af.bool ? "yes" : "no"}`;
   if (def.kind === "enum")    return af.values && af.values.length ? `${def.label}: ${af.values.length} sel` : def.label;
-  const lo = af.min !== undefined && af.min !== "" ? fmtBound(def, af.min) : null;
-  const hi = af.max !== undefined && af.max !== "" ? fmtBound(def, af.max) : null;
+  const lo = af.min !== undefined && af.min !== "" ? fmtBound(def, af.min, "min") : null;
+  const hi = af.max !== undefined && af.max !== "" ? fmtBound(def, af.max, "max") : null;
   if (!lo && !hi) return def.label;
   return `${def.label} ${lo ?? "*"}–${hi ?? "*"}`;
 }
@@ -331,10 +336,9 @@ function ScreenerInner() {
   }, [universe, active]);
 
 
-  // "+ Add Filter" picker: bring a filter into the sidebar with an empty
-  // value, ready to edit — bypasses setFilterValue's auto-drop-when-empty
-  // (below) since an intentionally-just-added filter should stick around
-  // with blank inputs, not vanish immediately.
+  // "+ Add Filter" picker: bring a filter into the sidebar seeded with its full
+  // catalogue range, ready to narrow. Edge values are open-ended (see
+  // isOpenEndedMax/Min), so a freshly-added filter never drops a single row.
   const addFilter = (fid: string) => {
     const id = canonicalFilterId(fid);
     if (active.some((a) => canonicalFilterId(a.id) === id)) return;
@@ -342,7 +346,7 @@ function ScreenerInner() {
     const initial: ActiveFilter =
       def.kind === "boolean" ? { id, bool: true } :
       def.kind === "enum"    ? { id, values: [] } :
-      { id };
+      { id, min: def.min ?? "", max: def.max ?? "" };
     setActive((a) => [...a, initial]);
   };
 
@@ -1270,14 +1274,22 @@ function NumberRange({ def, af, inpS, onChange }: {
   useEffect(() => { setMaxStr(af?.max == null || af.max === "" ? "" : String(af.max)); }, [af?.max]);
   const firstMin = useRef(true);
   const firstMax = useRef(true);
+  // Echo guard: a parent re-sync (saved screen load, seeded range) sets local
+  // state, which would otherwise push the identical value straight back up.
+  const same = (local: string, upstream: number | "" | undefined) => {
+    const up = upstream == null || upstream === "" ? "" : String(upstream);
+    return local === up || (local !== "" && up !== "" && Number(local) === Number(up));
+  };
   useEffect(() => {
     if (firstMin.current) { firstMin.current = false; return; }
+    if (same(minStr, af?.min)) return;
     const t = setTimeout(() => onChange({ min: minStr === "" ? "" : Number(minStr) }), 120);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [minStr]);
   useEffect(() => {
     if (firstMax.current) { firstMax.current = false; return; }
+    if (same(maxStr, af?.max)) return;
     const t = setTimeout(() => onChange({ max: maxStr === "" ? "" : Number(maxStr) }), 120);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1288,6 +1300,9 @@ function NumberRange({ def, af, inpS, onChange }: {
     if (Number.isFinite(lo) && Number.isFinite(hi) && lo > hi) {
       setMinStr(String(hi));
       setMaxStr(String(lo));
+      // Commit both bounds together so the URL / saved-screen signature can
+      // never observe a half-swapped (still inverted) state.
+      onChange({ min: hi, max: lo });
     }
   };
   const inverted = minStr !== "" && maxStr !== "" && Number(minStr) > Number(maxStr);

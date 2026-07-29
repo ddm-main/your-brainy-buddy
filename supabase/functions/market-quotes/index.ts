@@ -6,6 +6,31 @@ import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClie
 import { getReadProvider } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 import { getSharedQuotes } from "../_shared/market/quoteCache.ts";
+import { chunked, fetchAllRows } from "../_shared/market/paginate.ts";
+
+// How far back the EOD-cache lookups reach. Previously these queries had no
+// date floor and a `.limit(2000)` that the Data API silently truncated to
+// 1000 rows: with a few hundred symbols requested, the 1000 most recent rows
+// across the whole set could be consumed by a handful of long-history
+// symbols, leaving the rest with no cached close at all (rendering "—" LTP,
+// and skipping the previous-close anchor that guards change%). A 30-day floor
+// plus real paging makes the result set both complete and bounded.
+const CACHE_LOOKBACK_DAYS = 30;
+
+const lookbackStart = (): string =>
+  new Date(Date.now() - CACHE_LOOKBACK_DAYS * 86400_000).toISOString().slice(0, 10);
+
+/** Runs a paged query once per `.in()` chunk and concatenates the rows. */
+async function fetchChunkedIn<T>(
+  symbols: string[],
+  build: (batch: string[], from: number, to: number) => any,
+): Promise<T[]> {
+  const out: T[] = [];
+  for (const batch of chunked(symbols, 200)) {
+    out.push(...await fetchAllRows<T>((from, to) => build(batch, from, to)));
+  }
+  return out;
+}
 
 // This is the hot ~1s-poll path (provider.ts comment) across several panels
 // at once, so the ceiling is generous — it exists to catch a buggy client
@@ -81,12 +106,17 @@ Deno.serve(async (req) => {
         return { key: k, exchange: ex, symbol: sym };
       });
       const uniqSymbols = [...new Set(parsed.map((p) => p.symbol))];
-      const { data: cache } = await svc
-        .from("market_daily_prices")
-        .select("symbol,exchange,close,trade_date")
-        .in("symbol", uniqSymbols)
-        .order("trade_date", { ascending: false })
-        .limit(2000);
+      const lookbackFrom = lookbackStart();
+      const cache = await fetchChunkedIn<any>(
+        uniqSymbols,
+        (batch, from, to) => svc
+          .from("market_daily_prices")
+          .select("symbol,exchange,close,trade_date")
+          .in("symbol", batch)
+          .gte("trade_date", lookbackFrom)
+          .order("trade_date", { ascending: false })
+          .range(from, to) as any,
+      );
       const byKeyRows = new Map<string, Array<{ close: number; trade_date: string }>>();
       for (const r of (cache ?? []) as any[]) {
         const key = `${r.exchange}:${r.symbol}`;
@@ -143,13 +173,18 @@ Deno.serve(async (req) => {
         return { key: k, exchange: ex, symbol: sym };
       });
       const uniqSymbols = [...new Set(parsed.map((p) => p.symbol))];
-      const { data: cache } = await svc
-        .from("market_daily_prices")
-        .select("symbol,exchange,close,trade_date")
-        .in("symbol", uniqSymbols)
-        .lt("trade_date", today)
-        .order("trade_date", { ascending: false })
-        .limit(2000);
+      const lookbackFrom = lookbackStart();
+      const cache = await fetchChunkedIn<any>(
+        uniqSymbols,
+        (batch, from, to) => svc
+          .from("market_daily_prices")
+          .select("symbol,exchange,close,trade_date")
+          .in("symbol", batch)
+          .lt("trade_date", today)
+          .gte("trade_date", lookbackFrom)
+          .order("trade_date", { ascending: false })
+          .range(from, to) as any,
+      );
       const priorByKey = new Map<string, { close: number; trade_date: string }>();
       for (const r of (cache ?? []) as any[]) {
         const key = `${r.exchange}:${r.symbol}`;
@@ -159,13 +194,17 @@ Deno.serve(async (req) => {
       // cached close and today explains a large delta on its own — without
       // this, the "cache wins on >0.5% disagreement" heuristic below would
       // "correct" a genuine adjustment back to the stale unadjusted value.
-      const { data: recentActions } = await svc
-        .from("corporate_actions")
-        .select("symbol,exchange,ex_date")
-        .in("symbol", uniqSymbols)
-        .lte("ex_date", today)
-        .order("ex_date", { ascending: false })
-        .limit(2000);
+      const recentActions = await fetchChunkedIn<any>(
+        uniqSymbols,
+        (batch, from, to) => svc
+          .from("corporate_actions")
+          .select("symbol,exchange,ex_date")
+          .in("symbol", batch)
+          .lte("ex_date", today)
+          .gte("ex_date", lookbackFrom)
+          .order("ex_date", { ascending: false })
+          .range(from, to) as any,
+      );
       const actionExDatesByKey = new Map<string, string[]>();
       for (const a of (recentActions ?? []) as any[]) {
         const key = `${a.exchange}:${a.symbol}`;

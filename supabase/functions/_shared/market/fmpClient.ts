@@ -2,13 +2,15 @@
 // Free tier: 250 requests/day. All field names mapped to unified schema.
 // Docs: https://site.financialmodelingprep.com/developer/docs
 
+import { getProviderKey } from "./providerKeys.ts";
+
 const FMP_BASE = "https://financialmodelingprep.com/api/v3";
 const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" };
 
-// FMP requires an API key. Store in Supabase secrets/env vars.
-// For development, falls back to FINANCIAL_MODELING_PREP_API_KEY env var.
+// Key comes from the admin-managed store (Market Config → Providers → Edit),
+// falling back to the FINANCIAL_MODELING_PREP_API_KEY edge secret.
 async function getFmpApiKey(): Promise<string | null> {
-  return Deno.env.get("FINANCIAL_MODELING_PREP_API_KEY") ?? null;
+  return await getProviderKey("fmp");
 }
 
 const num = (...values: unknown[]): number | null => {

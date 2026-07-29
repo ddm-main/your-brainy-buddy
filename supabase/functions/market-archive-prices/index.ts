@@ -12,6 +12,7 @@
 // only then deletes from the table.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
+import { fetchAllRows } from "../_shared/market/paginate.ts";
 
 const BUCKET = "market-archive";
 // The archive backlog is the single biggest lever on database size, so the
@@ -73,15 +74,24 @@ Deno.serve(async (req) => {
         const path = `${item.exchange}/${item.symbol}.json.gz`;
 
         // Rows that are about to leave Postgres.
-        const { data: cold, error: coldErr } = await svc
-          .from("market_daily_prices")
-          .select("trade_date,open,high,low,close,close_adjusted,volume")
-          .eq("symbol", item.symbol).eq("exchange", item.exchange)
-          .lt("trade_date", item.cutoff)
-          .order("trade_date", { ascending: true })
-          .limit(20000);
-        if (coldErr) throw new Error(coldErr.message);
-        if (!cold || cold.length === 0) continue;
+        // MUST be paged: `.limit(20000)` was capped at 1000 by the Data API,
+        // so a symbol with more cold bars than that got only its oldest 1000
+        // archived — and the delete below is driven by the same cutoff, which
+        // would have destroyed the unarchived remainder.
+        const cold = await fetchAllRows<{
+          trade_date: string; open: number | null; high: number | null;
+          low: number | null; close: number | null;
+          close_adjusted: number | null; volume: number | null;
+        }>((from, to) =>
+          svc
+            .from("market_daily_prices")
+            .select("trade_date,open,high,low,close,close_adjusted,volume")
+            .eq("symbol", item.symbol).eq("exchange", item.exchange)
+            .lt("trade_date", item.cutoff)
+            .order("trade_date", { ascending: true })
+            .range(from, to) as any,
+        );
+        if (cold.length === 0) continue;
 
         const fresh: Bar[] = cold.map((r) => [
           r.trade_date as string,

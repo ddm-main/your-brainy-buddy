@@ -2,12 +2,15 @@
 // Free tier: 25 requests/day. All field names mapped to unified schema.
 // Docs: https://www.alphavantage.co/documentation/
 
+import { getProviderKey } from "./providerKeys.ts";
+
 const ALPHA_BASE = "https://www.alphavantage.co/query";
 const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" };
 
-// Alpha Vantage requires an API key. Store in Supabase secrets/env vars.
+// Key comes from the admin-managed store (Market Config → Providers → Edit),
+// falling back to the ALPHA_VANTAGE_API_KEY edge secret.
 async function getAlphaApiKey(): Promise<string | null> {
-  return Deno.env.get("ALPHA_VANTAGE_API_KEY") ?? null;
+  return await getProviderKey("alpha_vantage");
 }
 
 const num = (v: unknown): number | null => {

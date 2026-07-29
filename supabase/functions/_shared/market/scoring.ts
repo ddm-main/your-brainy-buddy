@@ -25,6 +25,14 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 const ramp = (v: number, lo: number, hi: number) =>
   hi <= lo ? (v >= hi ? 1 : 0) : clamp((v - lo) / (hi - lo), 0, 1);
 
+// OBV slope is *normalized* (slope per bar ÷ mean OBV), so its live range is
+// tiny: across the NSE universe p50 ≈ 0.0003 and p90 ≈ 0.019. The original
+// ramp(obv, 0, 1) therefore scored ~0 for every stock on earth, silently
+// removing 6 (breakout) / 5 (intraday) points from the achievable ceiling —
+// one of the reasons nothing ever crossed the 70 "strong" band. Full credit
+// now lands at the universe's ~p90 accumulation slope.
+export const OBV_SLOPE_FULL = 0.02;
+
 export function breakoutScore(s: IndicatorSnapshot, ctx: MarketContext): ScoreResult {
   const c: Record<string, number> = {};
 
@@ -80,7 +88,7 @@ export function breakoutScore(s: IndicatorSnapshot, ctx: MarketContext): ScoreRe
   const rv = s.relVolume ?? 0;
   c.volume = ramp(rv, 1, 3) * 14;
   const obv = s.obvSlope20 ?? null;
-  c.obv = obv == null ? 0 : ramp(obv, 0, 1) * 6;
+  c.obv = obv == null ? 0 : ramp(obv, 0, OBV_SLOPE_FULL) * 6;
 
   // --- Trend (10) ---
   c.above_ema200 = s.aboveEma200 ? 5 : 0;
@@ -422,7 +430,7 @@ export function intradayScore(input: IntradayInput): ScoreResultV3 {
   // --- Same-session volume/conviction (35) ---
   const rv = relVolumeSoFar ?? s.relVolume ?? 0;
   c.volume_surge = ramp(rv, 1, 3) * 20;
-  c.obv = s.obvSlope20 == null ? 0 : ramp(s.obvSlope20, 0, 1) * 5;
+  c.obv = s.obvSlope20 == null ? 0 : ramp(s.obvSlope20, 0, OBV_SLOPE_FULL) * 5;
   c.mfi = adv?.mfi14 == null ? 0 : ramp(adv.mfi14, 50, 80) * 10;
 
   // --- Momentum/trigger (30) ---

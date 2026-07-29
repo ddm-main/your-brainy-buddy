@@ -221,9 +221,40 @@ export interface CandlesResponse {
   candles: CandleDto[];
   emas: Record<string, Array<{ t: number; v: number | null }>>;
   timeframe: string;
-  /** Primary provider that served this response ("kotak_neo" or "yahoo"). Best-effort — kotak may internally fall back to yahoo per-symbol. */
-  provider?: "kotak_neo" | "yahoo";
+  /**
+   * What actually served this response:
+   *  kotak_neo — live broker data
+   *  yahoo     — ~15m delayed (only off-session, or symbols Kotak can't cover,
+   *              or opt-in delayed fallback during session)
+   *  cache     — stored bars from the last successful Kotak read
+   *  quote     — live Kotak quote seeded the current candle while history is down
+   *  quote_delayed — same idea but the quote itself is Yahoo/cache (~15m late)
+   *  none      — nothing available (broker down during the session)
+   */
+  provider?: "kotak_neo" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none";
+  /** True whenever the data is not a live Kotak read. */
+  degraded?: boolean;
+  /** Machine-readable cause when degraded: broker_503, route_missing, session, no_token, empty, broker_503_delayed… */
+  reason?: string;
+  /** When `provider === "cache"`, ISO timestamp of the newest cached bar's fetch. */
+  cached_at?: string;
+  /** When `provider === "yahoo"` during session, roughly how stale the feed is. */
+  delayed_minutes?: number;
+  // ---- P0 provenance additions (all optional / backwards-compatible) ----
+  /** Server clock at response time (ISO). Used by clients to compute freshness. */
+  as_of?: string;
+  /** ISO timestamp of the newest candle in the series. */
+  last_bar_at?: string;
+  /** ms between `last_bar_at` and `as_of`. */
+  freshness_ms?: number;
+  /** Session state for the exchange serving these bars. */
+  market_session?: "open" | "closed" | "pre_open" | "post_close" | "holiday" | "weekend";
+  /** Source of the historical series (everything except the current bar). */
+  history_source?: "kotak_neo" | "yahoo" | "cache" | "mixed" | "none";
+  /** Source of ONLY the most recent (possibly quote-seeded) bar. */
+  last_bar_source?: "kotak_neo" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none";
 }
+
 
 export interface SavedScreener {
   id: string;

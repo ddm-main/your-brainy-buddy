@@ -11,6 +11,7 @@ import {
   kotakCancelOrder,
   kotakConvertPosition,
   kotakCandles,
+  KOTAK_CANDLES_ROUTE,
   kotakDepth,
   kotakHoldings,
   kotakHoldingsEnvelope,
@@ -25,8 +26,12 @@ import {
   type KotakFundsSnapshot,
   withKotakSession,
 } from "./kotakClient.ts";
+import { isRouteOpen } from "./routeBreaker.ts";
 import { toYahooSymbol, yahooChartRetry, yahooQuote } from "./yahooClient.ts";
 import type { Candle } from "./indicators.ts";
+
+// Symbols already reported as missing a Kotak instrument token, per isolate.
+const loggedTokenGap = new Set<string>();
 
 export type DepthLadder = {
   bids: Array<{ price: number; qty: number; orders: number }>;
@@ -128,10 +133,20 @@ export interface PositionsResult {
   complete: boolean;
 }
 
+// `meta` is an out-param the provider fills with the upstream that ACTUALLY
+// served the bars. The Kotak provider legitimately falls back to Yahoo for
+// coverage gaps (no scrip token), and `provider.name` alone mislabelled those
+// delayed bars as "kotak · live" on the chart.
+export interface OhlcvMeta {
+  source?: "kotak_neo" | "yahoo";
+  /** Why Kotak could not serve: broker_503, no_token, empty, session, other. */
+  reason?: string;
+}
+
 export interface MarketProvider {
   name: string;
   getQuotes(keys: string[]): Promise<QuoteRow[]>;
-  getOHLCV(symbol: string, exchange: string, range: string, interval: string): Promise<Candle[]>;
+  getOHLCV(symbol: string, exchange: string, range: string, interval: string, meta?: OhlcvMeta): Promise<Candle[]>;
   getDepth(symbol: string, exchange: string): Promise<DepthLadder>;
   getHoldings(): Promise<HoldingRow[]>;
   getHoldingsDetailed?(): Promise<HoldingsResult>;
@@ -330,7 +345,8 @@ function yahooProvider(svc: SupabaseClient): MarketProvider {
         throw e;
       }
     },
-    async getOHLCV(symbol, exchange, range, interval) {
+    async getOHLCV(symbol, exchange, range, interval, meta) {
+      if (meta) meta.source = "yahoo";
       // Yahoo accepts 1m/2m/5m/15m/30m/60m/90m/1h/1d/5d/1wk/1mo/3mo only.
       // 3m -> resample from 1m, 2h/4h -> resample from 60m. 1h passes as 60m.
       const yInterval = interval === "3m" ? "1m"
@@ -414,19 +430,23 @@ function kotakBreakerRecordFailure(): void {
   if (kotakFailStreak >= KOTAK_FAIL_THRESHOLD) kotakBreakerOpenUntil = Date.now() + KOTAK_BREAKER_COOLDOWN_MS;
 }
 
+// NSE regular session (IST 09:15–15:30, Mon–Fri). During this window Kotak
+// Neo is the ONLY permitted source for live prices, candles and depth: Yahoo
+// is ~15 min delayed, so quietly substituting it turns a broker outage into
+// silent bad ticks. Off-hours Yahoo is still allowed for coverage of long
+// history and instruments Kotak doesn't carry (indices, obscure segments).
+export function nseSessionOpen(now = new Date()): boolean {
+  const day = now.getUTCDay();
+  if (day === 0 || day === 6) return false;
+  const utcMin = now.getUTCHours() * 60 + now.getUTCMinutes();
+  return utcMin >= 225 && utcMin <= 600;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProvider {
   const yahoo = yahooProvider(svc);
-  // NSE regular session (IST 09:15–15:30, Mon–Fri). During this window we
-  // MUST NOT quietly serve Yahoo (15-min delayed) prices in place of Kotak —
-  // that turns a broker outage into silent bad ticks. Off-hours Yahoo is
-  // still allowed for coverage of long history and instruments Kotak doesn't
-  // carry (indices, obscure segments).
-  const nseOpenNow = (now = new Date()): boolean => {
-    const day = now.getUTCDay();
-    if (day === 0 || day === 6) return false;
-    const utcMin = now.getUTCHours() * 60 + now.getUTCMinutes();
-    return utcMin >= 225 && utcMin <= 600;
-  };
+  const nseOpenNow = nseSessionOpen;
   return {
     name: "kotak_neo",
     async getQuotes(keys) {
@@ -519,10 +539,13 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
           return { rows, failed };
         }));
         for (const r of segResults) out.push(...r.rows);
-        // Any Kotak-tokened symbol Kotak couldn't quote falls to Yahoo per-symbol
-        // (source tagged "yahoo" so PriceSourceChip can show delayed if needed).
+        // A Kotak-tokened symbol Kotak couldn't quote:
+        //  • during the session — NO Yahoo substitution. The symbol comes back
+        //    unquoted and the UI says "broker unavailable" rather than showing
+        //    a 15-minute-old price as if it were live.
+        //  • off-hours — Yahoo is fine, nothing is live anyway.
         const failedKeys = segResults.flatMap((r) => r.failed.map((p) => p.key));
-        if (failedKeys.length > 0) {
+        if (failedKeys.length > 0 && !nseOpenNow()) {
           try { out.push(...(await yahoo.getQuotes(failedKeys))); }
           catch (e) { console.error("[market] yahoo per-symbol fallback failed:", e); }
         }
@@ -539,7 +562,8 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       return out;
     },
     // Kotak historical candles when we have an instrument token; else Yahoo.
-    async getOHLCV(symbol, exchange, range, interval) {
+    async getOHLCV(symbol, exchange, range, interval, meta) {
+      if (meta) meta.source = "kotak_neo";
       const { data: stock } = await svc
         .from("market_stocks").select("token,kotak_segment,instrument_type")
         .eq("symbol", symbol).eq("exchange", exchange)
@@ -554,11 +578,20 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
         : (exchange === "BSE" ? "bse_cm" : "nse_cm");
       const seg = (stock?.kotak_segment as string | undefined) || defaultSeg;
       if (!token) {
-        logProviderHealth(svc, "kotak_neo", "getOHLCV", false, 0, `no token for ${exchange}:${symbol} — using yahoo`);
+        // Not a failure — Kotak's scrip master simply has no token for this
+        // symbol (mostly indices and new listings), and Yahoo covers it. This
+        // used to write one health row per tokenless symbol per pipeline run,
+        // which is pure, permanent noise. Log it once per isolate so the gap
+        // is still visible without flooding the table.
+        if (!loggedTokenGap.has(`${exchange}:${symbol}`)) {
+          loggedTokenGap.add(`${exchange}:${symbol}`);
+          logProviderHealth(svc, "kotak_neo", "getOHLCV", false, 0, `no token for ${exchange}:${symbol} — using yahoo`);
+        }
         // Coverage gap Kotak's scrip master doesn't fill (mostly indices).
         // Yahoo is allowed here regardless of market state — it's the only
-        // source we have.
-        return yahoo.getOHLCV(symbol, exchange, range, interval);
+        // source we have. `meta` records that so the UI marks it delayed.
+        if (meta) meta.reason = "no_token";
+        return yahoo.getOHLCV(symbol, exchange, range, interval, meta);
       }
       // range like "2y","60d","30d","max"; interval like "1d","1h","15m"
       const now = Math.floor(Date.now() / 1000);
@@ -612,22 +645,47 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
         return [...byTime.values()].sort((a, b) => a.time - b.time);
       };
 
+      // Kotak sheds load with HTTP 503 ("no available server"), which usually
+      // clears within a second. Retry briefly before declaring the broker down
+      // — during the session there is no substitute source, so it's worth the
+      // extra ~1s rather than serving nothing.
+      const fetchKotakResilient = async (): Promise<Candle[]> => {
+        const backoff = [250, 750];
+        for (let attempt = 0; ; attempt++) {
+          try {
+            return await fetchKotak();
+          } catch (err) {
+            const st = (err as { status?: number } | null)?.status;
+            const retryable = st === 503 || st === 429 || st === 502 || st === 504;
+            if (!retryable || attempt >= backoff.length) throw err;
+            await sleep(backoff[attempt]);
+          }
+        }
+      };
+
       try {
-        const raw = await fetchKotak();
+        const raw = await fetchKotakResilient();
         if (raw.length === 0) {
           const reason = `empty candles for ${exchange}:${symbol} (seg=${seg})`;
           logProviderHealth(svc, "kotak_neo", "getOHLCV", false, Date.now() - t0, reason);
-          const isIntraday = !isDailyGrain;
-          // Intraday during market hours must NOT silently fall to Yahoo.
-          // For daily/weekly/monthly, Yahoo backfill for missing long history
-          // is still fine — that's data Kotak doesn't provide anyway.
-          if (isIntraday && nseOpenNow()) throw new Error(`kotak returned no ${interval} candles`);
-          return yahoo.getOHLCV(symbol, exchange, range, interval);
+          // Intraday during the session: Kotak is the only permitted source,
+          // so an empty series is a broker failure, not a licence to serve
+          // 15-min-delayed bars. Daily/weekly/monthly are historical — Yahoo
+          // may still backfill them (pipelines run mid-session too).
+          if (nseOpenNow() && !isDailyGrain) {
+            if (meta) meta.reason = "empty";
+            throw new Error(`kotak returned no ${interval} candles`);
+          }
+          // Off-hours: Yahoo backfill for history Kotak doesn't carry.
+          if (meta) meta.reason = "empty";
+          return yahoo.getOHLCV(symbol, exchange, range, interval, meta);
         }
         let c = resampleFactor > 1 ? resampleCandles(raw, resampleFactor) : raw;
         // Depth sanity check: when the caller asked for deep history and
         // Kotak came back materially short (its equity archive is shallow),
         // merge Yahoo's longer series in rather than serving a stub chart.
+        // This only ever ADDS older bars — the live tail stays Kotak's, so it
+        // doesn't violate the Kotak-only-during-session rule.
         if (isDailyGrain && wanted > 2 * YEAR) {
           const oldest = c[0]?.time ?? now;
           const covered = now - oldest;
@@ -648,20 +706,32 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
           }
         }
         logProviderHealth(svc, "kotak_neo", "getOHLCV", true, Date.now() - t0);
+        if (meta) meta.source = "kotak_neo";
         return c;
       } catch (e) {
-
-        logProviderHealth(svc, "kotak_neo", "getOHLCV", false, Date.now() - t0, e instanceof Error ? e.message : String(e));
-        const isIntraday = kotakInterval !== "D" && kotakInterval !== "W" && kotakInterval !== "M";
-        // A 404 means the charts route isn't available on this session's
-        // base URL (Kotak plan / route family), not a live-data failure —
-        // Yahoo is the only source then, even intraday during market hours.
         const status = (e as { status?: number } | null)?.status;
-        const routeMissing = status === 404;
-        // Same rule as above: strict for live intraday, permissive for
-        // historical/EOD tail-filling.
-        if (isIntraday && nseOpenNow() && !routeMissing) throw e;
-        return yahoo.getOHLCV(symbol, exchange, range, interval);
+        // Don't re-log what the circuit breaker already reported. When the
+        // charts route is dead (404) or the broker is shedding load (503),
+        // every symbol in the run fails identically; logging each one wrote
+        // thousands of duplicate rows a day into market_provider_health
+        // (9,658 in a single day) on a 500 MB database. The breaker logs the
+        // transition once and this path stays silent until it closes.
+        if (!isRouteOpen(KOTAK_CANDLES_ROUTE)) {
+          logProviderHealth(svc, "kotak_neo", "getOHLCV", false, Date.now() - t0, e instanceof Error ? e.message : String(e));
+        }
+        if (meta) {
+          meta.reason = status === 503 ? "broker_503"
+            : status === 404 ? "route_missing"
+            : status === 401 || status === 403 ? "session"
+            : meta.reason ?? "other";
+        }
+        // Kotak-only for live intraday during the session: a broker outage
+        // (503, dead route, tripped breaker) surfaces as a failure the UI
+        // reports honestly. Delayed Yahoo bars are NEVER substituted for live
+        // data. Daily-grain history stays permissive so EOD/backfill pipelines
+        // that run mid-session keep working.
+        if (nseOpenNow() && !isDailyGrain) throw e;
+        return yahoo.getOHLCV(symbol, exchange, range, interval, meta);
       }
     },
 

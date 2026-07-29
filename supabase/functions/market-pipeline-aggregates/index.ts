@@ -303,6 +303,8 @@ Deno.serve(async (req) => {
     }
     const scored: Scored[] = [];
     let updated = 0;
+    let rescoreFailed = 0;
+    let rescoreFirstError: string | null = null;
     for (let i = 0; i < rows.length; i += 50) {
       const batch = rows.slice(i, i + 50);
       await Promise.all(batch.map(async (r) => {
@@ -352,7 +354,19 @@ Deno.serve(async (req) => {
           context_complete: true,
           computed_at: nowIso,
         }).eq("symbol", r.symbol).eq("exchange", r.exchange);
-        if (!error) updated++;
+        // Never swallow this. A silent `if (!error)` here meant a single bad
+        // column name failed all 2,505 updates while the run still reported
+        // ok:true — the scores table simply stopped advancing with no signal
+        // anywhere. Count failures and surface the first reason.
+        if (!error) {
+          updated++;
+        } else {
+          rescoreFailed++;
+          if (!rescoreFirstError) {
+            rescoreFirstError = [error.message, error.details, error.hint, error.code]
+              .filter(Boolean).join(" | ");
+          }
+        }
 
         scored.push({
           symbol: r.symbol, exchange: r.exchange,
@@ -363,6 +377,39 @@ Deno.serve(async (req) => {
         });
       }));
     }
+
+    // ---- Relative score ranking (percentile within the tradable universe) ----
+    // Absolute bands (70/55/40) are regime-dependent: in a weak tape the whole
+    // universe can sit below 55 and the screener shows nothing "strong", while
+    // in a hot tape everything qualifies. The rank says where a name sits
+    // *today* relative to its peers, which is what a trader actually acts on.
+    // Only liquid names are ranked — illiquid junk shouldn't dilute the scale.
+    let ranked = 0;
+    try {
+      const rankOf = (key: "breakout" | "swing") => {
+        const pool = scored.filter((x) => x.liquidityOk).map((x) => ({ k: `${x.symbol}|${x.exchange}`, v: x[key] }));
+        pool.sort((a, b) => a.v - b.v);
+        const m = new Map<string, number>();
+        const n = pool.length;
+        pool.forEach((it, i) => m.set(it.k, n > 1 ? Math.round((i / (n - 1)) * 1000) / 10 : 50));
+        return m;
+      };
+      const boRank = rankOf("breakout");
+      const swRank = rankOf("swing");
+      for (let i = 0; i < scored.length; i += 50) {
+        const batch = scored.slice(i, i + 50);
+        await Promise.all(batch.map(async (x) => {
+          const k = `${x.symbol}|${x.exchange}`;
+          const { error } = await svc.from("market_stock_scores").update({
+            breakout_rank_pct: boRank.get(k) ?? null,
+            swing_rank_pct: swRank.get(k) ?? null,
+          }).eq("symbol", x.symbol).eq("exchange", x.exchange);
+          if (!error) ranked++;
+        }));
+      }
+    } catch { /* ranking is additive — never fail the run */ }
+
+
 
     // ---- Breakout tracking: daily snapshot + multi-day episode maintenance ----
     // Re-checks every open episode (yesterday's picks) and opens fresh episodes
@@ -514,6 +561,9 @@ Deno.serve(async (req) => {
       breadth: { advances, declines, regime, pct_above_ema50: Math.round(pctAboveEma50) },
       sectors: sectorRows.length,
       rescored: updated,
+      rescore_failed: rescoreFailed,
+      ranked,
+      rescore_error: rescoreFirstError,
       breakout_tracking: tracking,
       score_distribution: dist,
     });

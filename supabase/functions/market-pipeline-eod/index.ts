@@ -81,14 +81,47 @@ Deno.serve(async (req) => {
       .order("last_price_sync_at", { ascending: true, nullsFirst: true })
       .limit(CHUNK);
     if (error) return errorResponse(req, error.message, 500);
-    if (!stocks || stocks.length === 0) {
+
+    // ---- Enrichment top-up ----
+    // The cheap SQL rescore path (and the NSE bhavcopy sync) can mark a symbol
+    // "priced today" without ever computing the candle-derived fields —
+    // pivot level, volume dry-up, weekly confirmation, VWAP/Supertrend/MFI and
+    // candle patterns. Those rows then score with whole factor buckets stuck
+    // at zero (which is why the universe topped out in the 60s and nothing
+    // reached the 70 "strong" band). If the staleness picker didn't fill the
+    // chunk, spend the remaining budget on symbols whose scores are missing
+    // that enrichment, so every name eventually gets a full-fidelity pass.
+    const candidates = [...(stocks ?? [])];
+    if (candidates.length < CHUNK) {
+      const have = new Set(candidates.map((s) => `${s.symbol}|${s.exchange}`));
+      const room = CHUNK - candidates.length;
+      const { data: bare } = await svc.from("market_stock_scores")
+        .select("symbol,exchange")
+        .eq("exchange", "NSE")
+        .or("pivot_level.is.null,weekly_close.is.null")
+        .order("computed_at", { ascending: true, nullsFirst: true })
+        .limit(room * 3);
+      const wanted = (bare ?? []).filter((b) => !have.has(`${b.symbol}|${b.exchange}`)).slice(0, room);
+      if (wanted.length) {
+        const { data: enrich } = await svc.from("market_stocks")
+          .select("symbol,exchange,yahoo_symbol,sector,market_cap,last_price_sync_at,price_sync_attempts,price_sync_attempts_day")
+          .eq("is_active", true)
+          .eq("exchange", "NSE")
+          .in("symbol", wanted.map((w) => w.symbol));
+        for (const e of enrich ?? []) {
+          if (!have.has(`${e.symbol}|${e.exchange}`)) { candidates.push(e); have.add(`${e.symbol}|${e.exchange}`); }
+        }
+      }
+    }
+    if (candidates.length === 0) {
       return jsonResponse(req, { ok: true, processed: 0, drained: true });
     }
+
 
     let okCount = 0;
     let failCount = 0;
 
-    const work = [...stocks];
+    const work = [...candidates];
     const workers = Array.from({ length: CONCURRENCY }, async () => {
       while (work.length > 0) {
         const stock = work.shift();
@@ -281,9 +314,19 @@ Deno.serve(async (req) => {
           success = true;
         } catch (err) {
           failCount++;
+          // Supabase throws plain objects (PostgrestError), not Errors, so
+          // `String(err)` rendered every DB failure as the useless literal
+          // "[object Object]" — which is exactly what this table has been
+          // recording. Pull the real message/details out instead.
+          const detail = err instanceof Error
+            ? err.message
+            : (err && typeof err === "object"
+              ? [(err as any).message, (err as any).details, (err as any).hint, (err as any).code]
+                .filter(Boolean).join(" | ") || JSON.stringify(err).slice(0, 300)
+              : String(err));
           await svc.from("market_provider_health").insert({
             provider: (provider as any).name ?? "unknown", endpoint: "market-pipeline-eod", ok: false,
-            error: `${stock.symbol}: ${err instanceof Error ? err.message : String(err)}`,
+            error: `${stock.symbol}: ${detail}`,
           });
         } finally {
           // Success: mark sync fresh and reset the attempt counter.
@@ -316,7 +359,7 @@ Deno.serve(async (req) => {
     });
     await Promise.all(workers);
 
-    return jsonResponse(req, { ok: true, processed: stocks.length, succeeded: okCount, failed: failCount, local_rescored: localRescored, drained: stocks.length < CHUNK });
+    return jsonResponse(req, { ok: true, processed: candidates.length, succeeded: okCount, failed: failCount, local_rescored: localRescored, drained: candidates.length < CHUNK });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }

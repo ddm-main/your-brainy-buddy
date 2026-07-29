@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CandlestickChart, LineChart, AreaChart, BarChart3, Activity, Bell, LayoutGrid, MoreHorizontal, Maximize2, ExternalLink, Settings, Camera, Save, Search, Trash2 } from "lucide-react";
+import { CandlestickChart, LineChart, AreaChart, BarChart3, Activity, Bell, LayoutGrid, MoreHorizontal, Maximize2, ExternalLink, Settings, Camera, Save, Search, Trash2, TrendingUp, Waves } from "lucide-react";
 import { Menu, MenuItem, MenuGroup, MenuDivider } from "@/components/hud/Menu";
 import type { ChartType } from "@/components/market/CandleChart";
 import {
@@ -48,9 +48,11 @@ export function isIntraday(tf: string): boolean {
 
 const CHART_TYPES: Array<{ key: ChartType; label: string; icon: React.ReactNode }> = [
   { key: "candles", label: "Candles", icon: <CandlestickChart size={12} /> },
+  { key: "heikin_ashi", label: "Heikin-Ashi", icon: <Waves size={12} /> },
   { key: "bars", label: "Bars", icon: <BarChart3 size={12} /> },
   { key: "line", label: "Line", icon: <LineChart size={12} /> },
   { key: "area", label: "Area", icon: <AreaChart size={12} /> },
+  { key: "baseline", label: "Baseline", icon: <TrendingUp size={12} /> },
 ];
 
 
@@ -118,19 +120,24 @@ export function ChartToolbar({
 
 
   return (
-    <div className="mk-chart-toolbar">
-      {/* Interval */}
-      <Menu label={tf} width={200} active>
-        {(close) => (
-          <MenuGroup title="Interval">
-            {TIMEFRAMES.map((t) => (
-              <MenuItem key={t.key} selected={tf === t.key} onClick={() => { onTf(t.key); close(); }}>
-                {t.label}
-              </MenuItem>
-            ))}
-          </MenuGroup>
-        )}
-      </Menu>
+    <div className="mk-chart-toolbar" role="toolbar" aria-label="Chart controls">
+      {/* Interval — inline segmented buttons (TradingView / Kite pattern).
+          Keyboard: press number for quick TF switch (1=1m, 2=5m, 3=15m,
+          4=1h, 5=1D, 6=1W, 7=1M). See Analysis.tsx keydown handler. */}
+      <div className="mk-tf-seg" role="group" aria-label="Chart timeframe">
+        {TIMEFRAMES.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            aria-label={`Timeframe ${t.label}`}
+            aria-pressed={tf === t.key}
+            className={`mk-tf-btn ${tf === t.key ? "is-on" : ""}`}
+            onClick={() => onTf(t.key)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
 
       {!intraday && onRange && (
         <>

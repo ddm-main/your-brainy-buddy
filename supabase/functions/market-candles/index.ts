@@ -3,14 +3,73 @@
 // 15m/1h: intraday provider fetch, cached in market_intraday_prices (15-min staleness).
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { yahooChartRetry, toYahooSymbol } from "../_shared/market/yahooClient.ts";
-import { getReadProvider } from "../_shared/market/provider.ts";
+import { getReadProvider, yahooProvider, nseSessionOpen, type OhlcvMeta } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 import { isDailyGrain, grainReason } from "../_shared/market/candleGuard.ts";
 import { loadArchivedBars } from "../_shared/market/archive.ts";
+import { KOTAK_CANDLES_ROUTE } from "../_shared/market/kotakClient.ts";
+import { routeOpenForMs, hydrateRouteBreakers, setRouteBreakerPersistence } from "../_shared/market/routeBreaker.ts";
+import { isTradingHoliday } from "../_shared/market/cron.ts";
 
+// Small in-isolate cache so we don't hit market_holidays on every request.
+const holidayCache = new Map<string, { ts: number; isHoliday: boolean }>();
+const HOLIDAY_TTL_MS = 60 * 60_000;
+async function isHolidayCached(
+  svc: ReturnType<typeof svcClient>, dateStr: string, exchange = "NSE",
+): Promise<boolean> {
+  const key = `${exchange}:${dateStr}`;
+  const hit = holidayCache.get(key);
+  if (hit && Date.now() - hit.ts < HOLIDAY_TTL_MS) return hit.isHoliday;
+  try {
+    const isHoliday = await isTradingHoliday(svc, dateStr, exchange);
+    holidayCache.set(key, { ts: Date.now(), isHoliday });
+    return isHoliday;
+  } catch { return false; }
+}
 
+function istDateString(now = new Date()): string {
+  return new Date(now.getTime() + 5.5 * 3600_000).toISOString().slice(0, 10);
+}
+async function computeMarketSession(
+  svc: ReturnType<typeof svcClient>, exchange: string, now = new Date(),
+): Promise<"open" | "closed" | "pre_open" | "post_close" | "holiday" | "weekend"> {
+  const day = now.getUTCDay();
+  if (day === 0 || day === 6) return "weekend";
+  const today = istDateString(now);
+  if (await isHolidayCached(svc, today, exchange)) return "holiday";
+  const utcMin = now.getUTCHours() * 60 + now.getUTCMinutes();
+  if (utcMin < 225) return "pre_open";              // before 09:15 IST
+  if (utcMin >= 225 && utcMin <= 600) return "open"; // 09:15–15:30 IST
+  if (utcMin > 600 && utcMin < 660) return "post_close";
+  return "closed";
+}
+
+function candleTimeToIso(t: string | number): string {
+  if (typeof t === "number") return new Date(t * 1000).toISOString();
+  return `${t}T00:00:00.000Z`;
+}
+function withProvenance<T extends { candles: Array<{ time: string | number }> }>(
+  payload: T & Record<string, unknown>,
+  session: "open" | "closed" | "pre_open" | "post_close" | "holiday" | "weekend",
+  historySource: "kotak_neo" | "yahoo" | "cache" | "mixed" | "none",
+  lastBarSource: "kotak_neo" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none",
+): T & Record<string, unknown> {
+  const now = new Date();
+  const last = payload.candles[payload.candles.length - 1];
+  const lastAt = last ? candleTimeToIso(last.time) : undefined;
+  return {
+    ...payload,
+    as_of: now.toISOString(),
+    last_bar_at: lastAt,
+    freshness_ms: lastAt ? Math.max(0, now.getTime() - new Date(lastAt).getTime()) : undefined,
+    market_session: session,
+    history_source: historySource,
+    last_bar_source: lastBarSource,
+  };
+}
 
 const limiter = createMarketLimiter(120, 60_000);
+
 
 // UI TF -> { provider interval, range }. Kotak-native intervals (1/5/15/30/60/D/W/M)
 // pass through as-is; non-native TFs (2h, 4h, 3m) keep the UI grain so
@@ -30,6 +89,7 @@ const INTRADAY: Record<string, { interval: string; range: string }> = {
 
 interface DailyRow { trade_date: string; open: number; high: number; low: number; close: number; volume: number }
 interface OutCandle { time: string; open: number; high: number; low: number; close: number; volume: number }
+type IntradayProviderName = "kotak_neo" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none";
 
 // Weekly/monthly bars derived from the stored daily series. Kotak's W/M
 // archive is shallow; the daily cache (backfilled to full listed history)
@@ -96,13 +156,68 @@ function sanitizeDaily(rows: OutCandle[]): OutCandle[] {
   return out;
 }
 
+const IST_OFFSET_MS = 5.5 * 3600_000;
+const SESSION_OPEN_MS = (9 * 60 + 15) * 60_000;
+
+function timeframeMinutes(timeframe: string): number {
+  const m = timeframe.match(/^(\d+)(m|h)$/i);
+  if (!m) return 1;
+  const n = Math.max(1, Number(m[1]) || 1);
+  return m[2].toLowerCase() === "h" ? n * 60 : n;
+}
+
+function currentSessionBucket(timeframe: string, now = new Date()): number {
+  const intervalMs = timeframeMinutes(timeframe) * 60_000;
+  const nowMs = now.getTime();
+  const istDayStartMs = Math.floor((nowMs + IST_OFFSET_MS) / 86_400_000) * 86_400_000;
+  const sessionStartUtcMs = istDayStartMs - IST_OFFSET_MS + SESSION_OPEN_MS;
+  const elapsedMs = Math.max(0, nowMs - sessionStartUtcMs);
+  return Math.floor((sessionStartUtcMs + Math.floor(elapsedMs / intervalMs) * intervalMs) / 1000);
+}
+
+async function quoteSeedCandle(
+  provider: Awaited<ReturnType<typeof getReadProvider>>["provider"],
+  symbol: string,
+  exchange: string,
+  timeframe: string,
+): Promise<{ candle: { time: number; open: number; high: number; low: number; close: number; volume: number }; source: string } | null> {
+  const key = `${exchange}:${symbol}`;
+  let rows: Awaited<ReturnType<typeof provider.getQuotes>> = [];
+  try { rows = await provider.getQuotes([key]); } catch { rows = []; }
+  const q = rows.find((r) => r.key === key && Number.isFinite(r.price) && r.price > 0);
+  // When the broker's candle route is down, its quote route is often
+  // degrading too (same session), so quotes may come back tagged "yahoo" or
+  // "cache". A near-real-time price is still infinitely better than a blank
+  // chart — accept any positive quote; the caller decides whether to stamp
+  // the response as "quote" (Kotak-fresh) or "quote_delayed" (Yahoo/cache).
+  if (!q) return null;
+  const close = Number(q.price);
+  const open = Number(q.day_open ?? close);
+  const high = Math.max(close, open, Number(q.day_high ?? close));
+  const low = Math.min(close, open, Number(q.day_low ?? close));
+  return {
+    source: q.source ?? "unknown",
+    candle: {
+      time: currentSessionBucket(timeframe),
+      open,
+      high,
+      low,
+      close,
+      volume: Number(q.volume ?? 0) || 0,
+    },
+  };
+}
+
+
+
+type SourceName = "kotak_neo" | "yahoo" | "cache";
 
 async function loadDaily(
   svc: ReturnType<typeof svcClient>,
   userId: string,
   symbol: string,
   exchange: string,
-): Promise<{ rows: OutCandle[]; provider: "kotak_neo" | "yahoo" }> {
+): Promise<{ rows: OutCandle[]; provider: SourceName; reason?: string }> {
   // Newest-first read then reverse: ordering ascending with a LIMIT returned
   // the OLDEST N rows, which silently dropped the most recent bars once a
   // symbol had more history than the cap.
@@ -153,19 +268,28 @@ async function loadDaily(
   const sparse = byDate.size > 0 && byDate.size / monthsCovered < MIN_BARS_PER_MONTH;
   const wantDeep = (byDate.size < SHALLOW_BARS || sparse) && Date.now() - deepAt > DEEP_TTL_MS;
 
-  let providerName: "kotak_neo" | "yahoo" = "yahoo";
+  // Nothing fetched this call means the cached series is being served as-is.
+  let providerName: SourceName = "cache";
+  let reason: string | undefined;
   if (wantDeep || stale) {
     const range = wantDeep ? "max" : "30d";
     if (wantDeep) deepTried.set(deepKey, Date.now());
     try {
       const { provider } = await getReadProvider(svc, userId);
+      const meta: OhlcvMeta = {};
       let candles;
       try {
-        candles = await provider.getOHLCV(symbol, exchange, range, "1d");
-        providerName = provider.name === "kotak_neo" ? "kotak_neo" : "yahoo";
-      } catch {
+        candles = await provider.getOHLCV(symbol, exchange, range, "1d", meta);
+        // The source that ACTUALLY served the bars, not the configured
+        // provider — Kotak legitimately delegates coverage gaps to Yahoo.
+        providerName = meta.source === "kotak_neo" ? "kotak_neo" : "yahoo";
+        reason = meta.reason;
+      } catch (err) {
+        // Kotak-only during the session: no delayed Yahoo substitution.
+        if (nseSessionOpen()) throw err;
         candles = await yahooChartRetry(toYahooSymbol(symbol, exchange), range, "1d");
         providerName = "yahoo";
+        reason = meta.reason ?? "provider_failed";
       }
       // Never persist weekly/monthly bars into the daily table.
       if (!isDailyGrain(candles)) {
@@ -190,8 +314,13 @@ async function loadDaily(
 
       for (const u of upserts) byDate.set(u.trade_date, u as unknown as DailyRow);
     } catch (e) {
+      // No cached history at all and the broker is down — the caller decides
+      // how to surface that (empty + reason, never delayed substitution).
       if (byDate.size === 0) throw e;
-
+      // Cached bars are real but not a fresh broker read; flag it so the UI
+      // can say "cached — not live" rather than implying live data.
+      providerName = "cache";
+      reason = reason ?? (e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -205,7 +334,7 @@ async function loadDaily(
       }))
       .filter((c) => Number.isFinite(c.close)),
   );
-  return { rows, provider: providerName };
+  return { rows, provider: providerName, reason };
 
 }
 
@@ -222,27 +351,43 @@ Deno.serve(async (req) => {
     const timeframe = String(b?.timeframe ?? "1D");
     if (!symbol) return errorResponse(req, "symbol required");
     const svc = svcClient();
+    setRouteBreakerPersistence(svc);
+    await hydrateRouteBreakers(svc);
 
     if (timeframe === "1D" || timeframe === "1W" || timeframe === "1M") {
-      const daily = await loadDaily(svc, auth.userId, symbol, exchange);
+      const session = await computeMarketSession(svc, exchange);
+      let daily: { rows: OutCandle[]; provider: SourceName; reason?: string };
+      try {
+        daily = await loadDaily(svc, auth.userId, symbol, exchange);
+      } catch (e) {
+        // Broker down and no cached history: report it honestly with a 200 so
+        // the chart can render an "unavailable" state instead of a hard 502.
+        return jsonResponse(req, withProvenance({
+          candles: [], emas: {}, timeframe, provider: "none", degraded: true,
+          reason: e instanceof Error ? e.message : String(e),
+        }, session, "none", "none"));
+      }
       let candles: OutCandle[] = daily.rows;
       if (timeframe === "1W") candles = resampleDaily(candles, "W");
       if (timeframe === "1M") candles = resampleDaily(candles, "M");
 
       // Weekly/monthly: only fall back to the provider's own W/M series when
       // the stored daily history can't produce anything meaningful.
-      let providerName = daily.provider;
+      let providerName: SourceName = daily.provider;
+      let reason = daily.reason;
       if (timeframe !== "1D" && candles.length < 12) {
         const cfg = INTRADAY[timeframe];
         try {
           const { provider } = await getReadProvider(svc, auth.userId);
-          const raw = await provider.getOHLCV(symbol, exchange, cfg.range, cfg.interval);
+          const meta: OhlcvMeta = {};
+          const raw = await provider.getOHLCV(symbol, exchange, cfg.range, cfg.interval, meta);
           if (raw.length > candles.length) {
             candles = raw.map((c) => ({
               time: new Date(c.time * 1000).toISOString().slice(0, 10),
               open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume ?? 0,
             }));
-            providerName = provider.name === "kotak_neo" ? "kotak_neo" : "yahoo";
+            providerName = meta.source === "kotak_neo" ? "kotak_neo" : "yahoo";
+            reason = meta.reason;
           }
         } catch { /* keep the resampled series */ }
       }
@@ -257,34 +402,157 @@ Deno.serve(async (req) => {
         for (const o of overlays ?? []) emas[o.indicator] = o.value;
       }
 
-      return jsonResponse(req, { candles, emas, timeframe, provider: providerName });
+      return jsonResponse(req, withProvenance({
+        candles, emas, timeframe, provider: providerName, reason,
+        degraded: providerName !== "kotak_neo",
+      }, session, providerName, providerName));
     }
+
 
 
     const cfg = INTRADAY[timeframe];
     if (!cfg) return errorResponse(req, `Unsupported timeframe: ${timeframe}`);
 
-    // Intraday goes straight to the provider. The old market_intraday_prices
-    // cache had no interval column, so 5m/15m/1h bars for the same symbol
-    // collided in one (symbol,exchange,ts) keyspace and reads returned a mix.
-    // The client already caches responses for 5 minutes (react-query staleTime).
-    //
-    // NOTE: the outer Yahoo fallback that used to wrap this call has been
-    // removed. During market hours, `kotakProvider.getOHLCV` now throws for
-    // intraday when Kotak fails instead of quietly serving delayed Yahoo
-    // bars — we surface the failure to the UI (PriceSourceChip) instead of
-    // masking it. Off-hours, the provider itself still uses Yahoo internally
-    // where Kotak has no data.
+    // Intraday cache in market_intraday_prices (keyed by timeframe now, so
+    // 5m/15m/1h bars for the same symbol don't collide).  Flow:
+    //   1. Try Kotak (or off-session Yahoo). On success: return + persist.
+    //   2. On Kotak failure during session: serve the last successful bars
+    //      from the cache so charts don't blank out during broker outages.
+    //   3. If the user opted into delayed data (`allow_delayed` in the body),
+    //      also try Yahoo — clearly labelled `delayed_minutes: ~15`.
+    // Per-user opt-in for ~15m delayed intraday during broker outages. The
+    // body flag takes precedence (an in-session toggle), otherwise honour the
+    // persisted preference in market_user_prefs.
+    let allowDelayed = Boolean(b?.allow_delayed);
+    if (!allowDelayed) {
+      const { data: prefRow } = await svc
+        .from("market_user_prefs")
+        .select("allow_delayed_intraday")
+        .eq("user_id", auth.userId)
+        .maybeSingle();
+      allowDelayed = Boolean((prefRow as { allow_delayed_intraday?: boolean } | null)?.allow_delayed_intraday);
+    }
+    // If Kotak's candles route has been demonstrably down for ≥ 60s, stop
+    // punishing users for the broker outage and auto-serve Yahoo intraday
+    // even without the opt-in toggle. They still see the "DELAYED" ribbon.
+    const brokerDownForMs = routeOpenForMs(KOTAK_CANDLES_ROUTE);
+    const autoDelayed = brokerDownForMs >= 60_000;
+
     const { provider } = await getReadProvider(svc, auth.userId);
-    const raw = await provider.getOHLCV(symbol, exchange, cfg.range, cfg.interval);
-    const providerName: "kotak_neo" | "yahoo" = provider.name === "kotak_neo" ? "kotak_neo" : "yahoo";
+    const meta: OhlcvMeta = {};
+    let providerName: IntradayProviderName = "none";
+    let degraded = false;
+    let reason: string | undefined;
+    let cachedAt: string | undefined;
+    let delayedMinutes: number | undefined;
+    let raw: Awaited<ReturnType<typeof provider.getOHLCV>> = [];
+    try {
+      raw = await provider.getOHLCV(symbol, exchange, cfg.range, cfg.interval, meta);
+      providerName = meta.source === "kotak_neo" ? "kotak_neo" : "yahoo";
+      reason = meta.reason;
+      degraded = providerName !== "kotak_neo";
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      degraded = true;
+      reason = meta.reason ?? msg;
+      if (!nseSessionOpen()) {
+        // Off-session: Yahoo is fine (it's how we normally serve pre/post).
+        try {
+          raw = await yahooProvider(svc).getOHLCV(symbol, exchange, cfg.range, cfg.interval);
+          providerName = "yahoo";
+        } catch { providerName = "none"; }
+      } else {
+        // Session open + broker down. The route breaker (provider.ts) has
+        // already coalesced the health-log entry for this outage; do NOT
+        // re-log here — we were writing thousands of duplicate rows/day.
+        const { data: cached } = await svc.from("market_intraday_prices")
+          .select("ts,open,high,low,close,volume,fetched_at")
+          .eq("symbol", symbol).eq("exchange", exchange).eq("timeframe", timeframe)
+          .order("ts", { ascending: false }).limit(500);
+        if (cached && cached.length > 0) {
+          raw = cached.reverse().map((r: Record<string, unknown>) => ({
+            time: Math.floor(new Date(String(r.ts)).getTime() / 1000),
+            open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close),
+            volume: Number(r.volume ?? 0),
+          }));
+          providerName = "cache";
+          cachedAt = String((cached[cached.length - 1] as Record<string, unknown>).fetched_at ?? "");
+          reason = reason ?? "broker_503_cache";
+        }
+        if (allowDelayed || autoDelayed) {
+          try {
+            const y = await yahooProvider(svc).getOHLCV(symbol, exchange, cfg.range, cfg.interval);
+            if (y.length > raw.length) {
+              raw = y;
+              providerName = "yahoo";
+              delayedMinutes = 15;
+              reason = autoDelayed && !allowDelayed ? "broker_down_auto_delayed" : "broker_503_delayed";
+            }
+          } catch { /* keep cache/none */ }
+        }
+        if (raw.length === 0) {
+          try {
+            const seeded = await quoteSeedCandle(provider, symbol, exchange, timeframe);
+            if (seeded) {
+              raw = [seeded.candle];
+              if (seeded.source === "kotak") {
+                providerName = "quote";
+                reason = "broker_503_quote_live";
+              } else {
+                providerName = "quote_delayed";
+                delayedMinutes = seeded.source === "yahoo" ? 15 : undefined;
+                reason = `broker_503_quote_${seeded.source}`;
+              }
+            }
+          } catch { /* keep none */ }
+        }
+      }
+    }
+
+
+    // Persist successful Kotak reads into the intraday cache so we can serve
+    // them back during the next broker outage.  Also persist quote-seeded and
+    // delayed Yahoo bars (with a distinct source label) so a chart that opened
+    // during an outage keeps showing something on the *next* cold-start too.
+    if (raw.length > 0 && (providerName === "kotak_neo" || providerName === "yahoo" || providerName === "quote" || providerName === "quote_delayed")) {
+      const tail = raw.slice(-200);
+      const persistSource =
+        providerName === "kotak_neo" ? "kotak_neo"
+        : providerName === "yahoo" ? "yahoo_delayed"
+        : providerName === "quote" ? "quote_live"
+        : "quote_delayed";
+      const rows = tail.map((c) => ({
+        symbol, exchange, timeframe,
+        ts: new Date(c.time * 1000).toISOString(),
+        open: c.open, high: c.high, low: c.low, close: c.close,
+        volume: c.volume ?? 0,
+        source: persistSource, fetched_at: new Date().toISOString(),
+      }));
+      svc.from("market_intraday_prices")
+        .upsert(rows, { onConflict: "symbol,exchange,timeframe,ts" })
+        .then(() => {}, () => {});
+    }
+
     const candles = raw.map((c) => ({
       time: c.time,
       open: c.open, high: c.high, low: c.low, close: c.close,
       volume: c.volume ?? 0,
     }));
-    return jsonResponse(req, { candles, emas: {}, timeframe, provider: providerName });
+    // history vs last-bar separation: when we hit the outage path and only got
+    // a quote-seeded single bar, mark history as "cache" (or "none") and only
+    // the last bar as "quote"/"quote_delayed" so the UI can say the truth.
+    const session = await computeMarketSession(svc, exchange);
+    const historySource: "kotak_neo" | "yahoo" | "cache" | "mixed" | "none" =
+      providerName === "quote" || providerName === "quote_delayed"
+        ? (candles.length > 1 ? "cache" : "none")
+        : providerName;
+    return jsonResponse(req, withProvenance({
+      candles, emas: {}, timeframe, provider: providerName, degraded, reason,
+      cached_at: cachedAt, delayed_minutes: delayedMinutes,
+    }, session, historySource, providerName));
+
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 502);
   }
 });
+

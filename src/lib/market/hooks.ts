@@ -482,17 +482,34 @@ export function useSectorStrength() {
   });
 }
 
-export function useCandles(symbol: string | undefined, timeframe: string, exchange = "NSE") {
-  // Intraday timeframes need to pick up new completed bars while the market
-  // is open. Live LTP nudges the last bar via the tick store, but the full
-  // series stays 5 min stale without a refetch loop.
+export function useCandles(
+  symbol: string | undefined,
+  timeframe: string,
+  exchange = "NSE",
+  opts: { allowDelayed?: boolean } = {},
+) {
   const intraday = /^(?:\d+m|\d+h)$/.test(timeframe);
+  const allowDelayed = !!opts.allowDelayed;
   return useQuery({
-    queryKey: ["market", "candles", symbol ?? "", timeframe, exchange],
-    queryFn: () => callMarketFn<CandlesResponse>("market-candles", { symbol, timeframe, exchange }),
+    queryKey: ["market", "candles", symbol ?? "", timeframe, exchange, allowDelayed],
+    queryFn: () => callMarketFn<CandlesResponse>(
+      "market-candles",
+      { symbol, timeframe, exchange, allow_delayed: allowDelayed },
+    ),
     enabled: !!symbol,
-    staleTime: intraday ? 60_000 : 5 * 60_000,
-    refetchInterval: intraday ? liveInterval(60_000, false) : (false as const),
+    // Broker outages return provider="cache"/"none"/"quote". Keep a fast poll
+    // so recovery is visible within a bar-length instead of the old 5-minute
+    // punishment window; only fully-empty responses back off.
+    staleTime: intraday ? 30_000 : 5 * 60_000,
+    refetchInterval: (q) => {
+      if (!intraday) return false as const;
+      const d = q.state.data as CandlesResponse | undefined;
+      const empty = !d || d.provider === "none" || d.candles.length === 0;
+      // 60s normal, 90s during a recoverable outage, 3m only when truly empty.
+      const gap = empty ? 180_000 : d?.degraded ? 90_000 : 60_000;
+      return liveInterval(gap, false)();
+    },
+
     refetchIntervalInBackground: false,
   });
 }
@@ -501,11 +518,19 @@ export interface DepthRow { price: number; qty: number; orders: number }
 export interface DepthResponse { bids: DepthRow[]; asks: DepthRow[]; ltp: number | null; source: string }
 
 export function useDepth(symbol: string | undefined, exchange = "NSE") {
-  return useQuery({
+  return useQuery<DepthResponse, Error>({
     queryKey: ["market", "depth", symbol ?? "", exchange],
     queryFn: () => callMarketFn<DepthResponse>("market-depth", { symbol, exchange }),
     enabled: !!symbol,
-    refetchInterval: liveInterval(1_000, false),
+    // 1s polling only pays off when the ladder actually has rows. When the
+    // broker returns an empty book (outage, off-hours, unsupported segment)
+    // the old fixed 1s loop hammered the edge function 3,600x/hour for
+    // nothing — back off to 15s until depth returns.
+    refetchInterval: (q) => {
+      const d = q.state.data as DepthResponse | undefined;
+      const empty = !d || ((d.bids?.length ?? 0) === 0 && (d.asks?.length ?? 0) === 0);
+      return liveInterval(empty ? 15_000 : 1_000, false)();
+    },
     retry: false,
   });
 }

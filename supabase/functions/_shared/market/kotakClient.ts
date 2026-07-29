@@ -6,6 +6,7 @@ import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { decryptStatementPassword, type StatementPasswordRule } from "../crypto.ts";
 import { isKotakSessionFailure } from "./kotakErrorClassifier.ts";
 import { totp } from "./totp.ts";
+import { isRouteOpen, noteRouteFailure, noteRouteSuccess, routeOpenReason } from "./routeBreaker.ts";
 
 const NEO_FIN_KEY = "neotradeapi";
 // Login endpoints live on a fixed host; every post-login call uses the
@@ -453,6 +454,15 @@ export async function kotakScripFilePaths(s: KotakSettings): Promise<string[]> {
 
 // Historical candles via /charts/v2/history. Returns [{time,open,high,low,close,volume}]
 // where `time` is unix seconds. Intervals: "1","5","15","60","D","W","M".
+//
+// CIRCUIT-BROKEN. On accounts whose gateway does not expose the charts family
+// this route answers a bare "404 page not found" for every symbol. The caller
+// falls back to Yahoo, so charts kept working — but the pipeline still paid a
+// doomed round-trip per symbol per run and logged a provider-health row each
+// time: 9,658 identical failures in one day against a 500 MB database. The
+// breaker turns that into one probe per isolate, then straight to fallback.
+export const KOTAK_CANDLES_ROUTE = "kotak:charts/v2/history";
+
 export async function kotakCandles(
   s: KotakSettings,
   instrumentToken: string,
@@ -461,6 +471,10 @@ export async function kotakCandles(
   toEpoch: number,
   interval: string,
 ): Promise<Array<{ time: number; open: number; high: number; low: number; close: number; volume: number }>> {
+  if (isRouteOpen(KOTAK_CANDLES_ROUTE)) {
+    // Surface as a normal 404 so existing fallback logic is unchanged.
+    throw new KotakError(routeOpenReason(KOTAK_CANDLES_ROUTE), 404);
+  }
   const h = await sessionHeaders(s);
   const body = {
     exch: exchangeSegment.startsWith("bse") ? "BSE" : exchangeSegment.startsWith("nse_fo") ? "NFO" : "NSE",
@@ -469,11 +483,20 @@ export async function kotakCandles(
     toDate: String(toEpoch),
     interval,
   };
-  const j = await kotakFetch(`${apiBase(s)}/charts/v2/history`, {
-    method: "POST",
-    headers: { ...h, "Content-Type": "application/json", accept: "application/json" },
-    body: JSON.stringify(body),
-  });
+  let j: any;
+  try {
+    j = await kotakFetch(`${apiBase(s)}/charts/v2/history`, {
+      method: "POST",
+      headers: { ...h, "Content-Type": "application/json", accept: "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    const status = (e as { status?: number } | null)?.status;
+    const opened = noteRouteFailure(KOTAK_CANDLES_ROUTE, status, (e as Error).message ?? "candles failed");
+    if (opened) console.warn(`[kotak] ${routeOpenReason(KOTAK_CANDLES_ROUTE)}`);
+    throw e;
+  }
+  noteRouteSuccess(KOTAK_CANDLES_ROUTE);
   const raw = j?.data?.candles ?? j?.candles ?? j?.data ?? [];
   if (!Array.isArray(raw)) return [];
   // Kotak returns rows either as arrays [t,o,h,l,c,v] or objects.

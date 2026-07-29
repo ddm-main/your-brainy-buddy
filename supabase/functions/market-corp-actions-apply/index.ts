@@ -15,6 +15,7 @@
 // long-horizon series (Yahoo "adjusted close" style).
 import { preflight, jsonResponse, errorResponse, svcClient, corsFor } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
+import { fetchAllRows } from "../_shared/market/paginate.ts";
 
 const SYMBOL_BUDGET = 300;
 
@@ -58,13 +59,17 @@ Deno.serve(async (req) => {
   try {
     const svc = svcClient();
     // Pull unapplied actions, oldest first. Group by symbol.
-    const { data: unapplied, error: fetchErr } = await svc
-      .from("corporate_actions")
-      .select("id,symbol,exchange,action_type,ex_date,ratio_from,ratio_to,amount")
-      .is("applied_at", null)
-      .order("symbol").order("ex_date", { ascending: true })
-      .limit(5000);
-    if (fetchErr) throw fetchErr;
+    // Paged: `.limit(5000)` returned only the first 1000 rows (Data API cap),
+    // so the tail of the backlog was silently never applied — splits and
+    // bonuses that never reached the *_adjusted columns.
+    const unapplied = await fetchAllRows<Action>((from, to) =>
+      svc
+        .from("corporate_actions")
+        .select("id,symbol,exchange,action_type,ex_date,ratio_from,ratio_to,amount")
+        .is("applied_at", null)
+        .order("symbol").order("ex_date", { ascending: true })
+        .range(from, to) as any,
+    );
 
     const bySymbol = new Map<string, Action[]>();
     for (const a of (unapplied ?? []) as Action[]) {

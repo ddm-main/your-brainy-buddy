@@ -18,7 +18,7 @@ const CARDS: Card[] = [
   { to: "/config/email",       label: "Email",       desc: "Mailbox connections, sync rules, filters",                 table: "email_accounts", icon: Mail },
   { to: "/config/finance",     label: "Finance",     desc: "Banks, accounts, cards, loans, goals, subscriptions",      table: "",               icon: Landmark },
   { to: "/config/projects",    label: "Projects",    desc: "Active projects and areas",                                 table: "projects",       icon: FolderKanban },
-  { to: "/config/system-data", label: "System Data", desc: "Shared market data providers & pipeline (admin)",           table: "market_stocks",  icon: LineChart, adminOnly: true },
+  { to: "/config/system-data", label: "Market Config",  desc: "Market data providers, pipeline & storage (admin)",           table: "market_stocks",  icon: LineChart, adminOnly: true },
   { to: "/config/admin",       label: "Admin",       desc: "Users, roles, and section access",                          table: "",               icon: ShieldCheck, adminOnly: true },
 ];
 

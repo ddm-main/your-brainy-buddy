@@ -194,18 +194,28 @@ export default function Analysis() {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [symbol, exchange, tf, chartType, studies, settings]);
 
-  // F toggles fullscreen when not typing in an input
+  // Keyboard shortcuts (TradingView-style):
+  //   F        toggle fullscreen
+  //   1..7     select timeframe (1m,5m,15m,1h,1D,1W,1M)
+  //   ,  .     cycle timeframe left / right
   useEffect(() => {
+    const TF_KEYS = ["1m","5m","15m","1h","1D","1W","1M"];
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "f" && e.key !== "F") return;
       const el = document.activeElement as HTMLElement | null;
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
-      if (fs) return;
-      setFs(true);
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "f" || e.key === "F") { if (!fs) setFs(true); return; }
+      if (/^[1-7]$/.test(e.key)) { setTf(TF_KEYS[Number(e.key) - 1]); return; }
+      if (e.key === "," || e.key === ".") {
+        const i = TF_KEYS.indexOf(tf);
+        if (i < 0) return;
+        const next = e.key === "," ? Math.max(0, i - 1) : Math.min(TF_KEYS.length - 1, i + 1);
+        setTf(TF_KEYS[next]);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [fs]);
+  }, [fs, tf]);
 
   const sym = symbol?.toUpperCase();
 
@@ -252,7 +262,39 @@ export default function Analysis() {
     }, "image/png");
   }, [tf, sym, notify]);
 
-  const { data: candleData, isLoading, error } = useCandles(sym, tf, exchange);
+  // Opt-in fallback to ~15m delayed Yahoo data during broker outages.
+  // Persisted per-user in market_user_prefs so the preference follows the
+  // account across devices; localStorage is a same-tab fallback for the
+  // first render before the prefs row arrives.
+  const [allowDelayed, setAllowDelayed] = useState<boolean>(() => {
+    try { return localStorage.getItem("mkt.allowDelayedIntraday") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user || cancelled) return;
+      const { data } = await supabase
+        .from("market_user_prefs")
+        .select("allow_delayed_intraday")
+        .eq("user_id", user.id).maybeSingle();
+      const v = (data as { allow_delayed_intraday?: boolean } | null)?.allow_delayed_intraday;
+      if (typeof v === "boolean" && !cancelled) setAllowDelayed(v);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem("mkt.allowDelayedIntraday", allowDelayed ? "1" : "0"); } catch { /* quota */ }
+    (async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      await supabase.from("market_user_prefs").upsert(
+        { user_id: user.id, allow_delayed_intraday: allowDelayed },
+        { onConflict: "user_id" },
+      );
+    })();
+  }, [allowDelayed]);
+  const { data: candleData, isLoading, error, refetch, isFetching } = useCandles(sym, tf, exchange, { allowDelayed });
 
   const { data: scores = [] } = useStockScores({ symbol: sym, limit: 1 });
   const score = scores[0];
@@ -465,13 +507,84 @@ export default function Analysis() {
               savedLayouts={savedLayouts}
               intraday={isIntraday(tf)}
             />
-            <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0 }}>
+            <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0, position: "relative" }}>
+              {/* Degraded-source ribbon — shown while we still have bars but
+                  they didn't come straight from Kotak (cache, delayed, or Yahoo).
+                  Uses `history_source` vs `last_bar_source` so the label reflects
+                  what each part of the series actually came from. */}
+              {candleData && candleData.candles.length > 0 && candleData.degraded && (
+                <div style={{
+                  position: "absolute", top: 6, left: 6, zIndex: 2,
+                  display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap",
+                  padding: "4px 8px", borderRadius: 2,
+                  background: "rgba(24,32,40,0.75)", border: "1px solid var(--edge)",
+                  fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.14em",
+                  textTransform: "uppercase", color: "var(--warn, #f0b429)",
+                }}>
+                  {(() => {
+                    const hist = candleData.history_source ?? candleData.provider ?? "unknown";
+                    const last = candleData.last_bar_source ?? candleData.provider ?? "unknown";
+                    const fresh = candleData.freshness_ms != null
+                      ? `${Math.max(1, Math.round(candleData.freshness_ms / 60_000))}m old`
+                      : null;
+                    if (last === "quote") return `LIVE QUOTE (last bar) · history: ${hist} · candles route down`;
+                    if (last === "quote_delayed") return `LIVE QUOTE ~${candleData.delayed_minutes ?? 15}m delayed · history: ${hist}`;
+                    if (last === "cache") return `CACHED${candleData.cached_at ? ` · last fetch ${new Date(candleData.cached_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}${fresh ? ` · ${fresh}` : ""}`;
+                    if (last === "yahoo" && candleData.delayed_minutes) return `DELAYED ~${candleData.delayed_minutes}m · Yahoo fallback${fresh ? ` · ${fresh}` : ""}`;
+                    if (hist !== last) return `MIXED · history ${hist} · last bar ${last}`;
+                    return `DEGRADED · ${last}${fresh ? ` · ${fresh}` : ""}`;
+                  })()}
+                  {candleData.market_session && candleData.market_session !== "open" && (
+                    <span style={{ opacity: 0.7 }}>· {candleData.market_session}</span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => refetch()}
+                    disabled={isFetching}
+                    style={{
+                      marginLeft: 4, padding: "2px 6px", background: "transparent",
+                      border: "1px solid var(--edge)", color: "var(--text-dim)",
+                      fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.14em",
+                      textTransform: "uppercase", cursor: isFetching ? "wait" : "pointer",
+                    }}
+                  >{isFetching ? "…" : "retry"}</button>
+                </div>
+              )}
+
+
               {error ? (
                 <EmptyState hint={String((error as Error).message ?? "")}>chart unavailable</EmptyState>
               ) : isLoading || !candleData ? (
                 <div className="hud-label" style={{ padding: 24, textAlign: "center" }}>loading candles…</div>
               ) : candleData.candles.length === 0 ? (
-                <EmptyState hint="unknown symbol, or data pipeline hasn't covered it yet">no candle data</EmptyState>
+                candleData.provider === "none" ? (
+                  <EmptyState hint={candleData.reason ?? "the broker is not responding right now"}>
+                    <div>kotak neo unavailable</div>
+                    <div style={{
+                      marginTop: 12, display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap",
+                    }}>
+                      <button type="button" onClick={() => refetch()} disabled={isFetching}
+                        style={{
+                          padding: "6px 12px", background: "transparent",
+                          border: "1px solid var(--accent)", color: "var(--accent)",
+                          fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.18em",
+                          textTransform: "uppercase", cursor: isFetching ? "wait" : "pointer",
+                        }}>{isFetching ? "retrying…" : "retry"}</button>
+                      {!allowDelayed && isIntraday(tf) && (
+                        <button type="button"
+                          onClick={() => { setAllowDelayed(true); setTimeout(() => refetch(), 0); }}
+                          style={{
+                            padding: "6px 12px", background: "transparent",
+                            border: "1px solid var(--edge)", color: "var(--text-dim)",
+                            fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.18em",
+                            textTransform: "uppercase", cursor: "pointer",
+                          }}>show ~15m delayed data</button>
+                      )}
+                    </div>
+                  </EmptyState>
+                ) : (
+                  <EmptyState hint="unknown symbol, or data pipeline hasn't covered it yet">no candle data</EmptyState>
+                )
               ) : (
                 <CandleChart
                   candles={candleData.candles}

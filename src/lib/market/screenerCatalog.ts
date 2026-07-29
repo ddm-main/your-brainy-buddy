@@ -98,8 +98,6 @@ export interface FilterDef {
   nullMeansZero?: boolean;
   /** Optional raw field to compare while keeping a rounded display field visible. */
   valueKey?: string;
-  /** Treat a max equal to the catalogue max as open-ended, e.g. Tickertape's "1M+" volume cap. */
-  maxIsOpenEnded?: boolean;
 }
 
 export const CATEGORIES: Array<{ id: FilterCategory; label: string; desc: string }> = [
@@ -238,20 +236,36 @@ export interface ActiveFilter {
   values?: string[]; // for enum filters
 }
 
+/** A bound sitting exactly on the catalogue edge means "and beyond", not a hard
+ *  cap. Numeric filters are seeded with their full catalogue range when added,
+ *  so an edge value must never drop legitimate outliers (a +25% mover under a
+ *  1D Return filter whose catalogue max is 20). */
+export function isOpenEndedMax(def: FilterDef | undefined, v: number | null): boolean {
+  return !!def && def.max !== undefined && v !== null && v >= def.max;
+}
+export function isOpenEndedMin(def: FilterDef | undefined, v: number | null): boolean {
+  return !!def && def.min !== undefined && v !== null && v <= def.min;
+}
+
 /** Returns true if the row satisfies the active filter.
  *  Rules:
  *   - Rows outside the filter's applicability scope are always kept (they are "N/A").
  *   - Numeric filter with no min/max set → matches everything.
+ *   - A bound on the catalogue edge is open-ended (see isOpenEndedMax/Min).
  *   - Numeric filter with a bound + `nullMeansZero` → NULL is treated as 0.
  *   - Numeric filter with a bound and no `nullMeansZero` → NULL is excluded. */
+
 export function filterMatches(row: Record<string, any>, af: ActiveFilter, latestTradeDate?: string | null): boolean {
   const filterId = canonicalFilterId(af.id);
   const def = FILTER_BY_ID[filterId];
   if (!def) return true;
   if (def.kind === "boolean" && af.bool === undefined) return true;
   if (def.kind === "enum" && (!af.values || af.values.length === 0)) return true;
-  const minNum = af.min === undefined || af.min === "" || Number.isNaN(Number(af.min)) ? null : Number(af.min);
-  const maxNum = af.max === undefined || af.max === "" || Number.isNaN(Number(af.max)) ? null : Number(af.max);
+  const rawMin = af.min === undefined || af.min === "" || Number.isNaN(Number(af.min)) ? null : Number(af.min);
+  const rawMax = af.max === undefined || af.max === "" || Number.isNaN(Number(af.max)) ? null : Number(af.max);
+  // Catalogue-edge bounds are open-ended, so they don't constrain anything.
+  const minNum = isOpenEndedMin(def, rawMin) ? null : rawMin;
+  const maxNum = isOpenEndedMax(def, rawMax) ? null : rawMax;
   if (def.kind === "number" && minNum === null && maxNum === null) return true;
   // Applicability: rows outside the scope are excluded from filtering — they pass through
   // untouched so that, e.g., an ETF is not dropped by a PE filter. Technical filters
@@ -323,7 +337,11 @@ export function excludedByMissingData(rows: Array<Record<string, any>>, active: 
     const filterId = canonicalFilterId(af.id);
     const def = FILTER_BY_ID[filterId];
     if (!def || def.kind !== "number" || def.nullMeansZero) continue;
-    const hasBound = (af.min !== undefined && af.min !== "") || (af.max !== undefined && af.max !== "");
+    const rawMin = af.min === undefined || af.min === "" ? null : Number(af.min);
+    const rawMax = af.max === undefined || af.max === "" ? null : Number(af.max);
+    // A range left at the catalogue edges constrains nothing, so it can't be
+    // the reason a row disappeared.
+    const hasBound = (!isOpenEndedMin(def, rawMin) && rawMin !== null) || (!isOpenEndedMax(def, rawMax) && rawMax !== null);
     if (!hasBound) continue;
     const scope: ApplicabilityScope = def.scope ?? (def.fundamental ? "eq" : "all");
     for (const r of rows) {

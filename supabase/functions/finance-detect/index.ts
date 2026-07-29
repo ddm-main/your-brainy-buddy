@@ -12,6 +12,7 @@ import { requireUserId } from "../_shared/auth.ts";
 import { sanitizedErrorResponse } from "../_shared/errors.ts";
 import { createSlidingWindowLimiter } from "../_shared/rate-limit.ts";
 
+import { fetchAllRows } from "../_shared/market/paginate.ts";
 const limiter = createSlidingWindowLimiter(6, 60_000);
 
 function normalizeMerchant(raw: string | null | undefined): string | null {
@@ -65,14 +66,19 @@ Deno.serve(async (req) => {
     );
 
     // Last 90 days is enough for classification + duplicate detection.
+    // Paged: `.limit(5000)` was silently truncated to 1000 by the Data API,
+    // so heavy-usage accounts had 90-day windows where the oldest
+    // transactions were never classified and duplicates spanning the cut were
+    // never detected.
     const since = new Date(Date.now() - 90 * 86400_000).toISOString().slice(0, 10);
-    const { data: rows, error } = await svc
-      .from("transactions")
-      .select("id, user_id, txn_type, amount, merchant, description, category, txn_date, detected_kind, merchant_normalized, is_duplicate, is_suspicious")
-      .eq("user_id", uid).gte("txn_date", since).limit(5000);
-    if (error) throw error;
-
-    const txns = rows ?? [];
+    const txns = await fetchAllRows<any>((from, to) =>
+      svc
+        .from("transactions")
+        .select("id, user_id, txn_type, amount, merchant, description, category, txn_date, detected_kind, merchant_normalized, is_duplicate, is_suspicious")
+        .eq("user_id", uid).gte("txn_date", since)
+        .order("txn_date", { ascending: false }).order("id")
+        .range(from, to) as any,
+    );
     // Merchant medians for fraud check (60 days).
     const merchantAmounts = new Map<string, number[]>();
     const enriched = txns.map((t: any) => {
