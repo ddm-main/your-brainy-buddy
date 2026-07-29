@@ -3712,14 +3712,19 @@ export type Database = {
           band: string | null
           buckets: Json | null
           close: number | null
+          context_neutral: boolean
           coverage: Json | null
           created_at: string
           evaluated_at: string | null
           exchange: string
+          fwd_rel_10d: number | null
+          fwd_rel_21d: number | null
+          fwd_rel_5d: number | null
           fwd_ret_10d: number | null
           fwd_ret_21d: number | null
           fwd_ret_5d: number | null
           id: string
+          is_liquid_tradable: boolean | null
           model: string
           rank_pct: number | null
           score: number | null
@@ -3730,14 +3735,19 @@ export type Database = {
           band?: string | null
           buckets?: Json | null
           close?: number | null
+          context_neutral?: boolean
           coverage?: Json | null
           created_at?: string
           evaluated_at?: string | null
           exchange?: string
+          fwd_rel_10d?: number | null
+          fwd_rel_21d?: number | null
+          fwd_rel_5d?: number | null
           fwd_ret_10d?: number | null
           fwd_ret_21d?: number | null
           fwd_ret_5d?: number | null
           id?: string
+          is_liquid_tradable?: boolean | null
           model?: string
           rank_pct?: number | null
           score?: number | null
@@ -3748,14 +3758,19 @@ export type Database = {
           band?: string | null
           buckets?: Json | null
           close?: number | null
+          context_neutral?: boolean
           coverage?: Json | null
           created_at?: string
           evaluated_at?: string | null
           exchange?: string
+          fwd_rel_10d?: number | null
+          fwd_rel_21d?: number | null
+          fwd_rel_5d?: number | null
           fwd_ret_10d?: number | null
           fwd_ret_21d?: number | null
           fwd_ret_5d?: number | null
           id?: string
+          is_liquid_tradable?: boolean | null
           model?: string
           rank_pct?: number | null
           score?: number | null
@@ -6254,6 +6269,9 @@ export type Database = {
       }
       market_score_band_stats: {
         Row: {
+          avg_rel_10d: number | null
+          avg_rel_21d: number | null
+          avg_rel_5d: number | null
           avg_ret_10d: number | null
           avg_ret_21d: number | null
           avg_ret_5d: number | null
@@ -6263,7 +6281,12 @@ export type Database = {
           hit_rate_21d: number | null
           hit_rate_5d: number | null
           last_date: string | null
+          liquid_n: number | null
           model: string | null
+          neutral_n: number | null
+          rel_hit_rate_10d: number | null
+          rel_hit_rate_21d: number | null
+          rel_hit_rate_5d: number | null
           sample_10d: number | null
           sample_21d: number | null
           sample_5d: number | null
@@ -6734,6 +6757,14 @@ export type Database = {
         }[]
       }
       db_size_report: { Args: never; Returns: Json }
+      evaluate_score_history_forward: {
+        Args: { _limit?: number }
+        Returns: number
+      }
+      fit_score_calibration: {
+        Args: { _min_n?: number; _model?: string }
+        Returns: number
+      }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
@@ -6798,6 +6829,16 @@ export type Database = {
         Args: { _limit?: number; _trade_date?: string }
         Returns: number
       }
+      market_score_backfill_candidates: {
+        Args: { _limit?: number; _min_rows?: number }
+        Returns: {
+          bars: number
+          exchange: string
+          market_cap: number
+          sector: string
+          symbol: string
+        }[]
+      }
       prune_batched: { Args: { _sql: string }; Returns: number }
       prune_old_data: { Args: { _aggressive?: boolean }; Returns: Json }
       purge_old_jarvis_interactions: { Args: never; Returns: undefined }
@@ -6805,6 +6846,7 @@ export type Database = {
       quota_report: { Args: never; Returns: Json }
       refresh_market_screener_snapshot: { Args: never; Returns: number }
       refresh_market_top_movers: { Args: never; Returns: undefined }
+      refresh_score_distribution: { Args: { _model?: string }; Returns: number }
       run_daily_maintenance: { Args: never; Returns: Json }
       seed_default_indices: { Args: { _uid: string }; Returns: undefined }
       verify_market_cron_secret: { Args: { _secret: string }; Returns: boolean }

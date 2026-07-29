@@ -27,6 +27,13 @@ export interface ScoreHistoryRow {
   fwd_ret_5d: number | null;
   fwd_ret_10d: number | null;
   fwd_ret_21d: number | null;
+  // Same windows, minus NIFTY over the identical dates. A bull month makes
+  // every band look predictive; this is the honest read.
+  fwd_rel_5d: number | null;
+  fwd_rel_10d: number | null;
+  fwd_rel_21d: number | null;
+  context_neutral: boolean;
+  is_liquid_tradable: boolean | null;
   evaluated_at: string | null;
 }
 
@@ -39,9 +46,15 @@ export interface ScoreBandStat {
   avg_ret_5d: number | null;
   avg_ret_10d: number | null;
   avg_ret_21d: number | null;
+  avg_rel_5d: number | null;
+  avg_rel_10d: number | null;
+  avg_rel_21d: number | null;
   hit_rate_5d: number | null;
   hit_rate_10d: number | null;
   hit_rate_21d: number | null;
+  rel_hit_rate_5d: number | null;
+  rel_hit_rate_10d: number | null;
+  rel_hit_rate_21d: number | null;
   first_date: string | null;
   last_date: string | null;
 }
@@ -54,6 +67,10 @@ export interface CalibrationRow {
   computed_at: string;
 }
 
+/** Per-bucket attribution rows are stored as `bucket:<name>` components. */
+export const BUCKET_PREFIX = "bucket:";
+
+
 /** Daily v4 score snapshots for one symbol, oldest → newest. */
 export function useScoreHistory(symbol: string | null | undefined, exchange = "NSE", bars = 60) {
   return useQuery({
@@ -64,7 +81,7 @@ export function useScoreHistory(symbol: string | null | undefined, exchange = "N
       if (!symbol) return [];
       const { data, error } = await (supabase as any)
         .from("market_score_history")
-        .select("trade_date,score,rank_pct,band,close,buckets,coverage,fwd_ret_5d,fwd_ret_10d,fwd_ret_21d,evaluated_at")
+        .select("trade_date,score,rank_pct,band,close,buckets,coverage,fwd_ret_5d,fwd_ret_10d,fwd_ret_21d,fwd_rel_5d,fwd_rel_10d,fwd_rel_21d,context_neutral,is_liquid_tradable,evaluated_at")
         .eq("symbol", symbol)
         .eq("exchange", exchange)
         .eq("model", SCORE_MODEL)
@@ -83,8 +100,14 @@ export function useScoreHistory(symbol: string | null | undefined, exchange = "N
           fwd_ret_5d: num(r.fwd_ret_5d),
           fwd_ret_10d: num(r.fwd_ret_10d),
           fwd_ret_21d: num(r.fwd_ret_21d),
+          fwd_rel_5d: num(r.fwd_rel_5d),
+          fwd_rel_10d: num(r.fwd_rel_10d),
+          fwd_rel_21d: num(r.fwd_rel_21d),
+          context_neutral: r.context_neutral === true,
+          is_liquid_tradable: r.is_liquid_tradable ?? null,
           evaluated_at: r.evaluated_at ?? null,
         }))
+
         .reverse();
     },
   });
@@ -113,6 +136,13 @@ export function useScoreBandStats() {
         hit_rate_5d: num(r.hit_rate_5d),
         hit_rate_10d: num(r.hit_rate_10d),
         hit_rate_21d: num(r.hit_rate_21d),
+        avg_rel_5d: num(r.avg_rel_5d),
+        avg_rel_10d: num(r.avg_rel_10d),
+        avg_rel_21d: num(r.avg_rel_21d),
+        rel_hit_rate_5d: num(r.rel_hit_rate_5d),
+        rel_hit_rate_10d: num(r.rel_hit_rate_10d),
+        rel_hit_rate_21d: num(r.rel_hit_rate_21d),
+
         first_date: r.first_date ?? null,
         last_date: r.last_date ?? null,
       }));

@@ -5,6 +5,7 @@
 import { Chip } from "@/components/hud/HudControls";
 import { fmtPct } from "@/components/hud/DataTable";
 import {
+  BUCKET_PREFIX,
   MIN_BAND_SAMPLE,
   sortBands,
   useScoreBandStats,
@@ -14,6 +15,7 @@ import {
 } from "@/lib/market/scoreHistory";
 
 const MATURITY_SESSIONS = 21;
+
 
 function retColor(v: number | null): string {
   if (v == null) return "var(--text-muted)";
@@ -55,7 +57,14 @@ export function ScoreHistoryPanel({ symbol, exchange }: { symbol: string; exchan
   const { data: calibration = [] } = useScoreCalibration();
 
   const matured = history.filter((r) => r.fwd_ret_5d != null || r.fwd_ret_21d != null).slice(-6).reverse();
-  const model = calibration.find((c) => c.r2 != null) ?? calibration[0] ?? null;
+  const neutralCount = history.filter((r) => r.context_neutral).length;
+  const total = calibration.find((c) => c.component === "score_vs_fwd_rel_21d")
+    ?? calibration.find((c) => c.component === "score_vs_fwd_ret_21d") ?? null;
+  const buckets = calibration
+    .filter((c) => c.component.startsWith(BUCKET_PREFIX) && c.r2 != null)
+    .sort((a, b) => (b.r2 ?? 0) - (a.r2 ?? 0))
+    .slice(0, 5);
+
 
   const label = (t: string) => (
     <div className="hud-label" style={{ fontSize: 9, letterSpacing: "0.14em", color: "var(--accent-soft)", margin: "10px 0 4px" }}>
@@ -90,23 +99,27 @@ export function ScoreHistoryPanel({ symbol, exchange }: { symbol: string; exchan
         </div>
       ) : (
         <div style={{ fontSize: 10, fontFamily: "var(--font-hud)" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1.3fr 0.7fr repeat(3, 1fr)", gap: 4, color: "var(--text-muted)", paddingBottom: 2 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.6fr repeat(4, 1fr)", gap: 4, color: "var(--text-muted)", paddingBottom: 2 }}>
             <span>date</span><span>score</span><span style={{ textAlign: "right" }}>+5d</span>
             <span style={{ textAlign: "right" }}>+10d</span><span style={{ textAlign: "right" }}>+21d</span>
+            <span style={{ textAlign: "right" }}>vs NIFTY</span>
           </div>
           {matured.map((r) => (
-            <div key={r.trade_date} style={{ display: "grid", gridTemplateColumns: "1.3fr 0.7fr repeat(3, 1fr)", gap: 4, padding: "1px 0" }}>
+            <div key={r.trade_date} style={{ display: "grid", gridTemplateColumns: "1.2fr 0.6fr repeat(4, 1fr)", gap: 4, padding: "1px 0" }}>
               <span style={{ color: "var(--text-dim)" }}>
                 {new Date(r.trade_date).toLocaleDateString([], { day: "2-digit", month: "short" })}
               </span>
               <span style={{ color: "var(--text)" }}>{r.score ?? "—"}</span>
-              {[r.fwd_ret_5d, r.fwd_ret_10d, r.fwd_ret_21d].map((v, i) => (
+              {[r.fwd_ret_5d, r.fwd_ret_10d, r.fwd_ret_21d, r.fwd_rel_21d].map((v, i) => (
                 <span key={i} style={{ textAlign: "right", color: retColor(v), fontVariantNumeric: "tabular-nums" }}>
                   {v == null ? "…" : fmtPct(v, 1, false)}
                 </span>
               ))}
             </div>
           ))}
+          <div style={{ fontSize: 9, color: "var(--text-muted)", marginTop: 3 }}>
+            split-adjusted; “vs NIFTY” is the 21-day return minus the index over the same dates
+          </div>
         </div>
       )}
 
@@ -117,23 +130,26 @@ export function ScoreHistoryPanel({ symbol, exchange }: { symbol: string; exchan
         </div>
       ) : (
         <div style={{ fontSize: 10, fontFamily: "var(--font-hud)" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.8fr 1fr 1fr", gap: 4, color: "var(--text-muted)", paddingBottom: 2 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 0.7fr repeat(3, 1fr)", gap: 4, color: "var(--text-muted)", paddingBottom: 2 }}>
             <span>band</span><span style={{ textAlign: "right" }}>n</span>
-            <span style={{ textAlign: "right" }}>hit 21d</span><span style={{ textAlign: "right" }}>avg 21d</span>
+            <span style={{ textAlign: "right" }}>hit 21d</span>
+            <span style={{ textAlign: "right" }}>beat NIFTY</span>
+            <span style={{ textAlign: "right" }}>avg rel</span>
           </div>
           {sortBands(bands).map((b) => {
             const thin = b.sample_21d < MIN_BAND_SAMPLE;
             return (
-              <div key={b.band} style={{ display: "grid", gridTemplateColumns: "1.2fr 0.8fr 1fr 1fr", gap: 4, padding: "1px 0" }}>
+              <div key={b.band} style={{ display: "grid", gridTemplateColumns: "1fr 0.7fr repeat(3, 1fr)", gap: 4, padding: "1px 0" }}>
                 <span style={{ color: "var(--text-dim)" }}>{b.band}</span>
                 <span style={{ textAlign: "right", color: "var(--text-muted)" }}>{b.sample_21d}</span>
                 {thin ? (
-                  <span style={{ gridColumn: "3 / span 2", textAlign: "right", color: "var(--warn)" }}>insufficient sample</span>
+                  <span style={{ gridColumn: "3 / span 3", textAlign: "right", color: "var(--warn)" }}>insufficient sample</span>
                 ) : (
                   <>
                     <span style={{ textAlign: "right", color: "var(--text)" }}>{b.hit_rate_21d != null ? `${b.hit_rate_21d}%` : "—"}</span>
-                    <span style={{ textAlign: "right", color: retColor(b.avg_ret_21d) }}>
-                      {b.avg_ret_21d == null ? "—" : fmtPct(b.avg_ret_21d, 1, false)}
+                    <span style={{ textAlign: "right", color: "var(--text)" }}>{b.rel_hit_rate_21d != null ? `${b.rel_hit_rate_21d}%` : "—"}</span>
+                    <span style={{ textAlign: "right", color: retColor(b.avg_rel_21d) }}>
+                      {b.avg_rel_21d == null ? "—" : fmtPct(b.avg_rel_21d, 1, false)}
                     </span>
                   </>
                 )}
@@ -143,13 +159,36 @@ export function ScoreHistoryPanel({ symbol, exchange }: { symbol: string; exchan
         </div>
       )}
 
-      {model && (
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
-          {model.r2 != null && <Chip tone={model.r2 >= 0.05 ? "ok" : "warn"}>r² {model.r2.toFixed(3)}</Chip>}
-          {model.sample_n != null && <Chip>n {model.sample_n}</Chip>}
-          <Chip>fit {new Date(model.computed_at).toLocaleDateString([], { day: "2-digit", month: "short" })}</Chip>
-        </div>
+      {buckets.length > 0 && (
+        <>
+          {label("Which Buckets Carry Signal")}
+          <div style={{ fontSize: 10, fontFamily: "var(--font-hud)" }}>
+            {buckets.map((c) => (
+              <div key={c.component} style={{ display: "grid", gridTemplateColumns: "1.6fr 0.7fr 0.7fr", gap: 4, padding: "1px 0" }}>
+                <span style={{ color: "var(--text-dim)" }}>{c.component.slice(BUCKET_PREFIX.length)}</span>
+                <span style={{ textAlign: "right", color: "var(--text)" }}>r² {c.r2!.toFixed(3)}</span>
+                <span style={{ textAlign: "right", color: "var(--text-muted)" }}>n {c.sample_n ?? "—"}</span>
+              </div>
+            ))}
+          </div>
+        </>
       )}
+
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
+        {total ? (
+          <>
+            {total.r2 != null && <Chip tone={total.r2 >= 0.05 ? "ok" : "warn"}>r² {total.r2.toFixed(3)}</Chip>}
+            {total.sample_n != null && <Chip>n {total.sample_n}</Chip>}
+            <Chip>fit {new Date(total.computed_at).toLocaleDateString([], { day: "2-digit", month: "short" })}</Chip>
+          </>
+        ) : (
+          <Chip tone="warn">not fitted yet</Chip>
+        )}
+        {neutralCount > 0 && (
+          <Chip tone="warn">{neutralCount} replayed (neutral context, excluded from fit)</Chip>
+        )}
+      </div>
+
     </>
   );
 }

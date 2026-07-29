@@ -1,63 +1,71 @@
 ## Goal
 
-Panel A3 ("Breakout Intelligence") on `/market/analysis/:symbol` becomes a single-purpose surface: the breakout score, what it is made of, and the evidence that the score works — the score-history feedback loop with forward 5/10/21-day returns. Everything else in that panel moves out or is dropped.
+The Breakout Intelligence panel (A3) is already rebuilt around the score and the score-history feedback loop. All remaining work is data-side: make v4 produce scores, backfill history, and fit an honest calibration so the panel stops rendering empty states.
 
-## Verified current state (checked live, 2026-07-29)
+## Verified current state (live, 2026-07-29)
 
-- `market_score_history` exists with `score, rank_pct, band, close, buckets, coverage, fwd_ret_5d/10d/21d, evaluated_at` and is **empty (0 rows)** — the v4 aggregates pass hasn't run since it was wired.
-- `market_stock_scores.breakout_score_v4` is **null for every row** — same reason.
-- `market_scoring_calibration` has 12 rows, but they are legacy `breakout_v2` percentile stats (e.g. `breakout_p50 = 29`), not fitted v4 weights.
-- `market_breakout_snapshots` is empty, `market_score_distribution` is empty.
-- Nothing in `src/` reads any of these three tables today — the loop has no UI at all.
-- A3 currently renders: Breakout Score + stage, Setups chips, Chart Patterns chips, Resistance, Support (`src/routes/market/Analysis.tsx:667-748`).
+- `market_score_history` — **0 rows**.
+- `market_stock_scores` — 2,907 rows, `breakout_score_v4` non-null on **0** of them.
+- `market_scoring_calibration` — 12 rows, all `model_version` = `breakout_v2:2026-07-28` / `breakout_v2:2026-07-29`. No v4 rows.
+- `market_score_distribution` — **0 rows**. `market_breakout_snapshots` — 0 rows.
+- Universe: 2,852 active NSE symbols; latest `market_daily_prices` session 2026-07-29.
+- `market_score_history` has no column for benchmark-relative returns and no liquidity flag; `prune_old_data` does not list it.
+- `market_score_band_stats` view exists and matches what the UI reads.
 
-So the UI work and a data backfill are both needed; without the backfill the new panel would render "no history yet" for weeks.
+## Required improvements
 
-## What A3 will show
+**1. Run the v4 aggregates pass**
+Execute the aggregates function for session 2026-07-29 so `breakout_score_v4`, `band`, `rank_pct` and bucket contributions are written for the live universe, and one `market_score_history` row per scored symbol is snapshotted. Confirm the scored count is close to 2,852 and that unscoreable symbols (<120 bars) write a null score with a reason instead of a low number.
 
-1. **Score row** — score badge with stage chip and the bucket breakdown tooltip (kept, unchanged behaviour), plus band label (STRONG / MODERATE / WATCH / WEAK) and percentile rank within the day's universe.
-2. **Coverage / trust line** — which of the 8 buckets actually had data, and a "not scoreable" reason when the readability gate fired (<120 bars), instead of a misleading low number.
-3. **Score history sparkline** — this symbol's daily v4 score for the last ~60 sessions from `market_score_history`, with close overlaid so score-vs-price divergence is visible.
-4. **Forward returns for this symbol** — for past snapshots that have matured: score on date → realised +5d / +10d / +21d return.
-5. **Model calibration (universe-wide)** — hit rate and mean forward return by score band, plus `r2` / `sample_n` from `market_scoring_calibration`, so the panel states plainly how predictive the score has been.
+**2. Backfill `market_score_history` (~120 sessions)**
+One-off routine replaying the v4 scorer over the last ~120 NSE sessions from `market_daily_prices`, writing one row per symbol per session. Run in chunks (symbol batches per session) to stay inside edge-function limits and to keep the write volume manageable — roughly 2,800 rows per session, ~340k rows total.
 
-### Removed from A3
-- Setups chips, Chart Patterns chips, Resistance, Support rows. Resistance/Support and pattern flags already feed the score's bucket tooltip; the raw chips belong with the chart, so they move into the A4/A5 rails rather than being deleted outright (patterns → A4 Indicators, S/R → A5 Range & Strength). Nothing is silently lost.
+**3. Label neutral-context backfill rows**
+Sector strength, RS-vs-NIFTY regime and news/AI context are not reconstructible historically. Mark those buckets in the row's `coverage` jsonb as `neutral` (not `present`), and exclude neutral-context rows from the calibration fit so r² is not flattered by synthetic inputs.
+
+**4. Forward returns from `close_adjusted`**
+Compute `fwd_ret_5d/10d/21d` from `COALESCE(close_adjusted, close)` on both legs, so a split inside the window doesn't register as a −50% failure. Only write a forward return when the full forward window exists; leave null otherwise so "maturing" stays distinguishable from "flat".
+
+**5. Benchmark-relative returns**
+Add `fwd_rel_5d/10d/21d` to `market_score_history` — the symbol's forward return minus NIFTY's over the identical window — and surface both absolute and relative hit rate in `market_score_band_stats`. Without this, a bull month makes every band look predictive.
+
+**6. Liquidity filter in calibration**
+Fit only on rows whose symbol was liquid/tradable on the snapshot date (turnover + price floor, matching the screener's `is_liquid_tradable` definition). Store the flag on the history row at write time rather than re-deriving it later.
+
+**7. Purge legacy calibration rows**
+Delete the 12 `breakout_v2:*` rows once v4 rows are fitted, so nothing reads v2 percentile stats as v4 weights.
+
+**8. Per-bucket attribution**
+Fit each of the 8 bucket contributions from the stored `buckets` jsonb against forward returns, writing one calibration row per bucket (`component`, `weight`, `r2`, `sample_n`) plus a row for the total score. This is what lets the panel say *which* section carries signal.
+
+**9. Sample-size guard**
+Bands and buckets with n < 200 matured rows report `sample_n` but no hit rate; the UI already renders "insufficient sample" for these.
+
+**10. Populate `market_score_distribution`**
+Write the daily v4 distribution (n, p50/p70/p90, max, strong/moderate/watch cut-offs) for every backfilled session and going forward, so percentile band cut-offs have a source.
+
+**11. Retention**
+Add `market_score_history` to `prune_old_data` with a ~400-day window and a `system_retention_config` key, and add `(trade_date, model)` plus `(symbol, exchange, model, trade_date DESC)` indexes for the pending-evaluation scan and the per-symbol panel read.
 
 ## Technical work
 
-**Data layer — new `src/lib/market/scoreHistory.ts`**
-- `useScoreHistory(symbol, exchange)` → `market_score_history` filtered by symbol/model `breakout_v4`, ordered by `trade_date`, last 60 rows.
-- `useScoreCalibration()` → `market_scoring_calibration` for the current model version.
-- `useScoreBandStats()` → aggregated hit-rate / mean forward return per band. Aggregating client-side over thousands of rows is wasteful, so this reads a small `market_score_band_stats` view (new, security-invoker, grouped by `model, band`) exposing `sample_n, hit_rate_5d/10d/21d, avg_ret_5d/10d/21d`.
+```text
+migration
+  ALTER market_score_history  + fwd_rel_5d/10d/21d, is_liquid_tradable, context_neutral
+  CREATE INDEX  (symbol, exchange, model, trade_date DESC)
+  CREATE INDEX  (trade_date, model) WHERE fwd_ret_21d IS NULL
+  REPLACE VIEW  market_score_band_stats  + relative hit rate / avg
+  REPLACE FUNC  prune_old_data           + market_score_history (400d)
+  INSERT        system_retention_config  ('market_score_history', 400)
 
-**Migration**
-- Create the `market_score_band_stats` view over `market_score_history` with grants to `authenticated` / `service_role`.
-- Add a `market_score_history_symbol_idx (symbol, exchange, model, trade_date DESC)` index — the per-symbol read has no supporting index today.
+edge
+  market-aggregates      → also write distribution rows + history snapshot
+  market-score-backfill  → new one-off: replay ~120 sessions, chunked by session
+  market-score-evaluate  → nightly: fill matured fwd_ret_* / fwd_rel_*, refit
+                           calibration (per bucket + total), purge v2 rows
 
-**Backfill (one-off edge routine, run from Settings → Sync)**
-- Replay the v4 scorer over the last ~120 sessions from `market_daily_prices` for the NSE universe, writing one `market_score_history` row per symbol per session with neutral-context flags marked in `coverage` (sector/RS/regime are not reconstructible historically — they must be labelled, not faked).
-- Compute `fwd_ret_5d/10d/21d` for every backfilled row that has enough forward bars, then fit the calibration rows for `breakout_v4` and delete the stale `breakout_v2` rows.
+ui
+  Settings → Sync gains a "Backfill score history" action with progress
+```
 
-**UI**
-- New `src/components/market/ScoreHistoryPanel.tsx` holding the sparkline + forward-return table + band calibration block; A3 in `Analysis.tsx` renders the score row, coverage line, and this component.
-- Empty/immature states are explicit: "history collecting — N of 21 sessions" rather than blank or zeroed cells.
-
-## Required improvements (the list you asked for)
-
-1. **Run the v4 pipeline** — `breakout_score_v4` is null universe-wide; every v4 surface is dead until the aggregates pass executes on a real session.
-2. **Backfill history** — the loop is only meaningful with ≥21 sessions of matured snapshots; cold-start needs the replay above.
-3. **Purge legacy calibration rows** — `breakout_v2` percentile rows in `market_scoring_calibration` will be misread as v4 weights.
-4. **Label neutral-context snapshots** — backfilled rows lack true sector/RS/regime; mark them in `coverage` and exclude them from calibration fitting so the r² isn't flattered.
-5. **Survivorship and liquidity filter in calibration** — fit only on `is_liquid_tradable` symbols, or the hit rate is inflated by illiquid prints.
-6. **Forward returns must be adjusted** — use `close_adjusted`; a split inside the 21-day window otherwise reads as a −50% "failure".
-7. **Benchmark-relative hit rate** — report forward return *versus NIFTY over the same window* alongside absolute, otherwise a bull month makes every band look predictive.
-8. **Per-bucket attribution** — store bucket contributions in `market_score_history.buckets` (already in the schema) and fit per-bucket weights, so calibration says *which* of the 8 sections carries signal rather than only scoring the total.
-9. **Retention** — history grows ~2,800 rows/session; add it to `prune_old_data` with a ~400-day window, and index `(trade_date, model)` for the pending-evaluation scan.
-10. **Show sample size and confidence** — a band with n<200 must render as "insufficient sample", not as a hit rate.
-11. **Distribution table is empty** — `market_score_distribution` needs to populate for the percentile/band cut-offs the panel displays.
-12. **Never render a score without coverage** — when the readability gate returns null, A3 shows the reason; today a data-less symbol and a genuinely weak setup both show a low number.
-
-## Notes
-
-Score maths itself is unchanged — this is a presentation and evidence-loop change plus the data backfill required to make it non-empty.
+Score maths is unchanged. The panel's honest empty states remain until the backfill and first evaluation pass complete; after that, forward returns mature progressively — the 21-day column stays sparse for the most recent three weeks by construction.
