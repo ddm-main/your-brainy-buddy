@@ -5,8 +5,30 @@ import type { Candle } from "./indicators.ts";
 
 const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" };
 
+// Indian indices are NOT `<name>.NS` on Yahoo — they carry dedicated caret
+// tickers. Building `NIFTY.NS` returns HTTP 404, which used to surface as a
+// "daily candles failed" feed error whenever an index fell back to Yahoo.
+const YAHOO_INDEX_ALIASES: Record<string, string> = {
+  NIFTY: "^NSEI",
+  NIFTY50: "^NSEI",
+  "NIFTY 50": "^NSEI",
+  NIFTYBANK: "^NSEBANK",
+  BANKNIFTY: "^NSEBANK",
+  FINNIFTY: "^CNXFIN",
+  NIFTYFIN: "^CNXFIN",
+  NIFTYIT: "^CNXIT",
+  MIDCPNIFTY: "^NSEMDCP50",
+  NIFTYMIDCAP: "^NSEMDCP50",
+  SENSEX: "^BSESN",
+  BANKEX: "^BSEBANK",
+  INDIAVIX: "^INDIAVIX",
+  "INDIA VIX": "^INDIAVIX",
+};
+
 export function toYahooSymbol(symbol: string, exchange = "NSE"): string {
   if (symbol.startsWith("^") || symbol.includes(".")) return symbol;
+  const alias = YAHOO_INDEX_ALIASES[symbol.trim().toUpperCase()];
+  if (alias) return alias;
   return exchange === "BSE" ? `${symbol}.BO` : `${symbol}.NS`;
 }
 

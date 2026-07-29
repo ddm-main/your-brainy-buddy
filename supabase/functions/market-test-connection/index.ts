@@ -1,88 +1,16 @@
 // market-test-connection — live probe of any configured data provider.
-// Kotak/Yahoo: full MarketProvider.testAuth() (validates session / fetches a quote).
+// Kotak/Yahoo: full surface report / MarketProvider.testAuth().
 // FMP/Alpha Vantage/NSE/BSE: lightweight direct probes — these aren't
 // per-user broker sessions, just service-level API reachability + key checks.
-// (Stooq used to be here too — retired, see resolver.ts's PRIORITY_CHAINS
-// comment: its public endpoint now sits behind a browser anti-bot challenge.)
+// The probe implementations themselves live in _shared/market/selftest.ts so
+// market-selftest (the "test everything" / cron path) writes identical status.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { getActiveProvider, kotakProvider, yahooProvider } from "../_shared/market/provider.ts";
 import { KOTAK_SETTINGS_COLS, type KotakSettings } from "../_shared/market/kotakClient.ts";
-import { fmpProfile } from "../_shared/market/fmpClient.ts";
-import { alphaRSI } from "../_shared/market/alphaVantageClient.ts";
-import { nseMarketStatus } from "../_shared/market/nseClient.ts";
-import { bseCirculars } from "../_shared/market/bseClient.ts";
-
-const PROBE_SYMBOL = "RELIANCE";
-
-async function probeService(provider: string): Promise<{ ok: boolean; detail: string | null }> {
-  switch (provider) {
-    case "fmp": {
-      const p = await fmpProfile(PROBE_SYMBOL, "NSE");
-      return p ? { ok: true, detail: `FMP reachable — ${p.company_name ?? PROBE_SYMBOL}` } : { ok: false, detail: "FMP returned no data (check FINANCIAL_MODELING_PREP_API_KEY)" };
-    }
-    case "alpha_vantage": {
-      const v = await alphaRSI(PROBE_SYMBOL, "NSE");
-      return v != null ? { ok: true, detail: `Alpha Vantage reachable — RSI ${v.toFixed(1)}` } : { ok: false, detail: "Alpha Vantage returned no data (check ALPHA_VANTAGE_API_KEY or daily quota)" };
-    }
-    case "nse": {
-      const rows = await nseMarketStatus();
-      return rows.length > 0 ? { ok: true, detail: `NSE reachable — ${rows[0].market}: ${rows[0].status}` } : { ok: false, detail: "NSE unreachable (public endpoint blocked or cookie handshake failed)" };
-    }
-    case "bse": {
-      const rows = await bseCirculars();
-      return { ok: true, detail: `BSE reachable — ${rows.length} recent circulars` };
-    }
-    default:
-      return { ok: false, detail: "Provider connector is not enabled" };
-  }
-}
-
-// Per-surface probe — proves Kotak-first routing end-to-end from a single
-// call. Each field is `{ ok, provider_used, detail }`. Uses tiny read-only
-// probes (RELIANCE quote, NIFTY OHLCV, no orders placed).
-async function surfaceReport(svc: ReturnType<typeof svcClient>, userId: string) {
-  const { provider } = await getActiveProvider(svc, userId);
-  const wrap = async (name: string, fn: () => Promise<string>) => {
-    try {
-      const detail = await fn();
-      return { ok: true, provider_used: provider.name, detail };
-    } catch (e) {
-      return { ok: false, provider_used: provider.name, detail: e instanceof Error ? e.message : String(e) };
-    }
-  };
-  return {
-    quotes: await wrap("quotes", async () => {
-      const rows = await provider.getQuotes(["NSE:RELIANCE"]);
-      if (!rows.length) throw new Error("no rows");
-      return `ltp=${rows[0].price} via ${rows[0].source}`;
-    }),
-    depth: await wrap("depth", async () => {
-      const d = await provider.getDepth("RELIANCE", "NSE");
-      return `bids=${d.bids.length} asks=${d.asks.length} source=${d.source}`;
-    }),
-    candles_1d: await wrap("candles_1d", async () => {
-      const c = await provider.getOHLCV("NIFTY", "NSE", "5d", "1d");
-      return `${c.length} daily bars`;
-    }),
-    candles_intraday: await wrap("candles_intraday", async () => {
-      const c = await provider.getOHLCV("RELIANCE", "NSE", "5d", "15m");
-      return `${c.length} 15m bars`;
-    }),
-    funds: await wrap("funds", async () => {
-      const f = await provider.getFunds();
-      if (f.source === "unavailable") throw new Error("funds not exposed by provider");
-      return `available=${f.available_margin} used=${f.used_margin}`;
-    }),
-    holdings: await wrap("holdings", async () => {
-      const h = await provider.getHoldings();
-      return `${h.length} holdings`;
-    }),
-    positions: await wrap("positions", async () => {
-      const p = await provider.getPositions();
-      return `${p.length} positions`;
-    }),
-  };
-}
+import {
+  probeService, recordProviderProbe, recordSurfaceProbes, surfaceReport,
+  SERVICE_SURFACES, type SurfaceResult,
+} from "../_shared/market/selftest.ts";
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
@@ -93,18 +21,47 @@ Deno.serve(async (req) => {
     const requested = String(body?.provider ?? "active");
     const svc = svcClient();
 
-    // Surface-level end-to-end audit: one call proves every user-facing
-    // surface routes through the active provider (Kotak → Yahoo fallback).
+    // Surface-level end-to-end audit for one provider.
     if (body?.mode === "surfaces") {
-      const report = await surfaceReport(svc, auth.userId);
-      return jsonResponse(req, { ok: true, mode: "surfaces", surfaces: report });
+      // Service providers (no per-user session) get a single reachability
+      // probe mapped onto the surfaces they actually serve, so Feed Routing
+      // can show real health for NSE/FMP/Alpha/BSE instead of guessing from
+      // table freshness.
+      if (SERVICE_SURFACES[requested]) {
+        const checked_at = new Date().toISOString();
+        const started = Date.now();
+        const r = await probeService(requested).catch((e) => ({
+          ok: false, detail: e instanceof Error ? e.message : String(e),
+        }));
+        await recordProviderProbe(svc, requested, r.ok, r.detail ?? null, Date.now() - started);
+        const surfaces: Record<string, SurfaceResult> = {};
+        for (const key of SERVICE_SURFACES[requested]) {
+          surfaces[key] = {
+            ok: r.ok,
+            state: r.ok ? "ok" : "failed",
+            provider_used: requested,
+            detail: r.detail ?? "",
+            checked_at,
+          };
+        }
+        await recordSurfaceProbes(svc, surfaces, Date.now() - started);
+        return jsonResponse(req, { ok: r.ok, mode: "surfaces", provider: requested, surfaces });
+      }
+      const which = requested === "kotak_neo" || requested === "yahoo" ? requested : "active";
+      const report = await surfaceReport(svc, auth.userId, which);
+      await recordSurfaceProbes(svc, report);
+      return jsonResponse(req, { ok: true, mode: "surfaces", provider: which, surfaces: report });
     }
 
+
+
     if (["fmp", "alpha_vantage", "nse", "bse"].includes(requested)) {
+      const started = Date.now();
       const result = await probeService(requested).catch((e) => ({
         ok: false,
         detail: e instanceof Error ? e.message : String(e),
       }));
+      await recordProviderProbe(svc, requested, result.ok, result.detail ?? null, Date.now() - started);
       return jsonResponse(req, { ok: result.ok, provider: requested, detail: result.detail });
     }
 
@@ -113,14 +70,20 @@ Deno.serve(async (req) => {
       provider = yahooProvider(svc);
       settings = null;
     } else if (requested === "kotak_neo") {
+      // Look up the Kotak row regardless of which provider is currently
+      // active — a working Kotak session must not report "not configured"
+      // just because the user is reading through Yahoo right now.
       const { data, error } = await svc.from("market_api_settings")
         .select(KOTAK_SETTINGS_COLS)
-        .eq("user_id", auth.userId)
-        .eq("active_provider", "kotak_neo")
-        .maybeSingle();
+        .eq("user_id", auth.userId);
       if (error) return errorResponse(req, error.message, 500);
-      if (!data) return jsonResponse(req, { ok: false, provider: "kotak_neo", detail: "Kotak Neo is not configured yet" });
-      const kotak = data as KotakSettings;
+      const candidates = (data ?? []) as KotakSettings[];
+      const row = candidates.find((r) => !!r.session_token_enc && !!r.sid)
+        ?? candidates.find((r) => !!r.totp_secret_enc)
+        ?? candidates[0];
+      if (!row) return jsonResponse(req, { ok: false, provider: "kotak_neo", detail: "Kotak Neo is not configured yet" });
+      const kotak = row;
+
       const hasAutoLogin = !!kotak.totp_secret_enc;
       const hasSession = !!kotak.session_token_enc && !!kotak.sid;
       if (!hasAutoLogin && !hasSession) return jsonResponse(req, { ok: false, provider: "kotak_neo", detail: "Login to Kotak first" });

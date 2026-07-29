@@ -42,7 +42,17 @@ Deno.serve(async (req) => {
 
     if (mode === "clear") {
       const { error } = await svc.from("market_provider_credentials")
-        .upsert({ provider, api_key_enc: null, key_set: false, key_hint: null, updated_by: auth.userId, updated_at: new Date().toISOString() });
+        .upsert({
+          provider,
+          api_key_enc: null,
+          key_set: false,
+          key_hint: null,
+          last_tested_at: null,
+          last_test_ok: null,
+          last_test_detail: "Key removed",
+          updated_by: auth.userId,
+          updated_at: new Date().toISOString(),
+        });
       if (error) return errorResponse(req, error.message, 500);
       return jsonResponse(req, { ok: true, cleared: true });
     }
@@ -62,6 +72,9 @@ Deno.serve(async (req) => {
           api_key_enc: enc,
           key_set: true,
           key_hint: hintFor(key),
+          last_tested_at: null,
+          last_test_ok: null,
+          last_test_detail: "Saved — retest required",
           updated_by: auth.userId,
           updated_at: new Date().toISOString(),
         });

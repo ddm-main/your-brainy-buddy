@@ -2312,6 +2312,66 @@ export type Database = {
         }
         Relationships: []
       }
+      market_feed_heartbeat: {
+        Row: {
+          detail: string | null
+          feed_id: string
+          latency_ms: number | null
+          observed_at: string
+          ok: boolean
+          provider: string
+          symbols: number | null
+        }
+        Insert: {
+          detail?: string | null
+          feed_id: string
+          latency_ms?: number | null
+          observed_at?: string
+          ok?: boolean
+          provider: string
+          symbols?: number | null
+        }
+        Update: {
+          detail?: string | null
+          feed_id?: string
+          latency_ms?: number | null
+          observed_at?: string
+          ok?: boolean
+          provider?: string
+          symbols?: number | null
+        }
+        Relationships: []
+      }
+      market_feed_prefs: {
+        Row: {
+          created_at: string
+          fallback_provider: string | null
+          feed_id: string
+          id: string
+          provider: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          fallback_provider?: string | null
+          feed_id: string
+          id?: string
+          provider: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          fallback_provider?: string | null
+          feed_id?: string
+          id?: string
+          provider?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       market_fundamentals: {
         Row: {
           created_at: string
@@ -2738,6 +2798,33 @@ export type Database = {
         }
         Relationships: []
       }
+      market_holidays: {
+        Row: {
+          created_at: string
+          description: string | null
+          exchange: string
+          holiday_date: string
+          id: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          description?: string | null
+          exchange?: string
+          holiday_date: string
+          id?: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          description?: string | null
+          exchange?: string
+          holiday_date?: string
+          id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       market_index_members: {
         Row: {
           exchange: string
@@ -2986,31 +3073,40 @@ export type Database = {
       }
       market_news: {
         Row: {
+          classified_at: string | null
           created_at: string
           exchange: string
           headline: string
           id: string
+          impact: string | null
           published_at: string
+          sentiment: number | null
           source: string | null
           symbol: string | null
           url: string | null
         }
         Insert: {
+          classified_at?: string | null
           created_at?: string
           exchange?: string
           headline: string
           id?: string
+          impact?: string | null
           published_at?: string
+          sentiment?: number | null
           source?: string | null
           symbol?: string | null
           url?: string | null
         }
         Update: {
+          classified_at?: string | null
           created_at?: string
           exchange?: string
           headline?: string
           id?: string
+          impact?: string | null
           published_at?: string
+          sentiment?: number | null
           source?: string | null
           symbol?: string | null
           url?: string | null
@@ -3563,6 +3659,111 @@ export type Database = {
         }
         Relationships: []
       }
+      market_score_distribution: {
+        Row: {
+          created_at: string
+          id: string
+          max: number | null
+          model: string
+          moderate_cut: number | null
+          n: number
+          p50: number | null
+          p70: number | null
+          p90: number | null
+          strong_cut: number | null
+          trade_date: string
+          updated_at: string
+          watch_cut: number | null
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          max?: number | null
+          model?: string
+          moderate_cut?: number | null
+          n?: number
+          p50?: number | null
+          p70?: number | null
+          p90?: number | null
+          strong_cut?: number | null
+          trade_date: string
+          updated_at?: string
+          watch_cut?: number | null
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          max?: number | null
+          model?: string
+          moderate_cut?: number | null
+          n?: number
+          p50?: number | null
+          p70?: number | null
+          p90?: number | null
+          strong_cut?: number | null
+          trade_date?: string
+          updated_at?: string
+          watch_cut?: number | null
+        }
+        Relationships: []
+      }
+      market_score_history: {
+        Row: {
+          band: string | null
+          buckets: Json | null
+          close: number | null
+          coverage: Json | null
+          created_at: string
+          evaluated_at: string | null
+          exchange: string
+          fwd_ret_10d: number | null
+          fwd_ret_21d: number | null
+          fwd_ret_5d: number | null
+          id: string
+          model: string
+          rank_pct: number | null
+          score: number | null
+          symbol: string
+          trade_date: string
+        }
+        Insert: {
+          band?: string | null
+          buckets?: Json | null
+          close?: number | null
+          coverage?: Json | null
+          created_at?: string
+          evaluated_at?: string | null
+          exchange?: string
+          fwd_ret_10d?: number | null
+          fwd_ret_21d?: number | null
+          fwd_ret_5d?: number | null
+          id?: string
+          model?: string
+          rank_pct?: number | null
+          score?: number | null
+          symbol: string
+          trade_date: string
+        }
+        Update: {
+          band?: string | null
+          buckets?: Json | null
+          close?: number | null
+          coverage?: Json | null
+          created_at?: string
+          evaluated_at?: string | null
+          exchange?: string
+          fwd_ret_10d?: number | null
+          fwd_ret_21d?: number | null
+          fwd_ret_5d?: number | null
+          id?: string
+          model?: string
+          rank_pct?: number | null
+          score?: number | null
+          symbol?: string
+          trade_date?: string
+        }
+        Relationships: []
+      }
       market_scoring_calibration: {
         Row: {
           component: string
@@ -3953,9 +4154,13 @@ export type Database = {
       market_sector_strength_daily: {
         Row: {
           avg_change_pct: number | null
+          avg_ret_21d: number | null
+          avg_ret_5d: number | null
           avg_rsi: number | null
+          blended_strength: number | null
           computed_at: string
           id: string
+          participation_delta: number | null
           pct_above_ema50: number | null
           sector: string
           stock_count: number | null
@@ -3964,9 +4169,13 @@ export type Database = {
         }
         Insert: {
           avg_change_pct?: number | null
+          avg_ret_21d?: number | null
+          avg_ret_5d?: number | null
           avg_rsi?: number | null
+          blended_strength?: number | null
           computed_at?: string
           id?: string
+          participation_delta?: number | null
           pct_above_ema50?: number | null
           sector: string
           stock_count?: number | null
@@ -3975,9 +4184,13 @@ export type Database = {
         }
         Update: {
           avg_change_pct?: number | null
+          avg_ret_21d?: number | null
+          avg_ret_5d?: number | null
           avg_rsi?: number | null
+          blended_strength?: number | null
           computed_at?: string
           id?: string
+          participation_delta?: number | null
           pct_above_ema50?: number | null
           sector?: string
           stock_count?: number | null
@@ -4085,6 +4298,7 @@ export type Database = {
           adx14: number | null
           atr_pct: number | null
           atr14: number | null
+          bars_available: number | null
           base_depth_pct: number | null
           base_duration_days: number | null
           base_len_days: number | null
@@ -4094,10 +4308,15 @@ export type Database = {
           bb_squeeze: boolean | null
           bb_upper: number | null
           bb_width: number | null
+          breakout_band: string | null
           breakout_freshness_days: number | null
           breakout_rank_pct: number | null
           breakout_score: number | null
           breakout_score_v2: number | null
+          breakout_score_v4: number | null
+          breakout_v4_components: Json | null
+          breakout_v4_coverage: Json | null
+          breakout_v4_rank_pct: number | null
           change_pct: number | null
           change_pct_adjusted: number | null
           close: number | null
@@ -4120,6 +4339,7 @@ export type Database = {
           intraday_components: Json | null
           intraday_score: number | null
           is_liquid_tradable: boolean | null
+          is_stale: boolean
           iv_rank: number | null
           liquidity_reasons: Json | null
           low_52w: number | null
@@ -4135,14 +4355,17 @@ export type Database = {
           pct_from_52w_high: number | null
           pe_ttm: number | null
           pivot_level: number | null
+          pivot_touch_quality: number | null
           pivot_touches: number | null
           prebreakout_score: number | null
           prev_close_adjusted: number | null
           price_source: string | null
           rel_strength_nifty: number | null
           rel_volume: number | null
+          rel_volume_median30: number | null
           resistance_level: number | null
           ret_21d: number | null
+          ret_55d: number | null
           ret_5d: number | null
           ret_ytd: number | null
           revenue_growth: number | null
@@ -4156,6 +4379,8 @@ export type Database = {
           rsi14: number | null
           score_components: Json | null
           score_components_v2: Json | null
+          score_coverage: Json | null
+          score_unavailable_reason: string | null
           sector: string | null
           sector_strength: number | null
           supertrend: number | null
@@ -4184,6 +4409,7 @@ export type Database = {
           adx14?: number | null
           atr_pct?: number | null
           atr14?: number | null
+          bars_available?: number | null
           base_depth_pct?: number | null
           base_duration_days?: number | null
           base_len_days?: number | null
@@ -4193,10 +4419,15 @@ export type Database = {
           bb_squeeze?: boolean | null
           bb_upper?: number | null
           bb_width?: number | null
+          breakout_band?: string | null
           breakout_freshness_days?: number | null
           breakout_rank_pct?: number | null
           breakout_score?: number | null
           breakout_score_v2?: number | null
+          breakout_score_v4?: number | null
+          breakout_v4_components?: Json | null
+          breakout_v4_coverage?: Json | null
+          breakout_v4_rank_pct?: number | null
           change_pct?: number | null
           change_pct_adjusted?: number | null
           close?: number | null
@@ -4219,6 +4450,7 @@ export type Database = {
           intraday_components?: Json | null
           intraday_score?: number | null
           is_liquid_tradable?: boolean | null
+          is_stale?: boolean
           iv_rank?: number | null
           liquidity_reasons?: Json | null
           low_52w?: number | null
@@ -4234,14 +4466,17 @@ export type Database = {
           pct_from_52w_high?: number | null
           pe_ttm?: number | null
           pivot_level?: number | null
+          pivot_touch_quality?: number | null
           pivot_touches?: number | null
           prebreakout_score?: number | null
           prev_close_adjusted?: number | null
           price_source?: string | null
           rel_strength_nifty?: number | null
           rel_volume?: number | null
+          rel_volume_median30?: number | null
           resistance_level?: number | null
           ret_21d?: number | null
+          ret_55d?: number | null
           ret_5d?: number | null
           ret_ytd?: number | null
           revenue_growth?: number | null
@@ -4255,6 +4490,8 @@ export type Database = {
           rsi14?: number | null
           score_components?: Json | null
           score_components_v2?: Json | null
+          score_coverage?: Json | null
+          score_unavailable_reason?: string | null
           sector?: string | null
           sector_strength?: number | null
           supertrend?: number | null
@@ -4283,6 +4520,7 @@ export type Database = {
           adx14?: number | null
           atr_pct?: number | null
           atr14?: number | null
+          bars_available?: number | null
           base_depth_pct?: number | null
           base_duration_days?: number | null
           base_len_days?: number | null
@@ -4292,10 +4530,15 @@ export type Database = {
           bb_squeeze?: boolean | null
           bb_upper?: number | null
           bb_width?: number | null
+          breakout_band?: string | null
           breakout_freshness_days?: number | null
           breakout_rank_pct?: number | null
           breakout_score?: number | null
           breakout_score_v2?: number | null
+          breakout_score_v4?: number | null
+          breakout_v4_components?: Json | null
+          breakout_v4_coverage?: Json | null
+          breakout_v4_rank_pct?: number | null
           change_pct?: number | null
           change_pct_adjusted?: number | null
           close?: number | null
@@ -4318,6 +4561,7 @@ export type Database = {
           intraday_components?: Json | null
           intraday_score?: number | null
           is_liquid_tradable?: boolean | null
+          is_stale?: boolean
           iv_rank?: number | null
           liquidity_reasons?: Json | null
           low_52w?: number | null
@@ -4333,14 +4577,17 @@ export type Database = {
           pct_from_52w_high?: number | null
           pe_ttm?: number | null
           pivot_level?: number | null
+          pivot_touch_quality?: number | null
           pivot_touches?: number | null
           prebreakout_score?: number | null
           prev_close_adjusted?: number | null
           price_source?: string | null
           rel_strength_nifty?: number | null
           rel_volume?: number | null
+          rel_volume_median30?: number | null
           resistance_level?: number | null
           ret_21d?: number | null
+          ret_55d?: number | null
           ret_5d?: number | null
           ret_ytd?: number | null
           revenue_growth?: number | null
@@ -4354,6 +4601,8 @@ export type Database = {
           rsi14?: number | null
           score_components?: Json | null
           score_components_v2?: Json | null
+          score_coverage?: Json | null
+          score_unavailable_reason?: string | null
           sector?: string | null
           sector_strength?: number | null
           supertrend?: number | null
@@ -4423,6 +4672,7 @@ export type Database = {
           tickertape_sid: string | null
           tickertape_sid_as_of: string | null
           token: string | null
+          token_missing_at: string | null
           total_shares_cr: number | null
           updated_at: string
           yahoo_symbol: string | null
@@ -4470,6 +4720,7 @@ export type Database = {
           tickertape_sid?: string | null
           tickertape_sid_as_of?: string | null
           token?: string | null
+          token_missing_at?: string | null
           total_shares_cr?: number | null
           updated_at?: string
           yahoo_symbol?: string | null
@@ -4517,9 +4768,55 @@ export type Database = {
           tickertape_sid?: string | null
           tickertape_sid_as_of?: string | null
           token?: string | null
+          token_missing_at?: string | null
           total_shares_cr?: number | null
           updated_at?: string
           yahoo_symbol?: string | null
+        }
+        Relationships: []
+      }
+      market_surface_probes: {
+        Row: {
+          checked_at: string
+          created_at: string
+          detail: string | null
+          id: string
+          is_primary_path: boolean
+          latency_ms: number | null
+          ok: boolean
+          provider: string
+          state: string
+          supported: boolean
+          surface: string
+          updated_at: string
+        }
+        Insert: {
+          checked_at?: string
+          created_at?: string
+          detail?: string | null
+          id?: string
+          is_primary_path?: boolean
+          latency_ms?: number | null
+          ok?: boolean
+          provider: string
+          state?: string
+          supported?: boolean
+          surface: string
+          updated_at?: string
+        }
+        Update: {
+          checked_at?: string
+          created_at?: string
+          detail?: string | null
+          id?: string
+          is_primary_path?: boolean
+          latency_ms?: number | null
+          ok?: boolean
+          provider?: string
+          state?: string
+          supported?: boolean
+          surface?: string
+          updated_at?: string
         }
         Relationships: []
       }
@@ -5955,6 +6252,25 @@ export type Database = {
         }
         Relationships: []
       }
+      market_score_band_stats: {
+        Row: {
+          avg_ret_10d: number | null
+          avg_ret_21d: number | null
+          avg_ret_5d: number | null
+          band: string | null
+          first_date: string | null
+          hit_rate_10d: number | null
+          hit_rate_21d: number | null
+          hit_rate_5d: number | null
+          last_date: string | null
+          model: string | null
+          sample_10d: number | null
+          sample_21d: number | null
+          sample_5d: number | null
+          sample_n: number | null
+        }
+        Relationships: []
+      }
       market_screener_live: {
         Row: {
           above_ema200: boolean | null
@@ -6461,6 +6777,14 @@ export type Database = {
         }[]
       }
       market_cron_call: { Args: { fn_name: string }; Returns: number }
+      market_feed_freshness: {
+        Args: never
+        Returns: {
+          column_name: string
+          last_at: string
+          table_name: string
+        }[]
+      }
       market_history_backfill_candidates: {
         Args: { _limit?: number; _min_bars?: number }
         Returns: {

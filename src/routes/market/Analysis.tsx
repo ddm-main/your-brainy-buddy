@@ -10,6 +10,7 @@ import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
+import { ScoreHistoryPanel } from "@/components/market/ScoreHistoryPanel";
 import { ChartToolbar, DEFAULT_SETTINGS, isIntraday, type ChartSettings } from "@/components/market/ChartToolbar";
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
 import { NewAlertModal, StockAlertsPanel } from "@/components/market/StockAlerts";
@@ -20,6 +21,8 @@ import { marketOpen } from "@/lib/market/hooks";
 import { useBreadth, useCandles, useCorporateActions, useDepth, useFundamentals, useMarketNews, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores, useSyncNewsAndActions } from "@/lib/market/hooks";
 import { MarketDepthLadder } from "@/components/market/MarketDepthLadder";
 import { computeLiveScore } from "@/lib/market/liveSnapshot";
+import { readPatterns } from "@/lib/market/patternLabels";
+import { deriveBreakoutStage, STAGE_TONE } from "@/lib/market/breakoutStage";
 import { subscribeSymbolsForTicks, usePreferLiveTick } from "@/lib/market/useRealtimeTicks";
 import { getTrustedDayChange } from "@/lib/market/pnl";
 import { FullscreenShell } from "@/components/market/FullscreenShell";
@@ -615,44 +618,42 @@ export default function Analysis() {
       {/* Right rail — scrolls independently */}
       <div className="mk-anl-rail">
         <HudPanel flow title="Quote" index="A1">
-          <div style={{ fontFamily: "var(--font-display)", fontSize: 26, color: "var(--accent)" }}>
-            {ltp != null ? `₹${fmtNum(ltp)}` : "—"}
-          </div>
-          <div style={{ fontSize: 13 }}>
-            <Return1DCell abs={dayChange ?? deriveChangeAbs(ltp, chgPct)} pct={chgPct} />
-          </div>
-          <div style={{ display: "flex", gap: 6, marginTop: 6, alignItems: "center", flexWrap: "wrap" }}>
-            {score?.sector && <Chip tone="accent">{score.sector}</Chip>}
-            {/* Only claim "live" while the session is actually open — outside
-                hours the same recompute runs off the settled EOD close, and
-                labelling that as live made a two-day-old print look fresh. */}
-            {quote?.ltp && liveScore && sessionOpen ? (
-              <Chip tone="ok">live · technicals updating</Chip>
-            ) : score?.trade_date ? (
-              <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.1em" }}>
-                EOD · {new Date(score.trade_date).toLocaleDateString([], { day: "2-digit", month: "short" })}
-              </span>
-            ) : null}
-            {quote?.stale && <Chip tone="warn">stale</Chip>}
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ fontFamily: "var(--font-display)", fontSize: 22, lineHeight: 1.1, color: "var(--accent)" }}>
+              {ltp != null ? `₹${fmtNum(ltp)}` : "—"}
+            </div>
+            <div style={{ fontSize: 12 }}>
+              <Return1DCell abs={dayChange ?? deriveChangeAbs(ltp, chgPct)} pct={chgPct} />
+            </div>
+            <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap", marginLeft: "auto" }}>
+              {score?.sector && <Chip tone="accent">{score.sector}</Chip>}
+              {/* Only claim "live" while the session is actually open — outside
+                  hours the same recompute runs off the settled EOD close, and
+                  labelling that as live made a two-day-old print look fresh. */}
+              {quote?.ltp && liveScore && sessionOpen ? (
+                <Chip tone="ok">live</Chip>
+              ) : score?.trade_date ? (
+                <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.1em" }}>
+                  EOD · {new Date(score.trade_date).toLocaleDateString([], { day: "2-digit", month: "short" })}
+                </span>
+              ) : null}
+              {quote?.stale && <Chip tone="warn">stale</Chip>}
+            </div>
           </div>
 
           {dayBar && (
-            <div style={{ marginTop: 8 }}>
-              <Row label={dayBar.live ? "Open" : "Open (EOD)"} mono>{fmtNum(dayBar.open)}</Row>
-              <Row label={dayBar.live ? "Day High" : "High (EOD)"} mono>{fmtNum(dayBar.high)}</Row>
-              <Row label={dayBar.live ? "Day Low" : "Low (EOD)"} mono>{fmtNum(dayBar.low)}</Row>
-
-              <Row label="Prev Close" mono>{fmtNum(dayBar.prevClose)}</Row>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", columnGap: 12, marginTop: 6 }}>
+              <CompactStat label={dayBar.live ? "Open" : "Open"} value={fmtNum(dayBar.open)} />
+              <CompactStat label={dayBar.live ? "Day High" : "High"} value={fmtNum(dayBar.high)} />
+              <CompactStat label={dayBar.live ? "Day Low" : "Low"} value={fmtNum(dayBar.low)} />
+              <CompactStat label="Prev Close" value={fmtNum(dayBar.prevClose)} />
             </div>
           )}
-
-
-
         </HudPanel>
 
         <StockAlertsPanel symbol={sym} exchange={exchange} />
 
-        <MarketDepthLadder depth={depth} />
+        <MarketDepthLadder depth={depth} symbol={sym} exchange={exchange} />
 
         {!score ? (
           <HudPanel flow title="Coverage" index="A3">
@@ -665,50 +666,102 @@ export default function Analysis() {
         ) : (
         <>
         <HudPanel flow title="Breakout Intelligence" index="A3" actions={vintageChip}>
-          <Row label="Breakout">
-            <ScoreBadge
-              score={liveView?.breakout.score ?? score?.breakout_score}
-              components={liveView?.breakout.components ?? score?.score_components?.breakout}
-              label="breakout components"
-              onClick={() => nav(`/market/ai/${sym}`)}
-            />
-          </Row>
-          <Row label="Pre-Breakout">
-            <ScoreBadge
-              score={liveView?.prebreakout.score ?? score?.prebreakout_score}
-              components={liveView?.prebreakout.components ?? score?.score_components?.prebreakout}
-              label="pre-breakout components"
-              onClick={() => nav(`/market/ai/${sym}`)}
-            />
-          </Row>
-          <Row label="Setups">
-            <span style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-              {(liveView?.snapshot.bbSqueeze ?? score?.bb_squeeze) && <Chip tone="accent">BB squeeze</Chip>}
-              {(liveView?.snapshot.higherLows ?? score?.higher_lows) && <Chip tone="ok">higher lows</Chip>}
-              {(liveView?.snapshot.nearResistance ?? score?.near_resistance) && <Chip tone="warn">near resistance</Chip>}
-              {(liveView?.snapshot.aboveEma200 ?? score?.above_ema200) && <Chip tone="ok">&gt;200 EMA</Chip>}
-              {!score && !liveScore && <span style={{ color: "var(--text-muted)", fontSize: 11 }}>pipeline pending</span>}
-            </span>
-          </Row>
-          <Row label="Resistance" mono>
-            {fmtNum(liveView?.snapshot.resistance ?? score?.resistance_level)}
-            {liveView?.snapshot.resistanceTouches ? (
-              <span style={{ color: "var(--text-muted)", fontSize: 10, marginLeft: 6 }}>
-                {liveView!.snapshot.resistanceTouches}×{liveView!.snapshot.resistanceFallback ? " • range hi" : ""}
-              </span>
-            ) : null}
-          </Row>
-          <Row label="Support" mono>
-            {fmtNum(liveView?.snapshot.support ?? score?.support_level)}
-            {liveView?.snapshot.supportTouches ? (
-              <span style={{ color: "var(--text-muted)", fontSize: 10, marginLeft: 6 }}>
-                {liveView!.snapshot.supportTouches}×{liveView!.snapshot.supportFallback ? " • range lo" : ""}
-              </span>
-            ) : null}
-          </Row>
+          {(() => {
+            // Score-only panel: the number, why it can (or cannot) be trusted,
+            // and the score-history feedback loop that shows what actually
+            // happened after past scores. Setups / patterns / S&R chips live in
+            // A4 and A5 — this panel explains the score, nothing else.
+            const snap = liveView?.snapshot;
+            const breakoutScore = liveView?.breakout.score ?? score?.breakout_score_v4 ?? score?.breakout_score ?? null;
+            const components = liveView?.breakout.components ?? score?.score_components?.breakout ?? null;
+            const stage = deriveBreakoutStage(snap ?? null);
+            const stageTone = STAGE_TONE[stage.stage];
+            const chipTone = stageTone === "neutral" ? undefined : stageTone;
+            const band = score?.breakout_band ?? null;
+            const rankPct = score?.breakout_v4_rank_pct ?? null;
+            const coverage = score?.breakout_v4_coverage ?? null;
+            const covered = coverage ? Object.entries(coverage).filter(([, v]) => Number(v) > 0) : [];
+            const reason = score?.score_unavailable_reason ?? null;
+            // A score with no coverage and a genuinely weak setup must never
+            // look the same — say why instead of printing a low number.
+            if (breakoutScore == null) {
+              return (
+                <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6 }}>
+                  Not scoreable — {reason ?? "the pipeline hasn't written a v4 score for this symbol yet"}.
+                  {score?.bars_available != null && (
+                    <span style={{ color: "var(--text-muted)" }}> ({score.bars_available} sessions of history)</span>
+                  )}
+                </div>
+              );
+            }
+            return (
+              <>
+                <Row label="Breakout Score">
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <ScoreBadge
+                      score={breakoutScore}
+                      components={components}
+                      label="breakout components"
+                      onClick={() => nav(`/market/ai/${sym}`)}
+                    />
+                    {band && <Chip tone={band === "STRONG" ? "ok" : band === "WEAK" ? "warn" : "accent"}>{band}</Chip>}
+                    {chipTone && <Chip tone={chipTone}>{stage.stage}</Chip>}
+                  </span>
+                </Row>
+                {stage.detail && (
+                  <div style={{ fontSize: 10, color: "var(--text-muted)", padding: "2px 0 4px", textAlign: "right" }}>
+                    {stage.detail}
+                  </div>
+                )}
+                {rankPct != null && (
+                  <Row label="Universe Rank" mono>
+                    top {fmtNum(100 - rankPct, 1)}%
+                  </Row>
+                )}
+                <Row label="Coverage">
+                  <span style={{ fontSize: 10, color: "var(--text-muted)", textAlign: "right" }}>
+                    {covered.length > 0
+                      ? `${covered.length} of 7 buckets · ${covered.map(([k]) => k).join(", ")}`
+                      : score?.score_coverage != null
+                        ? `${Math.round(Number(score.score_coverage) * 100)}% of inputs present`
+                        : "coverage not recorded"}
+                  </span>
+                </Row>
+                <ScoreHistoryPanel symbol={sym} exchange={exchange} />
+              </>
+            );
+          })()}
         </HudPanel>
 
+
         <HudPanel flow title="Indicators (Daily)" index="A4" actions={vintageChip}>
+          <Row label="Setups">
+            <span style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              {(liveView?.snapshot.bbSqueeze ?? score?.bb_squeeze) && <Chip tone="accent">BB squeeze</Chip>}
+              {liveView?.snapshot.atrContracting && <Chip tone="accent">ATR contracting</Chip>}
+              {(liveView?.snapshot.higherLows ?? score?.higher_lows) && <Chip tone="ok">higher lows</Chip>}
+              {liveView?.snapshot.volDryUpRatio != null && liveView.snapshot.volDryUpRatio < 0.8 && <Chip tone="accent">vol dry-up</Chip>}
+              {(liveView?.snapshot.nearResistance ?? score?.near_resistance) && <Chip tone="warn">near R</Chip>}
+              {(liveView?.snapshot.aboveEma200 ?? score?.above_ema200) && <Chip tone="ok">&gt;200 EMA</Chip>}
+              {!liveView?.snapshot.bbSqueeze && !score?.bb_squeeze && !liveView?.snapshot.higherLows && !score?.higher_lows && !liveView?.snapshot.nearResistance && !score?.near_resistance && (
+                <span style={{ color: "var(--text-muted)", fontSize: 11 }}>none</span>
+              )}
+            </span>
+          </Row>
+          <Row label="Chart Patterns">
+            <span style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end", maxWidth: "70%" }}>
+              {(() => {
+                const patterns = readPatterns((liveView?.patterns ?? score?.pattern_flags) as Record<string, boolean> | undefined);
+                return patterns.length === 0 ? (
+                  <span style={{ color: "var(--text-muted)", fontSize: 11 }}>none detected</span>
+                ) : patterns.map((p) => (
+                  <span key={p.key} title={p.blurb} style={{ display: "inline-flex" }}>
+                    <Chip tone={p.tone}>{p.label}</Chip>
+                  </span>
+                ));
+              })()}
+            </span>
+          </Row>
           <Row label="RSI (14)" mono>{fmtNum(liveView?.snapshot.rsi14 ?? score?.rsi14, 1)}</Row>
           <Row label="MACD" mono>
             {fmtNum(liveView?.snapshot.macd ?? score?.macd, 2)} / {fmtNum(liveView?.snapshot.macdSignal ?? score?.macd_signal, 2)}
@@ -728,6 +781,22 @@ export default function Analysis() {
         </HudPanel>
 
         <HudPanel flow title="Range & Strength" index="A5" actions={vintageChip}>
+          <Row label="Resistance" mono>
+            {fmtNum(liveView?.snapshot.resistance ?? score?.resistance_level ?? null)}
+            {liveView?.snapshot.resistanceTouches ? (
+              <span style={{ color: "var(--text-muted)", fontSize: 10, marginLeft: 6 }}>
+                {liveView.snapshot.resistanceTouches}×{liveView.snapshot.resistanceFallback ? " • range hi" : ""}
+              </span>
+            ) : null}
+          </Row>
+          <Row label="Support" mono>
+            {fmtNum(liveView?.snapshot.support ?? score?.support_level ?? null)}
+            {liveView?.snapshot.supportTouches ? (
+              <span style={{ color: "var(--text-muted)", fontSize: 10, marginLeft: 6 }}>
+                {liveView.snapshot.supportTouches}×{liveView.snapshot.supportFallback ? " • range lo" : ""}
+              </span>
+            ) : null}
+          </Row>
           <Row label="52w High" mono>{fmtNum(liveView?.snapshot.high52w ?? score?.high_52w)}</Row>
           <Row label="52w Low" mono>{fmtNum(liveView?.snapshot.low52w ?? score?.low_52w)}</Row>
           <Row label="From 52w High" mono>
@@ -945,6 +1014,15 @@ function Row({ label, children, mono }: { label: string; children: React.ReactNo
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0", borderBottom: "1px solid var(--edge)", fontSize: 12 }}>
       <span className="hud-label" style={{ color: "var(--text-dim)" }}>{label}</span>
       <span style={mono ? { fontVariantNumeric: "tabular-nums", color: "var(--text)" } : undefined}>{children}</span>
+    </div>
+  );
+}
+
+function CompactStat({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6, padding: "2px 0", fontSize: 11 }}>
+      <span className="hud-label" style={{ color: "var(--text-dim)" }}>{label}</span>
+      <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text)" }}>{value}</span>
     </div>
   );
 }

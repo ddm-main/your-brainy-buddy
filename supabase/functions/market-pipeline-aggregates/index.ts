@@ -8,7 +8,10 @@ import {
   evaluateLiquidity, swingScore, intradayScore,
   BREAKOUT_QUALIFY_SCORE, SCORE_TREND_CAP,
   breakoutFollowThroughScore, nextEpisodeStatus, scoreDistribution,
-  type AdvancedSignals, type BreakoutStatus,
+  breakoutScoreV4, percentileBandCuts,
+  SCORE_BAND_STRONG, SCORE_BAND_MODERATE, SCORE_BAND_WEAK,
+  type AdvancedSignals, type BreakoutStatus, type BreakoutPatterns,
+  type V4Fundamentals, type V4Sentiment,
 } from "../_shared/market/scoring.ts";
 import type { IndicatorSnapshot, WeeklySnapshot } from "../_shared/market/indicators.ts";
 import { yahooChartRetry } from "../_shared/market/yahooClient.ts";
@@ -71,6 +74,9 @@ function snapFromRow(r: any): IndicatorSnapshot {
     // the refinement pass would silently re-score on a weaker pivot.
     pivotLevel: r.pivot_level ?? null,
     pivotTouches: r.pivot_touches ?? null,
+    pivotTouchQuality: r.pivot_touch_quality != null ? Number(r.pivot_touch_quality) : null,
+    relVolumeMedian30: r.rel_volume_median30 != null ? Number(r.rel_volume_median30) : null,
+    barsAvailable: r.bars_available != null ? Number(r.bars_available) : null,
     volDryUpRatio: r.vol_dryup_ratio ?? null,
 
     ema20Series: [],
@@ -113,6 +119,28 @@ function advFromRow(r: any): AdvancedSignals {
       flag: !!r.pattern_flags?.flag,
       ascendingTriangle: !!r.pattern_flags?.ascending_triangle,
     },
+  };
+}
+
+// The full pattern set the breakout scorer understands. The refinement pass
+// used to call breakoutScore(snap, ctx) with no patterns at all, silently
+// deleting the +8 bonus / −5 bearish penalty the EOD pass had applied.
+function patternsFromRow(r: any): BreakoutPatterns | undefined {
+  const p = r.pattern_flags;
+  if (!p || typeof p !== "object") return undefined;
+  return {
+    bullishEngulfing: !!p.bullish_engulfing,
+    bearishEngulfing: !!p.bearish_engulfing,
+    hammer: !!p.hammer,
+    shootingStar: !!p.shooting_star,
+    doji: !!p.doji,
+    cupAndHandle: !!p.cup_and_handle,
+    cupAndHandleTriggered: !!p.cup_and_handle_triggered,
+    flag: !!p.flag,
+    ascendingTriangle: !!p.ascending_triangle,
+    doubleBottom: !!p.double_bottom,
+    inverseHeadShoulders: !!p.inverse_head_shoulders,
+    fallingWedge: !!p.falling_wedge,
   };
 }
 
@@ -245,25 +273,59 @@ Deno.serve(async (req) => {
     }, { onConflict: "trade_date" });
 
     // ---- Sector strength ----
+    // Ranking sectors by ONE day's average change is noise: a single gap-up in
+    // a heavy name reorders the whole table overnight. Rank instead on a
+    // blended 5D/21D return with a participation term (how much of the sector
+    // is above its 50 EMA, and whether that share is rising vs yesterday).
+    const prevParticipation = new Map<string, number>();
+    {
+      const { data } = await svc.from("market_sector_strength_daily")
+        .select("sector,pct_above_ema50,trade_date")
+        .lt("trade_date", today)
+        .order("trade_date", { ascending: false })
+        .limit(200);
+      for (const d of data ?? []) {
+        if (d.sector && !prevParticipation.has(d.sector) && d.pct_above_ema50 != null) {
+          prevParticipation.set(d.sector, Number(d.pct_above_ema50));
+        }
+      }
+    }
     const bySector = new Map<string, any[]>();
     for (const r of rows) {
       const sec = r.sector || "Unknown";
       if (!bySector.has(sec)) bySector.set(sec, []);
       bySector.get(sec)!.push(r);
     }
+    const mean = (v: number[]) => v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
     const sectorStats = [...bySector.entries()].map(([sector, list]) => {
       const chg = list.map((r) => r.change_pct).filter((v): v is number => v != null);
       const rsis = list.map((r) => r.rsi14).filter((v): v is number => v != null);
       const above50 = list.filter((r) => r.ema50 != null && r.close != null && r.close > r.ema50).length;
+      const r5 = mean(list.map((r) => r.ret_5d).filter((v): v is number => v != null));
+      const r21 = mean(list.map((r) => r.ret_21d).filter((v): v is number => v != null));
+      const participation = (above50 / list.length) * 100;
+      const prev = prevParticipation.get(sector);
+      const participationDelta = prev != null ? participation - prev : null;
+      // 5D carries the near-term impulse, 21D the trend, participation says
+      // whether the move is broad or two stocks doing the work.
+      const blended =
+        0.45 * (r5 ?? 0) +
+        0.35 * ((r21 ?? 0) / 3) +
+        0.15 * ((participation - 50) / 10) +
+        0.05 * ((participationDelta ?? 0) / 5);
       return {
         sector,
         stock_count: list.length,
         avg_change_pct: chg.length ? chg.reduce((a, b) => a + b, 0) / chg.length : null,
         avg_rsi: rsis.length ? rsis.reduce((a, b) => a + b, 0) / rsis.length : null,
-        pct_above_ema50: (above50 / list.length) * 100,
+        pct_above_ema50: participation,
+        avg_ret_5d: r5,
+        avg_ret_21d: r21,
+        participation_delta: participationDelta,
+        blended_strength: Math.round(blended * 1000) / 1000,
       };
     });
-    sectorStats.sort((a, b) => (b.avg_change_pct ?? -99) - (a.avg_change_pct ?? -99));
+    sectorStats.sort((a, b) => b.blended_strength - a.blended_strength);
     const sectorRank = new Map<string, number>();
     const sectorRows = sectorStats.map((s, i) => {
       sectorRank.set(s.sector, i + 1);
@@ -274,14 +336,99 @@ Deno.serve(async (req) => {
     }
     const nSectors = sectorStats.length || 1;
 
-    // ---- RS percentile ranks over universe (based on ema50-anchored return) ----
+    // ---- Bucket 7 & 8 inputs: fundamentals, AI verdict, news, corp actions ----
+    // These three sections of the model contributed literally nothing before
+    // this pass loaded them; the scorer's coverage map now records whether
+    // each was actually available per symbol.
+    const fundMap = new Map<string, V4Fundamentals>();
+    for (let from = 0; ; from += 1000) {
+      const { data } = await svc.from("market_fundamentals_global")
+        .select("symbol,exchange,revenue_growth_yoy,profit_growth_yoy,roe,debt_to_equity,promoter_holding,pe_ttm")
+        .range(from, from + 999);
+      for (const d of data ?? []) {
+        fundMap.set(`${d.symbol}|${d.exchange}`, {
+          revenueGrowthYoy: d.revenue_growth_yoy != null ? Number(d.revenue_growth_yoy) : null,
+          profitGrowthYoy: d.profit_growth_yoy != null ? Number(d.profit_growth_yoy) : null,
+          roe: d.roe != null ? Number(d.roe) : null,
+          debtToEquity: d.debt_to_equity != null ? Number(d.debt_to_equity) : null,
+          promoterHolding: d.promoter_holding != null ? Number(d.promoter_holding) : null,
+          peTtm: d.pe_ttm != null ? Number(d.pe_ttm) : null,
+        });
+      }
+      if (!data || data.length < 1000) break;
+    }
+
+    // Latest AI verdict per symbol (within a week — an older one is not a view
+    // on today's tape and is treated as missing, not as neutral).
+    const aiMap = new Map<string, { verdict: string | null; confidence: number | null }>();
+    {
+      const since = new Date(Date.now() - 7 * 86_400_000).toISOString();
+      const { data } = await svc.from("market_stock_ai")
+        .select("symbol,exchange,recommendation,confidence,created_at")
+        .gte("created_at", since)
+        .order("created_at", { ascending: true })
+        .limit(5000);
+      for (const d of data ?? []) {
+        aiMap.set(`${d.symbol}|${d.exchange}`, {
+          verdict: d.recommendation ?? null,
+          confidence: d.confidence != null ? Number(d.confidence) : null,
+        });
+      }
+    }
+
+    // News sentiment over a 7-day window (rows classified by market-news-sync).
+    const newsMap = new Map<string, { sum: number; n: number }>();
+    {
+      const since = new Date(Date.now() - 7 * 86_400_000).toISOString();
+      const { data } = await svc.from("market_news")
+        .select("symbol,exchange,sentiment,published_at")
+        .gte("published_at", since)
+        .not("sentiment", "is", null)
+        .limit(5000);
+      for (const d of data ?? []) {
+        if (!d.symbol) continue;
+        const k = `${d.symbol}|${d.exchange ?? "NSE"}`;
+        const cur = newsMap.get(k) ?? { sum: 0, n: 0 };
+        cur.sum += Number(d.sentiment); cur.n += 1;
+        newsMap.set(k, cur);
+      }
+    }
+
+    // Nearest upcoming corporate action (ex-date) per symbol, in sessions.
+    const eventMap = new Map<string, number>();
+    {
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const { data } = await svc.from("corporate_actions")
+        .select("symbol,exchange,ex_date")
+        .gte("ex_date", todayIso)
+        .lte("ex_date", new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10))
+        .limit(5000);
+      for (const d of data ?? []) {
+        if (!d.symbol || !d.ex_date) continue;
+        const days = Math.round((Date.parse(`${d.ex_date}T00:00:00Z`) - Date.parse(`${todayIso}T00:00:00Z`)) / 86_400_000);
+        const k = `${d.symbol}|${d.exchange ?? "NSE"}`;
+        const prev = eventMap.get(k);
+        if (prev == null || days < prev) eventMap.set(k, days);
+      }
+    }
+
+    // ---- Relative strength: true 55-session return vs NIFTY's own ----
+    // The old proxy compared (close − ema100)/ema100 against half the NIFTY
+    // 55-day return: two different horizons subtracted from each other, which
+    // is not relative strength at all. Use the like-for-like 55-session return
+    // when the EOD pass has written one, falling back to the proxy only for
+    // rows that predate that column.
+    const rsOf = (r: any): number | null => {
+      if (r.ret_55d != null) return Number(r.ret_55d);
+      if (r.close != null && r.ema100 != null && r.ema100 !== 0) {
+        return ((r.close - r.ema100) / r.ema100) * 100;
+      }
+      return null;
+    };
     const rsInputs: { key: string; rs: number }[] = [];
     for (const r of rows) {
-      if (r.close != null && r.ema50 != null && r.ema50 !== 0) {
-        const base = r.ema100 ?? r.ema50;
-        const stockTrendPct = ((r.close - base) / base) * 100;
-        rsInputs.push({ key: `${r.symbol}|${r.exchange}`, rs: stockTrendPct });
-      }
+      const v = rsOf(r);
+      if (v != null) rsInputs.push({ key: `${r.symbol}|${r.exchange}`, rs: v });
     }
     rsInputs.sort((a, b) => a.rs - b.rs);
     const rsPct = new Map<string, number>();
@@ -289,6 +436,37 @@ Deno.serve(async (req) => {
     rsInputs.forEach((it, idx) => {
       rsPct.set(it.key, n > 1 ? Math.round((idx / (n - 1)) * 1000) / 10 : 50);
     });
+
+    // ---- Market-cap tier percentiles for rel-volume and ATR% -------------
+    // Small caps structurally run higher ATR% and rel-volume than large caps,
+    // so absolute thresholds put micro-caps permanently at the top of the
+    // list. Rank each symbol against its OWN size tier instead.
+    const tierOf = (mc: number | null): string =>
+      mc == null ? "unknown" : mc >= 200_000_000_000 ? "large" : mc >= 50_000_000_000 ? "mid" : "small";
+    const tierRelVolPct = new Map<string, number>();
+    const tierAtrPctile = new Map<string, number>();
+    {
+      const tiers = new Map<string, any[]>();
+      for (const r of rows) {
+        const t = tierOf(r.market_cap);
+        if (!tiers.has(t)) tiers.set(t, []);
+        tiers.get(t)!.push(r);
+      }
+      const rankInto = (list: any[], pick: (r: any) => number | null, out: Map<string, number>) => {
+        const vals = list
+          .map((r) => ({ key: `${r.symbol}|${r.exchange}`, v: pick(r) }))
+          .filter((x): x is { key: string; v: number } => x.v != null)
+          .sort((a, b) => a.v - b.v);
+        vals.forEach((x, i) => {
+          out.set(x.key, vals.length > 1 ? Math.round((i / (vals.length - 1)) * 1000) / 10 : 50);
+        });
+      };
+      for (const list of tiers.values()) {
+        rankInto(list, (r) => (r.rel_volume_median30 ?? r.rel_volume) != null
+          ? Number(r.rel_volume_median30 ?? r.rel_volume) : null, tierRelVolPct);
+        rankInto(list, (r) => r.atr_pct != null ? Number(r.atr_pct) : null, tierAtrPctile);
+      }
+    }
 
     // ---- Final scoring with market context ----
     // Collect each row's freshly-computed scores so the breakout-tracking pass
@@ -300,6 +478,9 @@ Deno.serve(async (req) => {
       sector: string | null; rel_volume: number | null;
       breakout: number; prebreakout: number; swing: number;
       liquidityOk: boolean; components: unknown;
+      v4: number | null;
+      v4Buckets?: Record<string, number>;
+      v4Coverage?: Record<string, number>;
     }
     const scored: Scored[] = [];
     let updated = 0;
@@ -310,16 +491,23 @@ Deno.serve(async (req) => {
       await Promise.all(batch.map(async (r) => {
         const rank = sectorRank.get(r.sector || "Unknown");
         const sectorStrength = rank != null && nSectors > 1 ? 1 - (rank - 1) / (nSectors - 1) : 0.5;
-        let relStrength: number | null = null;
-        if (niftyReturn55 != null && r.close != null && r.ema50 != null && r.ema50 !== 0) {
-          const base = r.ema100 ?? r.ema50;
-          const stockTrendPct = ((r.close - base) / base) * 100;
-          relStrength = stockTrendPct - (niftyClose != null && niftyReturn55 != null ? niftyReturn55 * 0.5 : 0);
-        }
+        // Like-for-like: the stock's 55-session return minus the index's own
+        // 55-session return over the same window.
+        const stockRs = rsOf(r);
+        const relStrength = stockRs != null && niftyReturn55 != null
+          ? stockRs - niftyReturn55
+          : null;
         const rsPercentile = rsPct.get(`${r.symbol}|${r.exchange}`) ?? null;
         const snap = { ...snapFromRow(r), rsPercentile };
-        const ctx = { sectorStrength, regime, relStrengthNifty: relStrength, deliveryPct: null };
-        const bs = breakoutScore(snap, ctx);
+        const key = `${r.symbol}|${r.exchange}`;
+        const ctx = {
+          sectorStrength, regime, relStrengthNifty: relStrength,
+          deliveryPct: r.delivery_pct != null ? Number(r.delivery_pct) : null,
+        };
+        // Patterns MUST be passed here — omitting them stripped the pattern
+        // bonus/penalty the EOD pass had already applied.
+        const pats = patternsFromRow(r);
+        const bs = breakoutScore(snap, ctx, pats);
         const ps = preBreakoutScore(snap, ctx);
         const scoreComponents = { breakout: bs.components, prebreakout: ps.components };
 
@@ -337,6 +525,30 @@ Deno.serve(async (req) => {
         const sw = swingScore({ s: snap, ctx, weekly, adv, liquidity });
         const is = intradayScore({ s: snap, ctx, adv, liquidity, relVolumeSoFar: null, gapPct: null });
 
+        // ---- v4: the coverage-aware 8-bucket score ----
+        const news = newsMap.get(key);
+        const ai = aiMap.get(key);
+        const v4 = breakoutScoreV4({
+          s: snap,
+          ctx,
+          patterns: pats,
+          weekly,
+          adv,
+          liquidity,
+          avgTurnoverCr,
+          tierRelVolumePct: tierRelVolPct.get(key) ?? null,
+          tierAtrPct: tierAtrPctile.get(key) ?? null,
+          barsAvailable: r.bars_available != null ? Number(r.bars_available) : null,
+          fundamentals: fundMap.get(key) ?? null,
+          sentiment: {
+            aiVerdict: ai?.verdict ?? null,
+            aiConfidence: ai?.confidence ?? null,
+            newsSentiment: news && news.n > 0 ? news.sum / news.n : null,
+            newsCount: news?.n ?? 0,
+            eventInDays: eventMap.get(key) ?? null,
+          },
+        });
+
         const nowIso = new Date().toISOString();
         const { error } = await svc.from("market_stock_scores").update({
           sector_strength: Math.round(sectorStrength * 100) / 100,
@@ -345,6 +557,10 @@ Deno.serve(async (req) => {
           breakout_score: bs.score,
           prebreakout_score: ps.score,
           score_components: scoreComponents,
+          breakout_score_v4: v4.score,
+          breakout_v4_components: { buckets: v4.buckets, factors: v4.components, penalties: v4.penalties },
+          breakout_v4_coverage: v4.coverage,
+          score_unavailable_reason: v4.unavailableReason,
           is_liquid_tradable: liquidity.ok,
           liquidity_reasons: liquidity.reasons,
           swing_score: sw.score,
@@ -352,8 +568,11 @@ Deno.serve(async (req) => {
           intraday_score: is.score,
           intraday_components: is.components,
           context_complete: true,
+          is_stale: false,
           computed_at: nowIso,
-        }).eq("symbol", r.symbol).eq("exchange", r.exchange);
+        // Scope by trade_date: without it, today's market context gets stamped
+        // onto a row that still holds yesterday's bar.
+        }).eq("symbol", r.symbol).eq("exchange", r.exchange).eq("trade_date", r.trade_date);
         // Never swallow this. A silent `if (!error)` here meant a single bad
         // column name failed all 2,505 updates while the run still reported
         // ok:true — the scores table simply stopped advancing with no signal
@@ -374,6 +593,8 @@ Deno.serve(async (req) => {
           sector: r.sector ?? null, rel_volume: r.rel_volume ?? null,
           breakout: bs.score, prebreakout: ps.score, swing: sw.score,
           liquidityOk: liquidity.ok, components: scoreComponents,
+          v4: v4.score,
+          v4Buckets: v4.buckets, v4Coverage: v4.coverage,
         });
       }));
     }
@@ -396,6 +617,11 @@ Deno.serve(async (req) => {
       };
       const boRank = rankOf("breakout");
       const swRank = rankOf("swing");
+      const v4Pool = scored.filter((x) => x.liquidityOk && x.v4 != null)
+        .map((x) => ({ k: `${x.symbol}|${x.exchange}`, v: x.v4 as number }));
+      v4Pool.sort((a, b) => a.v - b.v);
+      const v4Rank = new Map<string, number>();
+      v4Pool.forEach((it, i) => v4Rank.set(it.k, v4Pool.length > 1 ? Math.round((i / (v4Pool.length - 1)) * 1000) / 10 : 50));
       for (let i = 0; i < scored.length; i += 50) {
         const batch = scored.slice(i, i + 50);
         await Promise.all(batch.map(async (x) => {
@@ -403,11 +629,127 @@ Deno.serve(async (req) => {
           const { error } = await svc.from("market_stock_scores").update({
             breakout_rank_pct: boRank.get(k) ?? null,
             swing_rank_pct: swRank.get(k) ?? null,
+            breakout_v4_rank_pct: v4Rank.get(k) ?? null,
           }).eq("symbol", x.symbol).eq("exchange", x.exchange);
           if (!error) ranked++;
         }));
       }
     } catch { /* ranking is additive — never fail the run */ }
+
+    // ---- Stale marking + daily calibration ---------------------------------
+    // Any scored row that is not on the latest session is stale by definition:
+    // flag it so the UI can grey it instead of presenting it as today's read.
+    let staleFlagged = 0;
+    if (latestTradeDate) {
+      const { count } = await svc.from("market_stock_scores")
+        .update({ is_stale: true })
+        .lt("trade_date", latestTradeDate)
+        .select("symbol", { count: "exact", head: true });
+      staleFlagged = count ?? 0;
+    }
+
+    // Persist the day's v4 distribution + percentile-anchored band cut-offs so
+    // "STRONG" means the same thing in a weak tape and a hot one.
+    let calibration: Record<string, unknown> | null = null;
+    try {
+      const v4Scores = scored.filter((x) => x.liquidityOk && x.v4 != null).map((x) => x.v4 as number);
+      if (v4Scores.length > 0 && latestTradeDate) {
+        const dist = scoreDistribution(v4Scores);
+        const cuts = percentileBandCuts(v4Scores);
+        calibration = { ...dist, ...cuts };
+        await svc.from("market_score_distribution").upsert({
+          trade_date: latestTradeDate,
+          model: "breakout_v4",
+          n: dist.n,
+          p50: dist.p50, p70: dist.p70, p90: dist.p90, max: dist.max,
+          strong_cut: cuts.strong, moderate_cut: cuts.moderate, watch_cut: cuts.watch,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "trade_date,model" });
+      }
+    } catch { /* calibration is additive — never fail the run */ }
+
+    // ---- Score history + forward hit-rate feedback -------------------------
+    // Without a record of what was claimed and what happened next, the weights
+    // are an opinion. Snapshot every scored symbol daily, then fill in the
+    // realised 5/10/21-session returns as those sessions arrive, so band
+    // performance (does 70+ actually beat 40-54?) becomes measurable and
+    // Phase 4 calibration can be fitted rather than guessed.
+    const history = { written: 0, evaluated: 0 };
+    try {
+      if (latestTradeDate) {
+        const bandOf = (v: number) =>
+          v >= SCORE_BAND_STRONG ? "strong"
+          : v >= SCORE_BAND_MODERATE ? "moderate"
+          : v >= SCORE_BAND_WEAK ? "watch" : "weak";
+        const histRows = scored
+          .filter((x) => x.v4 != null)
+          .map((x) => ({
+            symbol: x.symbol, exchange: x.exchange,
+            trade_date: latestTradeDate, model: "breakout_v4",
+            score: x.v4, band: bandOf(x.v4 as number),
+            rank_pct: null as number | null,
+            close: x.close, buckets: x.v4Buckets ?? null, coverage: x.v4Coverage ?? null,
+          }));
+        for (let i = 0; i < histRows.length; i += 500) {
+          const { error } = await svc.from("market_score_history")
+            .upsert(histRows.slice(i, i + 500), { onConflict: "symbol,exchange,trade_date,model" });
+          if (!error) history.written += Math.min(500, histRows.length - i);
+        }
+
+        // Evaluate older snapshots whose forward windows have now elapsed.
+        const closeNow = new Map(scored.map((x) => [`${x.symbol}|${x.exchange}`, x.close]));
+        const { data: pending } = await svc.from("market_score_history")
+          .select("id,symbol,exchange,trade_date,close,fwd_ret_5d,fwd_ret_10d,fwd_ret_21d")
+          .is("fwd_ret_21d", null)
+          .lt("trade_date", latestTradeDate)
+          .order("trade_date", { ascending: true })
+          .limit(4000);
+        const sessionsBetween = (a: string, b: string) =>
+          // Calendar days × 5/7 is a close-enough session count for bucketing
+          // a feedback window; exactness here buys nothing.
+          Math.round(((Date.parse(b) - Date.parse(a)) / 86_400_000) * (5 / 7));
+        for (const h of pending ?? []) {
+          const now = closeNow.get(`${h.symbol}|${h.exchange}`);
+          if (now == null || h.close == null || Number(h.close) <= 0) continue;
+          const ret = ((Number(now) - Number(h.close)) / Number(h.close)) * 100;
+          const age = sessionsBetween(h.trade_date as string, latestTradeDate);
+          const patch: Record<string, unknown> = {};
+          if (age >= 5 && h.fwd_ret_5d == null) patch.fwd_ret_5d = Math.round(ret * 100) / 100;
+          if (age >= 10 && h.fwd_ret_10d == null) patch.fwd_ret_10d = Math.round(ret * 100) / 100;
+          if (age >= 21) { patch.fwd_ret_21d = Math.round(ret * 100) / 100; patch.evaluated_at = new Date().toISOString(); }
+          if (Object.keys(patch).length === 0) continue;
+          const { error } = await svc.from("market_score_history").update(patch).eq("id", h.id);
+          if (!error) history.evaluated++;
+        }
+
+        // Fit: how well did the score explain the realised 21-day return?
+        const { data: done } = await svc.from("market_score_history")
+          .select("score,fwd_ret_21d")
+          .eq("model", "breakout_v4")
+          .not("fwd_ret_21d", "is", null)
+          .limit(20000);
+        const pairs = (done ?? [])
+          .map((d) => [Number(d.score), Number(d.fwd_ret_21d)] as [number, number])
+          .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b));
+        if (pairs.length >= 200) {
+          const nP = pairs.length;
+          const mx = pairs.reduce((s, p) => s + p[0], 0) / nP;
+          const my = pairs.reduce((s, p) => s + p[1], 0) / nP;
+          let sxy = 0, sxx = 0, syy = 0;
+          for (const [x, y] of pairs) { sxy += (x - mx) * (y - my); sxx += (x - mx) ** 2; syy += (y - my) ** 2; }
+          const slope = sxx > 0 ? sxy / sxx : 0;
+          const r = sxx > 0 && syy > 0 ? sxy / Math.sqrt(sxx * syy) : 0;
+          await svc.from("market_scoring_calibration").insert({
+            model_version: "breakout_v4",
+            component: "score_vs_fwd_ret_21d",
+            weight: Math.round(slope * 10000) / 10000,
+            r2: Math.round(r * r * 10000) / 10000,
+            sample_n: nP,
+            computed_at: new Date().toISOString(),
+          });
+        }
+      }
+    } catch { /* feedback loop is additive — never fail the run */ }
 
 
 
@@ -566,6 +908,9 @@ Deno.serve(async (req) => {
       rescore_error: rescoreFirstError,
       breakout_tracking: tracking,
       score_distribution: dist,
+      stale_flagged: staleFlagged,
+      v4_calibration: calibration,
+      score_history: history,
     });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);

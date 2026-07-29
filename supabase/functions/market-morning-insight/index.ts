@@ -37,18 +37,17 @@ Deno.serve(async (req) => {
       svc.from("market_watchlist_items").select("symbol,exchange").eq("user_id", auth.userId),
     ]);
     // Route through the active provider (Kotak-first) so the brief uses the
-    // same fast path as every other price call. Indices have no Kotak
-    // instrument tokens today, so this transparently falls back to Yahoo —
-    // but any future index-token mapping lights up automatically.
+    // same fast path as every other price call. Index tokens are mapped to
+    // Kotak's index segments, with Yahoo only used as the configured fallback.
     const { provider } = await getReadProvider(svc, auth.userId);
-    const indexKeys = ["NSE:^NSEI", "NSE:^BSESN", "NSE:^NSEBANK", "NSE:^INDIAVIX"];
+    const indexKeys = ["NSE:^NSEI", "BSE:^BSESN", "NSE:^NSEBANK", "NSE:^INDIAVIX"];
     // Previously a bare `.catch(() => [])` — the model was still asked for
     // "market tone" off an empty context with nothing in the response
     // indicating index data was missing, risking fabricated commentary.
     let indexFetchFailed = false;
     const indexRows = await provider.getQuotes(indexKeys).catch(() => { indexFetchFailed = true; return []; });
     const indexNames: Record<string, string> = {
-      "NSE:^NSEI": "Nifty 50", "NSE:^BSESN": "Sensex",
+      "NSE:^NSEI": "Nifty 50", "BSE:^BSESN": "Sensex",
       "NSE:^NSEBANK": "Bank Nifty", "NSE:^INDIAVIX": "India VIX",
     };
     const indices = indexRows.map((r) => ({

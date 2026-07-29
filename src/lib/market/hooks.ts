@@ -4,6 +4,8 @@ import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/rea
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "./api";
 import { nseOpenNow } from "./liveTickStore";
+import { useLiveDepthStore, isFreshDepth } from "./liveDepthStore";
+
 import type {
   ApiSettings,
   BreadthDaily,
@@ -515,7 +517,16 @@ export function useCandles(
 }
 
 export interface DepthRow { price: number; qty: number; orders: number }
-export interface DepthResponse { bids: DepthRow[]; asks: DepthRow[]; ltp: number | null; source: string }
+export type DepthReasonCode =
+  | "ok" | "no_token" | "not_connected" | "market_closed" | "upstream_error" | "unsupported";
+export interface DepthResponse {
+  bids: DepthRow[];
+  asks: DepthRow[];
+  ltp: number | null;
+  source: string;
+  reason_code?: DepthReasonCode;
+  reason?: string;
+}
 
 export function useDepth(symbol: string | undefined, exchange = "NSE") {
   return useQuery<DepthResponse, Error>({
@@ -523,17 +534,27 @@ export function useDepth(symbol: string | undefined, exchange = "NSE") {
     queryFn: () => callMarketFn<DepthResponse>("market-depth", { symbol, exchange }),
     enabled: !!symbol,
     // 1s polling only pays off when the ladder actually has rows. When the
-    // broker returns an empty book (outage, off-hours, unsupported segment)
-    // the old fixed 1s loop hammered the edge function 3,600x/hour for
-    // nothing — back off to 15s until depth returns.
+    // broker returns an empty book the old fixed 1s loop hammered the edge
+    // function 3,600x/hour for nothing. Back off by reason: structurally
+    // impossible books stop polling entirely.
     refetchInterval: (q) => {
+      // The relay pushes the book over Realtime when it's running. While a
+      // fresh pushed book exists for this symbol, REST polling is dead weight
+      // — drop to a slow keep-warm so the fallback stays ready.
+      const live = useLiveDepthStore.getState().books[`${exchange.toUpperCase()}:${(symbol ?? "").toUpperCase()}`];
+      if (isFreshDepth(live)) return 60_000;
       const d = q.state.data as DepthResponse | undefined;
       const empty = !d || ((d.bids?.length ?? 0) === 0 && (d.asks?.length ?? 0) === 0);
-      return liveInterval(empty ? 15_000 : 1_000, false)();
+      if (!empty) return liveInterval(1_000, false)();
+      const code = d?.reason_code;
+      if (code === "no_token" || code === "unsupported") return false;
+      return liveInterval(15_000, false)();
     },
+
     retry: false,
   });
 }
+
 
 export function useSavedScreeners() {
   return useQuery({

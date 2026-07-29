@@ -7,6 +7,7 @@
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { getReadProvider } from "../_shared/market/provider.ts";
 import { getSharedQuotes } from "../_shared/market/quoteCache.ts";
+import { recordFeedHeartbeat } from "../_shared/market/heartbeat.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 
 const limiter = createMarketLimiter(300, 60_000);
@@ -68,8 +69,10 @@ Deno.serve(async (req) => {
     // (all indices, most of the time) falls back to Yahoo transparently.
     const { provider } = await getReadProvider(svc, auth.userId);
     const keys = source.map((r) => `NSE:${r.symbol}`);
+    const idxT0 = Date.now();
     const quoteRows = await getSharedQuotes(provider, keys);
     const byKey = new Map(quoteRows.map((q) => [q.key, q]));
+
 
     const providers = new Set<string>();
     const out = source.map((r) => {
@@ -108,6 +111,16 @@ Deno.serve(async (req) => {
         .eq("trade_date", istDate())
         .then(() => {}, () => {});
     }
+
+    const priced = out.filter((q) => typeof q.price === "number" && q.price > 0).length;
+    recordFeedHeartbeat(svc, {
+      feedId: "indices",
+      provider: providerSummary === "none" ? provider.name : providerSummary,
+      ok: priced > 0,
+      latencyMs: Date.now() - idxT0,
+      symbols: priced,
+      detail: priced === 0 ? "no index price returned" : null,
+    });
 
     return jsonResponse(req, { quotes: out, breadth: breadthRes.data ?? null, source: provider.name, provider: providerSummary });
   } catch (e) {

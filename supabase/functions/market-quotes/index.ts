@@ -6,6 +6,7 @@ import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClie
 import { getReadProvider } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 import { getSharedQuotes } from "../_shared/market/quoteCache.ts";
+import { recordFeedHeartbeat } from "../_shared/market/heartbeat.ts";
 import { chunked, fetchAllRows } from "../_shared/market/paginate.ts";
 
 // How far back the EOD-cache lookups reach. Previously these queries had no
@@ -79,6 +80,7 @@ Deno.serve(async (req) => {
     const { provider } = await getReadProvider(svc, auth.userId);
     // Shared cache + in-flight de-dup: all users read one system Kotak
     // session, so identical symbol requests must coalesce upstream.
+    const quoteT0 = Date.now();
     let rows = await getSharedQuotes(provider, symbols);
     const byKey = new Map(rows.map((r) => [r.key, r]));
 
@@ -309,6 +311,18 @@ Deno.serve(async (req) => {
     } else if (provSet.size > 1) {
       providerSummary = "mixed";
     }
+
+    // Liveness stamp for the Feed Routing page: who actually served this
+    // batch, and how fast. This is the live-price feed's real health signal —
+    // the old one keyed off an offline cache table that nothing writes.
+    recordFeedHeartbeat(svc, {
+      feedId: "quotes_ltp",
+      provider: providerSummary === "none" ? provider.name : providerSummary,
+      ok: out.length > 0,
+      latencyMs: Date.now() - quoteT0,
+      symbols: out.length,
+      detail: out.length === 0 ? "no provider returned a price" : null,
+    });
 
     return jsonResponse(req, { quotes: out, source: provider.name, provider: providerSummary });
   } catch (e) {

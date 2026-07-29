@@ -21,9 +21,9 @@ const YAHOO_HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"];
 
 // Symbol → (display name, kind, currency). Yahoo tickers are the display /
 // storage key (market_quotes.symbol) so the client keeps rendering unchanged.
-// `kotakKey` (when set) tells the Kotak-first path which NSE symbol to
-// request; kotakProvider transparently falls back to Yahoo per-symbol when
-// the instrument token isn't in market_stocks.
+// `kotakKey` (when set) tells the Kotak-first path which canonical symbol to
+// request. These match market_stocks storage keys; provider.ts also aliases
+// Kotak's documented names/tokens so older callers like NSE:NIFTY keep working.
 interface Tracked {
   symbol: string;
   name: string;
@@ -32,9 +32,9 @@ interface Tracked {
   kotakKey?: string; // "NSE:<symbol>" — only set for Kotak-eligible instruments
 }
 const TRACKED: Tracked[] = [
-  { symbol: "^NSEI",   name: "Nifty 50",     kind: "index",     currency: "INR", kotakKey: "NSE:NIFTY" },
-  { symbol: "^BSESN",  name: "Sensex",       kind: "index",     currency: "INR", kotakKey: "NSE:SENSEX" },
-  { symbol: "^NSEBANK",name: "Bank Nifty",   kind: "index",     currency: "INR", kotakKey: "NSE:BANKNIFTY" },
+  { symbol: "^NSEI",   name: "Nifty 50",     kind: "index",     currency: "INR", kotakKey: "NSE:^NSEI" },
+  { symbol: "^BSESN",  name: "Sensex",       kind: "index",     currency: "INR", kotakKey: "BSE:^BSESN" },
+  { symbol: "^NSEBANK",name: "Bank Nifty",   kind: "index",     currency: "INR", kotakKey: "NSE:^NSEBANK" },
   { symbol: "^DJI",    name: "Dow Jones",    kind: "index",     currency: "USD" },
   { symbol: "^IXIC",   name: "Nasdaq",       kind: "index",     currency: "USD" },
   { symbol: "^GSPC",   name: "S&P 500",      kind: "index",     currency: "USD" },
@@ -108,7 +108,7 @@ Deno.serve(async (req) => {
     if (kotakEligible.length > 0) {
       try {
         const { provider } = await getReadProvider(supabase, auth.userId);
-        const quotes = await provider.getQuotes(kotakEligible.map((t) => t.kotakKey!));
+        const quotes = await provider.getQuotes(kotakEligible.map((t) => t.kotakKey!), { allowFallback: true });
         const byKey = new Map(quotes.map((q) => [q.key, q]));
         for (const t of kotakEligible) {
           const q = byKey.get(t.kotakKey!);

@@ -1,0 +1,1 @@
+ALTER TABLE public.market_feed_prefs ADD COLUMN IF NOT EXISTS fallback_provider text;

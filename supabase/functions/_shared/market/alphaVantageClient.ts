@@ -2,15 +2,15 @@
 // Free tier: 25 requests/day. All field names mapped to unified schema.
 // Docs: https://www.alphavantage.co/documentation/
 
-import { getProviderKey } from "./providerKeys.ts";
+import { getProviderKey, type ProviderKeyOptions } from "./providerKeys.ts";
 
 const ALPHA_BASE = "https://www.alphavantage.co/query";
 const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" };
 
 // Key comes from the admin-managed store (Market Config → Providers → Edit),
 // falling back to the ALPHA_VANTAGE_API_KEY edge secret.
-async function getAlphaApiKey(): Promise<string | null> {
-  return await getProviderKey("alpha_vantage");
+async function getAlphaApiKey(options: ProviderKeyOptions = {}): Promise<string | null> {
+  return await getProviderKey("alpha_vantage", options);
 }
 
 const num = (v: unknown): number | null => {
@@ -22,12 +22,13 @@ const num = (v: unknown): number | null => {
 // Convert NSE symbol to Alpha Vantage format (usually just append .BSE or nothing for NSE)
 function toAlphaSymbol(symbol: string, exchange: string): string {
   if (symbol.includes(".")) return symbol;
-  // Alpha Vantage uses BSE suffix for BSE stocks
-  return exchange === "BSE" ? `${symbol}.BSE` : symbol;
+  // Alpha Vantage's India coverage is exposed through the BSE suffix. NSE
+  // symbols are routed there when this optional provider is selected.
+  return exchange === "BSE" || exchange === "NSE" ? `${symbol}.BSE` : symbol;
 }
 
-async function alphaFetch(params: Record<string, string>): Promise<any> {
-  const apiKey = await getAlphaApiKey();
+async function alphaFetch(params: Record<string, string>, options: ProviderKeyOptions = {}): Promise<any> {
+  const apiKey = await getAlphaApiKey(options);
   if (!apiKey) throw new Error("Alpha Vantage API key not configured");
 
   const url = new URL(ALPHA_BASE);
@@ -44,11 +45,22 @@ async function alphaFetch(params: Record<string, string>): Promise<any> {
   const json = await r.json();
 
   // Alpha Vantage returns error messages in the response body
-  if (json["Error Message"] || json["Note"]) {
-    throw new Error(json["Error Message"] ?? json["Note"]);
+  if (json["Error Message"] || json["Note"] || json["Information"]) {
+    throw new Error(json["Error Message"] ?? json["Note"] ?? json["Information"]);
   }
 
   return json;
+}
+
+/** Lightweight key validation that does not depend on Indian symbol coverage. */
+export async function alphaValidateKey(options: ProviderKeyOptions = {}): Promise<{ ok: boolean; detail: string }> {
+  const data = await alphaFetch({ function: "GLOBAL_QUOTE", symbol: "IBM" }, options);
+  const quote = data?.["Global Quote"];
+  const price = num(quote?.["05. price"]);
+  if (!quote || typeof quote !== "object" || Object.keys(quote).length === 0) {
+    return { ok: false, detail: "Alpha Vantage key accepted, but quote probe returned no data" };
+  }
+  return { ok: true, detail: `Alpha Vantage reachable — IBM${price != null ? ` ${price.toFixed(2)}` : ""}` };
 }
 
 // Extract the most recent value from Alpha Vantage time series

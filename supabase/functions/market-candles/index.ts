@@ -10,6 +10,7 @@ import { loadArchivedBars } from "../_shared/market/archive.ts";
 import { KOTAK_CANDLES_ROUTE } from "../_shared/market/kotakClient.ts";
 import { routeOpenForMs, hydrateRouteBreakers, setRouteBreakerPersistence } from "../_shared/market/routeBreaker.ts";
 import { isTradingHoliday } from "../_shared/market/cron.ts";
+import { recordFeedHeartbeat } from "../_shared/market/heartbeat.ts";
 
 // Small in-isolate cache so we don't hit market_holidays on every request.
 const holidayCache = new Map<string, { ts: number; isHoliday: boolean }>();
@@ -402,6 +403,13 @@ Deno.serve(async (req) => {
         for (const o of overlays ?? []) emas[o.indicator] = o.value;
       }
 
+      recordFeedHeartbeat(svc, {
+        feedId: "candles_daily",
+        provider: providerName,
+        ok: candles.length > 0,
+        symbols: candles.length,
+        detail: reason ?? null,
+      });
       return jsonResponse(req, withProvenance({
         candles, emas, timeframe, provider: providerName, reason,
         degraded: providerName !== "kotak_neo",
@@ -546,6 +554,16 @@ Deno.serve(async (req) => {
       providerName === "quote" || providerName === "quote_delayed"
         ? (candles.length > 1 ? "cache" : "none")
         : providerName;
+    // Intraday candle liveness — recorded per actual serving provider so the
+    // Feed Routing page can distinguish "Kotak served it" from "Kotak was
+    // down and Yahoo covered", instead of guessing from a cache table.
+    recordFeedHeartbeat(svc, {
+      feedId: timeframe === "1d" ? "candles_daily" : "candles_intraday",
+      provider: providerName,
+      ok: candles.length > 0,
+      symbols: candles.length,
+      detail: reason ?? null,
+    });
     return jsonResponse(req, withProvenance({
       candles, emas: {}, timeframe, provider: providerName, degraded, reason,
       cached_at: cachedAt, delayed_minutes: delayedMinutes,

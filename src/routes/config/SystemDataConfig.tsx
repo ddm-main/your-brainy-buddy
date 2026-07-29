@@ -34,13 +34,17 @@ function timeAgo(ts: string | null): string {
   if (s < 86400) return `${Math.round(s / 3600)}h ago`;
   return `${Math.round(s / 86400)}d ago`;
 }
+type Tab = "providers" | "storage";
 
 export default function SystemDataConfig() {
+
   const nav = useNavigate();
   const push = useUi((s) => s.push);
   const qc = useQueryClient();
 
   const [busy, setBusy] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("providers");
+
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -100,6 +104,11 @@ export default function SystemDataConfig() {
     { fn: "market-indices", label: "Index refresh", text: "Indices", icon: RefreshCw },
   ];
 
+  const TABS: { key: Tab; label: string }[] = [
+    { key: "providers", label: "Providers" },
+    { key: "storage", label: "Storage & Quota" },
+  ];
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10, height: "100%", minHeight: 0, overflow: "auto" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -108,12 +117,34 @@ export default function SystemDataConfig() {
         <span className="hud-label" style={{ color: "var(--accent)" }}>Market Config</span>
       </div>
 
+      <div style={{ display: "flex", gap: 4 }}>
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className="hud-label"
+            style={{
+              padding: "6px 12px", cursor: "pointer",
+              border: "1px solid var(--edge)",
+              background: tab === t.key ? "rgba(53,214,237,0.10)" : "transparent",
+              color: tab === t.key ? "var(--accent)" : "var(--text-muted)",
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "providers" && <ProvidersPanel />}
+
+      {/* Storage + pipeline are dense stat panels — capped width and stacked as
+          two rows so they stop stretching across the full ultrawide layout. */}
+      {tab === "storage" && <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 860 }}>
       <DatabaseStoragePanel />
 
-      <ProvidersPanel />
-
       <HudPanel title="Market Data Pipeline" index="MKT" live={isLoading ? "warn" : "ok"} bodyClass="overflow-visible">
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 6 }}>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 6 }}>
           <div style={stat}>
             <div style={statLabel}>Active Stocks</div>
             <div style={statValue}>{total}</div>
@@ -154,6 +185,8 @@ export default function SystemDataConfig() {
           ))}
         </div>
       </HudPanel>
+      </div>}
     </div>
+
   );
 }

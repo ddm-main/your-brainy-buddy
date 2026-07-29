@@ -13,6 +13,8 @@ import { useEffect, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useSession } from "@/lib/useSession";
 import { useLiveTickStore, RELAY_STALE_MS } from "./liveTickStore";
+import { useLiveDepthStore, type DepthLevel } from "./liveDepthStore";
+
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
 interface TickPayload {
@@ -62,6 +64,28 @@ export function subscribeSymbolsForTicks(keys: string[]): void {
   flushTimer = setTimeout(flushSubscribe, 500);
 }
 
+// Depth (level-2) is leased, not permanent: the relay drops the subscription
+// if we stop renewing (see DEPTH_LEASE_MS there). Renew comfortably inside
+// that window so a long-open Analysis tab keeps its ladder.
+const DEPTH_RENEW_MS = 30_000;
+
+/** Ask the relay to push the order book for `symbol` while the panel is mounted. */
+export function useLiveDepthSubscription(symbol: string | null | undefined): void {
+  useEffect(() => {
+    if (!symbol) return;
+    const sym = symbol.toUpperCase();
+    const send = () => {
+      sharedChannel?.send({ type: "broadcast", event: "depth_subscribe", payload: { symbols: [sym] } })
+        .catch(() => { /* relay may not be running — REST fallback covers it */ });
+    };
+    send();
+    const timer = setInterval(send, DEPTH_RENEW_MS);
+    return () => clearInterval(timer);
+  }, [symbol]);
+}
+
+
+
 
 export function useRealtimeTicks() {
   const { session } = useSession();
@@ -105,11 +129,22 @@ export function useRealtimeTicks() {
           change_pct: payload.change_pct ?? null,
         });
       })
+      .on("broadcast", { event: "depth" }, ({ payload }: { payload: { symbol?: string; exchange?: string; bids?: DepthLevel[]; asks?: DepthLevel[]; ltp?: number | null } }) => {
+        // Pushed order book for a leased symbol (A2 ladder). Replaces the
+        // per-second REST poll of the market-depth edge function.
+        if (cancelled || !payload?.symbol) return;
+        markRelayMessage();
+        useLiveDepthStore.getState().applyDepth(
+          `${(payload.exchange ?? "NSE").toUpperCase()}:${payload.symbol.toUpperCase()}`,
+          { bids: payload.bids ?? [], asks: payload.asks ?? [], ltp: payload.ltp ?? null },
+        );
+      })
       .on("broadcast", { event: "hello" }, () => {
         // Relay handshake — flips the chip to "push · kotak" before the first
         // tick actually lands, so thin symbols don't sit as "live · kotak".
         if (!cancelled) markRelayMessage();
       })
+
       .subscribe((status) => {
         if (!cancelled) setConnected(status === "SUBSCRIBED");
         // Flush any pending symbol set as soon as the channel is live.

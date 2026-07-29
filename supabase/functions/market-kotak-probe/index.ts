@@ -5,8 +5,16 @@
 // the fix is based on evidence, not a guess.
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { decryptStatementPassword, type StatementPasswordRule } from "../_shared/crypto.ts";
+import {
+  KOTAK_SETTINGS_COLS, type KotakSettings,
+  kotakQuotes, kotakDepth, kotakCandles, kotakLimits,
+  kotakHoldingsEnvelope, kotakPositionsEnvelope, kotakOrders, kotakTrades,
+  withKotakSession,
+} from "../_shared/market/kotakClient.ts";
+import { encryptValue } from "../_shared/market/provider.ts";
 
 const NEO_FIN_KEY = "neotradeapi";
+
 
 async function dec(encJson: string | null): Promise<string | null> {
   if (!encJson) return null;
@@ -47,6 +55,71 @@ Deno.serve(async (req) => {
       if (!role) return errorResponse(req, "admin only", 403);
     }
 
+    // ---- mode=feeds: raw per-surface dump straight off the Kotak client ----
+    // Every feed is called WITHOUT the Yahoo fallback so the payload/error we
+    // read here is Kotak's own answer, which is the only way to tell "Kotak is
+    // broken" from "Yahoo quietly answered".
+    const url = new URL(req.url);
+    const bodyPeek = await req.clone().json().catch(() => ({}));
+    const requestedMode = String(url.searchParams.get("mode") ?? bodyPeek?.mode ?? "quotes");
+
+    if (requestedMode === "feeds") {
+      const { data: row } = await svc.from("market_api_settings")
+        .select(KOTAK_SETTINGS_COLS).eq("is_system", true).maybeSingle();
+      if (!row) return errorResponse(req, "no system feed row", 404);
+      const settings = row as unknown as KotakSettings;
+      const sym = String(url.searchParams.get("symbol") ?? bodyPeek?.symbol ?? "RELIANCE").toUpperCase();
+      const { data: inst } = await svc.from("market_stocks")
+        .select("symbol,token,kotak_segment,instrument_type")
+        .eq("symbol", sym).eq("exchange", "NSE").maybeSingle();
+      const token = inst?.token ? String(inst.token) : null;
+      const seg = String(inst?.kotak_segment || "nse_cm");
+
+      const trunc = (v: unknown) => JSON.stringify(v ?? null).slice(0, 1200);
+      const run = async (name: string, fn: () => Promise<unknown>) => {
+        const t0 = Date.now();
+        try {
+          const out = await fn();
+          return { feed: name, ok: true, ms: Date.now() - t0, sample: trunc(out) };
+        } catch (e) {
+          return {
+            feed: name, ok: false, ms: Date.now() - t0,
+            status: (e as { status?: number })?.status ?? null,
+            error: (e instanceof Error ? e.message : String(e)).slice(0, 400),
+            body: String((e as { body?: string })?.body ?? "").slice(0, 400),
+          };
+        }
+      };
+      const withS = <T>(fn: (ss: KotakSettings) => Promise<T>) =>
+        withKotakSession(svc, settings, encryptValue, fn);
+      const now = Math.floor(Date.now() / 1000);
+
+      const { data: idxRows } = await svc.from("market_stocks")
+        .select("symbol,token,kotak_segment,instrument_type")
+        .in("symbol", ["NIFTY", "BANKNIFTY", "FINNIFTY", "NIFTY 50", "NIFTY BANK"]);
+
+      const feeds = await Promise.all([
+        run("quotes_all", () => token ? withS((ss) => kotakQuotes(ss, [`${seg}|${token}`], "all")) : Promise.reject(new Error("no token"))),
+        run("quotes_ltp", () => token ? withS((ss) => kotakQuotes(ss, [`${seg}|${token}`], "ltp")) : Promise.reject(new Error("no token"))),
+        run("depth", () => token ? withS((ss) => kotakDepth(ss, token, seg)) : Promise.reject(new Error("no token"))),
+        run("candles_1d", () => token ? withS((ss) => kotakCandles(ss, token, seg, now - 15 * 86400, now, "D")) : Promise.reject(new Error("no token"))),
+        run("candles_15m", () => token ? withS((ss) => kotakCandles(ss, token, seg, now - 5 * 86400, now, "15")) : Promise.reject(new Error("no token"))),
+        run("limits", () => withS((ss) => kotakLimits(ss))),
+        run("holdings", () => withS((ss) => kotakHoldingsEnvelope(ss))),
+        run("positions", () => withS((ss) => kotakPositionsEnvelope(ss))),
+        run("orders", () => withS((ss) => kotakOrders(ss))),
+        run("trades", () => withS((ss) => kotakTrades(ss))),
+      ]);
+
+      return jsonResponse(req, {
+        mode: "feeds",
+        symbol: sym,
+        instrument: { token, seg, type: inst?.instrument_type ?? null },
+        index_coverage: idxRows ?? [],
+        session: { base: settings.base_url, status: settings.connection_status, expires: settings.token_expires_at },
+        feeds,
+      });
+    }
 
 
     const { data: s } = await svc

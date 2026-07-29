@@ -4,6 +4,9 @@
 // panel makes that split explicit so nobody connects a broker hoping to fix
 // "delayed prices".
 import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { supabase } from "@/integrations/supabase/client";
+
 import HudPanel from "@/components/hud/HudPanel";
 import { Btn, Chip } from "@/components/hud/HudControls";
 import { useDesignateSystemFeed, useMarketSettings, useSystemFeed } from "@/lib/market/hooks";
@@ -15,6 +18,22 @@ export default function SystemFeedPanel() {
   const { data: feed, isLoading } = useSystemFeed();
   const { data: settings = [] } = useMarketSettings();
   const designate = useDesignateSystemFeed();
+
+  // Open circuit breakers on broker routes (persisted by routeBreaker.ts).
+  const { data: openRoutes = [] } = useQuery({
+    queryKey: ["market", "route-health"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("market_route_health")
+        .select("route,open_until,last_error")
+        .gt("open_until", new Date().toISOString())
+        .order("route");
+      if (error) throw error;
+      return (data ?? []) as Array<{ route: string; open_until: string | null; last_error: string | null }>;
+    },
+    refetchInterval: 60_000,
+  });
+
 
   const kotakRows = useMemo(
     () => (settings as any[]).filter((s) => s.active_provider === "kotak_neo"),
@@ -56,6 +75,24 @@ export default function SystemFeedPanel() {
         {feed?.last_sync_at && (
           <div className="hud-label">Last sync {new Date(feed.last_sync_at).toLocaleString()}</div>
         )}
+
+        {/* Route breakers. A dead broker endpoint (e.g. /charts/v2/history,
+            which this account's gateway answers with 404) is silently routed
+            to Yahoo. Silent is fine for uptime and terrible for diagnosis —
+            surface it so "why are my candles delayed?" has a visible answer. */}
+        {openRoutes.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+            <div className="hud-label">Broker routes disabled (fallback active)</div>
+            {openRoutes.map((r) => (
+              <div key={r.route} style={{ fontSize: 11, color: "var(--warn, #f5a524)" }}>
+                {r.route} — retrying {r.open_until ? new Date(r.open_until).toLocaleTimeString() : "soon"}
+                <span style={{ color: "var(--text-dim)" }}> · {r.last_error?.slice(0, 90)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+
 
         {feed?.is_admin && kotakRows.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>

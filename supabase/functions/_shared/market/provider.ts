@@ -16,7 +16,7 @@ import {
   kotakHoldings,
   kotakHoldingsEnvelope,
   kotakLimits,
-  kotakUserMargin,
+  classifyFundsError,
   kotakModifyOrder,
   kotakPlaceOrder,
   kotakPositions,
@@ -33,12 +33,34 @@ import type { Candle } from "./indicators.ts";
 // Symbols already reported as missing a Kotak instrument token, per isolate.
 const loggedTokenGap = new Set<string>();
 
+/** Why a depth ladder came back empty. `ok` means the book is real. */
+export type DepthReasonCode =
+  | "ok"
+  | "no_token"
+  | "not_connected"
+  | "market_closed"
+  | "upstream_error"
+  | "unsupported";
+
 export type DepthLadder = {
   bids: Array<{ price: number; qty: number; orders: number }>;
   asks: Array<{ price: number; qty: number; orders: number }>;
   ltp: number | null;
   source: "kotak" | "yahoo" | "unavailable";
+  reason_code?: DepthReasonCode;
+  reason?: string;
 };
+
+// NSE/BSE cash session in IST, Mon-Fri. Used only to explain an empty book —
+// never to suppress a fetch.
+export function isIndianMarketOpen(now = new Date()): boolean {
+  const ist = new Date(now.getTime() + (5 * 60 + 30) * 60_000);
+  const day = ist.getUTCDay();
+  if (day === 0 || day === 6) return false;
+  const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+}
+
 
 export interface QuoteRow {
   key: string; // "NSE:SYMBOL" as requested by the caller
@@ -145,7 +167,7 @@ export interface OhlcvMeta {
 
 export interface MarketProvider {
   name: string;
-  getQuotes(keys: string[]): Promise<QuoteRow[]>;
+  getQuotes(keys: string[], opts?: { allowFallback?: boolean }): Promise<QuoteRow[]>;
   getOHLCV(symbol: string, exchange: string, range: string, interval: string, meta?: OhlcvMeta): Promise<Candle[]>;
   getDepth(symbol: string, exchange: string): Promise<DepthLadder>;
   getHoldings(): Promise<HoldingRow[]>;
@@ -214,24 +236,77 @@ const TOKEN_MAP_TTL_MS = 60_000;
 // Keyed by exchange since the same symbol can carry different tokens on NSE
 // vs BSE.
 type TokenEntry = { token: string; segment: string };
+
+const keyFor = (exchange: string, symbol: string): string => `${exchange.toUpperCase()}:${symbol.trim().toUpperCase()}`;
+
+const INDEX_ALIASES: Record<string, string[]> = {
+  "NSE:^NSEI": ["NIFTY", "NIFTY 50", "Nifty 50", "^NSEI"],
+  "NSE:^NSEBANK": ["BANKNIFTY", "NIFTY BANK", "Nifty Bank", "BANK NIFTY", "^NSEBANK"],
+  "NSE:FINNIFTY": ["FINNIFTY", "NIFTY FIN SERVICE", "Nifty Fin Service", "NIFTY FINANCIAL SERVICES"],
+  "NSE:^INDIAVIX": ["INDIA VIX", "INDIAVIX", "^INDIAVIX"],
+  "NSE:NIFTY_MIDCAP_100.NS": ["NIFTY MIDCAP 100", "MIDCAP 100"],
+  "BSE:^BSESN": ["SENSEX", "BSE SENSEX", "^BSESN"],
+};
+
+/** NSE index instrument tokens (Kotak's nse_indices segment reuses them). */
+const KNOWN_INDEX_TOKENS: Record<string, string> = {
+  "NSE:^NSEI": "26000",
+  "NSE:^NSEBANK": "26009",
+  "NSE:FINNIFTY": "26037",
+  "NSE:^INDIAVIX": "26017",
+};
+
+
 async function getTokenMap(svc: SupabaseClient): Promise<Map<string, TokenEntry>> {
   if (tokenMapCache && tokenMapCache.expiresAt > Date.now()) return tokenMapCache.map;
-  const { data } = await svc
-    .from("market_stocks").select("symbol,exchange,token,kotak_segment,instrument_type")
-    .in("exchange", ["NSE", "BSE"]).not("token", "is", null);
-  const map = new Map<string, TokenEntry>(
-    (data ?? []).map((r: any) => {
-      const isIdx = String(r.instrument_type ?? "").toUpperCase() === "INDEX"
-        || String(r.symbol ?? "").startsWith("^");
-      const defaultSeg = isIdx
-        ? (r.exchange === "BSE" ? "bse_indices" : "nse_indices")
-        : (r.exchange === "BSE" ? "bse_cm" : "nse_cm");
-      return [
-        `${r.exchange}:${r.symbol}`,
-        { token: String(r.token), segment: r.kotak_segment || defaultSeg },
-      ];
-    }),
-  );
+  // PostgREST caps an unbounded select at 1000 rows. The universe is ~2.7k
+  // tokened instruments, so the un-paged read silently dropped ~two thirds of
+  // the book — every dropped symbol resolved "no Kotak token" and was served
+  // by Yahoo instead. Page explicitly until the table is drained.
+  const PAGE = 1000;
+  const data: any[] = [];
+  for (let from = 0; from < 20_000; from += PAGE) {
+    const { data: page, error } = await svc
+      .from("market_stocks").select("symbol,exchange,token,kotak_segment,instrument_type")
+      .in("exchange", ["NSE", "BSE"]).not("token", "is", null)
+      .order("symbol", { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) { console.error("[market] token map page failed:", error.message); break; }
+    data.push(...(page ?? []));
+    if (!page || page.length < PAGE) break;
+  }
+  const map = new Map<string, TokenEntry>();
+
+  for (const r of data ?? []) {
+    const isIdx = String(r.instrument_type ?? "").toUpperCase() === "INDEX"
+      || String(r.symbol ?? "").startsWith("^");
+    const defaultSeg = isIdx
+      ? (r.exchange === "BSE" ? "bse_indices" : "nse_indices")
+      : (r.exchange === "BSE" ? "bse_cm" : "nse_cm");
+    map.set(keyFor(String(r.exchange), String(r.symbol)), { token: String(r.token), segment: r.kotak_segment || defaultSeg });
+  }
+  // Index alias resolution is GROUP-wise, not canonical-first: the scrip
+  // master may carry the instrument under any member of the group ("NIFTY 50",
+  // "NIFTY", "^NSEI"). Resolving only from the canonical key meant a master
+  // that lists "NIFTY 50" left ^NSEI tokenless, so every index quote silently
+  // fell through to Yahoo. Take whichever member exists and map it to all.
+  for (const [canonical, aliases] of Object.entries(INDEX_ALIASES)) {
+    const [exchange, symbol] = canonical.split(":") as [string, string];
+    const members = [symbol, ...aliases];
+    let entry = members.map((m) => map.get(keyFor(exchange, m))).find(Boolean);
+    // Last resort: NSE's well-known index tokens. Kotak's nse_indices segment
+    // uses the same token numbers, so a master missing the index row does not
+    // have to cost us the feed.
+    if (!entry) {
+      const known = KNOWN_INDEX_TOKENS[canonical];
+      if (known) entry = { token: known, segment: exchange === "BSE" ? "bse_indices" : "nse_indices" };
+    }
+    if (!entry) continue;
+    for (const m of members) {
+      if (!map.has(keyFor(exchange, m))) map.set(keyFor(exchange, m), entry);
+    }
+  }
+
   tokenMapCache = { map, expiresAt: Date.now() + TOKEN_MAP_TTL_MS };
   return map;
 }
@@ -311,7 +386,8 @@ function logProviderHealth(
 function yahooProvider(svc: SupabaseClient): MarketProvider {
   return {
     name: "yahoo",
-    async getQuotes(keys) {
+    async getQuotes(keys, opts) {
+      const allowFallback = opts?.allowFallback !== false;
       const t0 = Date.now();
       try {
         const ySyms = keys.map((k) => {
@@ -358,9 +434,15 @@ function yahooProvider(svc: SupabaseClient): MarketProvider {
       const raw = await yahooChartRetry(toYahooSymbol(symbol, exchange), safeRange, yInterval);
       return factor > 1 ? resampleCandles(raw, factor) : raw;
     },
-    async getDepth() {
-      return { bids: [], asks: [], ltp: null, source: "unavailable" };
+    async getDepth(): Promise<DepthLadder> {
+      // Yahoo has no order book — say so instead of implying a broker problem.
+      return {
+        bids: [], asks: [], ltp: null, source: "yahoo",
+        reason_code: "unsupported",
+        reason: "The delayed price feed does not carry an order book.",
+      };
     },
+
     getHoldings() {
       return Promise.reject(new Error("Holdings sync requires a broker provider (Kotak Neo)."));
     },
@@ -406,7 +488,8 @@ const firstNum = (obj: any, paths: string[]): number | null => {
 };
 
 const parseKotakDate = (obj: any): string | null => {
-  const raw = obj?.last_traded_time ?? obj?.lastTradeTime ?? obj?.ltt ?? obj?.tradeTime ?? obj?.time;
+  const raw = obj?.last_traded_time ?? obj?.lastTradeTime ?? obj?.ltt ?? obj?.tradeTime ?? obj?.lstup_time ?? obj?.time;
+
   if (!raw) return null;
   const n = typeof raw === "number" ? raw : Number(raw);
   const d = Number.isFinite(n)
@@ -449,12 +532,14 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
   const nseOpenNow = nseSessionOpen;
   return {
     name: "kotak_neo",
-    async getQuotes(keys) {
+    async getQuotes(keys, opts) {
+      const allowFallback = opts?.allowFallback !== false;
       // Resolve instrument tokens from the cached market_stocks map; unresolved keys fall back to Yahoo per-symbol.
       const parsed = keys.map((k) => ({ key: k, ...parseKey(k) }));
       const tokenBySymbol = await getTokenMap(svc);
-      const withToken = parsed.filter((p) => tokenBySymbol.has(`${p.exchange}:${p.symbol}`));
-      const without = parsed.filter((p) => !tokenBySymbol.has(`${p.exchange}:${p.symbol}`));
+      const tokenEntryFor = (p: { exchange: string; symbol: string }) => tokenBySymbol.get(keyFor(p.exchange, p.symbol));
+      const withToken = parsed.filter((p) => tokenEntryFor(p));
+      const without = parsed.filter((p) => !tokenEntryFor(p));
 
       const out: QuoteRow[] = [];
       // Split batches by Kotak segment. One 500 on nse_indices used to fail
@@ -462,7 +547,7 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       if (withToken.length > 0) {
         const bySeg = new Map<string, typeof withToken>();
         for (const p of withToken) {
-          const seg = tokenBySymbol.get(`${p.exchange}:${p.symbol}`)!.segment;
+          const seg = tokenEntryFor(p)!.segment;
           const arr = bySeg.get(seg) ?? [];
           arr.push(p); bySeg.set(seg, arr);
         }
@@ -477,7 +562,7 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
           }
           try {
             const entryFor = (p: { exchange: string; symbol: string }) =>
-              tokenBySymbol.get(`${p.exchange}:${p.symbol}`)!;
+              tokenEntryFor(p)!;
             const neoSymbols = group.map((p) => { const e = entryFor(p); return `${e.segment}|${e.token}`; });
             const raw = await withKotakSession(svc, s, encryptValue, (ss) => kotakQuotes(ss, neoSymbols, "all"));
             logProviderHealth(svc, "kotak_neo", "getQuotes", true, Date.now() - t0);
@@ -488,9 +573,16 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
               const rawNeoSymbol = String(
                 r?.symbol ?? r?.neoSymbol ?? r?.neosymbol ?? r?.pSymbolName ?? "",
               ).trim();
+              // Neo's /script-details quote payload identifies a row with
+              // `exchange_token` + `exchange` (e.g. 2885 / "nse_cm") — it
+              // carries no `symbol`/`tk` field at all. Missing this made
+              // EVERY tokened symbol look unmatched, so the whole book fell
+              // through to Yahoo while Kotak was answering perfectly.
               const rawToken = String(
-                r?.tk ?? r?.token ?? r?.instrumentToken ?? r?.instrument_token ?? r?.pSymbol ?? "",
+                r?.tk ?? r?.token ?? r?.instrumentToken ?? r?.instrument_token
+                ?? r?.exchange_token ?? r?.exchangeToken ?? r?.pSymbol ?? "",
               ).trim();
+              const rawSeg = String(r?.exchange ?? r?.exchangeSegment ?? r?.exchange_segment ?? "").trim().toLowerCase();
               const segTok = rawNeoSymbol.match(/^([a-z]+_[a-z]+)\|(.+)$/i);
               if (segTok) {
                 const normalized = `${segTok[1].toLowerCase()}|${segTok[2]}`;
@@ -500,7 +592,10 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
                 byTokenOnly.set(rawNeoSymbol.includes("|") ? String(rawNeoSymbol.split("|").pop()) : rawNeoSymbol, r);
               }
               const tokenOnly = rawToken.includes("|") ? rawToken.split("|").pop() : rawToken;
-              if (tokenOnly) byTokenOnly.set(String(tokenOnly), r);
+              if (tokenOnly) {
+                byTokenOnly.set(String(tokenOnly), r);
+                if (rawSeg) byNeoSymbol.set(`${rawSeg}|${tokenOnly}`, r);
+              }
             }
             for (const p of group) {
               const e = entryFor(p);
@@ -512,13 +607,15 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
                 "ohlc.close", "ohlc.c", "closing_price", "close", "c",
               ]);
               if (!price) { failed.push(p); continue; }
+              const changeAbs = prevClose ? price - prevClose : firstNum(r, ["change"]);
               rows.push({
                 key: p.key,
                 price,
                 previous_close: prevClose,
-                change_abs: prevClose ? price - prevClose : null,
-                change_pct: prevClose ? ((price - prevClose) / prevClose) * 100 : null,
-                volume: num(r.volume ?? r.vol_traded_today) || null,
+                change_abs: changeAbs,
+                change_pct: prevClose ? ((price - prevClose) / prevClose) * 100 : firstNum(r, ["per_change"]),
+                // Neo calls the cumulative day volume `last_volume`.
+                volume: firstNum(r, ["volume", "vol_traded_today", "last_volume", "totalTradedVolume"]),
                 day_open: firstNum(r, ["open_price", "ohlc.open", "ohlc.o", "opn_pric", "open", "o"]),
                 day_high: firstNum(r, ["high_price", "ohlc.high", "ohlc.h", "hgh_pric", "high", "h"]),
                 day_low: firstNum(r, ["low_price", "ohlc.low", "ohlc.l", "lw_pric", "low", "l"]),
@@ -529,6 +626,7 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
                 low_52w: firstNum(r, ["lw_52w_val", "low_52w", "52wkLow", "yearLow", "year_low"]),
               });
             }
+
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             logProviderHealth(svc, "kotak_neo", "getQuotes", false, Date.now() - t0, msg);
@@ -545,7 +643,7 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
         //    a 15-minute-old price as if it were live.
         //  • off-hours — Yahoo is fine, nothing is live anyway.
         const failedKeys = segResults.flatMap((r) => r.failed.map((p) => p.key));
-        if (failedKeys.length > 0 && !nseOpenNow()) {
+        if (allowFallback && failedKeys.length > 0 && !nseOpenNow()) {
           try { out.push(...(await yahoo.getQuotes(failedKeys))); }
           catch (e) { console.error("[market] yahoo per-symbol fallback failed:", e); }
         }
@@ -555,7 +653,7 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       // this case (indices/products missing from Kotak's scrip master).
       const covered = new Set(out.map((o) => o.key));
       const remaining = without.map((p) => p.key).filter((k) => !covered.has(k));
-      if (remaining.length > 0) {
+      if (allowFallback && remaining.length > 0) {
         try { out.push(...(await yahoo.getQuotes(remaining))); }
         catch (e) { console.error("[market] yahoo coverage fallback failed:", e); }
       }
@@ -564,19 +662,22 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
     // Kotak historical candles when we have an instrument token; else Yahoo.
     async getOHLCV(symbol, exchange, range, interval, meta) {
       if (meta) meta.source = "kotak_neo";
-      const { data: stock } = await svc
-        .from("market_stocks").select("token,kotak_segment,instrument_type")
-        .eq("symbol", symbol).eq("exchange", exchange)
-        .not("token", "is", null).maybeSingle();
-      const token = stock?.token as string | undefined;
-      const isIndex = (stock?.instrument_type as string | undefined)?.toUpperCase() === "INDEX"
-        || symbol.startsWith("^");
+      // Resolve through the SAME alias-aware token map the quote path uses.
+      // A direct market_stocks lookup missed every index the UI asks for by
+      // its trading alias ("NIFTY", "BANKNIFTY", "INDIA VIX"), which is why
+      // index candles permanently logged "no token" and fell to Yahoo even
+      // though Kotak carries the instrument under its canonical row.
+      const tokenBySymbolForCandles = await getTokenMap(svc);
+      const entry = tokenBySymbolForCandles.get(keyFor(exchange, symbol))
+        ?? tokenBySymbolForCandles.get(keyFor(exchange === "BSE" ? "NSE" : "BSE", symbol));
+      const isIndex = symbol.startsWith("^") || /^(NIFTY|BANKNIFTY|FINNIFTY|SENSEX|INDIA VIX)/i.test(symbol);
       // Indices live under nse_indices / bse_indices in Kotak's scrip master.
       // Falling through to nse_cm returned empty and forced Yahoo (delayed).
       const defaultSeg = isIndex
         ? (exchange === "BSE" ? "bse_indices" : "nse_indices")
         : (exchange === "BSE" ? "bse_cm" : "nse_cm");
-      const seg = (stock?.kotak_segment as string | undefined) || defaultSeg;
+      const token = entry?.token;
+      const seg = entry?.segment || defaultSeg;
       if (!token) {
         // Not a failure — Kotak's scrip master simply has no token for this
         // symbol (mostly indices and new listings), and Yahoo covers it. This
@@ -650,7 +751,7 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       // — during the session there is no substitute source, so it's worth the
       // extra ~1s rather than serving nothing.
       const fetchKotakResilient = async (): Promise<Candle[]> => {
-        const backoff = [250, 750];
+        const backoff = [250, 750, 1500];
         for (let attempt = 0; ; attempt++) {
           try {
             return await fetchKotak();
@@ -735,22 +836,63 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       }
     },
 
-    async getDepth(symbol, exchange) {
+    async getDepth(symbol, exchange): Promise<DepthLadder> {
+      const t0 = Date.now();
       const { data: stock } = await svc
         .from("market_stocks").select("token,kotak_segment")
         .eq("symbol", symbol).eq("exchange", exchange)
         .not("token", "is", null).maybeSingle();
       const token = stock?.token as string | undefined;
       const seg = (stock?.kotak_segment as string | undefined) || (exchange === "BSE" ? "bse_cm" : "nse_cm");
-      if (!token) return { bids: [], asks: [], ltp: null, source: "unavailable" };
+      if (!token) {
+        // Same once-per-isolate rule as getOHLCV above: a tokenless symbol is
+        // a permanent scrip-master gap (market_stocks.token_missing_at marks
+        // it), not an incident, so it must not write a health row per poll.
+        if (!loggedTokenGap.has(`depth:${exchange}:${symbol}`)) {
+          loggedTokenGap.add(`depth:${exchange}:${symbol}`);
+          logProviderHealth(svc, "kotak_neo", "getDepth", false, 0, `no token for ${exchange}:${symbol}`);
+        }
+
+        return {
+          bids: [], asks: [], ltp: null, source: "unavailable",
+          reason_code: "no_token",
+          reason: `No broker instrument token mapped for ${exchange}:${symbol}.`,
+        };
+      }
       try {
         const d = await withKotakSession(svc, s, encryptValue, (ss) => kotakDepth(ss, token, seg));
-        if (!d) return { bids: [], asks: [], ltp: null, source: "unavailable" };
-        return { ...d, source: "kotak" };
-      } catch {
-        return { bids: [], asks: [], ltp: null, source: "unavailable" };
+        if (d && (d.bids.length || d.asks.length)) {
+          logProviderHealth(svc, "kotak_neo", "getDepth", true, Date.now() - t0);
+          return { bids: d.bids, asks: d.asks, ltp: d.ltp, source: "kotak", reason_code: "ok" };
+        }
+        // A well-formed but empty book. Outside session hours that is normal;
+        // inside them it means the gateway shape changed — log the keys once.
+        const closed = !isIndianMarketOpen();
+        const keys = d?.payloadKeys?.join(",") ?? "no payload";
+        logProviderHealth(
+          svc, "kotak_neo", "getDepth", false, Date.now() - t0,
+          `empty book for ${exchange}:${symbol} (${closed ? "market closed" : "market open"}) keys=${keys}`,
+        );
+        return {
+          bids: [], asks: [], ltp: d?.ltp ?? null, source: "kotak",
+          reason_code: closed ? "market_closed" : "upstream_error",
+          reason: closed
+            ? "The exchange order book is only published during market hours."
+            : "The broker returned an empty order book.",
+        };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const status = (e as { status?: number })?.status;
+        const authFail = status === 401 || status === 403 || /session|unauthor/i.test(msg);
+        logProviderHealth(svc, "kotak_neo", "getDepth", false, Date.now() - t0, msg);
+        return {
+          bids: [], asks: [], ltp: null, source: "unavailable",
+          reason_code: authFail ? "not_connected" : "upstream_error",
+          reason: msg.slice(0, 200),
+        };
       }
     },
+
     async getHoldings() {
       const detailed = await this.getHoldingsDetailed!();
       return detailed.rows;
@@ -920,34 +1062,27 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
     },
     async getFunds(): Promise<FundsSnapshot> {
       const t0 = Date.now();
-      // Kotak's /quick/user/limits is flaky for cash-only accounts. Try it
-      // first; on failure, fall back to /quick/user/margin (used by Neo web)
-      // before surfacing an error. The shared funds helper owns cooldown/
-      // cached fallback so we don't multiply calls across Funds + syncs.
-      let lastErr: unknown = null;
+      // Neo exposes margins only through /quick/user/limits (jData form-encoded).
+      // The old JSON body 404'd, and the /quick/user/margin "fallback" isn't a
+      // real Neo route — it just doubled the latency of every failure.
       try {
         const j = await withKotakSession(svc, s, encryptValue, (ss) => kotakLimits(ss));
         const parsed = parseKotakLimits(j);
         logProviderHealth(svc, "kotak_neo", "getFunds:limits", true, Date.now() - t0);
+        svc.from("market_api_settings")
+          .update({ funds_last_error_code: null, funds_last_attempt_at: new Date().toISOString() })
+          .eq("id", s.id).then(() => {}, () => {});
         return { ...parsed, source: "kotak" };
       } catch (e) {
-        lastErr = e;
-        const status = (e as any)?.status;
-        // Don't try /margin when the session itself is dead.
-        if (status !== 401 && status !== 403) {
-          try {
-            const j2 = await withKotakSession(svc, s, encryptValue, (ss) => kotakUserMargin(ss));
-            const parsed = parseKotakLimits(j2);
-            logProviderHealth(svc, "kotak_neo", "getFunds:margin", true, Date.now() - t0);
-            return { ...parsed, source: "kotak" };
-          } catch (e2) {
-            lastErr = e2;
-          }
-        }
+        const code = classifyFundsError(e);
+        logProviderHealth(svc, "kotak_neo", "getFunds", false, Date.now() - t0, e instanceof Error ? e.message : String(e));
+        svc.from("market_api_settings")
+          .update({ funds_last_error_code: code, funds_last_attempt_at: new Date().toISOString() })
+          .eq("id", s.id).then(() => {}, () => {});
+        throw e;
       }
-      logProviderHealth(svc, "kotak_neo", "getFunds", false, Date.now() - t0, lastErr instanceof Error ? lastErr.message : String(lastErr));
-      throw lastErr;
     },
+
 
     async testAuth() {
       // Holdings is a lightweight GET that succeeds whenever the session is

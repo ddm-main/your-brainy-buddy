@@ -351,13 +351,28 @@ export async function kotakHoldings(s: KotakSettings): Promise<any[]> {
 // Full envelope variant — sync uses `stat` to distinguish "empty book" from
 // "upstream returned garbage" before deleting rows. If `stat` is absent we
 // treat presence of a `data` array as OK (Kotak has inconsistent envelopes).
+//
+// Neo answers an *empty* book with `{stCode: 5203, errMsg: "No Data",
+// stat: "Not_Ok"}`. That is a successful "you hold nothing", not a failure —
+// reporting it as broken made the Holdings/Positions feeds show as DOWN on a
+// perfectly healthy session.
+function kotakEmptyBook(raw: any): boolean {
+  const code = Number(raw?.stCode ?? raw?.stcode ?? 0);
+  const msg = String(raw?.errMsg ?? raw?.emsg ?? raw?.desc ?? "").toLowerCase();
+  return code === 5203 || /no data|data not found|no records?/.test(msg);
+}
+
+function bookEnvelope(j: any): { rows: any[]; ok: boolean; raw: any } {
+  const rows = Array.isArray(j?.data) ? j.data : [];
+  const stat = String(j?.stat ?? j?.stCode ?? "").toLowerCase();
+  const ok = stat === "ok" || (stat === "" && Array.isArray(j?.data)) || kotakEmptyBook(j);
+  return { rows, ok, raw: j };
+}
+
 export async function kotakHoldingsEnvelope(s: KotakSettings): Promise<{ rows: any[]; ok: boolean; raw: any }> {
   const h = await sessionHeaders(s);
   const j = await kotakFetch(`${apiBase(s)}/portfolio/v1/holdings`, { headers: h });
-  const rows = Array.isArray(j?.data) ? j.data : [];
-  const stat = String(j?.stat ?? j?.stCode ?? "").toLowerCase();
-  const ok = stat === "ok" || (stat === "" && Array.isArray(j?.data));
-  return { rows, ok, raw: j };
+  return bookEnvelope(j);
 }
 
 export async function kotakPositions(s: KotakSettings): Promise<any[]> {
@@ -371,20 +386,17 @@ export async function kotakPositionsEnvelope(s: KotakSettings): Promise<{ rows: 
   requireServerId(s);
   const h = await sessionHeaders(s);
   const j = await kotakRouteFetch(s, ["quick/user/positions", "Orders/2.0/quick/user/positions"], { headers: h });
-  const rows = Array.isArray(j?.data) ? j.data : [];
-  const stat = String(j?.stat ?? j?.stCode ?? "").toLowerCase();
-  const ok = stat === "ok" || (stat === "" && Array.isArray(j?.data));
-  return { rows, ok, raw: j };
+  return bookEnvelope(j);
 }
+
 
 export async function kotakLimits(s: KotakSettings): Promise<any> {
   requireServerId(s);
   const h = await sessionHeaders(s);
-  // /quick/user/limits intermittently returns 5xx / empty bodies when queried
-  // with {ALL,ALL,ALL} on cash-only Neo accounts. Try the concrete cash combo
-  // first (what most retail accounts have), fall back to the broadcast query,
-  // and treat empty bodies as "combo not applicable" — advance rather than
-  // burn the whole attempt.
+  // Neo's REST surface takes `jData=<json>` as x-www-form-urlencoded — exactly
+  // like the order routes. Posting a raw JSON body made the gateway answer
+  // "404 page not found" on every combo, which surfaced in the UI as a broken
+  // Funds feed even on a perfectly healthy session.
   const combos: Array<{ seg: string; exch: string; prod: string }> = [
     { seg: "CASH", exch: "NSE", prod: "ALL" },
     { seg: "ALL",  exch: "ALL", prod: "ALL" },
@@ -395,8 +407,8 @@ export async function kotakLimits(s: KotakSettings): Promise<any> {
     try {
       const j = await kotakRouteFetch(s, ["quick/user/limits", "Orders/2.0/quick/user/limits"], {
         method: "POST",
-        headers: { ...h, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        headers: { ...h, "Content-Type": "application/x-www-form-urlencoded" },
+        body: jDataForm(body),
       });
       // Only accept combos that returned a real payload; empty {} → next combo.
       if (j && typeof j === "object" && Object.keys(j).length > 0) return j;
@@ -412,18 +424,20 @@ export async function kotakLimits(s: KotakSettings): Promise<any> {
   throw lastErr ?? new KotakError("Kotak limits: no payload from any segment combination", 502);
 }
 
-// Fallback margin endpoint. Neo web uses /quick/user/margin as an alternative
-// to /quick/user/limits — it returns the same shape (Net / CashAvailable /
-// MarginUsed / Collateral) but is more reliable on cash-only accounts.
-export async function kotakUserMargin(s: KotakSettings): Promise<any> {
-  requireServerId(s);
-  const h = await sessionHeaders(s);
-  return await kotakRouteFetch(s, ["quick/user/margin", "Orders/2.0/quick/user/margin"], {
-    method: "POST",
-    headers: { ...h, "Content-Type": "application/json" },
-    body: JSON.stringify({ seg: "CASH", exch: "NSE", prod: "ALL" }),
-  });
+// Classify a funds failure into a stable code for market_api_settings
+// .funds_last_error_code, so the Config screen can say *why* funds are stale
+// instead of the useless "unknown".
+export function classifyFundsError(e: unknown): string {
+  const status = (e as { status?: number } | null)?.status;
+  const msg = String((e as Error)?.message ?? e ?? "").toLowerCase();
+  if (status === 401 || status === 403) return "session";
+  if (status === 404) return "route_404";
+  if (status === 429) return "throttled";
+  if (typeof status === "number" && status >= 500) return "broker_5xx";
+  if (msg.includes("empty") || msg.includes("no payload")) return "empty_payload";
+  return "unknown";
 }
+
 
 
 // Quotes need an active session and go through the per-user baseUrl.
@@ -518,33 +532,123 @@ export async function kotakCandles(
 }
 
 // Level-2 market depth (best 5 bid/ask).
+//
+// Two things made this permanently empty while quotes were healthy:
+//  1) Kotak serves the ladder in more than one shape. The `all` quote payload
+//     can carry `depth: { buy: [...], sell: [...] }`, but the gateway also
+//     answers with the FLAT websocket-style field family documented in the
+//     Neo SDK (`docs/webSocket.md`): bp/bp1..bp4 (bid price, levels 1-5),
+//     bq/bq1..bq4, sp/sp1..sp4, bs/bs1..bs4, bno1..bno5 / sno1..sno5.
+//     The old parser only understood the nested form and silently produced [].
+//  2) When `all` carries no book at all, the `depth` quote_type (documented in
+//     Kotak-neo-api-v2) is the variant that does. We now probe it as a
+//     fallback and remember which variant worked for this isolate.
+export type KotakDepthBook = {
+  bids: Array<{ price: number; qty: number; orders: number }>;
+  asks: Array<{ price: number; qty: number; orders: number }>;
+  ltp: number | null;
+  /** Diagnostic: what the payload looked like when nothing was parseable. */
+  payloadKeys?: string[];
+};
+
+const DEPTH_VARIANTS = ["all", "depth"] as const;
+let preferredDepthVariant: string | null = null;
+
+const dnum = (v: unknown): number => {
+  const n = typeof v === "string" ? parseFloat(v) : typeof v === "number" ? v : NaN;
+  return Number.isFinite(n) ? n : 0;
+};
+
+// Flat Neo shape: level 1 has no suffix, levels 2-5 use suffix 1..4, while
+// order counts use 1..5 across all five levels (yes, really — that asymmetry
+// is exactly how Kotak documents it).
+function parseFlatSide(d: any, p: string, q: string, o: string) {
+  const rows: Array<{ price: number; qty: number; orders: number }> = [];
+  for (let i = 0; i < 5; i++) {
+    const sfx = i === 0 ? "" : String(i);
+    const price = dnum(d[`${p}${sfx}`]);
+    if (price <= 0) continue;
+    rows.push({
+      price,
+      qty: dnum(d[`${q}${sfx}`]),
+      orders: dnum(d[`${o}${i + 1}`]),
+    });
+  }
+  return rows;
+}
+
+function parseNestedSide(raw: unknown) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((r: any) => ({
+      price: dnum(r?.price ?? r?.p ?? r?.bp ?? r?.sp),
+      qty: dnum(r?.quantity ?? r?.qty ?? r?.q ?? r?.bq ?? r?.bs),
+      orders: dnum(r?.orders ?? r?.n ?? r?.no ?? r?.bno ?? r?.sno),
+    }))
+    .filter((r) => r.price > 0)
+    .slice(0, 5);
+}
+
+function extractBook(d: any): KotakDepthBook | null {
+  if (!d || typeof d !== "object") return null;
+  const book = d.depth ?? d;
+  const ltp = dnum(d.last_traded_price ?? d.ltp ?? d.lp ?? book?.ltp) || null;
+
+  // 1) Nested arrays.
+  let bids = parseNestedSide(book.buy ?? book.bids ?? book.bid);
+  let asks = parseNestedSide(book.sell ?? book.asks ?? book.ask);
+
+  // 2) Flat websocket-style keys, on either the envelope or the depth node.
+  if (bids.length === 0 && asks.length === 0) {
+    for (const src of [book, d]) {
+      const fb = parseFlatSide(src, "bp", "bq", "bno");
+      const fa = parseFlatSide(src, "sp", "bs", "sno");
+      if (fb.length || fa.length) { bids = fb; asks = fa; break; }
+    }
+  }
+
+  if (bids.length === 0 && asks.length === 0) {
+    return { bids: [], asks: [], ltp, payloadKeys: Object.keys(d).slice(0, 40) };
+  }
+  return { bids: bids.slice(0, 5), asks: asks.slice(0, 5), ltp };
+}
+
 export async function kotakDepth(
   s: KotakSettings,
   instrumentToken: string,
   exchangeSegment = "nse_cm",
-): Promise<{ bids: Array<{ price: number; qty: number; orders: number }>; asks: Array<{ price: number; qty: number; orders: number }>; ltp: number | null } | null> {
+): Promise<KotakDepthBook | null> {
   const h = await sessionHeaders(s);
-  const neoSym = `${exchangeSegment}|${instrumentToken}`;
-  const path = encodeURIComponent(neoSym);
-  const j = await kotakFetch(
-    `${apiBase(s)}/script-details/1.0/quotes/neosymbol/${path}/depth`,
-    { headers: { ...h, accept: "application/json" } },
-  );
-  const d = Array.isArray(j?.data) ? j.data[0] : (j?.data ?? j);
-  if (!d) return null;
-  const bidsRaw = d.bids ?? d.bid ?? d.buy ?? [];
-  const asksRaw = d.asks ?? d.ask ?? d.sell ?? [];
-  const toRow = (r: any) => ({
-    price: Number(r.price ?? r.p ?? 0),
-    qty: Number(r.quantity ?? r.qty ?? r.q ?? 0),
-    orders: Number(r.orders ?? r.n ?? 0),
-  });
-  return {
-    bids: (Array.isArray(bidsRaw) ? bidsRaw : []).map(toRow).filter((r) => r.price > 0).slice(0, 5),
-    asks: (Array.isArray(asksRaw) ? asksRaw : []).map(toRow).filter((r) => r.price > 0).slice(0, 5),
-    ltp: Number(d.last_traded_price ?? d.ltp ?? 0) || null,
-  };
+  const path = encodeURIComponent(`${exchangeSegment}|${instrumentToken}`);
+  const variants = preferredDepthVariant
+    ? [preferredDepthVariant, ...DEPTH_VARIANTS.filter((v) => v !== preferredDepthVariant)]
+    : [...DEPTH_VARIANTS];
+
+  let last: KotakDepthBook | null = null;
+  for (const variant of variants) {
+    let j: any;
+    try {
+      j = await kotakFetch(
+        `${apiBase(s)}/script-details/1.0/quotes/neosymbol/${path}/${variant}`,
+        { headers: { ...h, accept: "application/json" } },
+      );
+    } catch (e) {
+      // A missing quote_type on this gateway is not fatal — try the next one.
+      if (e instanceof KotakError && (e.status === 404 || e.status === 400)) continue;
+      throw e;
+    }
+    const d = Array.isArray(j?.data) ? j.data[0] : (j?.data ?? j);
+    const book = extractBook(d);
+    if (book && (book.bids.length || book.asks.length)) {
+      preferredDepthVariant = variant;
+      return book;
+    }
+    last = book ?? last;
+  }
+  return last;
 }
+
+
 
 // ---------------------------------------------------------------------
 // Order placement (AutoTrade). Endpoint/field names below are assembled

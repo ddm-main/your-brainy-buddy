@@ -1,0 +1,2 @@
+CREATE INDEX IF NOT EXISTS market_daily_prices_created_at_idx ON public.market_daily_prices (created_at DESC);
+CREATE INDEX IF NOT EXISTS market_daily_prices_trade_date_idx ON public.market_daily_prices (trade_date DESC);

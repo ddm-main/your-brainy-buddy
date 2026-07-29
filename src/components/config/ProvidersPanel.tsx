@@ -1,5 +1,6 @@
-// Providers panel for Market Config — one compact row per data provider with
-// live status, an Edit action (key entry / deep link / detail sheet) and Test.
+// Providers panel for Market Config — clickable list of every data provider.
+// Selecting a row opens ProviderDetail, which shows what that provider feeds,
+// whether each feed is live, who actually served it and where the app uses it.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -7,62 +8,16 @@ import HudPanel from "@/components/hud/HudPanel";
 import { HudModal } from "@/components/hud/HudModal";
 import { Btn, Chip, inputStyle } from "@/components/hud/HudControls";
 import { supabase } from "@/integrations/supabase/client";
-import { SAFE_SUPABASE_URL } from "@/lib/supabaseSafe";
-import { authFetch } from "@/lib/authFetch";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { KeyRound, TestTube2, Settings2 } from "lucide-react";
+import { ChevronRight, KeyRound, TestTube2, Settings2 } from "lucide-react";
+import ProviderDetail from "./providers/ProviderDetail";
+import FeedRoutingPanel from "./providers/FeedRoutingPanel";
+import { PROVIDERS, PROVIDER_ORDER, type ProviderId } from "./providers/feedCatalog";
+import { ago, callCreds, callTest, clean, type CredRow, type HealthRow } from "./providers/providerUtils";
+import { useRunSelfTest, SELFTEST_QUERY_KEY } from "@/lib/market/selftest";
 
-export type ProviderId = "kotak_neo" | "yahoo" | "fmp" | "alpha_vantage" | "nse" | "bse";
-type EditKind = "kotak" | "key" | "info";
-
-const META: Record<ProviderId, {
-  name: string; role: string; feeds: string[]; primary?: boolean;
-  edit: EditKind; docs?: string; envName?: string;
-}> = {
-  kotak_neo:     { name: "Kotak Neo", role: "Primary quotes / EOD", feeds: ["Live LTP", "Depth", "Session-backed EOD"], primary: true, edit: "kotak" },
-  yahoo:         { name: "Yahoo Finance", role: "Fallback market data", feeds: ["Quotes", "OHLC", "Fundamentals", "Indices"], edit: "info" },
-  fmp:           { name: "Financial Modeling Prep", role: "Fundamentals", feeds: ["Market cap", "PE / PB / ROE", "Balance sheet", "Cash flow"], edit: "key", docs: "https://site.financialmodelingprep.com/developer/docs", envName: "FINANCIAL_MODELING_PREP_API_KEY" },
-  alpha_vantage: { name: "Alpha Vantage", role: "Technicals", feeds: ["SMA / EMA", "RSI", "MACD", "ADX / ATR"], edit: "key", docs: "https://www.alphavantage.co/support/#api-key", envName: "ALPHA_VANTAGE_API_KEY" },
-  nse:           { name: "NSE", role: "Exchange data", feeds: ["Market status", "Index constituents", "Bulk deals", "Corp actions"], edit: "info" },
-  bse:           { name: "BSE", role: "Exchange data", feeds: ["Corp actions", "Announcements", "Circulars"], edit: "info" },
-};
-
-const ORDER: ProviderId[] = ["kotak_neo", "yahoo", "fmp", "alpha_vantage", "nse", "bse"];
-
-type CredRow = {
-  provider: string; key_set: boolean; key_hint: string | null;
-  last_tested_at: string | null; last_test_ok: boolean | null; last_test_detail: string | null;
-};
-
-type HealthRow = { provider: string; ok: boolean; error: string | null; created_at: string };
-
-function ago(ts: string | null | undefined): string {
-  if (!ts) return "";
-  const t = new Date(ts).getTime();
-  if (Number.isNaN(t)) return "";
-  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-  return `${Math.round(s / 86400)}d ago`;
-}
-
-/** Broker error pages come back as raw HTML — keep the readable part only. */
-function clean(detail: string | null | undefined): string | null {
-  if (!detail) return null;
-  const text = detail.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-  return text.length > 160 ? `${text.slice(0, 157)}…` : text || null;
-}
-
-async function callCreds(body: Record<string, unknown>) {
-  const r = await authFetch(`${SAFE_SUPABASE_URL}/functions/v1/market-provider-credentials`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || j?.error) throw new Error(j?.error ?? r.statusText);
-  return j;
-}
+export type { ProviderId };
 
 export default function ProvidersPanel() {
   const nav = useNavigate();
@@ -70,10 +25,13 @@ export default function ProvidersPanel() {
   const qc = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
   const [live, setLive] = useState<Partial<Record<ProviderId, { ok: boolean; detail: string | null; at: string }>>>({});
+  const [selected, setSelected] = useState<ProviderId | null>(null);
   const [editing, setEditing] = useState<ProviderId | null>(null);
   const [keyInput, setKeyInput] = useState("");
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+
+  const selfTest = useRunSelfTest();
 
   const { data: creds } = useQuery({
     queryKey: ["market", "provider-credentials"],
@@ -84,7 +42,7 @@ export default function ProvidersPanel() {
     staleTime: 60_000,
   });
 
-  // Last recorded outcome per provider, so status survives a reload.
+  // Last recorded outcomes per provider, so status survives a reload.
   const { data: health } = useQuery({
     queryKey: ["market", "provider-health-latest"],
     queryFn: async () => {
@@ -92,7 +50,7 @@ export default function ProvidersPanel() {
         .from("market_provider_health")
         .select("provider,ok,error,created_at")
         .order("created_at", { ascending: false })
-        .limit(200);
+        .limit(300);
       if (error) throw error;
       return data as HealthRow[];
     },
@@ -100,9 +58,13 @@ export default function ProvidersPanel() {
     staleTime: 60_000,
   });
 
-  const lastHealth = useMemo(() => {
-    const m = new Map<string, HealthRow>();
-    for (const r of health ?? []) if (!m.has(r.provider)) m.set(r.provider, r);
+  const historyFor = useMemo(() => {
+    const m = new Map<string, HealthRow[]>();
+    for (const r of health ?? []) {
+      const list = m.get(r.provider) ?? [];
+      list.push(r);
+      m.set(r.provider, list);
+    }
     return m;
   }, [health]);
 
@@ -112,15 +74,17 @@ export default function ProvidersPanel() {
     if (busy) return;
     setBusy(`test-${p}`);
     try {
-      const r = await authFetch(`${SAFE_SUPABASE_URL}/functions/v1/market-test-connection`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: p }),
-      });
-      const j = await r.json().catch(() => ({}));
+      const j = await callTest({ provider: p });
       const ok = !!j?.ok;
-      const detail = clean(j?.detail ?? j?.error);
+      const detail = clean((j?.detail as string) ?? (j?.error as string));
       if (mounted.current) setLive((s) => ({ ...s, [p]: { ok, detail, at: new Date().toISOString() } }));
-      push(ok ? `${META[p].name} OK` : `${META[p].name} failed${detail ? `: ${detail}` : ""}`, ok ? "ok" : "err");
-      await qc.invalidateQueries({ queryKey: ["market", "provider-health-latest"] });
+      push(ok ? `${PROVIDERS[p].name} OK` : `${PROVIDERS[p].name} failed${detail ? `: ${detail}` : ""}`, ok ? "ok" : "err");
+      // The test writes fresh surface rows too — refresh both, or the feed
+      // table keeps showing the pre-test state until the next cron tick.
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["market", "provider-health-latest"] }),
+        qc.invalidateQueries({ queryKey: SELFTEST_QUERY_KEY as unknown as string[] }),
+      ]);
     } catch (e) {
       const msg = clean(toSafeError(e, "Test failed").message);
       if (mounted.current) setLive((s) => ({ ...s, [p]: { ok: false, detail: msg, at: new Date().toISOString() } }));
@@ -130,13 +94,25 @@ export default function ProvidersPanel() {
 
   const saveKey = async () => {
     if (!editing || busy) return;
+    const provider = editing;
     setBusy("save");
     try {
-      await callCreds({ mode: "save", provider: editing, api_key: keyInput.trim() });
-      push(`${META[editing].name} key saved`, "ok");
+      await callCreds({ mode: "save", provider, api_key: keyInput.trim() });
       setKeyInput("");
       setEditing(null);
-      await qc.invalidateQueries({ queryKey: ["market", "provider-credentials"] });
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["market", "provider-credentials"] }),
+        qc.invalidateQueries({ queryKey: ["market", "provider-health-latest"] }),
+      ]);
+      const j = await callTest({ provider });
+      const ok = !!j?.ok;
+      const detail = clean((j?.detail as string) ?? (j?.error as string));
+      if (mounted.current) setLive((s) => ({ ...s, [provider]: { ok, detail, at: new Date().toISOString() } }));
+      push(ok ? `${PROVIDERS[provider].name} key saved and verified` : `${PROVIDERS[provider].name} key saved, test failed${detail ? `: ${detail}` : ""}`, ok ? "ok" : "err");
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["market", "provider-credentials"] }),
+        qc.invalidateQueries({ queryKey: ["market", "provider-health-latest"] }),
+      ]);
     } catch (e) {
       push(toSafeError(e, "Could not save key").message, "err");
     } finally { if (mounted.current) setBusy(null); }
@@ -147,7 +123,7 @@ export default function ProvidersPanel() {
     setBusy("clear");
     try {
       await callCreds({ mode: "clear", provider: p });
-      push(`${META[p].name} key removed`, "ok");
+      push(`${PROVIDERS[p].name} key removed`, "ok");
       await qc.invalidateQueries({ queryKey: ["market", "provider-credentials"] });
     } catch (e) {
       push(toSafeError(e, "Could not remove key").message, "err");
@@ -155,17 +131,20 @@ export default function ProvidersPanel() {
   };
 
   const openEdit = (p: ProviderId) => {
-    if (META[p].edit === "kotak") { nav("/market/settings"); return; }
+    if (PROVIDERS[p].edit === "kotak") { nav("/market/settings"); return; }
     setKeyInput("");
     setEditing(p);
   };
 
-  const rows = ORDER.map((p) => {
-    const meta = META[p];
+  const rows = PROVIDER_ORDER.map((p) => {
+    const meta = PROVIDERS[p];
     const cred = credFor(p);
-    const hp = lastHealth.get(p);
+    const rawHp = historyFor.get(p)?.[0] ?? null;
+    const hp = cred?.updated_at && rawHp?.created_at && new Date(rawHp.created_at).getTime() < new Date(cred.updated_at).getTime() ? null : rawHp;
     const lv = live[p];
-    const keyMissing = meta.edit === "key" && !cred?.key_set;
+    // A saved key OR the edge-secret fallback counts as configured; the panel
+    // can't see edge secrets, so only flag it as "check key" after a failure.
+    const keyMissing = meta.edit === "key" && !cred?.key_set && hp?.ok === false;
 
     let tone: "ok" | "warn" | "err" | "neutral" = "neutral";
     let label = "idle";
@@ -175,61 +154,110 @@ export default function ProvidersPanel() {
     if (lv) {
       tone = lv.ok ? "ok" : "err"; label = lv.ok ? "reachable" : "failed";
       detail = lv.detail; at = lv.at;
-    } else if (keyMissing) {
-      tone = "warn"; label = "key missing";
+    } else if (cred?.last_tested_at && cred.last_test_ok != null) {
+      tone = cred.last_test_ok ? "ok" : "err";
+      label = cred.last_test_ok ? "reachable" : "failed";
+      detail = clean(cred.last_test_detail);
+      at = cred.last_tested_at;
     } else if (hp) {
       tone = hp.ok ? "ok" : "warn";
-      label = hp.ok ? "reachable" : "degraded";
+      label = hp.ok ? "reachable" : keyMissing ? "check key" : "degraded";
       detail = clean(hp.error); at = hp.created_at;
+    } else if (meta.edit === "key" && cred?.key_set) {
+      tone = "neutral"; label = "saved — test";
+      detail = clean(cred.last_test_detail); at = cred.updated_at;
+    } else if (meta.edit === "key" && !cred?.key_set) {
+      tone = "neutral"; label = "edge secret";
     } else {
       tone = "neutral"; label = "untested";
     }
     if (!lv && p === "kotak_neo" && hp && !hp.ok) label = "degraded → yahoo";
 
-    return { p, meta, cred, tone, label, detail, at, keyMissing };
+    return { p, meta, cred, tone, label, detail, at };
   });
 
   const anyBad = rows.some((r) => r.tone === "err");
   const anyWarn = rows.some((r) => r.tone === "warn");
-  const editMeta = editing ? META[editing] : null;
+  const editMeta = editing ? PROVIDERS[editing] : null;
   const editCred = editing ? credFor(editing) : null;
 
   return (
     <>
-      <HudPanel title="Providers" index="PRV" live={anyBad ? "err" : anyWarn ? "warn" : "ok"} bodyClass="overflow-visible">
-        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-          {rows.map(({ p, meta, tone, label, detail, at }) => (
-            <div key={p} style={{ border: "1px solid var(--edge)", padding: "4px 8px", background: "rgba(255,255,255,0.015)" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }} title={meta.feeds.join(" · ")}>
-                <span style={{ fontFamily: "var(--font-hud)", fontSize: 12, color: "var(--text)", letterSpacing: "0.04em" }}>{meta.name}</span>
-                <span style={{ fontSize: 10, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.14em" }}>{meta.role}</span>
-                {meta.primary && <Chip tone="accent">primary</Chip>}
-                <Chip tone={tone}>{label}</Chip>
-                {at && <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{ago(at)}</span>}
-                <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-                  <Btn size="sm" onClick={() => openEdit(p)} disabled={busy !== null} title={`Edit ${meta.name}`}>
-                    {meta.edit === "kotak" ? <KeyRound size={11} style={{ marginRight: 4 }} /> : <Settings2 size={11} style={{ marginRight: 4 }} />}
-                    Edit
-                  </Btn>
-                  <Btn size="sm" onClick={() => test(p)} disabled={busy !== null}>
-                    <TestTube2 size={11} style={{ marginRight: 4 }} />{busy === `test-${p}` ? "testing…" : "Test"}
-                  </Btn>
-                </span>
+      {selected ? (
+        <ProviderDetail
+          id={selected}
+          cred={credFor(selected)}
+          health={historyFor.get(selected) ?? []}
+          busy={busy}
+          onBack={() => setSelected(null)}
+          onEdit={openEdit}
+          onTest={test}
+          liveDetail={live[selected] ?? null}
+        />
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <FeedRoutingPanel />
+        <HudPanel
+          title="Providers"
+          index="PRV"
+          live={anyBad ? "err" : anyWarn ? "warn" : "ok"}
+          bodyClass="overflow-visible"
+          actions={
+            <Btn size="sm" disabled={selfTest.isPending || busy !== null} onClick={async () => {
+              try {
+                const r = await selfTest.mutateAsync();
+                push(r?.down ? `Self-test done — ${r.down} provider(s) down` : "All providers tested", r?.down ? "warn" : "ok");
+              } catch (e) { push(clean(toSafeError(e, "Self-test failed").message) ?? "Self-test failed", "err"); }
+            }}>
+              <TestTube2 size={11} style={{ marginRight: 4 }} />
+              {selfTest.isPending ? "testing…" : "test all"}
+            </Btn>
+          }
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            {rows.map(({ p, meta, tone, label, detail, at }) => (
+              <div
+                key={p}
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelected(p)}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelected(p); } }}
+                style={{ border: "1px solid var(--edge)", padding: "4px 8px", background: "rgba(255,255,255,0.015)", cursor: "pointer" }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }} title={meta.feeds.map((f) => f.label).join(" · ")}>
+                  <ChevronRight size={12} style={{ color: "var(--text-muted)" }} />
+                  <span style={{ fontFamily: "var(--font-hud)", fontSize: 12, color: "var(--text)", letterSpacing: "0.04em" }}>{meta.name}</span>
+                  <span style={{ fontSize: 10, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.14em" }}>{meta.role}</span>
+                  {meta.primary && <Chip tone="accent">primary</Chip>}
+                  <Chip tone={tone}>{label}</Chip>
+                  <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{meta.feeds.length} feeds</span>
+                  {at && <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{ago(at)}</span>}
+                  <span style={{ marginLeft: "auto", display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+                    <Btn size="sm" onClick={() => openEdit(p)} disabled={busy !== null} title={`Edit ${meta.name}`}>
+                      {meta.edit === "kotak" ? <KeyRound size={11} style={{ marginRight: 4 }} /> : <Settings2 size={11} style={{ marginRight: 4 }} />}
+                      Edit
+                    </Btn>
+                    <Btn size="sm" onClick={() => test(p)} disabled={busy !== null}>
+                      <TestTube2 size={11} style={{ marginRight: 4 }} />{busy === `test-${p}` ? "testing…" : "Test"}
+                    </Btn>
+                  </span>
+                </div>
+                {detail && tone !== "ok" && (
+                  <div style={{ marginTop: 2, fontSize: 10, color: tone === "err" ? "var(--danger)" : "var(--text-muted)" }}>{detail}</div>
+                )}
               </div>
-              {detail && tone !== "ok" && (
-                <div style={{ marginTop: 2, fontSize: 10, color: tone === "err" ? "var(--danger)" : "var(--text-muted)" }}>{detail}</div>
-              )}
-            </div>
-          ))}
+            ))}
+          </div>
+        </HudPanel>
         </div>
-      </HudPanel>
+      )}
 
       <HudModal open={editing !== null} onClose={() => setEditing(null)} title={editMeta ? `${editMeta.name} — settings` : ""} width={460}>
         {editMeta && (
           <div style={{ display: "flex", flexDirection: "column", gap: 10, fontSize: 12, color: "var(--text-dim)" }}>
             <div>
               <div className="hud-label" style={{ color: "var(--text-muted)", marginBottom: 4 }}>Feeds</div>
-              <div>{editMeta.feeds.join(" · ")}</div>
+              <div>{editMeta.feeds.map((f) => f.label).join(" · ")}</div>
             </div>
 
             {editMeta.edit === "key" ? (
@@ -237,7 +265,7 @@ export default function ProvidersPanel() {
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span className="hud-label" style={{ color: "var(--text-muted)" }}>API key</span>
                   <Chip tone={editCred?.key_set ? "ok" : "warn"}>{editCred?.key_set ? `set ${editCred.key_hint ?? ""}` : "not set"}</Chip>
-                  {editCred?.key_set && <span style={{ fontSize: 10, color: "var(--text-muted)" }}>updated {ago(editCred.last_tested_at)}</span>}
+                  {editCred?.key_set && <span style={{ fontSize: 10, color: "var(--text-muted)" }}>updated {ago(editCred.updated_at)}</span>}
                 </div>
                 <input
                   type="password"

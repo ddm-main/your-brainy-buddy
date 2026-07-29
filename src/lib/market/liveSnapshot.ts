@@ -6,7 +6,8 @@
 // applied to the single symbol currently open in Analysis — not the whole
 // universe.
 import { computeSnapshot, type Candle, type IndicatorSnapshot } from "../../../supabase/functions/_shared/market/indicators";
-import { breakoutScore, preBreakoutScore, type MarketContext, type ScoreResult } from "../../../supabase/functions/_shared/market/scoring";
+import { detectPatterns, type PatternFlags } from "../../../supabase/functions/_shared/market/indicators-advanced";
+import { breakoutScore, type BreakoutPatterns, type MarketContext, type ScoreResult } from "../../../supabase/functions/_shared/market/scoring";
 import { marketOpen } from "./hooks";
 import type { BreadthDaily, CandleDto, Quote, StockScore } from "./types";
 
@@ -30,12 +31,7 @@ export function withLivePrice(dailyCandles: CandleDto[], quote: Quote | undefine
   const lastDateStr = last ? new Date(last.time * 1000).toISOString().slice(0, 10) : null;
 
   if (last && lastDateStr === today) {
-    // Once the session's over, stop repricing today's bar off the live tick —
-    // let the EOD-sourced close (backed by the pipeline's settled print) stand
-    // instead of freezing on whichever LTP arrived last before the market shut.
-    // Previously this fell through to the append branch below, which stuck a
-    // second, spurious "today" bar (built from previous_close as a fake open)
-    // on top of the real EOD bar any time this ran post-close.
+    // Once the session's over, stop repricing today's bar off the live tick.
     if (!marketOpen()) return base;
     base[base.length - 1] = {
       ...last,
@@ -46,10 +42,6 @@ export function withLivePrice(dailyCandles: CandleDto[], quote: Quote | undefine
     return base;
   }
 
-  // No bar for today yet. Only synthesize an in-progress one while the market
-  // is actually open (pipeline hasn't caught up) — outside session hours
-  // (weekend/holiday/pre-open) there's no real "today" candle to fabricate
-  // from a stale LTP.
   if (!marketOpen()) return base;
   const open = quote.previous_close ?? last?.close ?? quote.ltp;
   base.push({
@@ -66,13 +58,15 @@ export function withLivePrice(dailyCandles: CandleDto[], quote: Quote | undefine
 export interface LiveScore {
   snapshot: IndicatorSnapshot;
   breakout: ScoreResult;
-  prebreakout: ScoreResult;
+  patterns: PatternFlags;
 }
 
-// Recompute the full technical snapshot + breakout/pre-breakout scores from
-// the live-repriced series. Sector strength / breadth regime / relative
+// Recompute the full technical snapshot + breakout score from the
+// live-repriced series. Sector strength / breadth regime / relative
 // strength are carried over from the last EOD row — those are cross-sectional
 // (whole-market) computations that don't meaningfully shift tick to tick.
+// Pattern detection also runs on the live-repriced series so hammer /
+// engulfing / cup-and-handle-triggered flags update as the session forms.
 export function computeLiveScore(
   dailyCandles: CandleDto[] | undefined,
   quote: Quote | undefined,
@@ -84,8 +78,7 @@ export function computeLiveScore(
   const snapshot = computeSnapshot(candles);
   if (!snapshot) return null;
   // Stability cap: keep the EOD S/R visible unless the live close has cleared
-  // it by more than 0.25 × ATR. Prevents R from vanishing on the first tick
-  // above and hides the ATH-fallback flip-flop mid-session.
+  // it by more than 0.25 × ATR.
   const atrV = snapshot.atr14 ?? null;
   const tol = atrV ? 0.25 * atrV : 0;
   const eodR = eodScore?.resistance_level ?? null;
@@ -93,7 +86,6 @@ export function computeLiveScore(
   if (eodR != null && snapshot.close < eodR + tol) {
     snapshot.resistance = eodR;
     snapshot.resistanceFallback = false;
-    // touches unknown from EOD row — leave whatever live compute returned
   }
   if (eodS != null && snapshot.close > eodS - tol) {
     snapshot.support = eodS;
@@ -105,9 +97,24 @@ export function computeLiveScore(
     relStrengthNifty: eodScore?.rel_strength_nifty ?? null,
     deliveryPct: eodScore?.delivery_pct ?? null,
   };
+  const patterns = detectPatterns(candles);
+  const bp: BreakoutPatterns = {
+    bullishEngulfing: patterns.bullish_engulfing,
+    bearishEngulfing: patterns.bearish_engulfing,
+    hammer: patterns.hammer,
+    shootingStar: patterns.shooting_star,
+    doji: patterns.doji,
+    cupAndHandle: patterns.cup_and_handle,
+    cupAndHandleTriggered: patterns.cup_and_handle_triggered,
+    flag: patterns.flag,
+    ascendingTriangle: patterns.ascending_triangle,
+    doubleBottom: patterns.double_bottom,
+    inverseHeadShoulders: patterns.inverse_head_shoulders,
+    fallingWedge: patterns.falling_wedge,
+  };
   return {
     snapshot,
-    breakout: breakoutScore(snapshot, ctx),
-    prebreakout: preBreakoutScore(snapshot, ctx),
+    breakout: breakoutScore(snapshot, ctx, bp),
+    patterns,
   };
 }

@@ -284,13 +284,78 @@ function extractFieldValue(field: FieldName, providerData: any, providerName: st
   }
 }
 
+// ---------- Per-feed manual provider overrides ----------
+// Users can pin a provider for a feed in Market Config → Providers → Feed
+// Routing. A pin only *reorders* the chain — the remaining providers stay as
+// fallbacks so a pinned-but-down vendor degrades instead of going dark.
+// feed_id → resolver fields it governs.
+export const FEED_FIELDS: Record<string, string[]> = {
+  ltp: ["ltp", "change_abs", "change_pct", "volume"],
+  previous_close: ["previous_close"],
+  range_52w: ["high_52w", "low_52w"],
+  fundamentals: ["pe", "pb", "peg", "eps", "book_value", "dividend_yield", "roe", "roce", "roa",
+    "operating_margin", "net_margin", "ev_ebitda", "debt_equity", "current_ratio", "quick_ratio",
+    "sales_growth", "profit_growth", "eps_growth", "market_cap", "shares_outstanding"],
+  company_info: ["company_name", "sector", "industry"],
+  indicators: ["rsi", "macd", "macd_signal", "macd_hist", "adx", "atr",
+    "sma_20", "sma_50", "sma_200", "ema_20", "ema_50", "ema_100", "ema_200", "bb_upper", "bb_lower"],
+  ownership: ["promoter_holding", "promoter_pledge", "fii_holding", "dii_holding"],
+  shares: ["shares_outstanding"],
+  indices: ["ltp", "change_abs", "change_pct"],
+};
+
+
+const PREF_TTL_MS = 30_000;
+export type FieldPref = { primary?: string; fallback?: string };
+const prefCache = new Map<string, { at: number; map: Record<string, FieldPref> }>();
+
+/** field → {primary, fallback}, derived from the user's market_feed_prefs rows. */
+export async function getFieldOverrides(
+  svc: SupabaseClient,
+  userId: string | null,
+): Promise<Record<string, FieldPref>> {
+  if (!userId) return {};
+  const hit = prefCache.get(userId);
+  if (hit && Date.now() - hit.at < PREF_TTL_MS) return hit.map;
+  const map: Record<string, FieldPref> = {};
+  try {
+    const { data } = await svc.from("market_feed_prefs")
+      .select("feed_id, provider, fallback_provider").eq("user_id", userId);
+    for (const row of data ?? []) {
+      const r = row as { feed_id: string; provider: string | null; fallback_provider: string | null };
+      const fields = FEED_FIELDS[r.feed_id];
+      if (!fields) continue;
+      const primary = r.provider && r.provider !== "auto" ? r.provider : undefined;
+      const fallback = r.fallback_provider && r.fallback_provider !== "auto" ? r.fallback_provider : undefined;
+      if (!primary && !fallback) continue;
+      for (const f of fields) map[f] = { primary, fallback };
+    }
+  } catch { /* prefs are advisory — never block a data read */ }
+  prefCache.set(userId, { at: Date.now(), map });
+  return map;
+}
+
+export function invalidateFeedPrefCache(userId?: string): void {
+  if (userId) prefCache.delete(userId); else prefCache.clear();
+}
+
+/** primary → fallback → the rest of the built-in chain, de-duplicated. */
+export function buildChain(base: string[], pref?: FieldPref): string[] {
+  const front = [pref?.primary, pref?.fallback].filter(Boolean) as string[];
+  const seen = new Set<string>();
+  return [...front, ...base].filter((p) => (seen.has(p) ? false : (seen.add(p), true)));
+}
+
 // Resolve a single field using the priority chain
 export async function resolveField(
   req: FieldRequest,
   svc: SupabaseClient,
   userId: string | null = null,
 ): Promise<FieldResult | null> {
-  const chain = PRIORITY_CHAINS[req.field] ?? [];
+  const base = PRIORITY_CHAINS[req.field] ?? [];
+  const overrides = await getFieldOverrides(svc, userId);
+  const chain = buildChain(base, overrides[req.field]);
+
 
   for (const providerName of chain) {
     try {

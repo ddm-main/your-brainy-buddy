@@ -142,11 +142,24 @@ async function fetchTokenMap() {
 const BROADCAST_FLUSH_MS = 100;
 const BROADCAST_MAX_BATCH = 500;
 
+// --- Depth (level-2) ------------------------------------------------------
+// Depth is subscribed on demand, never for the whole universe: Kotak charges
+// a separate, much heavier frame per instrument and only a couple of symbols
+// are ever on screen at once (the A2 ladder on Analysis / IndexDetail).
+// Clients broadcast `depth_subscribe` with the symbols they're showing and
+// re-send it periodically; a symbol not renewed within DEPTH_LEASE_MS is
+// DEPTH_UNSUBSed so a closed tab stops costing us frames.
+const DEPTH_LEASE_MS = 90_000;
+const DEPTH_MAX_SYMBOLS = 8;
+const DEPTH_CHANNEL = 2;
+
+
 class Supervisor {
   constructor() {
     this.ws = null;
     this.channel = null;
     this.byToken = new Map();
+    this.bySymbol = new Map();
     // Per-token last-known change_pct. Kotak Neo sends bare-LTP delta frames
     // after the initial snapshot; without carrying the previous change_pct
     // forward, the UI's % column flickers to "—" between full frames.
@@ -154,7 +167,10 @@ class Supervisor {
     // Buffer: symbol -> latest tick payload. Last write wins per symbol
     // within a flush window so a hot ticker doesn't crowd out others.
     this.tickBuffer = new Map();
+    // token -> lease expiry epoch ms for depth subscriptions.
+    this.depthLeases = new Map();
     this.flushTimer = null;
+    this.depthSweepTimer = null;
     this.reconnectDelay = RECONNECT_BASE_MS;
     this.silenceTimer = null;
     this.heartbeatTimer = null;
@@ -162,11 +178,15 @@ class Supervisor {
     this.stopped = false;
   }
 
+
   async start() {
     this.tokenRefreshTimer = setInterval(() => {
-      fetchTokenMap().then(({ byToken }) => { this.byToken = byToken; }).catch((e) => log("token refresh failed:", e.message));
+      fetchTokenMap()
+        .then(({ byToken, bySymbol }) => { this.byToken = byToken; this.bySymbol = bySymbol; })
+        .catch((e) => log("token refresh failed:", e.message));
     }, TOKEN_MAP_REFRESH_MS);
     this.flushTimer = setInterval(() => this.flushTicks(), BROADCAST_FLUSH_MS);
+    this.depthSweepTimer = setInterval(() => this.sweepDepthLeases(), 15_000);
     await this.connectLoop();
   }
 
@@ -174,10 +194,54 @@ class Supervisor {
     this.stopped = true;
     clearInterval(this.tokenRefreshTimer);
     clearInterval(this.flushTimer);
+    clearInterval(this.depthSweepTimer);
     clearTimeout(this.silenceTimer);
     clearInterval(this.heartbeatTimer);
     this.ws?.close();
   }
+
+  // --- depth lease management --------------------------------------------
+  // A client asks for depth on the symbols it is currently rendering. Leases
+  // expire so an abandoned tab can't keep an expensive level-2 subscription
+  // alive forever; the client renews while the panel stays mounted.
+  requestDepth(symbols) {
+    if (!Array.isArray(symbols)) return;
+    const until = Date.now() + DEPTH_LEASE_MS;
+    const fresh = [];
+    for (const sym of symbols.slice(0, DEPTH_MAX_SYMBOLS)) {
+      const tok = this.bySymbol.get(String(sym).toUpperCase());
+      if (tok == null) continue;
+      const key = String(tok);
+      if (!this.depthLeases.has(key)) fresh.push(key);
+      this.depthLeases.set(key, until);
+    }
+    if (fresh.length > 0) this.sendDepthSubs(fresh, true);
+  }
+
+  sweepDepthLeases() {
+    const now = Date.now();
+    const expired = [];
+    for (const [tok, until] of this.depthLeases) {
+      if (until <= now) { this.depthLeases.delete(tok); expired.push(tok); }
+    }
+    if (expired.length > 0) this.sendDepthSubs(expired, false);
+  }
+
+  sendDepthSubs(tokens, subscribe) {
+    if (this.ws?.readyState !== 1 || tokens.length === 0) return;
+    const scrips = tokens.map((t) => `nse_cm|${t}`).join("&");
+    try {
+      this.ws.send(JSON.stringify({
+        type: subscribe ? "DEPTH_SUBS" : "DEPTH_UNSUBS",
+        scrips,
+        channelnum: DEPTH_CHANNEL,
+      }));
+      log(`${subscribe ? "depth subscribed" : "depth released"}: ${tokens.length} instrument(s)`);
+    } catch (e) {
+      log("depth subscription failed:", e?.message ?? e);
+    }
+  }
+
 
   flushTicks() {
     if (!this.channel || this.tickBuffer.size === 0) return;
@@ -221,8 +285,10 @@ class Supervisor {
       log("Kotak not connected (or session expired) — waiting before retry. Open Settings and log in.");
       throw new Error("no active Kotak session");
     }
-    const { byToken } = await fetchTokenMap();
+    const { byToken, bySymbol } = await fetchTokenMap();
     this.byToken = byToken;
+    this.bySymbol = bySymbol;
+
     if (byToken.size === 0) {
       log("universe is empty — run 'Sync universe' in Settings first. Subscribing with 0 symbols.");
     }
@@ -253,7 +319,14 @@ class Supervisor {
         this.channel?.send({ type: "broadcast", event: "hello", payload: { relay: "kotak-ws", ts: Date.now() } })
           .catch(() => { /* channel closing */ });
       });
+      // Depth (level-2) is opt-in and leased: the A2 ladder broadcasts the
+      // symbol it is showing and renews while mounted. This replaces the
+      // 1s REST poll of the market-depth edge function.
+      this.channel.on("broadcast", { event: "depth_subscribe" }, (msg) => {
+        this.requestDepth(msg?.payload?.symbols ?? []);
+      });
     }
+
 
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(session.wsUrl);
@@ -279,6 +352,10 @@ class Supervisor {
           ws.send(JSON.stringify({ type: "SCRIP_SUBS", scrips: chunk, channelnum: 1 }));
         }
         log(`subscribed to ${tokens.length} symbols`);
+        // Re-arm any depth leases that survived the disconnect.
+        const live = [...this.depthLeases.keys()];
+        if (live.length > 0) this.sendDepthSubs(live, true);
+
         this.heartbeatTimer = setInterval(() => {
           try { ws.send(JSON.stringify({ type: "hb" })); } catch { /* socket already closing */ }
         }, HEARTBEAT_MS);
@@ -328,14 +405,52 @@ class Supervisor {
     this.handleTick(msg);
   }
 
+  // Kotak's depth frames use flat, indexed fields: bp/bp1..bp4 (bid price),
+  // bq/bq1..bq4 (bid qty), bno1..bno5 (bid order count) and the sp/bs/sno
+  // mirror on the ask side. Same shape the REST `depth` quote returns, so the
+  // parser here matches kotakClient.ts's flat extractor.
+  extractDepth(msg) {
+    const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+    const side = (p, q, o) => {
+      const out = [];
+      for (let i = 0; i < 5; i += 1) {
+        const sfx = i === 0 ? "" : String(i);
+        const price = num(msg[`${p}${sfx}`]);
+        const qty = num(msg[`${q}${sfx}`]);
+        if (price <= 0 && qty <= 0) continue;
+        out.push({ price, qty, orders: num(msg[`${o}${i + 1}`]) });
+      }
+      return out;
+    };
+    const bids = side("bp", "bq", "bno");
+    const asks = side("sp", "bs", "sno");
+    return bids.length > 0 || asks.length > 0 ? { bids, asks } : null;
+  }
+
   handleTick(msg) {
     // Heartbeat/ack frames and anything without a token are not ticks.
     const tok = String(msg?.tk ?? "");
     if (!tok) return;
     const symbol = this.byToken.get(tok);
     if (!symbol) return;
+
+    // Depth frames arrive on the same socket; ship them straight through
+    // (a handful of leased instruments, no batching needed) and keep going —
+    // the same frame usually carries an LTP too.
+    if (this.depthLeases.has(tok)) {
+      const book = this.extractDepth(msg);
+      if (book) {
+        this.channel?.send({
+          type: "broadcast",
+          event: "depth",
+          payload: { symbol, exchange: "NSE", ...book, ltp: Number(msg.ltp) || null, ts: Date.now() },
+        })?.catch(() => { /* channel closing */ });
+      }
+    }
+
     const ltp = Number(msg.ltp);
     if (!Number.isFinite(ltp) || ltp <= 0) return;
+
     const rawPct = msg.nc != null ? Number(msg.nc) : msg.cng != null ? Number(msg.cng) : NaN;
     // Delta frames often omit change_pct — carry the last-known value forward
     // so the UI's % column doesn't flicker to "—" between full snapshots.

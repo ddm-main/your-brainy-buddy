@@ -33,7 +33,67 @@ const ramp = (v: number, lo: number, hi: number) =>
 // now lands at the universe's ~p90 accumulation slope.
 export const OBV_SLOPE_FULL = 0.02;
 
-export function breakoutScore(s: IndicatorSnapshot, ctx: MarketContext): ScoreResult {
+// Optional pattern + level context — passed through by the pipeline / live
+// recompute so the breakout scorer can reward chart patterns when they print
+// AT the right level (hammer at support, cup&handle triggered above the
+// right rim, ascending triangle while nearResistance) and penalise bearish
+// reversals at resistance. Passing nothing → all pattern bonuses are 0, so
+// legacy call sites keep working byte-identically.
+export interface BreakoutPatterns {
+  bullishEngulfing?: boolean;
+  bearishEngulfing?: boolean;
+  hammer?: boolean;
+  shootingStar?: boolean;
+  doji?: boolean;
+  cupAndHandle?: boolean;
+  cupAndHandleTriggered?: boolean;
+  flag?: boolean;
+  ascendingTriangle?: boolean;
+  doubleBottom?: boolean;
+  inverseHeadShoulders?: boolean;
+  fallingWedge?: boolean;
+}
+
+// Context-aware pattern read used by breakoutScore. Returns two numbers so
+// the caller can surface them separately in the UI (positives are in the
+// `pattern` component; negatives land under `penalty_bearish_pattern`).
+export function breakoutPatternBonus(
+  p: BreakoutPatterns | undefined,
+  nearR: boolean,
+  atSupport: boolean,
+  higherLows: boolean,
+): { bonus: number; penalty: number; labels: string[] } {
+  if (!p) return { bonus: 0, penalty: 0, labels: [] };
+  let bonus = 0, penalty = 0;
+  const labels: string[] = [];
+  // Cup&handle: full when the right rim has been cleared, half while forming.
+  if (p.cupAndHandleTriggered) { bonus += 4; labels.push("cup & handle · triggered"); }
+  else if (p.cupAndHandle) { bonus += 2; labels.push("cup & handle · forming"); }
+  // Ascending triangle only pays out into an actual ceiling.
+  if (p.ascendingTriangle) { bonus += nearR ? 3 : 1; labels.push("ascending triangle"); }
+  // Flag pays out on an ongoing higher-lows trend (continuation setup).
+  if (p.flag) { bonus += higherLows ? 2 : 1; labels.push("bull flag"); }
+  // Bullish engulfing / hammer are level-anchored: full at support, half elsewhere.
+  if (p.bullishEngulfing) { bonus += atSupport ? 2 : 1; labels.push("bullish engulfing"); }
+  if (p.hammer) { bonus += atSupport ? 2 : 1; labels.push("hammer"); }
+  if (p.doubleBottom) { bonus += 2; labels.push("double bottom"); }
+  if (p.inverseHeadShoulders) { bonus += 2; labels.push("inv. head & shoulders"); }
+  if (p.fallingWedge) { bonus += 1; labels.push("falling wedge"); }
+  // Bearish patterns: full penalty at resistance, half elsewhere.
+  if (p.bearishEngulfing) { penalty += nearR ? 3 : 1.5; labels.push("bearish engulfing"); }
+  if (p.shootingStar) { penalty += nearR ? 3 : 1.5; labels.push("shooting star"); }
+  // Cap the pattern bucket so a stock with every bull pattern set doesn't
+  // outweigh trigger + volume.
+  bonus = clamp(bonus, 0, 8);
+  penalty = clamp(penalty, 0, 5);
+  return { bonus, penalty, labels };
+}
+
+export function breakoutScore(
+  s: IndicatorSnapshot,
+  ctx: MarketContext,
+  patterns?: BreakoutPatterns,
+): ScoreResult {
   const c: Record<string, number> = {};
 
   // --- Trigger & momentum (25) ---
@@ -115,6 +175,36 @@ export function breakoutScore(s: IndicatorSnapshot, ctx: MarketContext): ScoreRe
   c.sector_strength = ctx.sectorStrength == null ? 0 : ctx.sectorStrength * 4;
   c.breadth = ctx.regime === "bullish" ? 3 : ctx.regime === "neutral" ? 1.5 : 0;
 
+  // --- Forward-looking coil / setup bonuses ---
+  // The old scorer only rewarded stocks that HAD already broken out. The
+  // panel is a "futuristic breakout" read, so setup quality (squeeze,
+  // volatility contraction, higher lows, drying volume, near-resistance
+  // build-up, support-defence) now feeds this same score. These are
+  // additive — if the setup isn't there, the component is 0.
+  c.bb_squeeze = s.bbSqueeze ? 4 : 0;
+  c.atr_contraction = s.atrContracting ? 3 : 0;
+  c.higher_lows = s.higherLows ? 4 : 0;
+  const dry = s.volDryUpRatio ?? null;
+  c.vol_dryup = dry == null ? 0 : (1 - ramp(dry, 0.6, 1)) * 3;
+
+  // Near-resistance build-up only counts BEFORE trigger fires (once price is
+  // above the pivot, the trigger component already rewards it).
+  const atrV = s.atr14 ?? null;
+  const isTriggered = pivot != null && s.close != null && s.close > pivot;
+  c.near_resistance = (s.nearResistance && !isTriggered) ? 3 : 0;
+
+  // Support-defence bonus: within 0.5×ATR of a real support level (not the
+  // range-low fallback) — a reversal-off-support setup for the next leg.
+  const atSupport = atrV != null && atrV > 0 && s.support != null && !(s.supportFallback ?? false)
+    ? Math.abs(s.close - s.support) / atrV <= 0.5
+    : false;
+  c.support_defended = atSupport ? 3 : 0;
+
+  // Chart-pattern bonus — level-aware. Zero when no patterns are passed
+  // (keeps legacy call sites identical).
+  const patBonus = breakoutPatternBonus(patterns, s.nearResistance, atSupport, s.higherLows);
+  c.pattern = patBonus.bonus;
+
   // --- Risk penalties (subtract; floor 0) ---
   let penalty = 0;
   const penalties: Record<string, number> = {};
@@ -127,6 +217,14 @@ export function breakoutScore(s: IndicatorSnapshot, ctx: MarketContext): ScoreRe
     const p = (0.8 - rv) * 10;
     penalties.thin_volume = p; penalty += p;
   }
+  // Overheated momentum — RSI > 80 while trigger is fresh is a common
+  // exhaustion tell (buyers already paid up).
+  if (rsi != null && rsi > 80) {
+    const p = ramp(rsi, 80, 95) * 4;
+    if (p > 0) { penalties.overbought = p; penalty += p; }
+  }
+  // Bearish pattern at resistance / anywhere.
+  if (patBonus.penalty > 0) { penalties.bearish_pattern = patBonus.penalty; penalty += patBonus.penalty; }
 
   const gross = Object.values(c).reduce((a, b) => a + b, 0);
   let total = gross - penalty;
@@ -135,6 +233,7 @@ export function breakoutScore(s: IndicatorSnapshot, ctx: MarketContext): ScoreRe
   const components = Object.fromEntries(Object.entries(c).map(([k, v]) => [k, Math.round(v * 10) / 10]));
   for (const [k, v] of Object.entries(penalties)) components[`penalty_${k}`] = -Math.round(v * 10) / 10;
   components.regime_mult = Math.round(regimeMult * 100) / 100;
+  if (patBonus.labels.length) components._pattern_labels = 0; // marker only; UI reads labels separately
   return { score: Math.round(clamp(total, 0, 100)), components };
 }
 
@@ -608,3 +707,419 @@ export function nextEpisodeStatus(inp: EpisodeTickInput): EpisodeTickResult {
 export const SCORE_BAND_STRONG = BREAKOUT_QUALIFY_SCORE; // 70+  strong / buy
 export const SCORE_BAND_MODERATE = 55;                   // 55-69 moderate / hold
 export const SCORE_BAND_WEAK = 40;                       // 40-54 weak / wait
+
+// ============================================================================
+// v4 — the single, coverage-aware Breakout Intelligence score.
+//
+// Eight buckets, weights summing to 100. The defining property: a bucket with
+// NO data for a symbol is *renormalised away* (its weight is redistributed
+// across the buckets that do have data) instead of silently scoring 0. v2
+// scored missing context as 0, which depressed the entire universe (observed
+// live: mean 26, max 67, nothing ever reaching the 70 band) and made it
+// impossible to tell "bad setup" from "no data".
+//
+// Additive: breakoutScore / preBreakoutScore / swingScore / intradayScore
+// above are untouched, so AutoTrade, alerts and the AI prompt keep working
+// while consumers migrate onto v4.
+// ============================================================================
+
+export const V4_WEIGHTS = {
+  volume: 16,
+  indicators: 16,
+  setups: 13,
+  levels: 22,
+  strength: 13,
+  patterns: 11,
+  sentiment: 9,
+} as const;
+export type V4Bucket = keyof typeof V4_WEIGHTS;
+
+// Fundamentals are NOT a bucket. Good books can never manufacture a breakout
+// score on their own, and 8 additive points let them do exactly that. They
+// apply as a multiplier on the technical score instead: at worst a 10% haircut
+// for a leveraged, shrinking business, at best a 5% nudge for a clean one.
+export const V4_FUNDAMENTAL_MULT_MIN = 0.90;
+export const V4_FUNDAMENTAL_MULT_MAX = 1.05;
+
+// Below this many sessions the chart simply cannot be read — no 52w range, no
+// 200 EMA, no base. Returning a low number there is indistinguishable from
+// "bad setup", so the scorer returns null with a reason instead.
+export const V4_MIN_BARS = 120;
+
+// A bucket needs at least this share of its own sub-factors (by sub-weight)
+// present before it counts as covered at all.
+const BUCKET_MIN_COVERAGE = 0.35;
+// Below this share of TOTAL weight covered, the chart is unreadable and we
+// refuse to emit a number — a 20 that means "no data" is worse than no score.
+const MIN_TOTAL_COVERAGE = 0.45;
+
+export interface V4Fundamentals {
+  revenueGrowthYoy: number | null;
+  profitGrowthYoy: number | null;
+  roe: number | null;
+  debtToEquity: number | null;
+  promoterHolding: number | null;
+  peTtm: number | null;
+}
+export interface V4Sentiment {
+  // 'buy' | 'accumulate' | 'hold' | 'reduce' | 'sell' (free text tolerated)
+  aiVerdict: string | null;
+  aiConfidence: number | null;   // 0..1 (0..100 also accepted)
+  newsSentiment: number | null;  // −1..1, window average
+  newsCount: number;
+  // Sessions until the next results date / ex-date; null when none known.
+  eventInDays: number | null;
+}
+export interface V4Input {
+  s: IndicatorSnapshot;
+  ctx: MarketContext;
+  patterns?: BreakoutPatterns;
+  weekly?: WeeklySnapshot | null;
+  adv?: AdvancedSignals;
+  fundamentals?: V4Fundamentals | null;
+  sentiment?: V4Sentiment | null;
+  liquidity?: LiquidityGate;
+  // Sessions since the 20/50 EMA crossed up (null = unknown, not "no cross").
+  emaCross2050FreshDays?: number | null;
+  emaCross50200FreshDays?: number | null;
+  // Average daily turnover in ₹ Cr — makes the volume bucket price-aware.
+  avgTurnoverCr?: number | null;
+  // 0..100 percentile of this symbol's rel-volume / ATR% WITHIN its market-cap
+  // tier. Small caps structurally run hotter on both, so raw thresholds put
+  // micro-caps permanently at the top of the list. Supplied by the aggregates
+  // pass; when absent the scorer falls back to absolute thresholds.
+  tierRelVolumePct?: number | null;
+  tierAtrPct?: number | null;
+  // Sessions of history behind the snapshot; overrides s.barsAvailable.
+  barsAvailable?: number | null;
+}
+
+export interface V4Result {
+  // null when the inputs are too sparse to say anything honest.
+  score: number | null;
+  rawBeforePenalty: number | null;
+  unavailableReason: string | null;
+  // Points actually contributed by each bucket, after renormalisation.
+  buckets: Record<string, number>;
+  // 0..1 share of each bucket's sub-factors that had data.
+  coverage: Record<string, number>;
+  components: Record<string, number>;
+  penalties: Record<string, number>;
+  // 0.90–1.05 fundamentals multiplier actually applied (1 when unknown).
+  fundamentalMultiplier: number;
+  liquidityOk: boolean;
+  liquidityReasons: string[];
+}
+
+// One sub-factor: a 0..1 value, or null when the input is missing.
+type Factor = [name: string, weight: number, value: number | null];
+
+// Collapse sub-factors into a 0..1 bucket value plus its coverage share,
+// renormalising within the bucket over the factors that do have data.
+function rollup(factors: Factor[]): { value: number | null; coverage: number; detail: Record<string, number> } {
+  let wSum = 0, wHave = 0, acc = 0;
+  const detail: Record<string, number> = {};
+  for (const [name, w, v] of factors) {
+    wSum += w;
+    if (v == null) continue;
+    wHave += w;
+    const cv = clamp(v, 0, 1);
+    acc += cv * w;
+    detail[name] = Math.round(cv * 1000) / 1000;
+  }
+  if (wSum <= 0 || wHave <= 0) return { value: null, coverage: 0, detail };
+  const coverage = wHave / wSum;
+  if (coverage < BUCKET_MIN_COVERAGE) return { value: null, coverage, detail };
+  return { value: acc / wHave, coverage, detail };
+}
+
+const freshCross = (d: number | null | undefined): number | null =>
+  d == null ? null : (d < 0 ? 0 : 1 - ramp(d, 0, 25));
+
+export function breakoutScoreV4(input: V4Input): V4Result {
+  const { s, ctx, patterns, weekly, adv } = input;
+  const f = input.fundamentals ?? null;
+  const sent = input.sentiment ?? null;
+  const liquidity = input.liquidity ?? { ok: true, reasons: [] };
+
+  const atr = s.atr14 != null && s.atr14 > 0 ? s.atr14 : null;
+  const close = s.close ?? null;
+
+  // ---- 0. Readability gate ------------------------------------------------
+  // Refuse to score a chart that isn't there. "20 because the setup is bad"
+  // and "20 because we have 40 bars" must never look the same.
+  const bars = input.barsAvailable ?? s.barsAvailable ?? null;
+  if (bars != null && bars < V4_MIN_BARS) {
+    return {
+      score: null, rawBeforePenalty: null,
+      unavailableReason: `only ${bars} sessions of history — needs ${V4_MIN_BARS} to read the chart`,
+      buckets: {}, coverage: {}, components: {}, penalties: {},
+      fundamentalMultiplier: 1,
+      liquidityOk: liquidity.ok, liquidityReasons: liquidity.reasons,
+    };
+  }
+
+  // ---- 1. Volume & participation -----------------------------------------
+  // Rel volume is measured against the 30D MEDIAN when available — the mean is
+  // dragged up by one climactic day, which then hides the next real expansion.
+  // It is also turnover-gated: 3× volume on a ₹5 lakh/day counter is noise, not
+  // participation, so below the turnover floor the factor is dropped entirely
+  // (null → renormalised away) rather than rewarded at half credit.
+  const relMean30 = s.volAvg30 != null && s.volAvg30 > 0 && s.volume != null
+    ? s.volume / s.volAvg30
+    : (s.relVolume ?? null);
+  const rel30 = s.relVolumeMedian30 ?? relMean30;
+  const turnoverOk = input.avgTurnoverCr == null || input.avgTurnoverCr >= LIQUIDITY_MIN_TURNOVER_CR;
+  // Prefer the size-tier percentile when the caller computed one: a 2.5× day on
+  // a large cap is a far rarer event than on a micro cap.
+  const relVolFactor = !turnoverOk ? null
+    : input.tierRelVolumePct != null ? ramp(input.tierRelVolumePct, 50, 95)
+    : rel30 == null ? null : ramp(rel30, 1, 3);
+  const volume = rollup([
+    ["rel_volume_30d", 0.45, relVolFactor],
+    ["obv_slope", 0.20, s.obvSlope20 == null ? null : ramp(s.obvSlope20, 0, OBV_SLOPE_FULL)],
+    ["vol_dryup", 0.15, s.volDryUpRatio == null ? null : 1 - ramp(s.volDryUpRatio, 0.6, 1)],
+    ["delivery_pct", 0.20, ctx.deliveryPct == null ? null : ramp(ctx.deliveryPct, 30, 65)],
+  ]);
+
+  // ---- 2. Indicators ------------------------------------------------------
+  const rsi = s.rsi14;
+  const rsiVal = rsi == null ? null
+    : rsi <= 45 ? 0
+    : rsi < 60 ? (rsi - 45) / 15
+    : rsi <= 75 ? 1
+    : rsi < 85 ? (85 - rsi) / 10
+    : 0;
+  const macdVal = s.macd == null || s.macdSignal == null
+    ? null
+    : (s.macd > s.macdSignal ? 0.6 : 0) + (s.macdHistRising ? 0.4 : 0);
+  // ATR% sanity: too quiet can't travel, too wild can't be held. 2–6% ideal.
+  const atrPct = s.atrPct;
+  const atrVal = input.tierAtrPct != null
+    // Tier-relative: mid-range volatility for the size tier is what travels;
+    // both extremes of the tier are penalised.
+    ? 1 - Math.abs(input.tierAtrPct - 55) / 55
+    : atrPct == null ? null
+    : atrPct < 2 ? ramp(atrPct, 0.5, 2)
+    : atrPct <= 6 ? 1
+    : 1 - ramp(atrPct, 6, 14);
+  const indicators = rollup([
+    ["rsi", 0.25, rsiVal],
+    ["macd", 0.20, macdVal],
+    ["adx", 0.20, s.adx14 == null ? null : ramp(s.adx14, 15, 30)],
+    ["atr_pct", 0.10, atrVal],
+    ["percent_b", 0.10, adv?.percentB == null ? null : ramp(adv.percentB, 0.5, 1)],
+    ["mfi", 0.10, adv?.mfi14 == null ? null : ramp(adv.mfi14, 50, 80)],
+    ["supertrend", 0.05, adv?.supertrendDir == null ? null : (adv.supertrendDir === 1 ? 1 : 0)],
+  ]);
+
+  // ---- 3. Setups / EMA structure -----------------------------------------
+  const setups = rollup([
+    ["ema_alignment", 0.30, s.ema20 == null || s.ema50 == null || s.ema200 == null
+      ? null : (s.emaAligned ? 1 : (s.ema20 > s.ema50 ? 0.5 : 0))],
+    ["above_ema200", 0.25, s.ema200 == null ? null : (s.aboveEma200 ? 1 : 0)],
+    ["cross_20_50", 0.15, freshCross(input.emaCross2050FreshDays)],
+    ["cross_50_200", 0.10, freshCross(input.emaCross50200FreshDays)],
+    ["weekly_trend", 0.20, weekly == null ? null
+      : ((weekly.aboveEma20W ? 0.5 : 0) + (weekly.trendUpW ? 0.3 : 0) + (weekly.higherLowsW ? 0.2 : 0))],
+  ]);
+
+  // ---- 4. Support / resistance & trigger ---------------------------------
+  const clusterPivot = s.pivotLevel ?? null;
+  const rollPivot = s.rollingHigh20 ?? null;
+  const pivot = clusterPivot != null && rollPivot != null
+    ? Math.max(clusterPivot, rollPivot)
+    : (clusterPivot ?? rollPivot);
+  const usingCluster = clusterPivot != null && (rollPivot == null || clusterPivot >= rollPivot);
+  // Volume-weighted touch quality when the indicator pass supplied it: a level
+  // rejected on heavy volume is a real supply zone; three thin pokes are not.
+  const touchStrength = s.pivotTouchQuality ?? s.pivotTouches ?? 0;
+  const pivotQuality = usingCluster ? 0.75 + 0.25 * ramp(touchStrength, 1, 3.5) : 0.75;
+  const cir = s.closeInRangePct;
+  // Gap-and-fade guard: a pivot cleared by the opening print and then given
+  // back into the close is not a breakout. Below a hard floor of 35% close-in-
+  // range the trigger earns almost nothing no matter how far above the pivot
+  // the print went; full credit needs a close in the top third of the bar.
+  const closeQuality = cir == null ? 0.85
+    : cir < 35 ? 0.2 + 0.3 * ramp(cir, 0, 35)
+    : 0.5 + 0.5 * ramp(cir, 35, 70);
+  let triggerVal: number | null = null;
+  if (pivot != null && close != null && atr != null) {
+    triggerVal = ramp((close - pivot) / atr, 0, 1) * pivotQuality * closeQuality;
+    // Pre-trigger coil right under a real ceiling still earns partial credit.
+    if (close <= pivot) {
+      const atrsBelow = (pivot - close) / atr;
+      triggerVal = Math.max(triggerVal, (1 - ramp(atrsBelow, 0, 1.5)) * 0.45 * pivotQuality);
+    }
+  } else if (s.pctFrom52wHigh != null) {
+    triggerVal = ramp(s.pctFrom52wHigh, -15, 0) * 0.8;
+  }
+  const atSupport = atr != null && s.support != null && close != null && !(s.supportFallback ?? false)
+    ? Math.abs(close - s.support) / atr <= 0.5
+    : false;
+  const levels = rollup([
+    // close-in-range is folded into the trigger above rather than scored
+    // independently — paying for it twice let a gap-up fade rank well.
+    ["trigger", 0.45, triggerVal],
+    ["freshness", 0.10, s.breakoutFreshnessDays == null ? null : Math.max(0, 1 - s.breakoutFreshnessDays / 5)],
+    ["base_tightness", 0.15, s.baseTightness == null ? null : 1 - ramp(s.baseTightness, 0.02, 0.08)],
+    ["base_depth", 0.10, s.baseDepthPct == null ? null : 1 - ramp(s.baseDepthPct, 8, 30)],
+    ["base_duration", 0.10, s.baseDurationDays == null ? null : ramp(s.baseDurationDays, 10, 30)],
+    ["support_defence", 0.10, s.support == null ? null : (atSupport ? 1 : 0.3)],
+  ]);
+
+  // ---- 5. Range & strength -----------------------------------------------
+  const strength = rollup([
+    ["pos_52w", 0.25, s.pctFrom52wHigh == null ? null : ramp(s.pctFrom52wHigh, -35, -1)],
+    ["rel_strength", 0.25, ctx.relStrengthNifty == null ? null : ramp(ctx.relStrengthNifty, -5, 15)],
+    ["rs_percentile", 0.20, s.rsPercentile == null ? null : ramp(s.rsPercentile, 50, 90)],
+    ["sector_strength", 0.20, ctx.sectorStrength],
+    ["breadth", 0.10, ctx.regime == null ? null : (ctx.regime === "bullish" ? 1 : ctx.regime === "neutral" ? 0.5 : 0)],
+  ]);
+
+  // ---- 6. Chart patterns --------------------------------------------------
+  const pat = breakoutPatternBonus(patterns, s.nearResistance, atSupport, s.higherLows);
+  const patterns6 = patterns
+    ? { value: clamp(pat.bonus / 8, 0, 1), coverage: 1, detail: { pattern_bonus: Math.round((pat.bonus / 8) * 1000) / 1000 } }
+    : { value: null, coverage: 0, detail: {} as Record<string, number> };
+
+  // ---- 7. Fundamentals — a MULTIPLIER, not points -------------------------
+  // Applied to the technical total below (0.90–1.05). "Good chart, bad books"
+  // gets marked down; clean books can nudge, never carry.
+  const fundRoll = rollup([
+    ["revenue_growth", 0.20, f?.revenueGrowthYoy == null ? null : ramp(f.revenueGrowthYoy, 0, 25)],
+    ["profit_growth", 0.20, f?.profitGrowthYoy == null ? null : ramp(f.profitGrowthYoy, 0, 30)],
+    ["roe", 0.25, f?.roe == null ? null : ramp(f.roe, 8, 25)],
+    ["debt_equity", 0.20, f?.debtToEquity == null ? null : 1 - ramp(f.debtToEquity, 0.5, 2)],
+    ["promoter_holding", 0.10, f?.promoterHolding == null ? null : ramp(f.promoterHolding, 25, 55)],
+    ["valuation", 0.05, f?.peTtm == null ? null : (f.peTtm <= 0 ? 0 : 1 - ramp(f.peTtm, 40, 90))],
+  ]);
+  const fundMult = fundRoll.value == null
+    ? 1
+    : V4_FUNDAMENTAL_MULT_MIN + (V4_FUNDAMENTAL_MULT_MAX - V4_FUNDAMENTAL_MULT_MIN) * fundRoll.value;
+
+  // ---- 8. AI verdict + news / corporate actions ---------------------------
+  const verdict = (sent?.aiVerdict ?? "").toLowerCase();
+  const verdictBase = verdict.includes("strong buy") ? 1
+    : verdict.includes("buy") || verdict.includes("accumulate") ? 0.85
+    : verdict.includes("hold") || verdict.includes("neutral") ? 0.5
+    : verdict.includes("reduce") ? 0.25
+    : verdict.includes("sell") || verdict.includes("avoid") ? 0
+    : null;
+  const conf = sent?.aiConfidence == null ? null : (sent.aiConfidence > 1 ? sent.aiConfidence / 100 : sent.aiConfidence);
+  const sentiment = rollup([
+    ["ai_verdict", 0.50, verdictBase == null ? null : 0.5 + (verdictBase - 0.5) * clamp(conf ?? 0.6, 0, 1)],
+    ["news_sentiment", 0.30, sent == null || sent.newsCount === 0 || sent.newsSentiment == null
+      ? null : clamp((sent.newsSentiment + 1) / 2, 0, 1)],
+    ["event_clear", 0.20, sent?.eventInDays == null ? null : ramp(sent.eventInDays, 0, 5)],
+  ]);
+
+  // ---- Weight renormalisation --------------------------------------------
+  const parts: Array<[V4Bucket, { value: number | null; coverage: number; detail: Record<string, number> }]> = [
+    ["volume", volume], ["indicators", indicators], ["setups", setups], ["levels", levels],
+    ["strength", strength], ["patterns", patterns6], ["sentiment", sentiment],
+  ];
+  let weightHave = 0, weighted = 0;
+  const coverage: Record<string, number> = {};
+  const components: Record<string, number> = {};
+  for (const [name, part] of parts) {
+    coverage[name] = Math.round(part.coverage * 100) / 100;
+    for (const [k, v] of Object.entries(part.detail)) components[`${name}.${k}`] = v;
+    if (part.value == null) continue;
+    weightHave += V4_WEIGHTS[name];
+    weighted += part.value * V4_WEIGHTS[name];
+  }
+  const totalWeight = Object.values(V4_WEIGHTS).reduce((a, b) => a + b, 0);
+  const coverShare = weightHave / totalWeight;
+
+  const buckets: Record<string, number> = {};
+  coverage.fundamentals = Math.round(fundRoll.coverage * 100) / 100;
+  for (const [k, v] of Object.entries(fundRoll.detail)) components[`fundamentals.${k}`] = v;
+  if (weightHave <= 0 || coverShare < MIN_TOTAL_COVERAGE) {
+    return {
+      score: null,
+      rawBeforePenalty: null,
+      unavailableReason: weightHave <= 0
+        ? "no scoreable inputs for this symbol"
+        : `insufficient data — only ${Math.round(coverShare * 100)}% of the model has inputs`,
+      buckets, coverage, components, penalties: {},
+      fundamentalMultiplier: 1,
+      liquidityOk: liquidity.ok, liquidityReasons: liquidity.reasons,
+    };
+  }
+  // Renormalise: each present bucket's weight is scaled up so the present
+  // weights sum to 100 again.
+  const scale = totalWeight / weightHave;
+  for (const [name, part] of parts) {
+    if (part.value == null) { buckets[name] = 0; continue; }
+    buckets[name] = Math.round(part.value * V4_WEIGHTS[name] * scale * 10) / 10;
+  }
+  const raw = (weighted / weightHave) * 100;
+
+  // ---- Penalties (points, applied after renormalisation, 0 floor) --------
+  const penalties: Record<string, number> = {};
+  let penalty = 0;
+  if (atr != null && s.ema20 != null && close != null) {
+    const p = ramp((close - s.ema20) / atr, 3, 6) * 15;
+    if (p > 0) { penalties.overextension = Math.round(p * 10) / 10; penalty += p; }
+  }
+  if (rel30 != null && rel30 > 0 && rel30 < 0.8) {
+    const p = (0.8 - rel30) * 10;
+    penalties.thin_volume = Math.round(p * 10) / 10; penalty += p;
+  }
+  if (rsi != null && rsi > 80) {
+    const p = ramp(rsi, 80, 95) * 6;
+    if (p > 0) { penalties.overbought = Math.round(p * 10) / 10; penalty += p; }
+  }
+  if (pat.penalty > 0) { penalties.bearish_pattern = Math.round(pat.penalty * 10) / 10; penalty += pat.penalty; }
+  // Failed breakout: price triggered recently and has since fallen back INTO
+  // the base. Freshness decay alone only stops paying points; a failure is
+  // strictly worse than never having triggered, and the deeper the re-entry
+  // the worse it is (up to 1 ATR back inside = full penalty).
+  if (pivot != null && close != null && close < pivot &&
+      s.breakoutFreshnessDays != null && s.breakoutFreshnessDays > 0 && s.breakoutFreshnessDays <= 10) {
+    const depth = atr != null ? ramp((pivot - close) / atr, 0.1, 1) : 0.5;
+    const p = 5 + 9 * depth;
+    penalties.failed_breakout = Math.round(p * 10) / 10; penalty += p;
+  }
+  if (!liquidity.ok) { penalties.illiquid = 25; penalty += 25; }
+
+  const regimeMult = ctx.regime === "bullish" ? 1.05 : ctx.regime === "bearish" ? 0.85 : 1;
+  let total = clamp((raw - penalty) * regimeMult * fundMult, 0, 100);
+
+  // Event blackout: results / ex-date inside two sessions makes the setup
+  // un-tradable, not merely weaker — a binary event decides the next print, not
+  // the base. Hard-cap into the WATCH band instead of shaving a few points.
+  if (sent?.eventInDays != null && sent.eventInDays <= 2) {
+    const capped = Math.min(total, SCORE_BAND_WEAK + 9); // top of WATCH, below MODERATE
+    if (capped < total) penalties.event_blackout = Math.round((total - capped) * 10) / 10;
+    total = capped;
+  }
+
+  components.regime_mult = Math.round(regimeMult * 100) / 100;
+  components.fundamental_mult = Math.round(fundMult * 1000) / 1000;
+  components.coverage_share = Math.round(coverShare * 100) / 100;
+
+  return {
+    score: Math.round(total),
+    rawBeforePenalty: Math.round(raw * 10) / 10,
+    unavailableReason: null,
+    buckets, coverage, components, penalties,
+    fundamentalMultiplier: Math.round(fundMult * 1000) / 1000,
+    liquidityOk: liquidity.ok, liquidityReasons: liquidity.reasons,
+  };
+}
+
+// Percentile-anchored bands, so "STRONG" means the same thing in a weak tape
+// and a hot one. Cut-offs are derived from the day's own distribution and
+// persisted to market_score_distribution by the aggregates pass.
+export interface ScoreBandCuts { strong: number; moderate: number; watch: number }
+export function percentileBandCuts(scores: number[]): ScoreBandCuts {
+  const vals = scores.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  const at = (topPct: number) => {
+    if (!vals.length) return SCORE_BAND_STRONG;
+    const idx = clamp(Math.floor((1 - topPct) * (vals.length - 1)), 0, vals.length - 1);
+    return vals[idx];
+  };
+  return { strong: at(0.02), moderate: at(0.10), watch: at(0.25) };
+}

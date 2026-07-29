@@ -18,6 +18,8 @@ const ENV_NAME: Record<KeyedProvider, string> = {
 const CACHE_MS = 60_000;
 const cache = new Map<KeyedProvider, { value: string | null; at: number }>();
 
+export type ProviderKeyOptions = { forceRefresh?: boolean };
+
 function svc() {
   return createClient(
     Deno.env.get("SUPABASE_URL") ?? "",
@@ -27,9 +29,9 @@ function svc() {
 }
 
 /** Returns the API key for a provider, or null when none is configured. */
-export async function getProviderKey(provider: KeyedProvider): Promise<string | null> {
+export async function getProviderKey(provider: KeyedProvider, options: ProviderKeyOptions = {}): Promise<string | null> {
   const hit = cache.get(provider);
-  if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
+  if (!options.forceRefresh && hit && Date.now() - hit.at < CACHE_MS) return hit.value;
 
   let value: string | null = null;
   try {

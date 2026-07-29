@@ -10,7 +10,7 @@ import { computeSnapshot, computeWeeklySnapshot } from "../_shared/market/indica
 import { vwap as vwapSeries, supertrend, mfi as mfiSeries, percentB, detectPatterns } from "../_shared/market/indicators-advanced.ts";
 import {
   breakoutScore, preBreakoutScore, evaluateLiquidity, swingScore, intradayScore,
-  type AdvancedSignals,
+  breakoutScoreV4, type AdvancedSignals,
 } from "../_shared/market/scoring.ts";
 import { getServiceProvider } from "../_shared/market/provider.ts";
 
@@ -120,6 +120,30 @@ Deno.serve(async (req) => {
 
     let okCount = 0;
     let failCount = 0;
+    // market-pipeline-aggregates is the authoritative score writer: it is the
+    // only pass that knows sector strength, breadth regime and relative
+    // strength. This chunked pass keeps draining for hours afterwards on cron
+    // and used to re-write those rows with a neutral, context-free score —
+    // which is why 99.7% of the universe carried context_complete = false and
+    // nothing could reach the 70 band. Load what already exists for the chunk
+    // and write ONLY indicators for symbols already scored with full context
+    // for the same session.
+    const existingScore = new Map<string, { trade_date: string | null; context_complete: boolean }>();
+    {
+      const syms = candidates.map((s) => s.symbol);
+      for (let i = 0; i < syms.length; i += 200) {
+        const { data } = await svc.from("market_stock_scores")
+          .select("symbol,exchange,trade_date,context_complete")
+          .in("symbol", syms.slice(i, i + 200));
+        for (const d of data ?? []) {
+          existingScore.set(`${d.symbol}|${d.exchange}`, {
+            trade_date: d.trade_date ?? null,
+            context_complete: !!d.context_complete,
+          });
+        }
+      }
+    }
+    let contextPreserved = 0;
 
     const work = [...candidates];
     const workers = Array.from({ length: CONCURRENCY }, async () => {
@@ -206,7 +230,23 @@ Deno.serve(async (req) => {
 
           // Preliminary scores with neutral market context (finalized by aggregates)
           const ctx = { sectorStrength: null, regime: null, relStrengthNifty: null, deliveryPct: null };
-          const bs = breakoutScore(snap, ctx);
+          // Feed the tightened detectPatterns output into breakoutScore so
+          // the pattern component, context-aware bonuses, and bearish-at-R
+          // penalty land in the persisted score components.
+          const bs = breakoutScore(snap, ctx, {
+            bullishEngulfing: patternFlags.bullish_engulfing,
+            bearishEngulfing: patternFlags.bearish_engulfing,
+            hammer: patternFlags.hammer,
+            shootingStar: patternFlags.shooting_star,
+            doji: patternFlags.doji,
+            cupAndHandle: patternFlags.cup_and_handle,
+            cupAndHandleTriggered: patternFlags.cup_and_handle_triggered,
+            flag: patternFlags.flag,
+            ascendingTriangle: patternFlags.ascending_triangle,
+            doubleBottom: patternFlags.double_bottom,
+            inverseHeadShoulders: patternFlags.inverse_head_shoulders,
+            fallingWedge: patternFlags.falling_wedge,
+          });
           const ps = preBreakoutScore(snap, ctx);
 
           // v3 — swing/intraday. This EOD pass has only the day's already-closed
@@ -219,6 +259,53 @@ Deno.serve(async (req) => {
           const gapPct = prevCandle?.close ? ((candles[candles.length - 1].open - prevCandle.close) / prevCandle.close) * 100 : null;
           const sw = swingScore({ s: snap, ctx, weekly, adv, liquidity });
           const is = intradayScore({ s: snap, ctx, adv, liquidity, relVolumeSoFar: null, gapPct });
+
+          // Preliminary v4 — neutral context, so the sector/RS/breadth bucket
+          // is simply *absent* and its weight is redistributed rather than
+          // scored as zero. The aggregates pass recomputes it with real context.
+          const v4 = breakoutScoreV4({
+            s: snap,
+            ctx,
+            patterns: {
+              bullishEngulfing: patternFlags.bullish_engulfing,
+              bearishEngulfing: patternFlags.bearish_engulfing,
+              hammer: patternFlags.hammer,
+              shootingStar: patternFlags.shooting_star,
+              doji: patternFlags.doji,
+              cupAndHandle: patternFlags.cup_and_handle,
+              cupAndHandleTriggered: patternFlags.cup_and_handle_triggered,
+              flag: patternFlags.flag,
+              ascendingTriangle: patternFlags.ascending_triangle,
+              doubleBottom: patternFlags.double_bottom,
+              inverseHeadShoulders: patternFlags.inverse_head_shoulders,
+              fallingWedge: patternFlags.falling_wedge,
+            },
+            weekly,
+            adv,
+            liquidity,
+            avgTurnoverCr,
+          });
+
+          const prior = existingScore.get(`${stock.symbol}|${stock.exchange}`);
+          const keepContext = !!prior?.context_complete && prior.trade_date === nseTradeDate;
+          if (keepContext) contextPreserved++;
+
+          const scoreFields = keepContext ? {} : {
+            breakout_score: bs.score,
+            prebreakout_score: ps.score,
+            score_components: { breakout: bs.components, prebreakout: ps.components },
+            breakout_score_v4: v4.score,
+            breakout_v4_components: { buckets: v4.buckets, factors: v4.components, penalties: v4.penalties },
+            breakout_v4_coverage: v4.coverage,
+            score_unavailable_reason: v4.unavailableReason,
+            swing_score: sw.score,
+            swing_components: sw.components,
+            intraday_score: is.score,
+            intraday_components: is.components,
+            // Neutral-context preliminary write; market-pipeline-aggregates
+            // recomputes with real sector/RS/regime context and flips this true.
+            context_complete: false,
+          };
 
           const { error: scoreErr } = await svc.from("market_stock_scores").upsert({
             symbol: stock.symbol,
@@ -268,11 +355,20 @@ Deno.serve(async (req) => {
             breakout_freshness_days: snap.breakoutFreshnessDays ?? null,
             pivot_level: snap.pivotLevel ?? null,
             pivot_touches: snap.pivotTouches ?? null,
+            pivot_touch_quality: snap.pivotTouchQuality ?? null,
+            rel_volume_median30: snap.relVolumeMedian30 ?? null,
+            bars_available: snap.barsAvailable ?? candles.length,
             vol_dryup_ratio: snap.volDryUpRatio ?? null,
+            // True 55-session return. Relative strength compares this against
+            // the Nifty's own 55-session return — same horizon, both sides.
+            ret_55d: (() => {
+              const base = candles[candles.length - 56];
+              const last = candles[candles.length - 1];
+              return base && last && base.close > 0
+                ? ((last.close - base.close) / base.close) * 100
+                : null;
+            })(),
 
-            breakout_score: bs.score,
-            prebreakout_score: ps.score,
-            score_components: { breakout: bs.components, prebreakout: ps.components },
             // v3 additions — additive, breakout_score/prebreakout_score above unchanged.
             weekly_close: weekly?.closeW ?? null,
             weekly_ema20: weekly?.ema20W ?? null,
@@ -287,13 +383,9 @@ Deno.serve(async (req) => {
             pattern_flags: patternFlags,
             is_liquid_tradable: liquidity.ok,
             liquidity_reasons: liquidity.reasons,
-            swing_score: sw.score,
-            swing_components: sw.components,
-            intraday_score: is.score,
-            intraday_components: is.components,
-            // Neutral-context preliminary write; market-pipeline-aggregates
-            // recomputes with real sector/RS/regime context and flips this true.
-            context_complete: false,
+            // This pass wrote today's bar, so the row is current by definition.
+            is_stale: false,
+            ...scoreFields,
             computed_at: new Date().toISOString(),
           }, { onConflict: "symbol,exchange" });
           if (scoreErr) throw scoreErr;
@@ -359,7 +451,7 @@ Deno.serve(async (req) => {
     });
     await Promise.all(workers);
 
-    return jsonResponse(req, { ok: true, processed: candidates.length, succeeded: okCount, failed: failCount, local_rescored: localRescored, drained: candidates.length < CHUNK });
+    return jsonResponse(req, { ok: true, processed: candidates.length, succeeded: okCount, failed: failCount, context_preserved: contextPreserved, local_rescored: localRescored, drained: candidates.length < CHUNK });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }

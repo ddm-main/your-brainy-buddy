@@ -2,15 +2,16 @@
 // Free tier: 250 requests/day. All field names mapped to unified schema.
 // Docs: https://site.financialmodelingprep.com/developer/docs
 
-import { getProviderKey } from "./providerKeys.ts";
+import { getProviderKey, type ProviderKeyOptions } from "./providerKeys.ts";
 
-const FMP_BASE = "https://financialmodelingprep.com/api/v3";
+const FMP_STABLE_BASE = "https://financialmodelingprep.com/stable";
+const FMP_LEGACY_BASE = "https://financialmodelingprep.com/api/v3";
 const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" };
 
 // Key comes from the admin-managed store (Market Config → Providers → Edit),
 // falling back to the FINANCIAL_MODELING_PREP_API_KEY edge secret.
-async function getFmpApiKey(): Promise<string | null> {
-  return await getProviderKey("fmp");
+async function getFmpApiKey(options: ProviderKeyOptions = {}): Promise<string | null> {
+  return await getProviderKey("fmp", options);
 }
 
 const num = (...values: unknown[]): number | null => {
@@ -32,14 +33,35 @@ const str = (...values: unknown[]): string | null => {
 // Convert NSE symbol to FMP symbol format (usually just append .NS)
 function toFmpSymbol(symbol: string, exchange: string): string {
   if (symbol.includes(".")) return symbol;
-  return exchange === "BSE" ? `${symbol}.BO` : `${symbol}.NS`;
+  if (exchange === "BSE") return `${symbol}.BO`;
+  if (exchange === "NSE") return `${symbol}.NS`;
+  return symbol;
 }
 
-async function fmpFetch(path: string, params: Record<string, string> = {}): Promise<any> {
-  const apiKey = await getFmpApiKey();
+class FmpApiError extends Error {
+  constructor(public status: number, public body: string) {
+    super(`FMP API ${status}: ${body.slice(0, 300)}`);
+  }
+}
+
+function stableRouteFor(path: string, params: Record<string, string>): { path: string; params: Record<string, string> } | null {
+  const m = path.match(/^\/(profile|ratios-ttm|income-statement|balance-sheet-statement|cash-flow-statement|financial-growth)\/(.+)$/);
+  if (!m) return null;
+  return { path: `/${m[1]}`, params: { ...params, symbol: decodeURIComponent(m[2]) } };
+}
+
+function shouldFallbackToLegacy(e: unknown): boolean {
+  if (!(e instanceof FmpApiError)) return false;
+  if (e.status === 404) return true;
+  return /not found|unknown endpoint|cannot get/i.test(e.body)
+    && !/invalid api key|limit|quota|subscription|plan/i.test(e.body);
+}
+
+async function fmpRequest(base: string, path: string, params: Record<string, string>, options: ProviderKeyOptions = {}): Promise<any> {
+  const apiKey = await getFmpApiKey(options);
   if (!apiKey) throw new Error("FMP API key not configured");
 
-  const url = new URL(`${FMP_BASE}${path}`);
+  const url = new URL(`${base}${path}`);
   url.searchParams.set("apikey", apiKey);
   for (const [k, v] of Object.entries(params)) {
     url.searchParams.set(k, v);
@@ -48,9 +70,34 @@ async function fmpFetch(path: string, params: Record<string, string> = {}): Prom
   const r = await fetch(url.toString(), { headers: UA });
   if (!r.ok) {
     const text = await r.text();
-    throw new Error(`FMP API ${r.status}: ${text.slice(0, 300)}`);
+    throw new FmpApiError(r.status, text);
   }
-  return r.json();
+  const json = await r.json();
+  if (json?.["Error Message"] || json?.error || json?.message) {
+    const body = String(json["Error Message"] ?? json.error ?? json.message);
+    throw new FmpApiError(200, body);
+  }
+  return json;
+}
+
+async function fmpFetch(path: string, params: Record<string, string> = {}, options: ProviderKeyOptions = {}): Promise<any> {
+  const stable = stableRouteFor(path, params);
+  if (stable) {
+    try {
+      return await fmpRequest(FMP_STABLE_BASE, stable.path, stable.params, options);
+    } catch (e) {
+      if (!shouldFallbackToLegacy(e)) throw e;
+    }
+  }
+  return await fmpRequest(FMP_LEGACY_BASE, path, params, options);
+}
+
+/** Lightweight key validation against a high-coverage US symbol. */
+export async function fmpValidateKey(options: ProviderKeyOptions = {}): Promise<{ ok: boolean; detail: string }> {
+  const data = await fmpFetch("/profile/AAPL", {}, options);
+  if (!Array.isArray(data) || data.length === 0) return { ok: false, detail: "FMP key accepted, but profile probe returned no data" };
+  const name = str(data[0]?.companyName, data[0]?.company_name, data[0]?.name) ?? "AAPL";
+  return { ok: true, detail: `FMP reachable — ${name}` };
 }
 
 export interface FmpProfile {

@@ -10,6 +10,7 @@ import { useAccessStore, type AppSection } from "@/store/accessStore";
 import { motion, AnimatePresence } from "framer-motion";
 import { MARKET_GROUPS } from "@/routes/market/nav";
 import QuotaStatusChip from "@/components/hud/QuotaStatusChip";
+import FeedStatusChip from "@/components/hud/FeedStatusChip";
 
 const NAV: { to: string; label: string; section: AppSection }[] = [
   { to: "/", label: "HUD", section: "hud" },
@@ -212,6 +213,7 @@ export default function TopBar() {
 
 
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <FeedStatusChip />
         <QuotaStatusChip />
         {/* System-health chip only surfaces when something is actually down. */}
         {!(linkOk && aiOk) && (

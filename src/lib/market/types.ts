@@ -173,6 +173,17 @@ export interface StockScore {
   revenue_growth?: number | null;
   pattern_flags?: Record<string, boolean> | null;
   score_components: { breakout?: Record<string, number>; prebreakout?: Record<string, number> } | null;
+  // Breakout Intelligence v4 — coverage-aware score written by the aggregates
+  // pass. Null until that pass has run for the session.
+  breakout_score_v4?: number | null;
+  breakout_band?: string | null;
+  breakout_v4_rank_pct?: number | null;
+  breakout_v4_components?: Record<string, number> | null;
+  breakout_v4_coverage?: Record<string, number> | null;
+  score_coverage?: number | null;
+  score_unavailable_reason?: string | null;
+  bars_available?: number | null;
+  context_complete?: boolean | null;
   computed_at: string;
 }
 

@@ -276,6 +276,22 @@ Deno.serve(async (req) => {
         .eq("exchange", "NSE");
     }
 
+    // Negative cache for scrip-master gaps. A full pass just ran, so any
+    // active symbol still without a token genuinely isn't in Kotak's master
+    // (delisted, SME, or a series we don't ingest). Stamping it lets the
+    // providers skip the broker round-trip — and the health-row noise — for
+    // those symbols; the stamp is cleared the moment a token shows up.
+    let token_gaps = 0;
+    if (parsed > 0) {
+      const { count } = await svc.from("market_stocks")
+        .update({ token_missing_at: new Date().toISOString() }, { count: "exact" })
+        .is("token", null).eq("is_active", true);
+      token_gaps = count ?? 0;
+      await svc.from("market_stocks")
+        .update({ token_missing_at: null })
+        .not("token", "is", null).not("token_missing_at", "is", null);
+    }
+
 
     return jsonResponse(req, {
       ok: true,
@@ -288,6 +304,8 @@ Deno.serve(async (req) => {
       indices_mapped: indicesMapped,
       indices_error: indicesError,
       universe_size: universe.length,
+      token_gaps,
+
       nifty500_source: n500.length > 50 ? "nse_archives" : "fallback_static",
       kotak_master_used: !!settings,
     });

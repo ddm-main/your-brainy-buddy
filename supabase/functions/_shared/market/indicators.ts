@@ -199,6 +199,22 @@ export function relVolume(volumes: number[], avgPeriod = 20): number | null {
   return avg === 0 ? null : today / avg;
 }
 
+export function medianOf(values: number[]): number {
+  const v = values.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+  if (!v.length) return 0;
+  const mid = Math.floor(v.length / 2);
+  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+}
+
+// Relative volume against the MEDIAN of the prior N sessions. The mean is
+// dragged upward by a single climactic day, which then makes the next genuine
+// expansion look ordinary; the median is stable against that.
+export function relVolumeMedian(volumes: number[], period = 30): number | null {
+  if (volumes.length < period + 1) return null;
+  const med = medianOf(volumes.slice(-period - 1, -1));
+  return med > 0 ? volumes[volumes.length - 1] / med : null;
+}
+
 // True if the last `count` swing lows are strictly ascending.
 export function higherLows(lows: number[], lookback = 40, count = 3): boolean {
   const window = lows.slice(-lookback);
@@ -253,8 +269,13 @@ function findPivots(
 }
 
 // Cluster pivots by ATR% band, weight by touches + recency + volume.
-type Cluster = { price: number; touches: number; strength: number };
-function clusterPivots(pivots: Pivot[], bandPct: number, windowLen: number): Cluster[] {
+//
+// `touchQuality` is the volume-weighted touch count: a ceiling rejected on
+// heavy volume is a real supply zone, while three low-volume touches are not.
+// Each touch counts as its volume relative to the window's median volume,
+// capped at 2 so one climactic bar can't manufacture a "strong" level.
+type Cluster = { price: number; touches: number; touchQuality: number; strength: number };
+function clusterPivots(pivots: Pivot[], bandPct: number, windowLen: number, medianVolume = 0): Cluster[] {
   const sorted = [...pivots].sort((a, b) => a.price - b.price);
   const clusters: Cluster[] = [];
   let bucket: Pivot[] = [];
@@ -264,7 +285,17 @@ function clusterPivots(pivots: Pivot[], bandPct: number, windowLen: number): Clu
                     bucket.reduce((s, p) => s + Math.max(1, p.volume), 0);
     // recency: newer pivots weight more (0..1 across window)
     const recency = bucket.reduce((s, p) => s + p.index / Math.max(1, windowLen - 1), 0);
-    clusters.push({ price: vwPrice, touches: bucket.length, strength: bucket.length + recency });
+    const touchQuality = medianVolume > 0
+      ? bucket.reduce((s, p) => s + Math.min(2, Math.max(0.25, p.volume / medianVolume)), 0)
+      : bucket.length;
+    clusters.push({
+      price: vwPrice,
+      touches: bucket.length,
+      touchQuality: Math.round(touchQuality * 100) / 100,
+      // Strength ranks zones against each other: volume-weighted touches beat
+      // a raw count of thin pokes at the same price.
+      strength: touchQuality + recency,
+    });
     bucket = [];
   };
   for (const p of sorted) {
@@ -308,8 +339,9 @@ export function supportResistance(
   const strength = 3;
   const hiPivots = findPivots(window, "high", strength);
   const loPivots = findPivots(window, "low", strength);
-  const hiClusters = clusterPivots(hiPivots, band, window.length);
-  const loClusters = clusterPivots(loPivots, band, window.length);
+  const medVol = medianOf(window.map((c) => c.volume));
+  const hiClusters = clusterPivots(hiPivots, band, window.length, medVol);
+  const loClusters = clusterPivots(loPivots, band, window.length, medVol);
 
   const aboveHi = hiClusters
     .filter((c) => c.price >= lastClose - tol)
@@ -346,22 +378,26 @@ export function resistancePivot(
   candles: Candle[],
   lookback = 250,
   maxAtrsBelow = 6,
-): { level: number | null; touches: number; atrsAbove: number | null } {
+): { level: number | null; touches: number; touchQuality: number; atrsAbove: number | null } {
   const window = candles.slice(-lookback);
-  if (window.length < 20) return { level: null, touches: 0, atrsAbove: null };
+  const none = { level: null, touches: 0, touchQuality: 0, atrsAbove: null };
+  if (window.length < 20) return none;
   const lastClose = window[window.length - 1].close;
   const atrV = lastDefined(atr(window, 14)) ?? lastClose * 0.02;
-  if (!(atrV > 0)) return { level: null, touches: 0, atrsAbove: null };
+  if (!(atrV > 0)) return none;
   const band = Math.max(0.003, (0.5 * atrV) / lastClose);
-  const clusters = clusterPivots(findPivots(window, "high", 3), band, window.length);
+  const clusters = clusterPivots(
+    findPivots(window, "high", 3), band, window.length, medianOf(window.map((c) => c.volume)),
+  );
   const cleared = clusters
     .filter((c) => c.price <= lastClose && (lastClose - c.price) / atrV <= maxAtrsBelow)
     // prefer the strongest (touches + recency); tie-break to the higher level
     .sort((a, b) => b.strength - a.strength || b.price - a.price)[0];
-  if (!cleared) return { level: null, touches: 0, atrsAbove: null };
+  if (!cleared) return none;
   return {
     level: cleared.price,
     touches: cleared.touches,
+    touchQuality: cleared.touchQuality,
     atrsAbove: (lastClose - cleared.price) / atrV,
   };
 }
@@ -605,6 +641,14 @@ export interface IndicatorSnapshot {
   breakoutFreshnessDays?: number | null; // sessions since 20d high was first cleared; 0 = today
   pivotLevel?: number | null;         // strongest cleared swing-high cluster (real base ceiling)
   pivotTouches?: number | null;       // how many swing highs formed that cluster
+  // Volume-weighted touch count for that cluster: heavy-volume rejections
+  // count for more than thin pokes at the same price.
+  pivotTouchQuality?: number | null;
+  // Rel volume vs the MEDIAN of the prior 30 sessions (spike-resistant).
+  relVolumeMedian30?: number | null;
+  // Sessions of price history behind this snapshot — below ~120 the chart is
+  // not readable and the scorer refuses to emit a number.
+  barsAvailable?: number | null;
   volDryUpRatio?: number | null;      // 5D avg volume / 20D avg volume; <1 = drying up
 
   // series for chart overlays (aligned to candles)
@@ -737,6 +781,9 @@ export function computeSnapshot(candles: Candle[]): IndicatorSnapshot | null {
     breakoutFreshnessDays: freshness,
     pivotLevel: pivot.level,
     pivotTouches: pivot.touches,
+    pivotTouchQuality: pivot.touchQuality,
+    relVolumeMedian30: relVolumeMedian(volumes, 30),
+    barsAvailable: candles.length,
     volDryUpRatio: dryUp,
 
     ema20Series: e20,
