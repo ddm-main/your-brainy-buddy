@@ -37,6 +37,7 @@ function sourceFrom(detail: string | undefined, fallback: string): string {
 function isOwnSource(id: ProviderId, source: string): boolean {
   const s = source.toLowerCase();
   if (id === "kotak_neo") return s === "kotak" || s === "kotak_neo";
+  if (id === "shoonya") return s === "shoonya" || s === "noren" || s === "finvasia";
   return s === id;
 }
 
@@ -64,7 +65,7 @@ export default function ProviderDetail({
   liveDetail: { ok: boolean; detail: string | null; at: string } | null;
 }) {
   const meta = PROVIDERS[id];
-  const probeable = id === "kotak_neo" || id === "yahoo";
+  const probeable = id === "kotak_neo" || id === "shoonya" || id === "yahoo";
 
   // Freshness of every table this catalog references — one RPC, and the same
   // shared query key/shape Feed Routing uses so neither can poison the other.
@@ -132,7 +133,7 @@ export default function ProviderDetail({
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <Btn size="sm" onClick={onBack}><ArrowLeft size={11} style={{ marginRight: 4 }} />Back</Btn>
           <Btn size="sm" onClick={() => onEdit(id)} disabled={busy !== null}>
-            {meta.edit === "kotak" ? <KeyRound size={11} style={{ marginRight: 4 }} /> : <Settings2 size={11} style={{ marginRight: 4 }} />}
+            {meta.edit === "kotak" || meta.edit === "broker" ? <KeyRound size={11} style={{ marginRight: 4 }} /> : <Settings2 size={11} style={{ marginRight: 4 }} />}
             Edit
           </Btn>
           <Btn size="sm" onClick={() => onTest(id)} disabled={busy !== null}>

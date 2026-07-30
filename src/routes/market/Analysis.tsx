@@ -31,26 +31,57 @@ import { RefreshCw } from "lucide-react";
 
 const STATE_STORE = "jarvis.analysis.state.v5";
 const LAYOUTS_STORE = "jarvis.analysis.layouts.v1";
-// Per-symbol chart preferences (TF/chartType) — lets users keep
-// e.g. NIFTY on 1h and RELIANCE on 15m. Falls back to STATE_STORE.
+// Per-symbol chart-type preference. Timeframe is intentionally not restored:
+// every newly opened symbol must start at the requested 5-minute view.
 const TF_STORE_PREFIX = "jarvis.analysis.tf.";
 const tfKey = (exch: string, sym: string | undefined) =>
   `${TF_STORE_PREFIX}${(exch || "NSE").toUpperCase()}:${(sym || "").toUpperCase()}`;
 
 
 type Persisted = {
-  tf: string;
   chartType: ChartType;
   studies: Study[];
   settings: ChartSettings;
 };
 
 const defaultState: Persisted = {
-  tf: "1D",
   chartType: "candles",
   studies: DEFAULT_STUDIES,
   settings: DEFAULT_SETTINGS,
 };
+
+// Human-readable provenance for the degraded-source chip in the panel header.
+function chartStatusText(cd: {
+  history_source?: string | null; provider?: string | null; last_bar_source?: string | null;
+  freshness_ms?: number | null; delayed_minutes?: number | null; cached_at?: string | null;
+}): string {
+  const hist = cd.history_source ?? cd.provider ?? "unknown";
+  const last = cd.last_bar_source ?? cd.provider ?? "unknown";
+  const fresh = cd.freshness_ms != null ? `${Math.max(1, Math.round(cd.freshness_ms / 60_000))}m old` : null;
+  if (last === "quote") return `LIVE LAST BAR · history: ${hist} (broker has no candles API)`;
+  if (last === "quote_delayed") return `LIVE QUOTE ~${cd.delayed_minutes ?? 15}m delayed · history: ${hist}`;
+  if (last === "cache") return `CACHED${cd.cached_at ? ` · last fetch ${new Date(cd.cached_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}${fresh ? ` · ${fresh}` : ""}`;
+  if (last === "yahoo" && cd.delayed_minutes) return `DELAYED ~${cd.delayed_minutes}m · Yahoo fallback${fresh ? ` · ${fresh}` : ""}`;
+  if (hist !== last) return `MIXED · history ${hist} · last bar ${last}`;
+  return `DEGRADED · ${last}${fresh ? ` · ${fresh}` : ""}`;
+}
+
+// Bars belonging to the newest trading day — the default viewport for
+// intraday charts (history stays loaded, just scrolled out of view).
+function todayBarCount(candles: Array<{ time: number | string }> | undefined): number | null {
+  if (!candles || candles.length === 0) return null;
+  const istDay = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
+  });
+  const dayOf = (t: number | string) => {
+    const ms = typeof t === "number" ? t * 1000 : Date.parse(String(t));
+    return istDay.format(new Date(ms));
+  };
+  const lastDay = dayOf(candles[candles.length - 1].time);
+  let n = 0;
+  for (let i = candles.length - 1; i >= 0 && dayOf(candles[i].time) === lastDay; i--) n++;
+  return n > 0 ? n : null;
+}
 
 // Drop studies whose type no longer exists and backfill missing params/colours.
 function loadStudies(saved: unknown): Study[] {
@@ -97,6 +128,15 @@ export default function Analysis() {
     queryKey: ["market", "listing-exchange", symbol?.toUpperCase()],
     enabled: !!symbol && !forcedExchange,
     staleTime: 60 * 60 * 1000,
+    gcTime: 24 * 60 * 60 * 1000,
+    // Remembered across reloads so the chart starts on the right exchange
+    // immediately instead of fetching NSE candles and refetching as BSE.
+    initialData: () => {
+      try {
+        const v = localStorage.getItem(`jarvis.listing.${symbol?.toUpperCase()}`);
+        return v === "BSE" || v === "NSE" ? (v as "NSE" | "BSE") : undefined;
+      } catch { return undefined; }
+    },
     queryFn: async () => {
       const { data } = await supabase
         .from("market_stocks")
@@ -104,24 +144,31 @@ export default function Analysis() {
         .eq("symbol", symbol!.toUpperCase())
         .eq("is_active", true);
       const rows = (data ?? []) as { exchange: string }[];
-      return pickNsePreferredListing(rows)?.exchange?.toUpperCase() === "BSE" ? "BSE" : "NSE";
+      const ex = pickNsePreferredListing(rows)?.exchange?.toUpperCase() === "BSE" ? "BSE" : "NSE";
+      try { localStorage.setItem(`jarvis.listing.${symbol!.toUpperCase()}`, ex); } catch { /* quota */ }
+      return ex as "NSE" | "BSE";
     },
   });
   const exchange: "NSE" | "BSE" = forcedExchange ?? listedExchange ?? "NSE";
 
   const initial = useMemo(loadState, []);
-  // Per-symbol TF/chartType override wins over the global state so
-  // switching between symbols keeps each one's preferred view.
+  // Keep chart style per symbol, but never restore its old timeframe.
   const perSymbolInitial = useMemo(() => {
     try {
       const raw = localStorage.getItem(tfKey(exchange, symbol));
       if (!raw) return null;
-      return JSON.parse(raw) as { tf?: string; chartType?: ChartType };
+      return JSON.parse(raw) as { chartType?: ChartType };
     } catch { return null; }
     // symbol/exchange change → recompute; safe: state below re-inits from this.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, exchange]);
-  const [tf, setTf] = useState(perSymbolInitial?.tf ?? initial.tf);
+  const [timeframeState, setTimeframeState] = useState({ symbol, value: "5m" });
+  // Derive synchronously so a reused route can never render/fetch the prior
+  // symbol's interval while waiting for an effect to reset it.
+  const tf = timeframeState.symbol === symbol ? timeframeState.value : "5m";
+  const setTf = useCallback((value: string) => {
+    setTimeframeState({ symbol, value });
+  }, [symbol]);
   const [chartType, setChartType] = useState<ChartType>(perSymbolInitial?.chartType ?? initial.chartType);
   const [fs, setFs] = useState(false);
   const [studies, setStudies] = useState<Study[]>(initial.studies);
@@ -165,7 +212,7 @@ export default function Analysis() {
       if (l.settings) setSettings({ ...DEFAULT_SETTINGS, ...l.settings });
       notify(`Layout "${name}" loaded`);
     } catch { notify("Could not load layout"); }
-  }, [notify]);
+  }, [notify, setTf]);
   const deleteLayout = useCallback((name: string) => {
     try {
       const all = JSON.parse(localStorage.getItem(LAYOUTS_STORE) ?? "{}");
@@ -176,26 +223,26 @@ export default function Analysis() {
   }, []);
 
   useEffect(() => {
-    const payload: Persisted = { tf, chartType, studies, settings };
+    const payload: Persisted = { chartType, studies, settings };
     localStorage.setItem(STATE_STORE, JSON.stringify(payload));
-  }, [tf, chartType, studies, settings]);
+  }, [chartType, studies, settings]);
 
-  // Per-symbol chart prefs (TF/chartType). Written on change AND on
-  // beforeunload so a fast refresh right after switching TF still catches it.
+  // Persist chart style only. A manually selected timeframe lasts for this
+  // open chart, but must not become the default for a later chart opening.
   useEffect(() => {
     if (!symbol) return;
     const key = tfKey(exchange, symbol);
-    const payload = { tf, chartType };
+    const payload = { chartType };
     try { localStorage.setItem(key, JSON.stringify(payload)); } catch { /* quota */ }
     const onBeforeUnload = () => {
       try {
         localStorage.setItem(key, JSON.stringify(payload));
-        localStorage.setItem(STATE_STORE, JSON.stringify({ tf, chartType, studies, settings }));
+        localStorage.setItem(STATE_STORE, JSON.stringify({ chartType, studies, settings }));
       } catch { /* noop */ }
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [symbol, exchange, tf, chartType, studies, settings]);
+  }, [symbol, exchange, chartType, studies, settings]);
 
   // Keyboard shortcuts (TradingView-style):
   //   F        toggle fullscreen
@@ -218,7 +265,7 @@ export default function Analysis() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [fs, tf]);
+  }, [fs, tf, setTf]);
 
   const sym = symbol?.toUpperCase();
 
@@ -301,16 +348,39 @@ export default function Analysis() {
 
   const { data: scores = [] } = useStockScores({ symbol: sym, limit: 1 });
   const score = scores[0];
-  const { data: quotesData } = useQuotes(sym ? [`${exchange}:${sym}`] : []);
+  const { data: quotesData, dataUpdatedAt: quotesUpdatedAt } = useQuotes(sym ? [`${exchange}:${sym}`] : []);
   useEffect(() => {
     if (!sym) return;
     subscribeSymbolsForTicks([`${exchange}:${sym}`]);
   }, [exchange, sym]);
   const restQuote = quotesData?.quotes?.[0];
-  const preferred = usePreferLiveTick(sym ? `${exchange}:${sym}` : null, restQuote ? { ltp: restQuote.ltp, change_pct: restQuote.change_pct } : null);
+  const preferred = usePreferLiveTick(
+    sym ? `${exchange}:${sym}` : null,
+    restQuote
+      ? {
+        ltp: restQuote.ltp,
+        change_pct: restQuote.change_pct,
+        volume: restQuote.volume,
+        day_open: restQuote.day_open,
+        day_high: restQuote.day_high,
+        day_low: restQuote.day_low,
+      }
+      : null,
+    quotesUpdatedAt || undefined,
+  );
   // `quote` keeps its REST shape (source/stale/day_change) for the rest of the
   // page; only ltp/change_pct are overridden when a fresher push tick exists.
-  const quote = restQuote && preferred ? { ...restQuote, ltp: preferred.ltp, change_pct: preferred.change_pct } : restQuote;
+  const quote = restQuote && preferred
+    ? {
+      ...restQuote,
+      ltp: preferred.ltp,
+      change_pct: preferred.change_pct,
+      volume: preferred.volume ?? restQuote.volume,
+      day_open: preferred.day_open ?? restQuote.day_open,
+      day_high: preferred.day_high ?? restQuote.day_high,
+      day_low: preferred.day_low ?? restQuote.day_low,
+    }
+    : restQuote;
   const { data: breadth } = useBreadth();
   // Daily candles independent of the chart's selected timeframe (`tf` may be
   // intraday) — this is what the live technical recompute always uses.
@@ -468,6 +538,11 @@ export default function Analysis() {
   const ltp = (!staleLive && quote?.ltp) || score?.close || null;
   const chgPct = (!staleLive ? quote?.change_pct : null) ?? score?.change_pct ?? null;
   const dayChange = getTrustedDayChange(quote);
+  const liveChartPrice = !staleLive ? (quote?.ltp ?? null) : null;
+  const liveChartVolume = !staleLive ? ((quote as any)?.volume ?? null) : null;
+  const chartSource = candleData?.last_bar_source === "quote" || candleData?.last_bar_source === "quote_delayed"
+    ? candleData.last_bar_source
+    : candleData?.provider ?? null;
 
   return (
     <div className="mk-anl-grid">
@@ -480,7 +555,35 @@ export default function Analysis() {
           style={{ flex: 1, minHeight: 0 }}
           actions={
             <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-              {/* Provider provenance is shown on the chart itself ("yahoo · delayed") — no duplicate chip here. */}
+              {/* Degraded-source provenance sits here, right before the exchange chip. */}
+              {candleData && candleData.candles.length > 0 && candleData.degraded && (
+                <span
+                  title={chartStatusText(candleData)}
+                  style={{
+                    display: "inline-flex", gap: 6, alignItems: "center",
+                    maxWidth: 420, padding: "2px 6px", borderRadius: 2,
+                    background: "rgba(24,32,40,0.75)", border: "1px solid var(--edge)",
+                    fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.14em",
+                    textTransform: "uppercase", color: "var(--warn, #f0b429)",
+                  }}
+                >
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {chartStatusText(candleData)}
+                    {candleData.market_session && candleData.market_session !== "open" ? ` · ${candleData.market_session}` : ""}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => refetch()}
+                    disabled={isFetching}
+                    style={{
+                      padding: "1px 5px", background: "transparent",
+                      border: "1px solid var(--edge)", color: "var(--text-dim)",
+                      fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.14em",
+                      textTransform: "uppercase", cursor: isFetching ? "wait" : "pointer",
+                    }}
+                  >{isFetching ? "…" : "retry"}</button>
+                </span>
+              )}
               <Chip tone="neutral">{exchange}</Chip>
             </div>
 
@@ -510,55 +613,12 @@ export default function Analysis() {
               savedLayouts={savedLayouts}
               intraday={isIntraday(tf)}
             />
-            <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0, position: "relative" }}>
-              {/* Degraded-source ribbon — shown while we still have bars but
-                  they didn't come straight from Kotak (cache, delayed, or Yahoo).
-                  Uses `history_source` vs `last_bar_source` so the label reflects
-                  what each part of the series actually came from. */}
-              {candleData && candleData.candles.length > 0 && candleData.degraded && (
-                <div style={{
-                  position: "absolute", top: 6, left: 6, zIndex: 2,
-                  display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap",
-                  padding: "4px 8px", borderRadius: 2,
-                  background: "rgba(24,32,40,0.75)", border: "1px solid var(--edge)",
-                  fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.14em",
-                  textTransform: "uppercase", color: "var(--warn, #f0b429)",
-                }}>
-                  {(() => {
-                    const hist = candleData.history_source ?? candleData.provider ?? "unknown";
-                    const last = candleData.last_bar_source ?? candleData.provider ?? "unknown";
-                    const fresh = candleData.freshness_ms != null
-                      ? `${Math.max(1, Math.round(candleData.freshness_ms / 60_000))}m old`
-                      : null;
-                    // Kotak publishes no candles API at all — the last bar is a
-                    // live broker print stitched onto Yahoo/cached history.
-                    if (last === "quote") return `LIVE LAST BAR · history: ${hist} (broker has no candles API)`;
-
-                    if (last === "quote_delayed") return `LIVE QUOTE ~${candleData.delayed_minutes ?? 15}m delayed · history: ${hist}`;
-                    if (last === "cache") return `CACHED${candleData.cached_at ? ` · last fetch ${new Date(candleData.cached_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}${fresh ? ` · ${fresh}` : ""}`;
-                    if (last === "yahoo" && candleData.delayed_minutes) return `DELAYED ~${candleData.delayed_minutes}m · Yahoo fallback${fresh ? ` · ${fresh}` : ""}`;
-                    if (hist !== last) return `MIXED · history ${hist} · last bar ${last}`;
-                    return `DEGRADED · ${last}${fresh ? ` · ${fresh}` : ""}`;
-                  })()}
-                  {candleData.market_session && candleData.market_session !== "open" && (
-                    <span style={{ opacity: 0.7 }}>· {candleData.market_session}</span>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => refetch()}
-                    disabled={isFetching}
-                    style={{
-                      marginLeft: 4, padding: "2px 6px", background: "transparent",
-                      border: "1px solid var(--edge)", color: "var(--text-dim)",
-                      fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.14em",
-                      textTransform: "uppercase", cursor: isFetching ? "wait" : "pointer",
-                    }}
-                  >{isFetching ? "…" : "retry"}</button>
-                </div>
-              )}
-
-
+            <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0, position: "relative", display: "flex", flexDirection: "column" }}>
+              {/* Chart surface — own stacking context so overlays inside it
+                  (OHLC line, study legend) start below the ribbon. */}
+              <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
               {error ? (
+
                 <EmptyState hint={String((error as Error).message ?? "")}>chart unavailable</EmptyState>
               ) : isLoading || !candleData ? (
                 <div className="hud-label" style={{ padding: 24, textAlign: "center" }}>loading candles…</div>
@@ -599,19 +659,22 @@ export default function Analysis() {
                   chartType={chartType}
                   studies={studies}
                   intraday={isIntraday(tf)}
-                  livePrice={!staleLive ? (quote?.ltp ?? null) : null}
-                  liveVolume={!staleLive ? ((quote as any)?.volume ?? null) : null}
+                  livePrice={liveChartPrice}
+                  liveVolume={liveChartVolume}
                   settings={settings}
                   onToggleStudy={toggleStudy}
                   onEditStudy={setEditingId}
                   onRemoveStudy={removeStudy}
-                  source={candleData.provider ?? null}
-                  visibleBars={null}
+                  source={chartSource}
+                  visibleBars={isIntraday(tf) ? todayBarCount(candleData.candles) : null}
+                  viewportKey={`${exchange}:${sym}:${tf}`}
                 />
 
 
               )}
+              </div>
             </div>
+
 
           </FullscreenShell>
           <IndicatorSettingsModal study={editing} onChange={updateStudy} onRemove={removeStudy} onClose={() => setEditingId(null)} />

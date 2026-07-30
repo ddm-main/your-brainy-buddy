@@ -18,6 +18,7 @@
 // prove.
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import type { MarketProvider } from "./provider.ts";
+import { BROKER_PROVIDERS } from "./provider.ts";
 
 export interface OpenPosition {
   ruleId: string;
@@ -33,7 +34,7 @@ export async function reconcileOpenPositions(
   userId: string,
   openPositions: OpenPosition[],
 ): Promise<OpenPosition[]> {
-  if (provider.name !== "kotak_neo" || openPositions.length === 0) return openPositions;
+  if (!BROKER_PROVIDERS.includes(provider.name) || openPositions.length === 0) return openPositions;
 
   let brokerPositions;
   try {

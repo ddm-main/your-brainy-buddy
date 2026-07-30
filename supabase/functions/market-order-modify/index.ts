@@ -1,6 +1,7 @@
 // market-order-modify — change price/qty/trigger/validity on a live Kotak order.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { getActiveProvider } from "../_shared/market/provider.ts";
+import { BROKER_PROVIDERS } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 import { z } from "npm:zod";
 
@@ -36,7 +37,7 @@ Deno.serve(async (req) => {
   try {
     const svc = svcClient();
     const { provider } = await getActiveProvider(svc, auth.userId);
-    if (provider.name !== "kotak_neo") return errorResponse(req, "Requires Kotak Neo connection", 400);
+    if (!BROKER_PROVIDERS.includes(provider.name)) return errorResponse(req, "Requires Kotak Neo connection", 400);
     const { order_id, ...changes } = parsed.data;
     const r = await provider.modifyOrder(order_id, changes);
     return jsonResponse(req, { ok: true, order_id: r.orderId, status: r.status });

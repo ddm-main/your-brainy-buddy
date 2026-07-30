@@ -2,8 +2,9 @@
 // provider, on demand) and market-selftest (all providers, on demand or from
 // pg_cron). Everything that writes status lives here so the UI reads one
 // consistent story no matter who ran the probe.
-import { getActiveProvider, kotakProvider, yahooProvider, type OhlcvMeta } from "./provider.ts";
+import { getActiveProvider, kotakProvider, shoonyaProvider, yahooProvider, type OhlcvMeta } from "./provider.ts";
 import { KOTAK_SETTINGS_COLS, type KotakSettings } from "./kotakClient.ts";
+import { SHOONYA_SETTINGS_COLS, type ShoonyaSettings } from "./shoonyaClient.ts";
 import { fmpValidateKey } from "./fmpClient.ts";
 import { alphaValidateKey } from "./alphaVantageClient.ts";
 import { nseMarketStatus } from "./nseClient.ts";
@@ -35,6 +36,9 @@ export const SERVICE_SURFACES: Record<string, string[]> = {
  */
 export const PROVIDER_SURFACES: Record<string, string[]> = {
   kotak_neo: ["quotes", "index_quotes", "depth", "funds", "holdings", "positions"],
+  // Noren DOES publish candles (TPSeries / EODChartData), so Shoonya is
+  // judged on the history surfaces too — unlike Kotak.
+  shoonya: ["quotes", "index_quotes", "depth", "candles_1d", "candles_intraday", "funds", "holdings", "positions"],
   yahoo: ["quotes", "index_quotes", "candles_1d", "candles_index_1d", "candles_intraday"],
 };
 
@@ -68,6 +72,7 @@ export const PRIMARY_BY_SURFACE: Record<string, string> = {
 export function canonicalProvider(name: string): string {
   const n = (name || "").toLowerCase();
   if (n.includes("kotak")) return "kotak_neo";
+  if (n.includes("shoonya") || n.includes("noren") || n.includes("finvasia")) return "shoonya";
   if (n.includes("yahoo")) return "yahoo";
   if (n.includes("alpha")) return "alpha_vantage";
   if (n.includes("fmp") || n.includes("modeling")) return "fmp";
@@ -172,7 +177,7 @@ export async function probeService(provider: string): Promise<{ ok: boolean; det
 export async function surfaceReport(
   svc: Svc,
   userId: string,
-  which: "active" | "kotak_neo" | "yahoo" = "active",
+  which: "active" | "kotak_neo" | "shoonya" | "yahoo" = "active",
 ): Promise<Record<string, SurfaceResult>> {
   let provider;
   if (which === "yahoo") {
@@ -185,6 +190,14 @@ export async function surfaceReport(
       ?? candidates.find((r) => !!r.totp_secret_enc)
       ?? candidates[0];
     provider = row ? kotakProvider(svc, row) : yahooProvider(svc);
+  } else if (which === "shoonya") {
+    const { data } = await svc.from("market_api_settings").select(SHOONYA_SETTINGS_COLS)
+      .eq("user_id", userId).eq("active_provider", "shoonya");
+    const candidates = (data ?? []) as ShoonyaSettings[];
+    const row = candidates.find((r) => !!r.session_token_enc)
+      ?? candidates.find((r) => !!r.ucc && !!r.vendor_code && !!r.api_secret_enc)
+      ?? candidates[0];
+    provider = row ? shoonyaProvider(svc, row) : yahooProvider(svc);
   } else {
     provider = (await getActiveProvider(svc, userId)).provider;
   }
@@ -194,7 +207,7 @@ export async function surfaceReport(
     try {
       const r = await fn();
       const source = r.source ?? provider.name;
-      const fellBack = which === "kotak_neo" && source !== "kotak" && source !== "kotak_neo";
+      const fellBack = which !== "active" && which !== "yahoo" && canonicalProvider(source) !== which;
       return { ok: true, state: fellBack ? "degraded" : "ok", provider_used: source, detail: r.detail, checked_at };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -216,12 +229,12 @@ export async function surfaceReport(
   const owner = which === "active" ? canonicalProvider(provider.name) : which;
   const probes: Record<string, () => Promise<{ detail: string; source?: string }>> = {
     quotes: async () => {
-      const rows = await provider.getQuotes(["NSE:RELIANCE"], { allowFallback: which !== "kotak_neo" });
+      const rows = await provider.getQuotes(["NSE:RELIANCE"], { allowFallback: which === "active" || which === "yahoo" });
       if (!rows.length) throw new Error("no rows");
       return { detail: `ltp=${rows[0].price}`, source: rows[0].source };
     },
     index_quotes: async () => {
-      const rows = await provider.getQuotes(["NSE:^NSEI"], { allowFallback: which !== "kotak_neo" });
+      const rows = await provider.getQuotes(["NSE:^NSEI"], { allowFallback: which === "active" || which === "yahoo" });
       if (!rows.length) throw new Error("no index rows");
       return { detail: `Nifty 50 ltp=${rows[0].price}`, source: rows[0].source };
     },

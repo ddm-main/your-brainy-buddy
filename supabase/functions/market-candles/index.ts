@@ -52,8 +52,8 @@ function candleTimeToIso(t: string | number): string {
 function withProvenance<T extends { candles: Array<{ time: string | number }> }>(
   payload: T & Record<string, unknown>,
   session: "open" | "closed" | "pre_open" | "post_close" | "holiday" | "weekend",
-  historySource: "kotak_neo" | "yahoo" | "cache" | "mixed" | "none",
-  lastBarSource: "kotak_neo" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none",
+  historySource: "kotak_neo" | "shoonya" | "yahoo" | "cache" | "mixed" | "none",
+  lastBarSource: "kotak_neo" | "shoonya" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none",
 ): T & Record<string, unknown> {
   const now = new Date();
   const last = payload.candles[payload.candles.length - 1];
@@ -89,8 +89,21 @@ const INTRADAY: Record<string, { interval: string; range: string }> = {
 };
 
 interface DailyRow { trade_date: string; open: number; high: number; low: number; close: number; volume: number }
-interface OutCandle { time: string; open: number; high: number; low: number; close: number; volume: number }
-type IntradayProviderName = "kotak_neo" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none";
+interface OutCandle { time: string | number; open: number; high: number; low: number; close: number; volume: number }
+type IntradayProviderName = "kotak_neo" | "shoonya" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none";
+
+/** Which broker (if any) actually served these bars. Shoonya's Noren API does
+ *  publish candles, so it is a first-class history source, not a fallback. */
+function brokerSource(source: string | undefined): "kotak_neo" | "shoonya" | "yahoo" {
+  if (source === "kotak_neo" || source === "kotak") return "kotak_neo";
+  if (source === "shoonya") return "shoonya";
+  return "yahoo";
+}
+
+/** Broker-served (live) as opposed to the delayed public fallback. */
+function isBrokerSource(name: string): boolean {
+  return name === "kotak_neo" || name === "shoonya";
+}
 
 // Weekly/monthly bars derived from the stored daily series. Kotak's W/M
 // archive is shallow; the daily cache (backfilled to full listed history)
@@ -176,12 +189,18 @@ function currentSessionBucket(timeframe: string, now = new Date()): number {
   return Math.floor((sessionStartUtcMs + Math.floor(elapsedMs / intervalMs) * intervalMs) / 1000);
 }
 
-async function quoteSeedCandle(
+export interface DayQuote {
+  open: number; high: number; low: number; close: number; volume: number; source: string;
+}
+
+// The single live reference for "today": the same broker quote the Quote panel
+// renders. Every timeframe (daily included) stitches its forming bar from
+// THIS, so the chart legend and the quote card can never disagree.
+async function fetchDayQuote(
   provider: Awaited<ReturnType<typeof getReadProvider>>["provider"],
   symbol: string,
   exchange: string,
-  timeframe: string,
-): Promise<{ candle: { time: number; open: number; high: number; low: number; close: number; volume: number }; source: string } | null> {
+): Promise<DayQuote | null> {
   const key = `${exchange}:${symbol}`;
   let rows: Awaited<ReturnType<typeof provider.getQuotes>> = [];
   try { rows = await provider.getQuotes([key]); } catch { rows = []; }
@@ -196,22 +215,112 @@ async function quoteSeedCandle(
   const open = Number(q.day_open ?? close);
   const high = Math.max(close, open, Number(q.day_high ?? close));
   const low = Math.min(close, open, Number(q.day_low ?? close));
+  return { open, high, low, close, volume: Number(q.volume ?? 0) || 0, source: q.source ?? "unknown" };
+}
+
+async function quoteSeedCandle(
+  provider: Awaited<ReturnType<typeof getReadProvider>>["provider"],
+  symbol: string,
+  exchange: string,
+  timeframe: string,
+): Promise<{ candle: { time: number; open: number; high: number; low: number; close: number; volume: number }; source: string } | null> {
+  const dq = await fetchDayQuote(provider, symbol, exchange);
+  if (!dq) return null;
   return {
-    source: q.source ?? "unknown",
+    source: dq.source,
     candle: {
       time: currentSessionBucket(timeframe),
-      open,
-      high,
-      low,
-      close,
-      volume: Number(q.volume ?? 0) || 0,
+      open: dq.open,
+      high: dq.high,
+      low: dq.low,
+      close: dq.close,
+      volume: dq.volume,
     },
   };
 }
 
+function istSessionDayStartSec(now = new Date()): number {
+  const nowMs = now.getTime();
+  const istDayStartMs = Math.floor((nowMs + IST_OFFSET_MS) / 86_400_000) * 86_400_000;
+  return Math.floor((istDayStartMs - IST_OFFSET_MS) / 1000);
+}
+
+function sessionOpenSecFor(epochSec: number): number {
+  const ms = epochSec * 1000;
+  const istDayStartMs = Math.floor((ms + IST_OFFSET_MS) / 86_400_000) * 86_400_000;
+  return Math.floor((istDayStartMs - IST_OFFSET_MS + SESSION_OPEN_MS) / 1000);
+}
+
+function sessionBucketFor(epochSec: number, timeframe: string): number {
+  const intervalSec = timeframeMinutes(timeframe) * 60;
+  const open = sessionOpenSecFor(epochSec);
+  const elapsed = Math.max(0, epochSec - open);
+  return open + Math.floor(elapsed / intervalSec) * intervalSec;
+}
+
+async function loadKotakTickBars(
+  svc: ReturnType<typeof svcClient>,
+  symbol: string,
+  exchange: string,
+  timeframe: string,
+): Promise<OutCandle[]> {
+  const dayStart = new Date(istSessionDayStartSec() * 1000).toISOString();
+  const { data } = await svc.from("market_intraday_prices")
+    .select("ts,open,high,low,close,volume,source")
+    .eq("symbol", symbol).eq("exchange", exchange).eq("timeframe", "1m")
+    .gte("ts", dayStart)
+    .order("ts", { ascending: true })
+    .limit(500);
+
+  const oneMinute = ((data ?? []) as Array<Record<string, unknown>>)
+    .filter((r) => String(r.source ?? "").startsWith("kotak"))
+    .map((r) => ({
+      time: Math.floor(new Date(String(r.ts)).getTime() / 1000),
+      open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close),
+      volume: Number(r.volume ?? 0),
+    }))
+    .filter((c) => Number.isFinite(c.time) && Number.isFinite(c.close) && c.close > 0);
+
+  if (timeframe === "1m") return oneMinute;
+  const byBucket = new Map<number, OutCandle>();
+  for (const c of oneMinute) {
+    const bucket = sessionBucketFor(c.time, timeframe);
+    const prev = byBucket.get(bucket);
+    if (!prev) {
+      byBucket.set(bucket, { time: String(bucket), open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume });
+    } else {
+      prev.high = Math.max(prev.high, c.high);
+      prev.low = Math.min(prev.low, c.low);
+      prev.close = c.close;
+      prev.volume += c.volume;
+    }
+  }
+  return [...byBucket.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, c]) => ({ ...c, time: Number(c.time) }));
+}
+
+function mergeTodayKotakBars(history: OutCandle[], kotakBars: OutCandle[]): OutCandle[] {
+  if (kotakBars.length === 0) return history;
+  const firstKotak = typeof kotakBars[0].time === "number" ? kotakBars[0].time : Math.floor(Date.parse(kotakBars[0].time) / 1000);
+  const byTime = new Map<string, OutCandle>();
+  for (const c of history) {
+    const t = typeof c.time === "number" ? c.time : Math.floor(Date.parse(c.time) / 1000);
+    if (Number.isFinite(firstKotak) && Number.isFinite(t) && t >= firstKotak) continue;
+    byTime.set(String(c.time), { ...c });
+  }
+  for (const c of kotakBars) byTime.set(String(c.time), { ...c });
+  return [...byTime.values()].sort((a, b) => {
+    const at = typeof a.time === "number" ? a.time : Math.floor(Date.parse(a.time) / 1000);
+    const bt = typeof b.time === "number" ? b.time : Math.floor(Date.parse(b.time) / 1000);
+    return at - bt;
+  });
+}
 
 
-type SourceName = "kotak_neo" | "yahoo" | "cache";
+
+
+type SourceName = "kotak_neo" | "shoonya" | "yahoo" | "cache";
 
 async function loadDaily(
   svc: ReturnType<typeof svcClient>,
@@ -283,7 +392,7 @@ async function loadDaily(
         candles = await provider.getOHLCV(symbol, exchange, range, "1d", meta);
         // The source that ACTUALLY served the bars, not the configured
         // provider — Kotak legitimately delegates coverage gaps to Yahoo.
-        providerName = meta.source === "kotak_neo" ? "kotak_neo" : "yahoo";
+        providerName = brokerSource(meta.source);
         reason = meta.reason;
       } catch (err) {
         // Kotak-only during the session: no delayed Yahoo substitution.
@@ -368,9 +477,41 @@ Deno.serve(async (req) => {
           reason: e instanceof Error ? e.message : String(e),
         }, session, "none", "none"));
       }
-      let candles: OutCandle[] = daily.rows;
+      let dailyRows: OutCandle[] = daily.rows;
+
+      // ---- Live forming DAILY bar ------------------------------------------
+      // The intraday path already stitches the broker quote onto its tail; the
+      // daily path used to return pure cached rows, so 1D could never agree
+      // with the Quote panel during a session. Same quote, same numbers.
+      let lastBarSource: "kotak_neo" | "shoonya" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none" = daily.provider;
+      if (session === "open" || session === "post_close") {
+        try {
+          const { provider } = await getReadProvider(svc, auth.userId);
+          const dq = await fetchDayQuote(provider, symbol, exchange);
+          if (dq && dq.close > 0) {
+            const today = istDateString();
+            const last = dailyRows[dailyRows.length - 1];
+            if (last && last.time === today) {
+              last.open = dq.open || last.open;
+              last.high = Math.max(last.high, dq.high, dq.close);
+              last.low = Math.min(last.low, dq.low, dq.close);
+              last.close = dq.close;
+              if (dq.volume > 0) last.volume = dq.volume;
+            } else {
+              dailyRows = [...dailyRows, {
+                time: today,
+                open: dq.open, high: dq.high, low: dq.low, close: dq.close, volume: dq.volume,
+              }];
+            }
+            lastBarSource = isBrokerSource(brokerSource(dq.source)) ? "quote" : "quote_delayed";
+          }
+        } catch { /* stored history alone is still worth serving */ }
+      }
+
+      let candles: OutCandle[] = dailyRows;
       if (timeframe === "1W") candles = resampleDaily(candles, "W");
       if (timeframe === "1M") candles = resampleDaily(candles, "M");
+
 
       // Weekly/monthly: only fall back to the provider's own W/M series when
       // the stored daily history can't produce anything meaningful.
@@ -387,7 +528,7 @@ Deno.serve(async (req) => {
               time: new Date(c.time * 1000).toISOString().slice(0, 10),
               open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume ?? 0,
             }));
-            providerName = meta.source === "kotak_neo" ? "kotak_neo" : "yahoo";
+            providerName = brokerSource(meta.source);
             reason = meta.reason;
           }
         } catch { /* keep the resampled series */ }
@@ -412,14 +553,22 @@ Deno.serve(async (req) => {
       });
       return jsonResponse(req, withProvenance({
         candles, emas, timeframe, provider: providerName, reason,
-        degraded: providerName !== "kotak_neo",
-      }, session, providerName, providerName));
+        degraded: !isBrokerSource(providerName),
+      }, session, providerName, lastBarSource));
+
     }
 
 
 
-    const cfg = INTRADAY[timeframe];
-    if (!cfg) return errorResponse(req, `Unsupported timeframe: ${timeframe}`);
+    const baseCfg = INTRADAY[timeframe];
+    if (!baseCfg) return errorResponse(req, `Unsupported timeframe: ${timeframe}`);
+    // The client can ask for a shallower window (default intraday view only
+    // needs the current session) — a smaller upstream range is dramatically
+    // faster to fetch and parse than 60d/max of 5-minute bars.
+    const rangeHint = typeof b?.range === "string" && /^\d+d$/.test(b.range) ? String(b.range) : null;
+    const cfg = rangeHint && /^\d+m$/.test(timeframe)
+      ? { interval: baseCfg.interval, range: rangeHint }
+      : baseCfg;
 
     // Intraday cache in market_intraday_prices (keyed by timeframe now, so
     // 5m/15m/1h bars for the same symbol don't collide).  Flow:
@@ -456,9 +605,9 @@ Deno.serve(async (req) => {
     let raw: Awaited<ReturnType<typeof provider.getOHLCV>> = [];
     try {
       raw = await provider.getOHLCV(symbol, exchange, cfg.range, cfg.interval, meta);
-      providerName = meta.source === "kotak_neo" ? "kotak_neo" : "yahoo";
+      providerName = brokerSource(meta.source);
       reason = meta.reason;
-      degraded = providerName !== "kotak_neo";
+      degraded = !isBrokerSource(providerName);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       degraded = true;
@@ -517,25 +666,49 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Prefer the locally built Kotak tick candles for today's intraday series.
+    // Kotak's historical candles route is not reliable/available for all cash
+    // symbols, but the relay has the live stream; completed 1m bars from that
+    // stream are the correct source for today's trading chart.
+    let kotakTickBars: OutCandle[] = [];
+    if (nseSessionOpen()) {
+      try {
+        kotakTickBars = await loadKotakTickBars(svc, symbol, exchange, timeframe);
+        if (kotakTickBars.length > 0) {
+          raw = mergeTodayKotakBars(raw, kotakTickBars).map((c) => ({
+            time: typeof c.time === "number" ? c.time : Math.floor(Date.parse(c.time) / 1000),
+            open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
+          }));
+          providerName = providerName === "none" || providerName === "cache" ? "quote" : providerName;
+          reason = reason ?? "kotak_tick_today";
+        }
+      } catch { /* provider history still renders */ }
+    }
+
 
     // Persist successful Kotak reads into the intraday cache so we can serve
     // them back during the next broker outage.  Also persist quote-seeded and
     // delayed Yahoo bars (with a distinct source label) so a chart that opened
     // during an outage keeps showing something on the *next* cold-start too.
-    if (raw.length > 0 && (providerName === "kotak_neo" || providerName === "yahoo" || providerName === "quote" || providerName === "quote_delayed")) {
+    if (raw.length > 0 && (isBrokerSource(providerName) || providerName === "yahoo" || providerName === "quote" || providerName === "quote_delayed")) {
       const tail = raw.slice(-200);
       const persistSource =
-        providerName === "kotak_neo" ? "kotak_neo"
+        isBrokerSource(providerName) ? providerName
         : providerName === "yahoo" ? "yahoo_delayed"
         : providerName === "quote" ? "quote_live"
         : "quote_delayed";
+      // Snap every persisted bar to its timeframe bucket. Quote-seeded bars
+      // used to be written at wall-clock time (…:16:16), permanently polluting
+      // the bucket grid and colliding with nothing on the next upsert.
+      const bucketMs = timeframeMinutes(timeframe) * 60_000;
       const rows = tail.map((c) => ({
         symbol, exchange, timeframe,
-        ts: new Date(c.time * 1000).toISOString(),
+        ts: new Date(Math.floor((c.time * 1000) / bucketMs) * bucketMs).toISOString(),
         open: c.open, high: c.high, low: c.low, close: c.close,
         volume: c.volume ?? 0,
         source: persistSource, fetched_at: new Date().toISOString(),
       }));
+
       svc.from("market_intraday_prices")
         .upsert(rows, { onConflict: "symbol,exchange,timeframe,ts" })
         .then(() => {}, () => {});
@@ -547,24 +720,44 @@ Deno.serve(async (req) => {
     // route is live and healthy on the same session, so stitch the real-time
     // print onto the tail: the last bucket becomes a live forming candle
     // instead of the chart flatlining 15 minutes in the past.
+    let dayVolume: number | undefined;
     if (nseSessionOpen() && raw.length > 0) {
       try {
-        const seeded = await quoteSeedCandle(provider, symbol, exchange, timeframe);
-        if (seeded && seeded.candle.close > 0) {
-          const bucket = seeded.candle.time;
+        const dq = await fetchDayQuote(provider, symbol, exchange);
+        if (dq && dq.close > 0) {
+          const bucket = currentSessionBucket(timeframe);
           const tail = raw[raw.length - 1];
           if (tail && tail.time >= bucket) {
             // Yahoo already published this bucket — only lift the close/extremes
             // to the live print, never rewrite the open.
-            tail.close = seeded.candle.close;
-            tail.high = Math.max(tail.high, seeded.candle.close);
-            tail.low = Math.min(tail.low, seeded.candle.close);
+            tail.close = dq.close;
+            tail.high = Math.max(tail.high, dq.close);
+            tail.low = Math.min(tail.low, dq.close);
           } else {
             // volume 0, not the quote's day-cumulative figure — that would
             // render a single forming bar taller than the whole session.
-            raw = [...raw, { ...seeded.candle, open: tail?.close ?? seeded.candle.open, volume: 0 }];
+            raw = [...raw, {
+              time: bucket,
+              open: tail?.close ?? dq.open,
+              high: Math.max(tail?.close ?? dq.open, dq.close),
+              low: Math.min(tail?.close ?? dq.open, dq.close),
+              close: dq.close,
+              volume: 0,
+            }];
           }
-          if (seeded.source === "kotak" || seeded.source === "kotak_neo") {
+          // Clamp this session's bars to the broker's own day range. Intraday
+          // history is Yahoo's and regularly prints a high/low the broker (and
+          // therefore the Quote panel) denies — 417.80 vs 417.00 on RELAXO.
+          const dayStart = istSessionDayStartSec();
+          for (const c of raw) {
+            if (c.time < dayStart) continue;
+            c.high = Math.min(c.high, dq.high);
+            c.low = Math.max(c.low, dq.low);
+            c.high = Math.max(c.high, c.close, c.open);
+            c.low = Math.min(c.low, c.close, c.open);
+          }
+          dayVolume = dq.volume;
+          if (isBrokerSource(brokerSource(dq.source))) {
             providerName = "quote";
             delayedMinutes = undefined;
             reason = reason ?? "live_tail_on_yahoo_history";
@@ -572,6 +765,7 @@ Deno.serve(async (req) => {
         }
       } catch { /* history alone is still worth serving */ }
     }
+
 
     const candles = raw.map((c) => ({
       time: c.time,
@@ -582,7 +776,8 @@ Deno.serve(async (req) => {
     // a quote-seeded single bar, mark history as "cache" (or "none") and only
     // the last bar as "quote"/"quote_delayed" so the UI can say the truth.
     const session = await computeMarketSession(svc, exchange);
-    const historySource: "kotak_neo" | "yahoo" | "cache" | "mixed" | "none" =
+      const historySource: "kotak_neo" | "shoonya" | "yahoo" | "cache" | "mixed" | "none" =
+        kotakTickBars.length > 0 && meta.source === "yahoo" ? "mixed" :
       providerName === "quote" || providerName === "quote_delayed"
         ? (candles.length > 1 ? (meta.source === "yahoo" ? "yahoo" : "cache") : "none")
         : providerName;
@@ -590,7 +785,7 @@ Deno.serve(async (req) => {
     // Feed Routing page can distinguish "Kotak served it" from "Kotak was
     // down and Yahoo covered", instead of guessing from a cache table.
     recordFeedHeartbeat(svc, {
-      feedId: timeframe === "1d" ? "candles_daily" : "candles_intraday",
+      feedId: timeframe.toLowerCase() === "1d" ? "candles_daily" : "candles_intraday",
       provider: providerName,
       ok: candles.length > 0,
       symbols: candles.length,
@@ -598,8 +793,9 @@ Deno.serve(async (req) => {
     });
     return jsonResponse(req, withProvenance({
       candles, emas: {}, timeframe, provider: providerName, degraded, reason,
-      cached_at: cachedAt, delayed_minutes: delayedMinutes,
+      cached_at: cachedAt, delayed_minutes: delayedMinutes, day_volume: dayVolume,
     }, session, historySource, providerName));
+
 
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 502);

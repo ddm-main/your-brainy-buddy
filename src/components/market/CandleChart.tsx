@@ -61,6 +61,10 @@ const UP = TOKENS_FALLBACK.up;
 const DOWN = TOKENS_FALLBACK.down;
 
 // ---- per-study compute (pure) ----
+// IST offset in seconds — used to find the start of the current trading day
+// when splitting a day-cumulative volume across intraday bars.
+const IST_OFFSET_SEC = 5.5 * 3600;
+
 type Computed =
   | { g: "ma"; line: Num[] }
   | { g: "band"; upper: Num[]; mid: Num[]; lower: Num[] }
@@ -168,6 +172,7 @@ export function CandleChart({
   onRemoveStudy,
   source,
   visibleBars = null,
+  viewportKey,
 }: {
   candles: CandleDto[];
   priceLines?: Array<{ price: number; label: string; color: string }>;
@@ -193,6 +198,9 @@ export function CandleChart({
    * series. The full series stays loaded either way — this only sets the
    * viewport, so scrolling left still reveals the older history. */
   visibleBars?: number | null;
+  /** Identity of the opened chart. A new identity discards any zoom/range
+   * captured from the previous symbol or timeframe. */
+  viewportKey?: string;
 }) {
 
 
@@ -203,6 +211,7 @@ export function CandleChart({
   // preserve zoom/scroll across rebuilds; reset only when the candle set changes
   const rangeRef = useRef<{ from: number; to: number } | null>(null);
   const candlesKeyRef = useRef<string>("");
+  const viewportKeyRef = useRef<string | undefined>(viewportKey);
   // live-tick plumbing: refs so the 1s price update never tears down the chart
   const priceSeriesRef = useRef<ISeriesApi<any> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<any> | null>(null);
@@ -399,6 +408,13 @@ export function CandleChart({
 
 
     const toTime = (t: string | number) => (typeof t === "number" ? (t as UTCTimestamp) : t) as any;
+    const timeKey = (t: any): string => {
+      if (typeof t === "number" || typeof t === "string") return String(t);
+      if (t && typeof t === "object" && "year" in t && "month" in t && "day" in t) {
+        return `${String(t.year).padStart(4, "0")}-${String(t.month).padStart(2, "0")}-${String(t.day).padStart(2, "0")}`;
+      }
+      return String(t ?? "");
+    };
     const lw = (n: number) => Math.max(1, Math.min(4, Math.round(n))) as 1 | 2 | 3 | 4;
     const lineData = (values: Num[], offset = 0) =>
       data.flatMap((c, i) => {
@@ -713,18 +729,19 @@ export function CandleChart({
     }
 
     // ---- crosshair legend ----
-    const byTime = new Map(data.map((c) => [String(c.time), c]));
-    const idxByTime = new Map(data.map((c, i) => [String(c.time), i]));
+    const byTime = new Map(data.map((c) => [timeKey(c.time), c]));
+    const idxByTime = new Map(data.map((c, i) => [timeKey(c.time), i]));
     chart.subscribeCrosshairMove((param) => {
       if (!param.time) { setLegend(null); setHoverIdx(null); return; }
-      const key = String(param.time);
+      const key = timeKey(param.time);
       setLegend(byTime.get(key) ?? null);
       setHoverIdx(idxByTime.get(key) ?? null);
     });
 
     // preserve view across param edits; fit only on a new candle set
     const candlesKey = `${data.length}:${data[0] ? String(data[0].time) : ""}:${data[data.length - 1] ? String(data[data.length - 1].time) : ""}:${visibleBars ?? "all"}`;
-    if (candlesKey === candlesKeyRef.current && rangeRef.current) {
+    const sameViewport = viewportKey === viewportKeyRef.current;
+    if (sameViewport && candlesKey === candlesKeyRef.current && rangeRef.current) {
       chart.timeScale().setVisibleLogicalRange(rangeRef.current);
     } else if (visibleBars && data.length > visibleBars) {
       // Deep series stay fully loaded; the viewport just opens on the most
@@ -734,6 +751,7 @@ export function CandleChart({
       chart.timeScale().fitContent();
     }
     candlesKeyRef.current = candlesKey;
+    viewportKeyRef.current = viewportKey;
 
     const doResize = () => {
       const w = el.clientWidth;
@@ -754,7 +772,7 @@ export function CandleChart({
       priceSeriesRef.current = null;
       volumeSeriesRef.current = null;
     };
-  }, [candles, computed, priceLines, height, fill, chartType, intraday, sGrid, sLog, sPriceLine, sSessionBreaks, sMagnet, visibleBars]);
+  }, [candles, computed, priceLines, height, fill, chartType, intraday, sGrid, sLog, sPriceLine, sSessionBreaks, sMagnet, visibleBars, viewportKey]);
 
 
   // ---- live tick: move/extend the rightmost bar without rebuilding the chart ----
@@ -790,8 +808,28 @@ export function CandleChart({
       setLiveBar({ time: fresh.rawTime, open: fresh.open, high: fresh.high, low: fresh.low, close: fresh.close, volume: fresh.volume });
       return;
     }
-    const nextVol = liveVolume != null && Number.isFinite(liveVolume) ? Math.max(base.volume, liveVolume) : base.volume;
+    // `liveVolume` is the broker's DAY-CUMULATIVE traded quantity. On a daily
+    // bar that is exactly the bar's volume; on a 5m bar it is not — dropping it
+    // in raw drew a single 37.97M bar dwarfing the whole session. For intraday
+    // the forming bar gets the delta: cumulative minus everything already
+    // printed today.
+    let nextVol = base.volume;
+    if (liveVolume != null && Number.isFinite(liveVolume)) {
+      if (typeof base.rawTime === "number") {
+        const dayStart = Math.floor((base.rawTime + IST_OFFSET_SEC) / 86_400) * 86_400 - IST_OFFSET_SEC;
+        let printed = 0;
+        for (const c of candles) {
+          const t = typeof c.time === "number" ? c.time : 0;
+          if (t >= dayStart && t < base.rawTime) printed += Number(c.volume) || 0;
+        }
+        const delta = liveVolume - printed;
+        nextVol = delta > 0 ? Math.max(base.volume, delta) : base.volume;
+      } else {
+        nextVol = Math.max(base.volume, liveVolume);
+      }
+    }
     const updated = { ...base, high: Math.max(base.high, close), low: Math.min(base.low, close), close, volume: nextVol };
+
     liveBarRef.current = updated;
     if (livePrice != null && Number.isFinite(livePrice)) {
       if (chartType === "line" || chartType === "area" || chartType === "baseline") {
@@ -835,7 +873,8 @@ export function CandleChart({
       const prim = primaryOf(c);
       const v = prim && idx >= 0 && idx < prim.length ? prim[idx] : null;
       const isVol = c.g === "volume";
-      const rawVol = isVol && idx >= 0 && candles[idx] ? candles[idx].volume : null;
+      const latestLive = liveBar && idx === candles.length - 1 ? liveBar : null;
+      const rawVol = isVol && idx >= 0 ? (latestLive ?? candles[idx])?.volume ?? null : null;
       const val: string = isVol
         ? (rawVol != null ? compact(rawVol) : "—")
         : v == null
@@ -860,11 +899,12 @@ export function CandleChart({
       });
     }
     return rows;
-  }, [computed, hoverIdx, candles.length, candles, intraday]);
+  }, [computed, hoverIdx, candles.length, candles, intraday, liveBar]);
 
   const last = liveBar ?? candles[candles.length - 1];
   const prev = candles[candles.length - 2];
-  const l = legend ?? last;
+  const hoveringLatest = hoverIdx === candles.length - 1;
+  const l = hoveringLatest && liveBar ? liveBar : legend ?? last;
   // Δ vs previous bar (crosshair-aware): when hovering, compare to the bar
   // just before the hovered one; otherwise compare last bar to the one prior.
   // This is the only "change" we show in the legend — the old same-bar

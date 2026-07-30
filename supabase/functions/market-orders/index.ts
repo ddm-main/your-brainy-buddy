@@ -1,6 +1,7 @@
 // market-orders — today's order book from Kotak (read-only).
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { getActiveProvider } from "../_shared/market/provider.ts";
+import { BROKER_PROVIDERS } from "../_shared/market/provider.ts";
 import { KOTAK_SETTINGS_COLS, type KotakSettings, kotakOrders, withKotakSession } from "../_shared/market/kotakClient.ts";
 import { encryptValue } from "../_shared/market/provider.ts";
 
@@ -11,7 +12,7 @@ Deno.serve(async (req) => {
   try {
     const svc = svcClient();
     const { provider, settings } = await getActiveProvider(svc, auth.userId);
-    if (provider.name !== "kotak_neo" || !settings) {
+    if (!BROKER_PROVIDERS.includes(provider.name) || !settings) {
       return jsonResponse(req, { orders: [], source: "unavailable" });
     }
     const raw = await withKotakSession(svc, settings, encryptValue, (ss) => kotakOrders(ss));

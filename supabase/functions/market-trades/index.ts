@@ -1,6 +1,7 @@
 // market-trades — today's executed trades from Kotak (read-only).
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { getActiveProvider, encryptValue } from "../_shared/market/provider.ts";
+import { BROKER_PROVIDERS } from "../_shared/market/provider.ts";
 import { kotakTrades, withKotakSession } from "../_shared/market/kotakClient.ts";
 
 Deno.serve(async (req) => {
@@ -10,7 +11,7 @@ Deno.serve(async (req) => {
   try {
     const svc = svcClient();
     const { provider, settings } = await getActiveProvider(svc, auth.userId);
-    if (provider.name !== "kotak_neo" || !settings) {
+    if (!BROKER_PROVIDERS.includes(provider.name) || !settings) {
       return jsonResponse(req, { trades: [], source: "unavailable" });
     }
     const raw = await withKotakSession(svc, settings, encryptValue, (ss) => kotakTrades(ss));

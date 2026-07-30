@@ -13,6 +13,7 @@
 import { preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret, istTradeDate, isTradingHoliday } from "../_shared/market/cron.ts";
 import { getActiveProvider, type PlaceOrderInput } from "../_shared/market/provider.ts";
+import { BROKER_PROVIDERS } from "../_shared/market/provider.ts";
 import { evaluateGroups, type ScreenerGroup } from "../_shared/market/conditions.ts";
 import { reconcileOpenPositions, type OpenPosition } from "../_shared/market/autotradeReconcile.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
@@ -191,7 +192,7 @@ Deno.serve(async (req) => {
           .select("*").eq("user_id", userId).order("created_at", { ascending: true });
 
         const { provider, settings: kotakSettings } = await getActiveProvider(svc, userId);
-        if (provider.name !== "kotak_neo" || !kotakSettings || kotakSettings.connection_status !== "connected") {
+        if (!BROKER_PROVIDERS.includes(provider.name) || !kotakSettings || kotakSettings.connection_status !== "connected") {
           if (rules?.length) await log(svc, userId, "skip", "Kotak not connected — AutoTrade paused for this tick");
           continue;
         }

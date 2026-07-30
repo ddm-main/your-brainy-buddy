@@ -33,11 +33,24 @@ Deno.serve(async (req) => {
       try {
         base32Decode(cleaned);
       } catch {
-        return errorResponse(req, "That TOTP secret isn't valid base32 (letters A-Z and digits 2-7 only) — check for typos or extra characters copied from Kotak Neo.", 400);
+        return errorResponse(req, "That TOTP secret isn't valid base32 (letters A-Z and digits 2-7 only) — check for typos or extra characters copied from your broker.", 400);
       }
       patch.totp_secret_enc = await enc(cleaned);
     }
     if (b?.ucc !== undefined) patch.ucc = String(b.ucc).trim().toUpperCase() || null;
+    // Shoonya OAuth credentials. `ucc` is the Noren uid/actid; Client ID and
+    // Secret Code come from Shoonya's API key generation screen.
+    if (provider === "shoonya") {
+      if (b?.vendor_code !== undefined) patch.vendor_code = String(b.vendor_code).trim() || null;
+      if (b?.api_secret) patch.api_secret_enc = await enc(String(b.api_secret).trim());
+      if (b?.imei !== undefined) patch.imei = String(b.imei).trim() || null;
+      // A credential change invalidates any session minted from the old ones.
+      if (b?.api_secret || b?.vendor_code !== undefined || b?.ucc !== undefined) {
+        patch.session_token_enc = null;
+        patch.connection_status = "disconnected";
+        patch.token_expires_at = null;
+      }
+    }
     if (b?.base_url !== undefined) patch.base_url = b.base_url;
     if (b?.ws_url !== undefined) patch.ws_url = b.ws_url;
 

@@ -1596,6 +1596,7 @@ export type Database = {
         Row: {
           access_token_enc: string | null
           active_provider: Database["public"]["Enums"]["market_provider"]
+          api_secret_enc: string | null
           base_url: string | null
           connection_status: Database["public"]["Enums"]["market_connection_status"]
           consumer_key: string | null
@@ -1609,6 +1610,7 @@ export type Database = {
           greeting_name: string | null
           hs_server_id: string | null
           id: string
+          imei: string | null
           is_system: boolean
           last_error: string | null
           last_sync_at: string | null
@@ -1624,12 +1626,14 @@ export type Database = {
           ucc: string | null
           updated_at: string
           user_id: string
+          vendor_code: string | null
           view_token_enc: string | null
           ws_url: string | null
         }
         Insert: {
           access_token_enc?: string | null
           active_provider?: Database["public"]["Enums"]["market_provider"]
+          api_secret_enc?: string | null
           base_url?: string | null
           connection_status?: Database["public"]["Enums"]["market_connection_status"]
           consumer_key?: string | null
@@ -1643,6 +1647,7 @@ export type Database = {
           greeting_name?: string | null
           hs_server_id?: string | null
           id?: string
+          imei?: string | null
           is_system?: boolean
           last_error?: string | null
           last_sync_at?: string | null
@@ -1658,12 +1663,14 @@ export type Database = {
           ucc?: string | null
           updated_at?: string
           user_id?: string
+          vendor_code?: string | null
           view_token_enc?: string | null
           ws_url?: string | null
         }
         Update: {
           access_token_enc?: string | null
           active_provider?: Database["public"]["Enums"]["market_provider"]
+          api_secret_enc?: string | null
           base_url?: string | null
           connection_status?: Database["public"]["Enums"]["market_connection_status"]
           consumer_key?: string | null
@@ -1677,6 +1684,7 @@ export type Database = {
           greeting_name?: string | null
           hs_server_id?: string | null
           id?: string
+          imei?: string | null
           is_system?: boolean
           last_error?: string | null
           last_sync_at?: string | null
@@ -1692,6 +1700,7 @@ export type Database = {
           ucc?: string | null
           updated_at?: string
           user_id?: string
+          vendor_code?: string | null
           view_token_enc?: string | null
           ws_url?: string | null
         }
@@ -4680,6 +4689,7 @@ export type Database = {
           shares_source: string | null
           shares_sync_attempted_at: string | null
           shares_sync_attempts: number
+          shoonya_token: string | null
           sub_sector: string | null
           sub_sector_source: string | null
           symbol: string
@@ -4728,6 +4738,7 @@ export type Database = {
           shares_source?: string | null
           shares_sync_attempted_at?: string | null
           shares_sync_attempts?: number
+          shoonya_token?: string | null
           sub_sector?: string | null
           sub_sector_source?: string | null
           symbol: string
@@ -4776,6 +4787,7 @@ export type Database = {
           shares_source?: string | null
           shares_sync_attempted_at?: string | null
           shares_sync_attempts?: number
+          shoonya_token?: string | null
           sub_sector?: string | null
           sub_sector_source?: string | null
           symbol?: string
@@ -6883,6 +6895,7 @@ export type Database = {
         | "kotak_sync"
         | "zerodha_sync"
         | "dhan_sync"
+        | "shoonya_sync"
       market_position_side: "long" | "short"
       market_provider: "kotak_neo" | "yahoo" | "zerodha" | "dhan" | "shoonya"
       note_type:
@@ -7075,6 +7088,7 @@ export const Constants = {
         "kotak_sync",
         "zerodha_sync",
         "dhan_sync",
+        "shoonya_sync",
       ],
       market_position_side: ["long", "short"],
       market_provider: ["kotak_neo", "yahoo", "zerodha", "dhan", "shoonya"],

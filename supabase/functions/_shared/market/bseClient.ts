@@ -133,3 +133,142 @@ export async function bseCirculars(subCategory = "Circulars"): Promise<BseCircul
     return [];
   }
 }
+
+// ---------------------------------------------------------------------------
+// Live BSE index quotes.
+//
+// Sensex is a BSE index: NSE's allIndices feed does not carry it and Kotak has
+// no working index quote route, so without this the strip could only ever show
+// a ~15-minute-delayed Yahoo print. These two endpoints are BSE's own and are
+// realtime during the session:
+//
+//   IndexMovers      — LTP/change/% for EVERY BSE index in one call
+//   getScripHeaderData(scripcode=1) — Sensex previous close + OHLC
+//
+// Both are public and need no key; they only want the browser-like headers
+// this module already sends.
+// ---------------------------------------------------------------------------
+
+const BSE_INDEX_MOVERS = "https://api.bseindia.com/BseIndiaAPI/api/IndexMovers/w";
+const BSE_SCRIP_HEADER = "https://api.bseindia.com/BseIndiaAPI/api/getScripHeaderData/w";
+
+export interface BseIndexQuote {
+  /** BSE's short alias, upper-cased and space-collapsed, e.g. "SENSEX". */
+  alias: string;
+  /** BSE's display name, e.g. "BSE SENSEX". */
+  name: string;
+  last: number | null;
+  change: number | null;
+  changePct: number | null;
+  previousClose: number | null;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  asOf: string | null;
+}
+
+const num = (...values: unknown[]): number | null => {
+  for (const v of values) {
+    if (v == null) continue;
+    const n = typeof v === "number" ? v : Number(String(v).replace(/[,\s+]/g, ""));
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+};
+
+const aliasKey = (s: string): string => s.trim().toUpperCase().replace(/\s+/g, " ");
+
+// Realtime means realtime: a 3s window is enough to collapse a burst of
+// concurrent callers without the strip ever showing a visibly stale tick.
+const BSE_INDEX_TTL_MS = 3_000;
+let indexCache: { at: number; rows: BseIndexQuote[] } | null = null;
+let inflight: Promise<BseIndexQuote[]> | null = null;
+
+async function fetchIndexMovers(): Promise<BseIndexQuote[]> {
+  const r = await fetchWithTimeout(`${BSE_INDEX_MOVERS}?indexcode=SENSEX`, { headers: HEADERS });
+  if (!r.ok) return [];
+  const body = await r.json();
+  const rows: any[] = Array.isArray(body?.Table) ? body.Table : [];
+  return rows.flatMap((row) => {
+    const name = str(row?.indexName, row?.indexName_Par) ?? "";
+    const alias = str(row?.shortalias, row?.indexName_Par, row?.indexName);
+    const last = num(row?.LTP);
+    if (!alias || last == null || last <= 0) return [];
+    const change = num(row?.change);
+    return [{
+      alias: aliasKey(alias),
+      name,
+      last,
+      change,
+      changePct: num(row?.PERCENTCHG),
+      previousClose: change != null ? last - change : null,
+      open: null,
+      high: null,
+      low: null,
+      asOf: str(row?.DT_TM),
+    }];
+  });
+}
+
+// Sensex specifically gets the richer header call so previous close / OHLC
+// come from BSE rather than being derived.
+async function fetchSensexHeader(): Promise<BseIndexQuote | null> {
+  try {
+    const r = await fetchWithTimeout(`${BSE_SCRIP_HEADER}?Debtflag=&scripcode=1&seriesid=`, { headers: HEADERS });
+    if (!r.ok) return null;
+    const body = await r.json();
+    const last = num(body?.CurrRate?.LTP, body?.Header?.LTP);
+    if (last == null || last <= 0) return null;
+    return {
+      alias: "SENSEX",
+      name: str(body?.Cmpname?.FullN) ?? "BSE SENSEX",
+      last,
+      change: num(body?.CurrRate?.Chg),
+      changePct: num(body?.CurrRate?.PcChg),
+      previousClose: num(body?.Header?.PrevClose),
+      open: num(body?.Header?.Open),
+      high: num(body?.Header?.High),
+      low: num(body?.Header?.Low),
+      asOf: null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Live quotes for every BSE index, keyed by BSE's short alias.
+ * Fails soft to `[]` so callers can fall through to the next source.
+ */
+export async function bseIndexQuotes(): Promise<BseIndexQuote[]> {
+  if (indexCache && Date.now() - indexCache.at < BSE_INDEX_TTL_MS) return indexCache.rows;
+  if (inflight) return await inflight;
+  inflight = (async () => {
+    try {
+      const [movers, sensex] = await Promise.all([
+        fetchIndexMovers().catch(() => [] as BseIndexQuote[]),
+        fetchSensexHeader(),
+      ]);
+      const byAlias = new Map(movers.map((m) => [m.alias, m]));
+      if (sensex) {
+        const prev = byAlias.get("SENSEX");
+        // Header wins on the fields it actually carries; keep the movers row's
+        // timestamp/name where the header has none.
+        byAlias.set("SENSEX", {
+          ...sensex,
+          name: sensex.name || prev?.name || "BSE SENSEX",
+          changePct: sensex.changePct ?? prev?.changePct ?? null,
+          asOf: prev?.asOf ?? null,
+        });
+      }
+      const rows = [...byAlias.values()];
+      // Never cache an empty read for the full window — BSE blips transiently
+      // and the next poll should retry immediately.
+      indexCache = { at: rows.length > 0 ? Date.now() : 0, rows };
+      return rows;
+    } finally {
+      inflight = null;
+    }
+  })();
+  return await inflight;
+}

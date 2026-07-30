@@ -3,6 +3,10 @@ import { create } from "zustand";
 export interface LiveTick {
   ltp: number;
   change_pct: number | null;
+  volume?: number | null;
+  day_open?: number | null;
+  day_high?: number | null;
+  day_low?: number | null;
   receivedAt: number; // epoch ms
 }
 
@@ -17,7 +21,7 @@ interface LiveTickStore {
   relayAlive: boolean;
   lastRelayMessageAt: number | null;
   upsertTick: (key: string, tick: Omit<LiveTick, "receivedAt">) => void;
-  applyTicks: (batch: Array<{ symbol: string; exchange?: string; ltp: number; change_pct: number | null }>) => void;
+  applyTicks: (batch: Array<{ symbol: string; exchange?: string; ltp: number; change_pct: number | null; volume?: number | null; day_open?: number | null; day_high?: number | null; day_low?: number | null }>) => void;
   setConnected: (v: boolean) => void;
   setRelayAlive: (v: boolean) => void;
   markRelayMessage: () => void;
@@ -43,7 +47,15 @@ export const useLiveTickStore = create<LiveTickStore>((set) => ({
       for (const t of batch) {
         if (!t?.symbol || !Number.isFinite(t.ltp)) continue;
         const key = `${(t.exchange ?? "NSE").toUpperCase()}:${t.symbol.toUpperCase()}`;
-        next[key] = { ltp: t.ltp, change_pct: t.change_pct ?? null, receivedAt: now };
+        next[key] = {
+          ltp: t.ltp,
+          change_pct: t.change_pct ?? null,
+          volume: t.volume ?? null,
+          day_open: t.day_open ?? null,
+          day_high: t.day_high ?? null,
+          day_low: t.day_low ?? null,
+          receivedAt: now,
+        };
         touched++;
       }
       if (!touched) return s;

@@ -10,6 +10,7 @@
 import { preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret, istTradeDate, isTradingHoliday } from "../_shared/market/cron.ts";
 import { getActiveProvider, type PlaceOrderInput } from "../_shared/market/provider.ts";
+import { BROKER_PROVIDERS } from "../_shared/market/provider.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 
 function marketOpenNow(): boolean {
@@ -83,7 +84,7 @@ Deno.serve(async (req) => {
     for (const [userId, list] of byUser) {
       try {
         const { provider, settings } = await getActiveProvider(svc, userId);
-        if (provider.name !== "kotak_neo" || !settings || settings.connection_status !== "connected") continue;
+        if (!BROKER_PROVIDERS.includes(provider.name) || !settings || settings.connection_status !== "connected") continue;
 
         // One quote call per user (deduped symbols).
         const symbols = [...new Set(list.map((g) => `${g.exchange}:${g.symbol}`))];

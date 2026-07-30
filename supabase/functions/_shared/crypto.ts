@@ -77,6 +77,6 @@ export async function decryptStatementPassword(rule: StatementPasswordRule): Pro
   const key = await keyFromSecret();
   const iv = fromB64(rule.iv_b64);
   const combined = concatBytes(fromB64(rule.ciphertext_b64), fromB64(rule.auth_tag_b64));
-  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, combined);
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: iv.slice().buffer }, key, combined.slice().buffer);
   return new TextDecoder().decode(pt);
 }

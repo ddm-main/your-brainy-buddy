@@ -141,6 +141,7 @@ async function fetchTokenMap() {
 // cost is capped at ~10Hz regardless of tick volume.
 const BROADCAST_FLUSH_MS = 100;
 const BROADCAST_MAX_BATCH = 500;
+const CANDLE_FLUSH_MS = 2_000;
 
 // --- Depth (level-2) ------------------------------------------------------
 // Depth is subscribed on demand, never for the whole universe: Kotak charges
@@ -167,9 +168,14 @@ class Supervisor {
     // Buffer: symbol -> latest tick payload. Last write wins per symbol
     // within a flush window so a hot ticker doesn't crowd out others.
     this.tickBuffer = new Map();
+    // symbol -> forming 1m Kotak candle. This is the authoritative source for
+    // today's intraday chart bars; Yahoo is only historical/backfill.
+    this.minuteBars = new Map();
+    this.lastCumVolume = new Map();
     // token -> lease expiry epoch ms for depth subscriptions.
     this.depthLeases = new Map();
     this.flushTimer = null;
+    this.candleFlushTimer = null;
     this.depthSweepTimer = null;
     this.reconnectDelay = RECONNECT_BASE_MS;
     this.silenceTimer = null;
@@ -186,6 +192,7 @@ class Supervisor {
         .catch((e) => log("token refresh failed:", e.message));
     }, TOKEN_MAP_REFRESH_MS);
     this.flushTimer = setInterval(() => this.flushTicks(), BROADCAST_FLUSH_MS);
+    this.candleFlushTimer = setInterval(() => this.flushCandles(), CANDLE_FLUSH_MS);
     this.depthSweepTimer = setInterval(() => this.sweepDepthLeases(), 15_000);
     await this.connectLoop();
   }
@@ -194,6 +201,7 @@ class Supervisor {
     this.stopped = true;
     clearInterval(this.tokenRefreshTimer);
     clearInterval(this.flushTimer);
+    clearInterval(this.candleFlushTimer);
     clearInterval(this.depthSweepTimer);
     clearTimeout(this.silenceTimer);
     clearInterval(this.heartbeatTimer);
@@ -257,6 +265,66 @@ class Supervisor {
         payload: { ticks: chunk, ts: Date.now() },
       })?.catch((e) => log("ticks broadcast failed:", e?.message ?? e));
     }
+  }
+
+  flushCandles() {
+    if (this.minuteBars.size === 0) return;
+    const nowIso = new Date().toISOString();
+    const rows = Array.from(this.minuteBars.values()).map((b) => ({
+      symbol: b.symbol,
+      exchange: "NSE",
+      timeframe: "1m",
+      ts: new Date(b.minute * 60_000).toISOString(),
+      open: b.open,
+      high: b.high,
+      low: b.low,
+      close: b.close,
+      volume: Math.max(0, Math.round(b.volume || 0)),
+      source: "kotak_tick",
+      fetched_at: nowIso,
+    }));
+    // Keep the current and just-completed minute hot; older minutes are already
+    // persisted and can be dropped from memory.
+    const currentMinute = Math.floor(Date.now() / 60_000);
+    for (const [key, b] of this.minuteBars) {
+      if (b.minute < currentMinute - 1) this.minuteBars.delete(key);
+    }
+    svc.from("market_intraday_prices")
+      .upsert(rows, { onConflict: "symbol,exchange,timeframe,ts" })
+      .then(() => {}, (e) => log("candle flush failed:", e?.message ?? e));
+  }
+
+  numField(msg, fields) {
+    for (const f of fields) {
+      const v = msg?.[f];
+      const n = typeof v === "string" ? Number(v.replace(/,/g, "")) : Number(v);
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  }
+
+  ingestMinuteBar(symbol, ltp, msg) {
+    const minute = Math.floor(Date.now() / 60_000);
+    const key = `${symbol}:${minute}`;
+    const prev = this.minuteBars.get(key);
+    const cumulative = this.numField(msg, ["volume", "vol_traded_today", "totalTradedVolume", "total_traded_volume", "v", "vol", "ttv"]);
+    const lastQty = this.numField(msg, ["ltq", "last_traded_quantity", "lastQty", "last_quantity", "qty"]);
+    let addVol = 0;
+    if (cumulative != null && cumulative >= 0) {
+      const prevCum = this.lastCumVolume.get(symbol);
+      if (prevCum != null && cumulative >= prevCum) addVol = cumulative - prevCum;
+      this.lastCumVolume.set(symbol, cumulative);
+    } else if (lastQty != null && lastQty > 0) {
+      addVol = lastQty;
+    }
+    if (!prev) {
+      this.minuteBars.set(key, { symbol, minute, open: ltp, high: ltp, low: ltp, close: ltp, volume: addVol });
+      return;
+    }
+    prev.high = Math.max(prev.high, ltp);
+    prev.low = Math.min(prev.low, ltp);
+    prev.close = ltp;
+    prev.volume += addVol;
   }
 
   async connectLoop() {
@@ -450,6 +518,7 @@ class Supervisor {
 
     const ltp = Number(msg.ltp);
     if (!Number.isFinite(ltp) || ltp <= 0) return;
+    this.ingestMinuteBar(symbol, ltp, msg);
 
     const rawPct = msg.nc != null ? Number(msg.nc) : msg.cng != null ? Number(msg.cng) : NaN;
     // Delta frames often omit change_pct — carry the last-known value forward
@@ -464,7 +533,11 @@ class Supervisor {
     // Buffer the tick — flushTicks() ships batches on the 100ms interval.
     // Last write wins per symbol so a rapid-fire ticker doesn't drown out
     // slower-moving symbols within one flush window.
-    this.tickBuffer.set(symbol, { symbol, exchange: "NSE", ltp, change_pct: changePct });
+    const volume = this.numField(msg, ["volume", "vol_traded_today", "totalTradedVolume", "total_traded_volume", "v", "vol", "ttv"]);
+    const day_open = this.numField(msg, ["open_price", "opn_pric", "open", "o"]);
+    const day_high = this.numField(msg, ["high_price", "hgh_pric", "high", "h"]);
+    const day_low = this.numField(msg, ["low_price", "lw_pric", "low", "l"]);
+    this.tickBuffer.set(symbol, { symbol, exchange: "NSE", ltp, change_pct: changePct, volume, day_open, day_high, day_low });
   }
 }
 

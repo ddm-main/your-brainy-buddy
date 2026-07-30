@@ -2,6 +2,7 @@
 // without flattening + re-buying. Kotak Neo only.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { getActiveProvider } from "../_shared/market/provider.ts";
+import { BROKER_PROVIDERS } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 import { z } from "npm:zod";
 
@@ -31,7 +32,7 @@ Deno.serve(async (req) => {
   try {
     const svc = svcClient();
     const { provider } = await getActiveProvider(svc, auth.userId);
-    if (provider.name !== "kotak_neo") return errorResponse(req, "Position conversion requires a Kotak Neo connection", 400);
+    if (!BROKER_PROVIDERS.includes(provider.name)) return errorResponse(req, "Position conversion requires a Kotak Neo connection", 400);
     await provider.convertPosition(parsed.data);
     return jsonResponse(req, { ok: true });
   } catch (e) {

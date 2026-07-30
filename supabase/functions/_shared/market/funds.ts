@@ -3,6 +3,7 @@
 // cooldown prevents Funds + Holdings sync + Positions sync from hammering it.
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import type { FundsSnapshot, MarketProvider } from "./provider.ts";
+import { BROKER_PROVIDERS } from "./provider.ts";
 
 export type FundsReasonCode = "not_connected" | "session_expired" | "rate_limited" | "upstream_down" | "unknown";
 
@@ -89,7 +90,7 @@ export async function refreshFundsSnapshot(opts: {
   const { svc, userId, settingsId, provider, respectCooldown = true } = opts;
   const cached = await readCachedFunds(svc, userId);
 
-  if (provider.name !== "kotak_neo") {
+  if (!BROKER_PROVIDERS.includes(provider.name)) {
     return {
       funds: expandCached(cached),
       source: cached ? "stale" : "unavailable",

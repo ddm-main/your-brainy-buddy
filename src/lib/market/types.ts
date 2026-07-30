@@ -46,13 +46,17 @@ export interface Quote {
 export interface IndexQuote {
   symbol: string;
   name: string;
-  price: number;
+  price: number | null;
   change_pct: number | null;
   change_abs: number | null;
   region?: "IN" | "GLOBAL";
   nse_symbol?: string | null;
   fno_enabled?: boolean;
   constituents_slug?: string | null;
+  source?: "kotak" | "yahoo" | "cache" | null;
+  live_required?: boolean;
+  delayed_blocked?: boolean;
+  reason?: string | null;
 }
 
 export interface IndexWatchRow {
@@ -265,7 +269,6 @@ export interface CandlesResponse {
   /** Source of ONLY the most recent (possibly quote-seeded) bar. */
   last_bar_source?: "kotak_neo" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none";
 }
-
 
 export interface SavedScreener {
   id: string;

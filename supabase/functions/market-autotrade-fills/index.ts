@@ -9,6 +9,7 @@
 import { preflight, jsonResponse, errorResponse, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret, istTradeDate, isTradingHoliday } from "../_shared/market/cron.ts";
 import { getActiveProvider } from "../_shared/market/provider.ts";
+import { BROKER_PROVIDERS } from "../_shared/market/provider.ts";
 import { withKotakSession, kotakOrders, type KotakSettings } from "../_shared/market/kotakClient.ts";
 import { encryptStatementPassword } from "../_shared/crypto.ts";
 
@@ -80,7 +81,7 @@ Deno.serve(async (req) => {
       users++;
       try {
         const { provider, settings } = await getActiveProvider(svc, userId);
-        if (provider.name !== "kotak_neo" || !settings || settings.connection_status !== "connected") continue;
+        if (!BROKER_PROVIDERS.includes(provider.name) || !settings || settings.connection_status !== "connected") continue;
         // Reuse the shared, session-refreshing kotakOrders() rather than a bespoke
         // fetch — keeps the endpoint + auth surface in one place.
         const book = await withKotakSession(svc, settings as KotakSettings, encryptValue, (ss) => kotakOrders(ss));

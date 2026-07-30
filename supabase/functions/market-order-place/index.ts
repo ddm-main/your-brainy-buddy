@@ -8,6 +8,7 @@
 //     the broker will reject with a clean error we surface.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { getActiveProvider, type FundsSnapshot } from "../_shared/market/provider.ts";
+import { BROKER_PROVIDERS } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 import { KotakAmbiguousOrderError } from "../_shared/market/kotakClient.ts";
 import { z } from "npm:zod";
@@ -127,7 +128,7 @@ Deno.serve(async (req) => {
 
   try {
     const { provider } = await getActiveProvider(svc, auth.userId);
-    if (provider.name !== "kotak_neo") {
+    if (!BROKER_PROVIDERS.includes(provider.name)) {
       return await failIntent("Order placement requires an active Kotak Neo connection. Connect it in Market → Config.", 400);
     }
 

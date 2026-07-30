@@ -7,6 +7,7 @@
 // or truncated response previously wiped the whole book.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { getActiveProvider } from "../_shared/market/provider.ts";
+import { BROKER_PROVIDERS } from "../_shared/market/provider.ts";
 import { refreshFundsSnapshot } from "../_shared/market/funds.ts";
 
 Deno.serve(async (req) => {
@@ -16,7 +17,7 @@ Deno.serve(async (req) => {
   try {
     const svc = svcClient();
     const { provider, settings } = await getActiveProvider(svc, auth.userId);
-    if (provider.name !== "kotak_neo" || !provider.getHoldingsDetailed) {
+    if (!BROKER_PROVIDERS.includes(provider.name) || !provider.getHoldingsDetailed) {
       return errorResponse(req, "Holdings sync needs a connected broker (Kotak Neo). Connect it in Settings.", 400);
     }
     const detailed = await provider.getHoldingsDetailed();

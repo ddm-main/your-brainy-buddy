@@ -1,8 +1,8 @@
 // Provider feed catalog — the single place that declares, per data provider,
 // which feeds it supplies, which surface probe proves the feed, which table it
 // lands in (for a freshness read) and which app screens consume it.
-export type ProviderId = "kotak_neo" | "yahoo" | "fmp" | "alpha_vantage" | "nse" | "bse";
-export type EditKind = "kotak" | "key" | "info";
+export type ProviderId = "kotak_neo" | "shoonya" | "yahoo" | "fmp" | "alpha_vantage" | "nse" | "bse";
+export type EditKind = "kotak" | "broker" | "key" | "info";
 
 /** Keys returned by market-test-connection `mode: "surfaces"`. */
 export type SurfaceKey =
@@ -101,6 +101,59 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
       },
       {
         id: "orders", label: "Order placement", desc: "Place / modify / cancel, GTT and auto-trade execution",
+        usedBy: [ORDERS, GTT, AUTOTRADE],
+        note: "Write path — not probed (no test order is ever placed).",
+      },
+    ],
+  },
+
+  shoonya: {
+    id: "shoonya",
+    name: "Shoonya (Finvasia)",
+    role: "Broker quotes / candles / trading",
+    edit: "broker",
+    docs: "https://shoonya.com/api-documentation",
+    summary:
+      "Noren API broker session. Unlike Kotak Neo it publishes a native candle feed (TPSeries intraday + EOD), so when Shoonya is the active provider charts are broker-sourced instead of falling back to Yahoo. Also serves quotes, depth and the account surfaces. Sessions are day-scoped and re-minted with a stored TOTP seed.",
+    feeds: [
+      {
+        id: "ltp", label: "Live LTP / quotes", desc: "Last traded price, day OHLC, change %, volume",
+        surface: "quotes", table: { name: "market_quotes", column: "fetched_at" },
+        usedBy: [MARKET_OVERVIEW, SCREENER, HOLDINGS, POSITIONS, INTEL],
+      },
+      {
+        id: "depth", label: "Market depth", desc: "5-level bid / ask ladder",
+        surface: "depth",
+        usedBy: [ORDERS, { label: "Stock Analysis", to: "/market/screener" }],
+        note: "Live-only — never persisted.",
+      },
+      {
+        id: "candles_1d", label: "Daily candles", desc: "Native EOD series from Noren (no Yahoo needed)",
+        surface: "candles_1d", table: { name: "market_daily_prices", column: "created_at" },
+        usedBy: [SCREENER, BREAKOUT, BACKTEST, AI_ENGINE],
+      },
+      {
+        id: "candles_intraday", label: "Intraday candles", desc: "Native TPSeries bars (1/3/5/15/30/60m)",
+        surface: "candles_intraday", table: { name: "market_intraday_prices", column: "fetched_at" },
+        usedBy: [MARKET_OVERVIEW, PLANNER, AUTOTRADE],
+      },
+      {
+        id: "funds", label: "Funds / margin", desc: "Available and used margin",
+        surface: "funds", table: { name: "market_funds", column: "synced_at" },
+        usedBy: [PORTFOLIO, ORDERS],
+      },
+      {
+        id: "holdings", label: "Holdings", desc: "Demat holdings with average cost",
+        surface: "holdings", table: { name: "market_holdings", column: "updated_at" },
+        usedBy: [HOLDINGS, PORTFOLIO, INVESTMENTS],
+      },
+      {
+        id: "positions", label: "Positions", desc: "Intraday / carry-forward open positions",
+        surface: "positions", table: { name: "market_positions", column: "updated_at" },
+        usedBy: [POSITIONS, PORTFOLIO],
+      },
+      {
+        id: "orders", label: "Order placement", desc: "Place / modify / cancel via Noren",
         usedBy: [ORDERS, GTT, AUTOTRADE],
         note: "Write path — not probed (no test order is ever placed).",
       },
@@ -271,7 +324,7 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
   },
 };
 
-export const PROVIDER_ORDER: ProviderId[] = ["kotak_neo", "yahoo", "fmp", "alpha_vantage", "nse", "bse"];
+export const PROVIDER_ORDER: ProviderId[] = ["kotak_neo", "shoonya", "yahoo", "fmp", "alpha_vantage", "nse", "bse"];
 
 /** Unique {table, column} pairs across the whole catalog — one freshness query. */
 export function allFreshnessTargets(): { name: string; column: string }[] {

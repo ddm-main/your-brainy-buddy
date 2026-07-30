@@ -25,6 +25,39 @@ type PagedQuery<T> = PromiseLike<{ data: T[] | null; error: { message: string } 
 const PAGE_SIZE = 1000;
 
 /**
+ * PostgREST occasionally answers with a transient infrastructure error rather
+ * than a real query failure — most commonly "Could not query the database for
+ * the schema cache. Retrying." right after a migration/pooler restart, or a
+ * connection blip. These are retryable: bubbling them up turns a 200ms hiccup
+ * into a 500 and a blank screen for the caller.
+ */
+export function isTransientPgError(message: string | null | undefined): boolean {
+  const m = (message ?? "").toLowerCase();
+  return m.includes("schema cache")
+    || m.includes("connection")
+    || m.includes("timeout")
+    || m.includes("timed out")
+    || m.includes("temporarily unavailable")
+    || m.includes("server closed")
+    || m.includes("503");
+}
+
+/** Runs `fn`, retrying only on transient PostgREST/database errors. */
+export async function withPgRetry<T>(
+  fn: () => Promise<{ data: T[] | null; error: { message: string } | null }>,
+  attempts = 3,
+): Promise<{ data: T[] | null; error: { message: string } | null }> {
+  let last: { data: T[] | null; error: { message: string } | null } = { data: null, error: null };
+  for (let i = 0; i < attempts; i++) {
+    last = await fn();
+    if (!last.error || !isTransientPgError(last.error.message)) return last;
+    await new Promise((r) => setTimeout(r, 250 * (i + 1)));
+  }
+  return last;
+}
+
+
+/**
  * Drains a PostgREST query across `.range()` pages until it is exhausted.
  *
  * @param build   Called once per page with the half-open row window. Must
@@ -40,8 +73,9 @@ export async function fetchAllRows<T>(
   const out: T[] = [];
   for (let from = 0; from < maxRows; from += PAGE_SIZE) {
     const to = Math.min(from + PAGE_SIZE, maxRows) - 1;
-    const { data, error } = await build(from, to);
+    const { data, error } = await withPgRetry<T>(() => Promise.resolve(build(from, to)));
     if (error) throw new Error(error.message);
+
     const rows = (data ?? []) as T[];
     out.push(...rows);
     // A short page means the result set is exhausted.

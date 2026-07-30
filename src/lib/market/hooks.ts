@@ -488,29 +488,42 @@ export function useCandles(
   symbol: string | undefined,
   timeframe: string,
   exchange = "NSE",
-  opts: { allowDelayed?: boolean } = {},
+  opts: { allowDelayed?: boolean; range?: string } = {},
 ) {
   const intraday = /^(?:\d+m|\d+h)$/.test(timeframe);
   const allowDelayed = !!opts.allowDelayed;
+  // Intraday charts open on today's session, so a shallow upstream window is
+  // enough and loads far faster than 60d/max of minute bars.
+  const range = opts.range ?? (/^\d+m$/.test(timeframe) ? "5d" : undefined);
   return useQuery({
-    queryKey: ["market", "candles", symbol ?? "", timeframe, exchange, allowDelayed],
+    queryKey: ["market", "candles", symbol ?? "", timeframe, exchange, allowDelayed, range ?? ""],
     queryFn: () => callMarketFn<CandlesResponse>(
       "market-candles",
-      { symbol, timeframe, exchange, allow_delayed: allowDelayed },
+      { symbol, timeframe, exchange, allow_delayed: allowDelayed, ...(range ? { range } : {}) },
     ),
     enabled: !!symbol,
+    // Never blank the chart while a new symbol/timeframe loads, and keep the
+    // series around long enough that revisiting a chart paints instantly.
+    placeholderData: (prev: CandlesResponse | undefined) => prev,
+    gcTime: 30 * 60_000,
     // Broker outages return provider="cache"/"none"/"quote". Keep a fast poll
     // so recovery is visible within a bar-length instead of the old 5-minute
     // punishment window; only fully-empty responses back off.
-    staleTime: intraday ? 30_000 : 5 * 60_000,
+    staleTime: intraday ? 5_000 : 5_000,
     refetchInterval: (q) => {
-      if (!intraday) return false as const;
       const d = q.state.data as CandlesResponse | undefined;
       const empty = !d || d.provider === "none" || d.candles.length === 0;
-      // 60s normal, 90s during a recoverable outage, 3m only when truly empty.
-      const gap = empty ? 180_000 : d?.degraded ? 90_000 : 60_000;
+      // Daily/weekly/monthly now carry a live forming bar stitched from the
+      // same broker quote the Quote panel shows, so they must poll during a
+      // session too — otherwise 1D freezes at the cached close and disagrees
+      // with the quote card (the RELAXO 409.10 vs 417.00 mismatch).
+      if (!intraday) return liveInterval(empty ? 60_000 : 5_000, false)();
+      // Analysis shows one selected symbol; keep it close to the 1s quote path.
+      // Broad quote surfaces remain protected by their own batched hooks.
+      const gap = empty ? 60_000 : d?.degraded ? 15_000 : 5_000;
       return liveInterval(gap, false)();
     },
+
 
     refetchIntervalInBackground: false,
   });

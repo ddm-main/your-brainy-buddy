@@ -3,6 +3,7 @@
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { getReadProvider } from "./provider.ts";
+import { BROKER_PROVIDERS } from "./provider.ts";
 import { nseEquityMeta } from "./nseClient.ts";
 import * as fmp from "./fmpClient.ts";
 import * as alpha from "./alphaVantageClient.ts";
@@ -128,7 +129,7 @@ async function getProviderFetcher(
   switch (providerName) {
     case "kotak": {
       const { provider } = await getReadProvider(svc, userId ?? "");
-      if (provider.name !== "kotak_neo") return null;
+      if (!BROKER_PROVIDERS.includes(provider.name)) return null;
       return async (symbol, exchange) => {
         const quotes = await provider.getQuotes([`${exchange}:${symbol}`]);
         return quotes[0] ?? null;

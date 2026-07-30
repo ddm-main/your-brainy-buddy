@@ -6,6 +6,7 @@
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { istTradeDate } from "../_shared/market/cron.ts";
 import { getActiveProvider } from "../_shared/market/provider.ts";
+import { BROKER_PROVIDERS } from "../_shared/market/provider.ts";
 import { kotakCancelOrder, withKotakSession } from "../_shared/market/kotakClient.ts";
 import { encryptValue } from "../_shared/market/provider.ts";
 import { evaluateGroups, type ScreenerGroup } from "../_shared/market/conditions.ts";
@@ -64,7 +65,7 @@ Deno.serve(async (req) => {
       const product = (rows.find((o) => o.leg === "entry")?.product ?? "MIS") as "MIS" | "CNC";
 
       const { provider, settings } = await getActiveProvider(svc, userId);
-      if (provider.name !== "kotak_neo" || !settings || settings.connection_status !== "connected") {
+      if (!BROKER_PROVIDERS.includes(provider.name) || !settings || settings.connection_status !== "connected") {
         return errorResponse(req, "Kotak Neo not connected", 400);
       }
 

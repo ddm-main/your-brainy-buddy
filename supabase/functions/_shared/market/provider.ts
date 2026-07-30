@@ -4,6 +4,7 @@
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { encryptStatementPassword } from "../crypto.ts";
 import { isDailyGrain as hasDailyGrain } from "./candleGuard.ts";
+import { withPgRetry } from "./paginate.ts";
 
 import {
   KOTAK_SETTINGS_COLS,
@@ -28,7 +29,29 @@ import {
   withKotakSession,
 } from "./kotakClient.ts";
 import { isRouteOpen } from "./routeBreaker.ts";
+import {
+  SHOONYA_SETTINGS_COLS,
+  SHOONYA_WS,
+  type ShoonyaSettings,
+  ShoonyaError,
+  depthFromQuote,
+  norenExchange,
+  norenInterval,
+  shoonyaCancelOrder,
+  shoonyaConvertPosition,
+  shoonyaDailyCandles,
+  shoonyaHoldings,
+  shoonyaIntradayCandles,
+  shoonyaLimits,
+  shoonyaModifyOrder,
+  shoonyaPlaceOrder,
+  shoonyaPositions,
+  shoonyaPost,
+  shoonyaQuote,
+  withShoonyaSession,
+} from "./shoonyaClient.ts";
 import { toYahooSymbol, yahooChartRetry, yahooQuote } from "./yahooClient.ts";
+import { isIndexSymbol, resolveIndexQuotes } from "./indexQuotes.ts";
 import type { Candle } from "./indicators.ts";
 
 // Symbols already reported as missing a Kotak instrument token, per isolate.
@@ -47,7 +70,7 @@ export type DepthLadder = {
   bids: Array<{ price: number; qty: number; orders: number }>;
   asks: Array<{ price: number; qty: number; orders: number }>;
   ltp: number | null;
-  source: "kotak" | "yahoo" | "unavailable";
+  source: "kotak" | "shoonya" | "yahoo" | "unavailable";
   reason_code?: DepthReasonCode;
   reason?: string;
 };
@@ -73,11 +96,17 @@ export interface QuoteRow {
   day_open?: number | null;
   day_high?: number | null;
   day_low?: number | null;
-  source: "kotak" | "yahoo" | "cache";
+  source: "kotak" | "shoonya" | "nse" | "bse" | "yahoo" | "cache";
   as_of?: string | null;
   previous_close_as_of?: string | null;
   high_52w?: number | null;
   low_52w?: number | null;
+  /** Why a live-only symbol was not priced, when applicable. */
+  reason?: string | null;
+  /** True when the UI must not substitute a delayed public quote. */
+  live_required?: boolean;
+  /** True when a delayed fallback existed or could exist but was intentionally blocked. */
+  delayed_blocked?: boolean;
 }
 
 export interface HoldingRow {
@@ -138,7 +167,7 @@ export interface FundsSnapshot {
   exposure_margin?: number | null;
   realized_mtm?: number | null;
   unrealized_mtm?: number | null;
-  source: "kotak" | "unavailable";
+  source: "kotak" | "shoonya" | "unavailable";
   raw?: unknown;
 }
 
@@ -161,7 +190,7 @@ export interface PositionsResult {
 // coverage gaps (no scrip token), and `provider.name` alone mislabelled those
 // delayed bars as "kotak · live" on the chart.
 export interface OhlcvMeta {
-  source?: "kotak_neo" | "yahoo";
+  source?: "kotak_neo" | "shoonya" | "yahoo";
   /** Why Kotak could not serve: broker_503, no_token, empty, session, other. */
   reason?: string;
 }
@@ -198,7 +227,13 @@ function parseKey(key: string): { exchange: string; symbol: string } {
 // path. Neither value is correctness-critical to cache for a few seconds:
 // connection status / instrument tokens don't change tick to tick.
 
-interface SettingsRow extends KotakSettings { active_provider: string }
+type SettingsRow = KotakSettings & Partial<Omit<ShoonyaSettings, keyof KotakSettings>> & { active_provider: string };
+
+// Union of every provider's column set — one read serves whichever provider
+// the row turns out to be, instead of a second round-trip per provider.
+const ALL_SETTINGS_COLS = Array.from(new Set(
+  (KOTAK_SETTINGS_COLS + "," + SHOONYA_SETTINGS_COLS + ",active_provider").split(","),
+)).join(",");
 const settingsCache = new Map<string, { rows: SettingsRow[]; expiresAt: number }>();
 const SETTINGS_TTL_MS = 10_000;
 
@@ -207,9 +242,9 @@ async function getSettingsRows(svc: SupabaseClient, userId: string): Promise<Set
   if (cached && cached.expiresAt > Date.now()) return cached.rows;
   const { data } = await svc
     .from("market_api_settings")
-    .select(KOTAK_SETTINGS_COLS + ",active_provider")
+    .select(ALL_SETTINGS_COLS)
     .eq("user_id", userId);
-  const rows = (data ?? []) as SettingsRow[];
+  const rows = (data ?? []) as unknown as SettingsRow[];
   settingsCache.set(userId, { rows, expiresAt: Date.now() + SETTINGS_TTL_MS });
   return rows;
 }
@@ -257,6 +292,15 @@ const KNOWN_INDEX_TOKENS: Record<string, string> = {
   "NSE:^INDIAVIX": "26017",
 };
 
+export const LIVE_ONLY_NSE_INDEX_SYMBOLS = new Set(["^NSEI", "^NSEBANK", "^INDIAVIX"]);
+
+export function isLiveOnlyNseIndex(symbol: string, exchange = "NSE"): boolean {
+  return exchange.toUpperCase() === "NSE" && LIVE_ONLY_NSE_INDEX_SYMBOLS.has(symbol.toUpperCase());
+}
+
+const INDEX_QUOTE_TYPES = ["all", "ltp", "ohlc"] as const;
+const indexQuoteRouteCache = new Map<string, { segment: string; quoteType: typeof INDEX_QUOTE_TYPES[number] }>();
+
 
 async function getTokenMap(svc: SupabaseClient): Promise<Map<string, TokenEntry>> {
   if (tokenMapCache && tokenMapCache.expiresAt > Date.now()) return tokenMapCache.map;
@@ -266,16 +310,18 @@ async function getTokenMap(svc: SupabaseClient): Promise<Map<string, TokenEntry>
   // by Yahoo instead. Page explicitly until the table is drained.
   const PAGE = 1000;
   const data: any[] = [];
+  let partial = false;
   for (let from = 0; from < 20_000; from += PAGE) {
-    const { data: page, error } = await svc
+    const { data: page, error } = await withPgRetry<any>(() => Promise.resolve(svc
       .from("market_stocks").select("symbol,exchange,token,kotak_segment,instrument_type")
       .in("exchange", ["NSE", "BSE"]).not("token", "is", null)
       .order("symbol", { ascending: true })
-      .range(from, from + PAGE - 1);
-    if (error) { console.error("[market] token map page failed:", error.message); break; }
+      .range(from, from + PAGE - 1) as any));
+    if (error) { console.error("[market] token map page failed:", error.message); partial = true; break; }
     data.push(...(page ?? []));
     if (!page || page.length < PAGE) break;
   }
+
   const map = new Map<string, TokenEntry>();
 
   for (const r of data ?? []) {
@@ -308,7 +354,10 @@ async function getTokenMap(svc: SupabaseClient): Promise<Map<string, TokenEntry>
     }
   }
 
-  tokenMapCache = { map, expiresAt: Date.now() + TOKEN_MAP_TTL_MS };
+  // A partial read (transient DB error mid-paging) must not be cached for the
+  // full TTL — otherwise one blip demotes most symbols to Yahoo for an hour.
+  tokenMapCache = { map, expiresAt: Date.now() + (partial ? 30_000 : TOKEN_MAP_TTL_MS) };
+
   return map;
 }
 
@@ -488,6 +537,20 @@ const firstNum = (obj: any, paths: string[]): number | null => {
   return null;
 };
 
+const finiteNum = (v: unknown): number | null => {
+  const n = typeof v === "string" ? parseFloat(v) : typeof v === "number" ? v : NaN;
+  return Number.isFinite(n) ? n : null;
+};
+
+const firstFiniteNum = (obj: any, paths: string[]): number | null => {
+  for (const path of paths) {
+    const value = path.split(".").reduce((acc, key) => acc?.[key], obj);
+    const n = finiteNum(value);
+    if (n != null) return n;
+  }
+  return null;
+};
+
 const parseKotakDate = (obj: any): string | null => {
   const raw = obj?.last_traded_time ?? obj?.lastTradeTime ?? obj?.ltt ?? obj?.tradeTime ?? obj?.lstup_time ?? obj?.time;
 
@@ -499,6 +562,124 @@ const parseKotakDate = (obj: any): string | null => {
   if (Number.isNaN(d.getTime())) return null;
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
 };
+
+type ParsedQuoteRequest = { key: string; exchange: string; symbol: string };
+
+function isKnownIndexRequest(p: ParsedQuoteRequest, entry?: TokenEntry): boolean {
+  const canonical = keyFor(p.exchange, p.symbol);
+  const known = KNOWN_INDEX_TOKENS[canonical];
+  return !!known && (!entry?.token || String(entry.token) === String(known));
+}
+
+function indexSegmentsFor(exchange: string, storedSegment?: string | null): string[] {
+  const ex = exchange.toUpperCase();
+  const candidates = ex === "BSE"
+    ? [storedSegment, "bse_indices", "bse_cm"]
+    : [storedSegment, "nse_indices", "nse_cm"];
+  return candidates
+    .map((s) => String(s ?? "").trim().toLowerCase())
+    .filter((s, i, arr) => !!s && arr.indexOf(s) === i);
+}
+
+function kotakQuoteMaps(raw: any[]): { byNeoSymbol: Map<string, any>; byTokenOnly: Map<string, any> } {
+  const byNeoSymbol = new Map<string, any>();
+  const byTokenOnly = new Map<string, any>();
+  for (const r of raw) {
+    const rawNeoSymbol = String(
+      r?.symbol ?? r?.neoSymbol ?? r?.neosymbol ?? r?.pSymbolName ?? "",
+    ).trim();
+    const rawToken = String(
+      r?.tk ?? r?.token ?? r?.instrumentToken ?? r?.instrument_token
+      ?? r?.exchange_token ?? r?.exchangeToken ?? r?.pSymbol ?? "",
+    ).trim();
+    const rawSeg = String(r?.exchange ?? r?.exchangeSegment ?? r?.exchange_segment ?? "").trim().toLowerCase();
+    const segTok = rawNeoSymbol.match(/^([a-z]+_[a-z]+)\|(.+)$/i);
+    if (segTok) {
+      const normalized = `${segTok[1].toLowerCase()}|${segTok[2]}`;
+      byNeoSymbol.set(normalized, r);
+      byTokenOnly.set(String(segTok[2]), r);
+    } else if (rawNeoSymbol) {
+      byTokenOnly.set(rawNeoSymbol.includes("|") ? String(rawNeoSymbol.split("|").pop()) : rawNeoSymbol, r);
+    }
+    const tokenOnly = rawToken.includes("|") ? rawToken.split("|").pop() : rawToken;
+    if (tokenOnly) {
+      byTokenOnly.set(String(tokenOnly), r);
+      if (rawSeg) byNeoSymbol.set(`${rawSeg}|${tokenOnly}`, r);
+    }
+  }
+  return { byNeoSymbol, byTokenOnly };
+}
+
+function kotakRawForEntry(raw: any[], entry: TokenEntry): any | null {
+  const maps = kotakQuoteMaps(raw);
+  return maps.byNeoSymbol.get(`${entry.segment}|${entry.token}`) ?? maps.byTokenOnly.get(String(entry.token)) ?? null;
+}
+
+function quoteRowFromKotak(p: ParsedQuoteRequest, r: any): QuoteRow | null {
+  if (!r) return null;
+  const price = firstNum(r, [
+    "last_traded_price", "ltp", "lastPrice", "last_price", "lp",
+    "index_value", "indexValue", "index", "value", "iv",
+  ]);
+  const prevClose = firstNum(r, [
+    "previous_close", "prev_close", "previousClose", "prevClose",
+    "previous_close_price", "previousClosePrice", "prv_close", "prev_close_price",
+    "ohlc.close", "ohlc.c", "closing_price", "close", "c",
+  ]);
+  if (!price) return null;
+  const changeAbs = prevClose ? price - prevClose : firstFiniteNum(r, ["change", "net_change", "day_change", "chg", "cng"]);
+  const directChangePct = firstFiniteNum(r, ["per_change", "change_pct", "percent_change", "changePercent", "nc"]);
+  return {
+    key: p.key,
+    price,
+    previous_close: prevClose,
+    change_abs: changeAbs,
+    change_pct: prevClose ? ((price - prevClose) / prevClose) * 100 : directChangePct,
+    volume: firstNum(r, ["volume", "vol_traded_today", "last_volume", "totalTradedVolume"]),
+    day_open: firstNum(r, ["open_price", "ohlc.open", "ohlc.o", "opn_pric", "open", "o"]),
+    day_high: firstNum(r, ["high_price", "ohlc.high", "ohlc.h", "hgh_pric", "high", "h"]),
+    day_low: firstNum(r, ["low_price", "ohlc.low", "ohlc.l", "lw_pric", "low", "l"]),
+    source: "kotak",
+    as_of: parseKotakDate(r),
+    previous_close_as_of: null,
+    high_52w: firstNum(r, ["hgh_52w_val", "high_52w", "52wkHigh", "yearHigh", "year_high"]),
+    low_52w: firstNum(r, ["lw_52w_val", "low_52w", "52wkLow", "yearLow", "year_low"]),
+  };
+}
+
+async function resolveKotakIndexQuote(
+  svc: SupabaseClient,
+  s: KotakSettings,
+  p: ParsedQuoteRequest,
+  entry: TokenEntry,
+): Promise<QuoteRow | null> {
+  const canonical = keyFor(p.exchange, p.symbol);
+  const cached = indexQuoteRouteCache.get(canonical);
+  const routes = [
+    ...(cached ? [cached] : []),
+    ...indexSegmentsFor(p.exchange, entry.segment).flatMap((segment) =>
+      INDEX_QUOTE_TYPES.map((quoteType) => ({ segment, quoteType }))),
+  ].filter((r, i, arr) => arr.findIndex((x) => x.segment === r.segment && x.quoteType === r.quoteType) === i);
+
+  let lastErr: unknown = null;
+  for (const route of routes) {
+    try {
+      const raw = await withKotakSession(svc, s, encryptValue, (ss) =>
+        kotakQuotes(ss, [`${route.segment}|${entry.token}`], route.quoteType));
+      const r = kotakRawForEntry(raw, { ...entry, segment: route.segment });
+      const row = quoteRowFromKotak(p, r);
+      if (row) {
+        indexQuoteRouteCache.set(canonical, route);
+        return row;
+      }
+    } catch (e) {
+      lastErr = e;
+      const status = (e as { status?: number } | null)?.status;
+      if (status === 401 || status === 403 || status === 429 || (typeof status === "number" && status >= 500)) throw e;
+    }
+  }
+  return null;
+}
 
 // In-isolate circuit breaker for Kotak getQuotes. After N consecutive batch
 // failures, skip Kotak briefly and serve Yahoo per-symbol instead of hammering
@@ -543,12 +724,48 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       const without = parsed.filter((p) => !tokenEntryFor(p));
 
       const out: QuoteRow[] = [];
+      const failedFromKotak: typeof parsed = [];
+
+      const indexReqs = withToken.filter((p) => isKnownIndexRequest(p, tokenEntryFor(p)));
+      const normalReqs = withToken.filter((p) => !isKnownIndexRequest(p, tokenEntryFor(p)));
+
+      if (indexReqs.length > 0) {
+        const idxResults = await Promise.all(indexReqs.map(async (p) => {
+          const t0 = Date.now();
+          if (kotakBreakerOpen()) return { row: null as QuoteRow | null, failed: p, latency: 0, error: "kotak quote breaker open" };
+          try {
+            const entry = tokenEntryFor(p);
+            if (!entry) return { row: null as QuoteRow | null, failed: p, latency: Date.now() - t0, error: "no token" };
+            const row = await resolveKotakIndexQuote(svc, s, p, entry);
+            return { row, failed: row ? null : p, latency: Date.now() - t0, error: row ? null : "no index quote row" };
+          } catch (e) {
+            return { row: null as QuoteRow | null, failed: p, latency: Date.now() - t0, error: e instanceof Error ? e.message : String(e) };
+          }
+        }));
+        const okCount = idxResults.filter((r) => r.row).length;
+        logProviderHealth(
+          svc,
+          "kotak_neo",
+          "getQuotes:index",
+          okCount > 0,
+          Math.max(...idxResults.map((r) => r.latency), 0),
+          okCount === indexReqs.length ? undefined : `missing index rows: ${idxResults.filter((r) => r.failed).map((r) => r.failed?.key).join(",")}`,
+        );
+        if (okCount > 0) kotakBreakerRecordSuccess();
+        for (const r of idxResults) {
+          if (r.row) out.push(r.row);
+          else if (r.failed) failedFromKotak.push(r.failed);
+        }
+      }
+
       // Split batches by Kotak segment. One 500 on nse_indices used to fail
       // the equity batch too — a poll-wide collapse to 0 across the UI.
-      if (withToken.length > 0) {
-        const bySeg = new Map<string, typeof withToken>();
-        for (const p of withToken) {
-          const seg = tokenEntryFor(p)!.segment;
+      if (normalReqs.length > 0) {
+        const bySeg = new Map<string, typeof normalReqs>();
+        for (const p of normalReqs) {
+          const entry = tokenEntryFor(p);
+          if (!entry) continue;
+          const seg = entry.segment;
           const arr = bySeg.get(seg) ?? [];
           arr.push(p); bySeg.set(seg, arr);
         }
@@ -562,71 +779,30 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
             return { rows, failed };
           }
           try {
-            const entryFor = (p: { exchange: string; symbol: string }) =>
-              tokenEntryFor(p)!;
-            const neoSymbols = group.map((p) => { const e = entryFor(p); return `${e.segment}|${e.token}`; });
+            const neoSymbols = group.flatMap((p) => {
+              const e = tokenEntryFor(p);
+              return e ? [`${e.segment}|${e.token}`] : [];
+            });
             const raw = await withKotakSession(svc, s, encryptValue, (ss) => kotakQuotes(ss, neoSymbols, "all"));
-            logProviderHealth(svc, "kotak_neo", "getQuotes", true, Date.now() - t0);
-            kotakBreakerRecordSuccess();
-            const byNeoSymbol = new Map<string, any>();
-            const byTokenOnly = new Map<string, any>();
-            for (const r of raw) {
-              const rawNeoSymbol = String(
-                r?.symbol ?? r?.neoSymbol ?? r?.neosymbol ?? r?.pSymbolName ?? "",
-              ).trim();
-              // Neo's /script-details quote payload identifies a row with
-              // `exchange_token` + `exchange` (e.g. 2885 / "nse_cm") — it
-              // carries no `symbol`/`tk` field at all. Missing this made
-              // EVERY tokened symbol look unmatched, so the whole book fell
-              // through to Yahoo while Kotak was answering perfectly.
-              const rawToken = String(
-                r?.tk ?? r?.token ?? r?.instrumentToken ?? r?.instrument_token
-                ?? r?.exchange_token ?? r?.exchangeToken ?? r?.pSymbol ?? "",
-              ).trim();
-              const rawSeg = String(r?.exchange ?? r?.exchangeSegment ?? r?.exchange_segment ?? "").trim().toLowerCase();
-              const segTok = rawNeoSymbol.match(/^([a-z]+_[a-z]+)\|(.+)$/i);
-              if (segTok) {
-                const normalized = `${segTok[1].toLowerCase()}|${segTok[2]}`;
-                byNeoSymbol.set(normalized, r);
-                byTokenOnly.set(String(segTok[2]), r);
-              } else if (rawNeoSymbol) {
-                byTokenOnly.set(rawNeoSymbol.includes("|") ? String(rawNeoSymbol.split("|").pop()) : rawNeoSymbol, r);
-              }
-              const tokenOnly = rawToken.includes("|") ? rawToken.split("|").pop() : rawToken;
-              if (tokenOnly) {
-                byTokenOnly.set(String(tokenOnly), r);
-                if (rawSeg) byNeoSymbol.set(`${rawSeg}|${tokenOnly}`, r);
-              }
-            }
+            const maps = kotakQuoteMaps(raw);
             for (const p of group) {
-              const e = entryFor(p);
-              const r = byNeoSymbol.get(`${e.segment}|${e.token}`) ?? byTokenOnly.get(String(e.token));
+              const e = tokenEntryFor(p);
+              if (!e) { failed.push(p); continue; }
+              const r = maps.byNeoSymbol.get(`${e.segment}|${e.token}`) ?? maps.byTokenOnly.get(String(e.token));
               if (!r) { failed.push(p); continue; }
-              const price = firstNum(r, ["last_traded_price", "ltp", "lastPrice", "last_price", "lp"]);
-              const prevClose = firstNum(r, [
-                "previous_close", "prev_close", "previousClose", "prevClose",
-                "ohlc.close", "ohlc.c", "closing_price", "close", "c",
-              ]);
-              if (!price) { failed.push(p); continue; }
-              const changeAbs = prevClose ? price - prevClose : firstNum(r, ["change"]);
-              rows.push({
-                key: p.key,
-                price,
-                previous_close: prevClose,
-                change_abs: changeAbs,
-                change_pct: prevClose ? ((price - prevClose) / prevClose) * 100 : firstNum(r, ["per_change"]),
-                // Neo calls the cumulative day volume `last_volume`.
-                volume: firstNum(r, ["volume", "vol_traded_today", "last_volume", "totalTradedVolume"]),
-                day_open: firstNum(r, ["open_price", "ohlc.open", "ohlc.o", "opn_pric", "open", "o"]),
-                day_high: firstNum(r, ["high_price", "ohlc.high", "ohlc.h", "hgh_pric", "high", "h"]),
-                day_low: firstNum(r, ["low_price", "ohlc.low", "ohlc.l", "lw_pric", "low", "l"]),
-                source: "kotak",
-                as_of: parseKotakDate(r),
-                previous_close_as_of: null,
-                high_52w: firstNum(r, ["hgh_52w_val", "high_52w", "52wkHigh", "yearHigh", "year_high"]),
-                low_52w: firstNum(r, ["lw_52w_val", "low_52w", "52wkLow", "yearLow", "year_low"]),
-              });
+              const row = quoteRowFromKotak(p, r);
+              if (row) rows.push(row);
+              else failed.push(p);
             }
+            logProviderHealth(
+              svc,
+              "kotak_neo",
+              "getQuotes",
+              rows.length > 0,
+              Date.now() - t0,
+              rows.length > 0 ? undefined : `no quote rows for ${group.map((p) => p.key).join(",")}`,
+            );
+            if (rows.length > 0) kotakBreakerRecordSuccess();
 
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -639,24 +815,37 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
         }));
         for (const r of segResults) out.push(...r.rows);
         // A Kotak-tokened symbol Kotak couldn't quote:
-        //  • during the session — NO Yahoo substitution. The symbol comes back
-        //    unquoted and the UI says "broker unavailable" rather than showing
-        //    a 15-minute-old price as if it were live.
-        //  • off-hours — Yahoo is fine, nothing is live anyway.
-        const failedKeys = segResults.flatMap((r) => r.failed.map((p) => p.key));
-        if (allowFallback && failedKeys.length > 0 && !nseOpenNow()) {
-          try { out.push(...(await yahoo.getQuotes(failedKeys))); }
-          catch (e) { console.error("[market] yahoo per-symbol fallback failed:", e); }
+        //  • an INDEX — Kotak has no working index quote route at all, so a
+        //    public source is the only source. Always allowed, and labelled
+        //    with whichever upstream served it.
+        //  • an equity during the session — NO delayed substitution. The
+        //    symbol comes back unquoted and the UI says "broker unavailable"
+        //    rather than showing a 15-minute-old price as if it were live.
+        //  • an equity off-hours — Yahoo is fine, nothing is live anyway.
+        const failedKeys = [...failedFromKotak.map((p) => p.key), ...segResults.flatMap((r) => r.failed.map((p) => p.key))];
+        const fallbackKeys = failedKeys.filter((k) => {
+          const p = parseKey(k);
+          return isIndexSymbol(p.symbol) || !nseOpenNow();
+        });
+        if (allowFallback && fallbackKeys.length > 0) {
+          try { out.push(...(await resolveIndexQuotes(svc, fallbackKeys.map((k) => ({ key: k, ...parseKey(k) })), []))); }
+          catch (e) { console.error("[market] per-symbol fallback failed:", e); }
         }
+      } else if (failedFromKotak.length > 0 && allowFallback) {
+        const fallbackKeys = failedFromKotak
+          .filter((p) => isIndexSymbol(p.symbol) || !nseOpenNow())
+          .map((p) => ({ key: p.key, exchange: p.exchange, symbol: p.symbol }));
+        try { if (fallbackKeys.length > 0) out.push(...(await resolveIndexQuotes(svc, fallbackKeys, []))); }
+        catch (e) { console.error("[market] index fallback failed:", e); }
       }
-      // Symbols with no Kotak token — always use Yahoo. Kotak-primary means
-      // "use Yahoo only for coverage Kotak doesn't provide", which is exactly
-      // this case (indices/products missing from Kotak's scrip master).
+      // Symbols with no Kotak token — always use the public chain. Kotak-primary
+      // means "use another source only for coverage Kotak doesn't provide",
+      // which is exactly this case (indices/products missing from the master).
       const covered = new Set(out.map((o) => o.key));
-      const remaining = without.map((p) => p.key).filter((k) => !covered.has(k));
+      const remaining = without.filter((p) => !covered.has(p.key));
       if (allowFallback && remaining.length > 0) {
-        try { out.push(...(await yahoo.getQuotes(remaining))); }
-        catch (e) { console.error("[market] yahoo coverage fallback failed:", e); }
+        try { out.push(...(await resolveIndexQuotes(svc, remaining.map((p) => ({ key: p.key, exchange: p.exchange, symbol: p.symbol })), []))); }
+        catch (e) { console.error("[market] coverage fallback failed:", e); }
       }
       return out;
     },
@@ -1113,11 +1302,283 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
   };
 }
 
+// ---------- Shoonya (Finvasia Noren) provider ----------
+// Noren is token-keyed: every data route wants the instrument token from the
+// symbol master (mirrored into market_stocks.shoonya_token by
+// market-shoonya-master-sync). Unlike Kotak, Noren DOES serve candles
+// natively (TPSeries intraday, EODChartData daily), so charts don't need
+// Yahoo except for coverage gaps and grains Noren has no endpoint for.
+
+let shoonyaTokenCache: { map: Map<string, string>; expiresAt: number } | null = null;
+const SHOONYA_TOKEN_TTL_MS = 60_000;
+
+async function getShoonyaTokenMap(svc: SupabaseClient): Promise<Map<string, string>> {
+  if (shoonyaTokenCache && shoonyaTokenCache.expiresAt > Date.now()) return shoonyaTokenCache.map;
+  const PAGE = 1000;
+  const map = new Map<string, string>();
+  for (let from = 0; from < 40_000; from += PAGE) {
+    const { data, error } = await withPgRetry<any>(() => Promise.resolve(svc
+      .from("market_stocks").select("symbol,exchange,shoonya_token")
+      .in("exchange", ["NSE", "BSE"]).not("shoonya_token", "is", null)
+      .range(from, from + PAGE - 1)));
+    if (error) break;
+    const page = (data ?? []) as any[];
+    for (const r of page) map.set(keyFor(r.exchange, r.symbol), String(r.shoonya_token));
+    if (page.length < PAGE) break;
+  }
+  // Don't cache an empty map for a full minute — the master sync may simply
+  // not have run yet, and a stale empty map would pin every symbol to Yahoo.
+  shoonyaTokenCache = { map, expiresAt: Date.now() + (map.size ? SHOONYA_TOKEN_TTL_MS : 5_000) };
+  return map;
+}
+
+export function invalidateShoonyaTokenMap(): void {
+  shoonyaTokenCache = null;
+}
+
+const SHOONYA_QUOTE_CONCURRENCY = 8;
+
+async function mapPool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length) {
+      const idx = i++;
+      out[idx] = await fn(items[idx]);
+    }
+  }));
+  return out;
+}
+
+export function shoonyaProvider(svc: SupabaseClient, s: ShoonyaSettings): MarketProvider {
+  const yahoo = yahooProvider(svc);
+  const run = <T>(fn: (ctx: any) => Promise<T>, opts?: { retryOnAuthError?: boolean }) =>
+    withShoonyaSession<T>(svc, s, encryptValue, fn, opts ?? {});
+
+  return {
+    name: "shoonya",
+
+    async getQuotes(keys, opts) {
+      const allowFallback = opts?.allowFallback !== false;
+      const t0 = Date.now();
+      const parsed = keys.map((k) => ({ key: k, ...parseKey(k) }));
+      const tokens = await getShoonyaTokenMap(svc);
+      const withToken = parsed.filter((p) => tokens.get(keyFor(p.exchange, p.symbol)));
+      const without = parsed.filter((p) => !tokens.get(keyFor(p.exchange, p.symbol)));
+
+      const out: QuoteRow[] = [];
+      const failed: typeof parsed = [];
+
+      if (withToken.length > 0) {
+        // Noren has no batch quote route — one GetQuotes per instrument,
+        // bounded so a wide watchlist can't open 100 sockets at once.
+        const results = await run((ctx) => mapPool(withToken, SHOONYA_QUOTE_CONCURRENCY, async (p) => {
+          try {
+            const q = await shoonyaQuote(ctx, tokens.get(keyFor(p.exchange, p.symbol))!, p.exchange);
+            return { p, q, error: null as string | null };
+          } catch (e) {
+            return { p, q: null, error: e instanceof Error ? e.message : String(e) };
+          }
+        }));
+        for (const r of results) {
+          if (!r.q || !Number.isFinite(r.q.price) || r.q.price <= 0) { failed.push(r.p); continue; }
+          const prev = r.q.previous_close;
+          out.push({
+            key: r.p.key,
+            price: r.q.price,
+            previous_close: prev,
+            change_abs: prev != null ? r.q.price - prev : null,
+            change_pct: prev ? ((r.q.price - prev) / prev) * 100 : null,
+            volume: r.q.volume,
+            day_open: r.q.day_open,
+            day_high: r.q.day_high,
+            day_low: r.q.day_low,
+            high_52w: r.q.high_52w,
+            low_52w: r.q.low_52w,
+            source: "shoonya",
+            as_of: new Date().toISOString(),
+          });
+        }
+        logProviderHealth(svc, "shoonya", "getQuotes", out.length > 0, Date.now() - t0,
+          failed.length ? `${failed.length}/${withToken.length} symbols unpriced` : undefined);
+      }
+
+      const leftovers = [...without, ...failed];
+      if (leftovers.length === 0) return out;
+      // Live session: never paper over a broker gap with 15-min delayed bars
+      // for symbols the broker is supposed to serve.
+      if (!allowFallback) {
+        return [...out, ...leftovers.map((p) => ({
+          key: p.key, price: 0, previous_close: null, change_abs: null, change_pct: null,
+          volume: null, source: "shoonya" as const, reason: "no shoonya quote",
+          live_required: true, delayed_blocked: true,
+        }))];
+      }
+      try {
+        const y = await yahoo.getQuotes(leftovers.map((p) => p.key));
+        return [...out, ...y];
+      } catch {
+        return out;
+      }
+    },
+
+    async getOHLCV(symbol, exchange, range, interval, meta) {
+      if (meta) meta.source = "shoonya";
+      const t0 = Date.now();
+      const now = Math.floor(Date.now() / 1000);
+      const wanted = rangeSeconds(range);
+      const fromEpoch = now - wanted;
+      const intrv = norenInterval(interval);
+      const daily = intrv === null;
+      // Weekly/monthly have no Noren endpoint — Yahoo owns those grains.
+      if (interval === "1wk" || interval === "1mo") {
+        if (meta) { meta.source = "yahoo"; meta.reason = "grain_unsupported"; }
+        return yahoo.getOHLCV(symbol, exchange, range, interval, meta);
+      }
+      const tokens = await getShoonyaTokenMap(svc);
+      const token = tokens.get(keyFor(exchange, symbol));
+      if (!daily && !token) {
+        if (meta) { meta.source = "yahoo"; meta.reason = "no_token"; }
+        return yahoo.getOHLCV(symbol, exchange, range, interval, meta);
+      }
+      // Noren emits 1/3/5/10/15/30/60/240 natively; 2m/2h/4h are resampled.
+      const resampleFactor = interval === "2m" ? 2 : interval === "2h" ? 2 : 1;
+      const baseInterval = interval === "2m" ? "1" : interval === "2h" ? "60" : intrv;
+
+      try {
+        const raw = daily
+          ? await run((ctx) => shoonyaDailyCandles(ctx, symbol, exchange, fromEpoch, now))
+          : await run((ctx) => shoonyaIntradayCandles(ctx, token!, exchange, baseInterval!, fromEpoch, now));
+        if (raw.length === 0) {
+          if (meta) meta.reason = "empty";
+          if (nseSessionOpen() && !daily) throw new ShoonyaError(`shoonya returned no ${interval} candles`, 502);
+          if (meta) meta.source = "yahoo";
+          return yahoo.getOHLCV(symbol, exchange, range, interval, meta);
+        }
+        logProviderHealth(svc, "shoonya", "getOHLCV", true, Date.now() - t0);
+        return resampleFactor > 1 ? resampleCandles(raw, resampleFactor) : raw;
+      } catch (e) {
+        logProviderHealth(svc, "shoonya", "getOHLCV", false, Date.now() - t0, e instanceof Error ? e.message : String(e));
+        if (meta) meta.reason = meta.reason ?? "other";
+        // Same rule as Kotak: during the cash session live intraday must be
+        // broker-sourced or fail loudly. History may be backfilled by Yahoo.
+        if (nseSessionOpen() && !daily) throw e;
+        if (meta) meta.source = "yahoo";
+        return yahoo.getOHLCV(symbol, exchange, range, interval, meta);
+      }
+    },
+
+    async getDepth(symbol, exchange): Promise<DepthLadder> {
+      const tokens = await getShoonyaTokenMap(svc);
+      const token = tokens.get(keyFor(exchange, symbol));
+      if (!token) {
+        return { bids: [], asks: [], ltp: null, source: "unavailable", reason_code: "no_token",
+          reason: "No Shoonya instrument token for this symbol — run the symbol master sync." };
+      }
+      try {
+        const q = await run((ctx) => shoonyaPost<any>(ctx.base, "GetQuotes", {
+          uid: ctx.uid, exch: norenExchange(exchange), token: String(token),
+        }, ctx.jKey));
+        const d = depthFromQuote(q);
+        if (d.bids.length === 0 && d.asks.length === 0) {
+          return { ...d, source: "shoonya", reason_code: isIndianMarketOpen() ? "upstream_error" : "market_closed",
+            reason: isIndianMarketOpen() ? "Broker returned an empty book." : "Market is closed — no live order book." };
+        }
+        return { ...d, source: "shoonya", reason_code: "ok" };
+      } catch (e) {
+        return { bids: [], asks: [], ltp: null, source: "unavailable", reason_code: "upstream_error",
+          reason: e instanceof Error ? e.message : String(e) };
+      }
+    },
+
+    async getHoldings(): Promise<HoldingRow[]> {
+      return (await this.getHoldingsDetailed!()).rows;
+    },
+    async getHoldingsDetailed(): Promise<HoldingsResult> {
+      const r = await run((ctx) => shoonyaHoldings(ctx));
+      return { rows: r.rows, complete: r.complete };
+    },
+    async getPositions(): Promise<PositionRow[]> {
+      return (await this.getPositionsDetailed!()).rows;
+    },
+    async getPositionsDetailed(): Promise<PositionsResult> {
+      const r = await run((ctx) => shoonyaPositions(ctx));
+      return { rows: r.rows, realized: r.realized, complete: r.complete };
+    },
+
+    async placeOrder(input): Promise<PlaceOrderResult> {
+      // Never replayed on an auth error — a 401 after POST is ambiguous and a
+      // retry could double the position.
+      return await run((ctx) => shoonyaPlaceOrder(ctx, input), { retryOnAuthError: false });
+    },
+    async modifyOrder(orderId, changes): Promise<PlaceOrderResult> {
+      // Noren's ModifyOrder requires the instrument, which the app's modify
+      // call doesn't carry — recover it from the recorded intent.
+      const { data: row } = await svc.from("market_order_intents")
+        .select("request").eq("broker_order_id", orderId).maybeSingle();
+      const req = ((row as any)?.request ?? {}) as { symbol?: string; exchange?: string };
+      const current = { symbol: String(req.symbol ?? ""), exchange: String(req.exchange ?? "NSE") };
+      if (!current.symbol) {
+        throw new ShoonyaError("Shoonya needs the order's symbol to modify it — order not found locally.", 400);
+      }
+      return await run((ctx) => shoonyaModifyOrder(ctx, orderId, current, changes), { retryOnAuthError: false });
+    },
+    async cancelOrder(orderId): Promise<PlaceOrderResult> {
+      return await run((ctx) => shoonyaCancelOrder(ctx, orderId), { retryOnAuthError: false });
+    },
+    async convertPosition(input) {
+      return await run((ctx) => shoonyaConvertPosition(ctx, input), { retryOnAuthError: false });
+    },
+
+    async getFunds(): Promise<FundsSnapshot> {
+      const t0 = Date.now();
+      try {
+        const f = await run((ctx) => shoonyaLimits(ctx));
+        logProviderHealth(svc, "shoonya", "getFunds", true, Date.now() - t0);
+        svc.from("market_api_settings")
+          .update({ funds_last_error_code: null, funds_last_attempt_at: new Date().toISOString() })
+          .eq("id", s.id).then(() => {}, () => {});
+        return { ...f, source: "shoonya" };
+      } catch (e) {
+        logProviderHealth(svc, "shoonya", "getFunds", false, Date.now() - t0, e instanceof Error ? e.message : String(e));
+        svc.from("market_api_settings")
+          .update({ funds_last_error_code: "upstream", funds_last_attempt_at: new Date().toISOString() })
+          .eq("id", s.id).then(() => {}, () => {});
+        throw e;
+      }
+    },
+
+    async testAuth() {
+      try {
+        await run((ctx) => shoonyaLimits(ctx));
+        return { ok: true, detail: `Shoonya session valid${s.greeting_name ? ` — ${s.greeting_name}` : ""}` };
+      } catch (e) {
+        return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+      }
+    },
+  };
+}
+
 // ---------- Resolution ----------
 
 export interface ActiveProvider {
   provider: MarketProvider;
-  settings: KotakSettings | null;
+  settings: (KotakSettings & Partial<ShoonyaSettings>) | null;
+}
+
+/** Providers that carry a real broker account (orders, holdings, funds). */
+export const BROKER_PROVIDERS = ["kotak_neo", "shoonya"] as const as readonly string[];
+
+const shoonyaUsable = (r: SettingsRow): boolean =>
+  r.connection_status === "connected" || (!!r.ucc && !!r.vendor_code && !!r.api_secret_enc);
+
+const kotakUsable = (r: SettingsRow): boolean =>
+  r.connection_status === "connected" || !!r.totp_secret_enc;
+
+function providerForRow(svc: SupabaseClient, row: SettingsRow): MarketProvider | null {
+  if (row.active_provider === "kotak_neo") return kotakProvider(svc, row);
+  if (row.active_provider === "shoonya") return shoonyaProvider(svc, row as unknown as ShoonyaSettings);
+  return null;
 }
 
 // Account-bound provider: the caller's OWN broker connection. Orders,
@@ -1128,10 +1589,21 @@ export async function getActiveProvider(
   userId: string,
 ): Promise<ActiveProvider> {
   const rows = await getSettingsRows(svc, userId);
-  const kotak = rows.find((r) => r.active_provider === "kotak_neo" && r.connection_status === "connected");
-  if (kotak) return { provider: kotakProvider(svc, kotak), settings: kotak };
-  const kotakAny = rows.find((r) => r.active_provider === "kotak_neo" && r.totp_secret_enc);
-  if (kotakAny) return { provider: kotakProvider(svc, kotakAny), settings: kotakAny };
+  // Connected rows win; a credentialed-but-idle row is next (it can log in on
+  // demand). Order within each tier follows the row's own provider, so a user
+  // with both brokers keeps whichever is actually live.
+  const connected = rows.find((r) => BROKER_PROVIDERS.includes(r.active_provider) && r.connection_status === "connected");
+  if (connected) {
+    const p = providerForRow(svc, connected);
+    if (p) return { provider: p, settings: connected };
+  }
+  const credentialed = rows.find((r) =>
+    (r.active_provider === "kotak_neo" && kotakUsable(r)) ||
+    (r.active_provider === "shoonya" && shoonyaUsable(r)));
+  if (credentialed) {
+    const p = providerForRow(svc, credentialed);
+    if (p) return { provider: p, settings: credentialed };
+  }
   return { provider: yahooProvider(svc), settings: null };
 }
 
@@ -1141,35 +1613,35 @@ export async function getActiveProvider(
 // (market_api_settings.is_system) instead of requiring every user to connect
 // their own broker. Users only connect Kotak for their own account data.
 const SYSTEM_FEED_TTL_MS = 15_000;
-let systemFeedCache: { row: KotakSettings | null; expiresAt: number } | null = null;
+let systemFeedCache: { row: SettingsRow | null; expiresAt: number } | null = null;
 
 export function invalidateSystemFeedCache(): void {
   systemFeedCache = null;
 }
 
-async function getSystemFeedRow(svc: SupabaseClient): Promise<KotakSettings | null> {
+async function getSystemFeedRow(svc: SupabaseClient): Promise<SettingsRow | null> {
   if (systemFeedCache && systemFeedCache.expiresAt > Date.now()) return systemFeedCache.row;
-  const cols = KOTAK_SETTINGS_COLS + ",active_provider,is_system";
+  const cols = ALL_SETTINGS_COLS + ",is_system";
   // 1) Explicitly designated system feed.
   const { data: designated } = await svc
     .from("market_api_settings").select(cols)
-    .eq("is_system", true).eq("active_provider", "kotak_neo").limit(1);
-  let row = ((designated ?? []) as KotakSettings[])[0] ?? null;
-  // 2) Legacy fallback — no designation yet: newest connected Kotak row.
+    .eq("is_system", true).in("active_provider", BROKER_PROVIDERS as string[]).limit(1);
+  let row: SettingsRow | null = ((designated ?? []) as unknown as SettingsRow[])[0] ?? null;
+  // 2) Legacy fallback — no designation yet: newest usable broker row.
   if (!row) {
     const { data } = await svc
       .from("market_api_settings").select(cols)
-      .eq("active_provider", "kotak_neo")
-      .order("updated_at", { ascending: false }).limit(5);
-    const rows = (data ?? []) as KotakSettings[];
-    row = rows.find((r) => r.connection_status === "connected") ?? rows.find((r) => r.totp_secret_enc) ?? null;
+      .in("active_provider", BROKER_PROVIDERS as string[])
+      .order("updated_at", { ascending: false }).limit(8);
+    const rows = (data ?? []) as unknown as SettingsRow[];
+    row = rows.find((r) => r.connection_status === "connected") ?? rows.find((r) => usableSession(r)) ?? null;
   }
   systemFeedCache = { row, expiresAt: Date.now() + SYSTEM_FEED_TTL_MS };
   return row;
 }
 
-const usableSession = (r: KotakSettings | null | undefined): boolean =>
-  !!r && (r.connection_status === "connected" || !!r.totp_secret_enc);
+const usableSession = (r: SettingsRow | null | undefined): boolean =>
+  !!r && (r.active_provider === "shoonya" ? shoonyaUsable(r) : kotakUsable(r));
 
 // Read-only market-data provider. System Kotak feed first (so every signed-in
 // user gets real-time prices without connecting a broker), the caller's own
@@ -1180,7 +1652,10 @@ export async function getReadProvider(
 ): Promise<ActiveProvider> {
   try {
     const sys = await getSystemFeedRow(svc);
-    if (usableSession(sys)) return { provider: kotakProvider(svc, sys!), settings: sys };
+    if (usableSession(sys)) {
+      const p = providerForRow(svc, sys!);
+      if (p) return { provider: p, settings: sys };
+    }
   } catch { /* fall through to the caller's own connection */ }
   return getActiveProvider(svc, userId);
 }
@@ -1188,7 +1663,10 @@ export async function getReadProvider(
 // Service-level provider for cron jobs (no user context) — same system feed.
 export async function getServiceProvider(svc: SupabaseClient): Promise<ActiveProvider> {
   const row = await getSystemFeedRow(svc);
-  if (usableSession(row)) return { provider: kotakProvider(svc, row!), settings: row };
+  if (usableSession(row)) {
+    const p = providerForRow(svc, row!);
+    if (p) return { provider: p, settings: row };
+  }
   return { provider: yahooProvider(svc), settings: null };
 }
 

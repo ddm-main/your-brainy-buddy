@@ -5,8 +5,8 @@
 // real-time when Kotak has them, everything else stays via Yahoo.
 // Reads from public.market_index_watch; falls back to a default 6 when empty.
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
-import { getReadProvider } from "../_shared/market/provider.ts";
-import { getSharedQuotes } from "../_shared/market/quoteCache.ts";
+import { getReadProvider, isLiveOnlyNseIndex } from "../_shared/market/provider.ts";
+import { indexExchangeFor, resolveIndexQuotes } from "../_shared/market/indexQuotes.ts";
 import { recordFeedHeartbeat } from "../_shared/market/heartbeat.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 
@@ -64,20 +64,32 @@ Deno.serve(async (req) => {
     const seenSym = new Set(base.map((r) => r.symbol));
     const source = [...base, ...ALWAYS.filter((a) => !seenSym.has(a.symbol))] as typeof base;
 
-    // Route through the active provider. Keys are "NSE:<symbol>" — Kotak
-    // provider looks them up in the instrument-token map; anything not found
-    // (all indices, most of the time) falls back to Yahoo transparently.
+    // Resolve through the full index chain: broker first, then NSE's own
+    // (undelayed) allIndices feed, then Yahoo, then the last stored close.
+    // Sensex is a BSE index — asking for it as "NSE:^BSESN" never resolved.
     const { provider } = await getReadProvider(svc, auth.userId);
-    const keys = source.map((r) => `NSE:${r.symbol}`);
+    const reqs = source.map((r) => {
+      const exchange = indexExchangeFor(r.symbol);
+      return { key: `${exchange}:${r.symbol}`, exchange, symbol: r.symbol };
+    });
     const idxT0 = Date.now();
-    const quoteRows = await getSharedQuotes(provider, keys);
+    let brokerRows: Awaited<ReturnType<typeof provider.getQuotes>> = [];
+    try {
+      brokerRows = await provider.getQuotes(reqs.map((r) => r.key), { allowFallback: false });
+    } catch (e) {
+      console.error("[market-indices] broker quotes failed:", e instanceof Error ? e.message : String(e));
+    }
+    const quoteRows = await resolveIndexQuotes(svc, reqs, brokerRows);
     const byKey = new Map(quoteRows.map((q) => [q.key, q]));
 
 
     const providers = new Set<string>();
     const out = source.map((r) => {
-      const q = byKey.get(`NSE:${r.symbol}`);
+      const exchange = indexExchangeFor(r.symbol);
+      const q = byKey.get(`${exchange}:${r.symbol}`);
       if (q?.source) providers.add(q.source);
+      const price = typeof q?.price === "number" && Number.isFinite(q.price) && q.price > 0 ? q.price : null;
+      const delayed = price != null && q?.delayed === true;
       return {
         symbol: r.symbol,
         name: r.name,
@@ -85,19 +97,36 @@ Deno.serve(async (req) => {
         nse_symbol: r.nse_symbol,
         fno_enabled: r.fno_enabled,
         constituents_slug: (r as any).constituents_slug ?? null,
-        price: q?.price ?? 0,
-        change_pct: q?.change_pct ?? null,
-        change_abs: q?.change_abs ?? null,
+        price,
+        change_pct: price != null ? q?.change_pct ?? null : null,
+        change_abs: price != null ? q?.change_abs ?? null : null,
         source: q?.source ?? null,
+        as_of: q?.as_of ?? null,
+        delayed,
+        live_required: isLiveOnlyNseIndex(r.symbol, "NSE"),
+        // Only a genuine total failure — every source in the chain came back
+        // empty. A delayed/stored value is shown and labelled, not blocked.
+        delayed_blocked: price == null,
+        reason: price == null
+          ? "No source could price this index (broker, exchange feed, Yahoo and stored close all failed)."
+          : q?.source === "cache"
+            ? `Last stored close${q?.as_of ? ` (${q.as_of})` : ""} — no live source available.`
+            : q?.source === "yahoo"
+              ? "Delayed quote (~15 min) — broker and exchange feeds unavailable."
+              : q?.source === "bse"
+                ? "Live from BSE's own index feed."
+                : q?.source === "nse"
+                  ? "Live from NSE's own index feed."
+                  : null,
       };
     });
 
     // Top-level provider summary — same convention as market-quotes so the
     // strip can render an honest live/delayed chip.
-    let providerSummary: "kotak" | "yahoo" | "mixed" | "cache" | "none" = "none";
+    let providerSummary: "kotak" | "nse" | "bse" | "yahoo" | "mixed" | "cache" | "none" = "none";
     if (providers.size === 1) {
       const only = [...providers][0];
-      providerSummary = only === "kotak" || only === "yahoo" || only === "cache" ? only : "mixed";
+      providerSummary = only === "kotak" || only === "nse" || only === "bse" || only === "yahoo" || only === "cache" ? only : "mixed";
     } else if (providers.size > 1) {
       providerSummary = "mixed";
     }
@@ -112,14 +141,15 @@ Deno.serve(async (req) => {
         .then(() => {}, () => {});
     }
 
-    const priced = out.filter((q) => typeof q.price === "number" && q.price > 0).length;
+    const missing = out.filter((q) => q.price == null).map((q) => q.symbol);
+    const priced = out.length - missing.length;
     recordFeedHeartbeat(svc, {
       feedId: "indices",
       provider: providerSummary === "none" ? provider.name : providerSummary,
       ok: priced > 0,
       latencyMs: Date.now() - idxT0,
       symbols: priced,
-      detail: priced === 0 ? "no index price returned" : null,
+      detail: missing.length > 0 ? `no source could price: ${missing.join(",")}` : null,
     });
 
     return jsonResponse(req, { quotes: out, breadth: breadthRes.data ?? null, source: provider.name, provider: providerSummary });

@@ -1,1 +1,4 @@
 project_id = "ybtaxgstmxnlwurkritg"
+
+[functions.shoonya-oauth-callback]
+verify_jwt = false

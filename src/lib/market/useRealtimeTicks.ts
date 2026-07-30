@@ -22,6 +22,10 @@ interface TickPayload {
   exchange: string;
   ltp: number;
   change_pct: number | null;
+  volume?: number | null;
+  day_open?: number | null;
+  day_high?: number | null;
+  day_low?: number | null;
 }
 
 // Shared channel handle so `subscribeSymbolsForTicks` (called from arbitrary
@@ -111,7 +115,7 @@ export function useRealtimeTicks() {
     channelRef.current = channel;
     sharedChannel = channel;
     channel
-      .on("broadcast", { event: "ticks" }, ({ payload }: { payload: { ticks: Array<{ symbol: string; exchange?: string; ltp: number; change_pct: number | null }> } }) => {
+      .on("broadcast", { event: "ticks" }, ({ payload }: { payload: { ticks: Array<{ symbol: string; exchange?: string; ltp: number; change_pct: number | null; volume?: number | null; day_open?: number | null; day_high?: number | null; day_low?: number | null }> } }) => {
         // Batched path — the relay coalesces up to 100ms of ticks into one
         // message so we do a single store write per flush regardless of how
         // many symbols moved.
@@ -127,6 +131,10 @@ export function useRealtimeTicks() {
         upsertTick(`${(payload.exchange ?? "NSE").toUpperCase()}:${payload.symbol.toUpperCase()}`, {
           ltp: payload.ltp,
           change_pct: payload.change_pct ?? null,
+          volume: payload.volume ?? null,
+          day_open: payload.day_open ?? null,
+          day_high: payload.day_high ?? null,
+          day_low: payload.day_low ?? null,
         });
       })
       .on("broadcast", { event: "depth" }, ({ payload }: { payload: { symbol?: string; exchange?: string; bids?: DepthLevel[]; asks?: DepthLevel[]; ltp?: number | null } }) => {
@@ -184,6 +192,10 @@ import { isFreshTick } from "./liveTickStore";
 export interface PreferredTick {
   ltp: number;
   change_pct: number | null;
+  volume?: number | null;
+  day_open?: number | null;
+  day_high?: number | null;
+  day_low?: number | null;
   live: boolean;
 }
 
@@ -191,12 +203,31 @@ export interface PreferredTick {
 // falls back to `rest` automatically once ticks stop arriving.
 export function usePreferLiveTick(
   key: string | null | undefined,
-  rest: { ltp: number; change_pct?: number | null } | null | undefined,
+  rest: { ltp: number; change_pct?: number | null; volume?: number | null; day_open?: number | null; day_high?: number | null; day_low?: number | null } | null | undefined,
+  restFetchedAt?: number,
 ): PreferredTick | null {
   const tick = useLiveTickStore((s) => (key ? s.ticks[key] : undefined));
-  if (isFreshTick(tick)) {
-    return { ltp: tick.ltp, change_pct: tick.change_pct, live: true };
+  if (isFreshTick(tick) && (restFetchedAt == null || tick.receivedAt >= restFetchedAt)) {
+    return {
+      ltp: tick.ltp,
+      change_pct: tick.change_pct,
+      volume: tick.volume ?? null,
+      day_open: tick.day_open ?? null,
+      day_high: tick.day_high ?? null,
+      day_low: tick.day_low ?? null,
+      live: true,
+    };
   }
-  if (rest) return { ltp: rest.ltp, change_pct: rest.change_pct ?? null, live: false };
+  if (rest) {
+    return {
+      ltp: rest.ltp,
+      change_pct: rest.change_pct ?? null,
+      volume: rest.volume ?? null,
+      day_open: rest.day_open ?? null,
+      day_high: rest.day_high ?? null,
+      day_low: rest.day_low ?? null,
+      live: false,
+    };
+  }
   return null;
 }

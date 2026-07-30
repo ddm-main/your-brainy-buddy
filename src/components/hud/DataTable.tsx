@@ -175,7 +175,7 @@ export function PctCell({ value }: { value: number | null | undefined }) {
 //   +3.14 (+8.83%)   —abs and pct shown together (screener-parity).
 // Falls back to whichever value is available; renders "—" when neither is.
 // Sign/colour is driven by pct when present, otherwise by abs.
-export function Return1DCell({ abs, pct }: { abs: number | null | undefined; pct: number | null | undefined }) {
+export function Return1DCell({ abs, pct, compact = false }: { abs: number | null | undefined; pct: number | null | undefined; compact?: boolean }) {
   const absOk = abs != null && Number.isFinite(abs);
   const pctOk = pct != null && Number.isFinite(pct);
   if (!absOk && !pctOk) return <span style={{ color: "var(--text-muted)" }}>—</span>;
@@ -186,7 +186,7 @@ export function Return1DCell({ abs, pct }: { abs: number | null | undefined; pct
   return (
     <span style={{ color, whiteSpace: "nowrap" }}>
       {absTxt ?? pctTxt}
-      {absTxt && pctTxt ? ` (${pctTxt})` : ""}
+      {absTxt && pctTxt ? `${compact ? "" : " "}(${pctTxt})` : ""}
     </span>
   );
 }

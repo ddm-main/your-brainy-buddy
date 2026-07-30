@@ -20,7 +20,7 @@ import { ALL_PRESETS, GLOBAL_PRESETS, INDIAN_PRESETS, type IndexPreset } from "@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { Settings2, Trash2, X } from "lucide-react";
+import { Trash2, X } from "lucide-react";
 import type { Quote, StockScore } from "@/lib/market/types";
 import { holdingPnl, quoteKey } from "@/lib/market/pnl";
 import { isFreshTick, nseOpenNow, useLiveTickStore, useTicksRevision} from "@/lib/market/liveTickStore";
@@ -395,18 +395,16 @@ export default function MarketDashboard() {
 
 
 
-  const indexActions = (
-    <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-      <Btn size="sm" onClick={() => setManageOpen(true)} title="Manage indices · advanced actions" ariaLabel="Manage indices"><Settings2 size={12} /></Btn>
-    </div>
-  );
+  // Manage-indices action removed from the strip; keeps the HUD line compact.
+  void setManageOpen;
+
 
   // Price-feed status is admin-only and lives in /config/system-data. No
   // banner here — every user reads prices from the shared system Kotak feed.
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 0, height: "100%" }}>
-      <MarketStrip actions={indexActions} />
+      <MarketStrip />
 
 
       {/* Row 2 · Top Breakouts · Watchlist · Portfolio (right) */}
