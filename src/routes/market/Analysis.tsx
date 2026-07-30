@@ -530,7 +530,10 @@ export default function Analysis() {
                     const fresh = candleData.freshness_ms != null
                       ? `${Math.max(1, Math.round(candleData.freshness_ms / 60_000))}m old`
                       : null;
-                    if (last === "quote") return `LIVE QUOTE (last bar) · history: ${hist} · candles route down`;
+                    // Kotak publishes no candles API at all — the last bar is a
+                    // live broker print stitched onto Yahoo/cached history.
+                    if (last === "quote") return `LIVE LAST BAR · history: ${hist} (broker has no candles API)`;
+
                     if (last === "quote_delayed") return `LIVE QUOTE ~${candleData.delayed_minutes ?? 15}m delayed · history: ${hist}`;
                     if (last === "cache") return `CACHED${candleData.cached_at ? ` · last fetch ${new Date(candleData.cached_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}${fresh ? ` · ${fresh}` : ""}`;
                     if (last === "yahoo" && candleData.delayed_minutes) return `DELAYED ~${candleData.delayed_minutes}m · Yahoo fallback${fresh ? ` · ${fresh}` : ""}`;

@@ -477,6 +477,17 @@ export async function kotakScripFilePaths(s: KotakSettings): Promise<string[]> {
 // breaker turns that into one probe per isolate, then straight to fallback.
 export const KOTAK_CANDLES_ROUTE = "kotak:charts/v2/history";
 
+// CONFIRMED 2026-07-30: Kotak Neo has NO historical/candle API. Every route in
+// the charts family (`/charts/v2/history` POST + GET, `/charts/v1/*`,
+// `/chart/v2/*`, and the gw-napi host) answers "404 page not found" on a live,
+// authenticated session whose quotes route returns 200 on the very same
+// headers — and Kotak's own support page says "Historical data is unavailable
+// at the moment. This feature is not allowed for this platform."
+// So we stop asking: no round-trip, no breaker churn, no health-log noise.
+// Candles come from our own stores (market_daily_prices / market_intraday_
+// prices) plus Yahoo, with the live Kotak QUOTE stitched on as the forming bar.
+export const KOTAK_HISTORY_SUPPORTED = false;
+
 export async function kotakCandles(
   s: KotakSettings,
   instrumentToken: string,
@@ -485,10 +496,14 @@ export async function kotakCandles(
   toEpoch: number,
   interval: string,
 ): Promise<Array<{ time: number; open: number; high: number; low: number; close: number; volume: number }>> {
+  if (!KOTAK_HISTORY_SUPPORTED) {
+    throw new KotakError("Kotak Neo does not expose a historical candles API", 404);
+  }
   if (isRouteOpen(KOTAK_CANDLES_ROUTE)) {
     // Surface as a normal 404 so existing fallback logic is unchanged.
     throw new KotakError(routeOpenReason(KOTAK_CANDLES_ROUTE), 404);
   }
+
   const h = await sessionHeaders(s);
   const body = {
     exch: exchangeSegment.startsWith("bse") ? "BSE" : exchangeSegment.startsWith("nse_fo") ? "NFO" : "NSE",
@@ -551,7 +566,9 @@ export type KotakDepthBook = {
   payloadKeys?: string[];
 };
 
-const DEPTH_VARIANTS = ["all", "depth"] as const;
+// `market_depth` is the quote_type Kotak documents in the Neo SDK; `depth`
+// and `all` both work on the e41 gateway (verified 2026-07-30).
+const DEPTH_VARIANTS = ["depth", "all", "market_depth"] as const;
 let preferredDepthVariant: string | null = null;
 
 const dnum = (v: unknown): number => {
@@ -637,7 +654,15 @@ export async function kotakDepth(
       if (e instanceof KotakError && (e.status === 404 || e.status === 400)) continue;
       throw e;
     }
-    const d = Array.isArray(j?.data) ? j.data[0] : (j?.data ?? j);
+    // The gateway answers this route with a BARE TOP-LEVEL ARRAY
+    // (`[{ exchange_token, depth: { buy, sell } }]`) — not `{ data: [...] }`.
+    // The old unwrap missed that case, handed the array itself to
+    // extractBook(), and produced an empty book on a perfectly good payload.
+    // That is the whole reason A2 said "broker returned an empty order book"
+    // while quotes on the identical session were fine.
+    const d = Array.isArray(j) ? j[0]
+      : Array.isArray(j?.data) ? j.data[0]
+      : (j?.data ?? j);
     const book = extractBook(d);
     if (book && (book.bids.length || book.asks.length)) {
       preferredDepthVariant = variant;

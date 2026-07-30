@@ -1,71 +1,48 @@
-## Goal
+## What's actually wrong (verified against the live system)
 
-The Breakout Intelligence panel (A3) is already rebuilt around the score and the score-history feedback loop. All remaining work is data-side: make v4 produce scores, backfill history, and fit an honest calibration so the panel stops rendering empty states.
+I probed the database, provider-health rows and edge logs for NILKAMAL during today's open session. Three independent faults, one shared root: two Kotak REST routes are answering wrong, and the code correctly falls back to honest-but-degraded states.
 
-## Verified current state (live, 2026-07-29)
+**1. Charts are delayed, not broken.** The chart renders — it renders *Yahoo* bars. Edge log, 04:45 today:
+`[kotak] kotak:charts/v2/history circuit open for 3600s after 1 failure(s): Kotak API 404: 404 page not found`
+Kotak's `POST {base_url}/charts/v2/history` returns a bare 404 on this gateway, the circuit breaker opens for an hour, and every intraday request for every symbol serves 15-minute-delayed Yahoo bars. Meanwhile `getQuotes` against the *same* session is succeeding (146–176 ms, `ok:true`) — so the session and token are fine; the chart URL is wrong for this account's data centre (`E41`, `server4`). Note `market_intraday_prices` is fresh (last row 04:49 today, 1,102 rows) — we have live 1-minute data locally that the chart currently ignores.
 
-- `market_score_history` — **0 rows**.
-- `market_stock_scores` — 2,907 rows, `breakout_score_v4` non-null on **0** of them.
-- `market_scoring_calibration` — 12 rows, all `model_version` = `breakout_v2:2026-07-28` / `breakout_v2:2026-07-29`. No v4 rows.
-- `market_score_distribution` — **0 rows**. `market_breakout_snapshots` — 0 rows.
-- Universe: 2,852 active NSE symbols; latest `market_daily_prices` session 2026-07-29.
-- `market_score_history` has no column for benchmark-relative returns and no liquidity flag; `prune_old_data` does not list it.
-- `market_score_band_stats` view exists and matches what the UI reads.
+**2. Market depth is empty because the payload is empty.** Every poll logs:
+`getDepth empty book for NSE:NILKAMAL (market open) keys=0`
+`keys=0` means Kotak returned a data node with *zero* fields — not a shape we failed to parse. NILKAMAL has a valid token (`2421`, `nse_cm`), and quotes on the identical `script-details/1.0/quotes/neosymbol/...` path work. So the two `quote_type` variants we try (`all`, `depth`) are not the ones this gateway serves a book on. The panel then shows "Broker feed hiccup — retrying", which is honest but useless.
 
-## Required improvements
+**3. Breakout Intelligence is thin for this symbol, not broken.** v4 scores now exist (2,133 of 2,910 rows). But `market_score_history` holds 2,230 rows across a partial universe, **all** `context_neutral = true`, and NILKAMAL has no rows at all — hence "No snapshots yet" and "not fitted yet". The backfill drain is running but the current symbol isn't prioritised, and calibration deliberately excludes neutral rows so it can never fit from backfill alone.
 
-**1. Run the v4 aggregates pass**
-Execute the aggregates function for session 2026-07-29 so `breakout_score_v4`, `band`, `rank_pct` and bucket contributions are written for the live universe, and one `market_score_history` row per scored symbol is snapshotted. Confirm the scored count is close to 2,852 and that unscoreable symbols (<120 bars) write a null score with a reason instead of a low number.
+## Plan
 
-**2. Backfill `market_score_history` (~120 sessions)**
-One-off routine replaying the v4 scorer over the last ~120 NSE sessions from `market_daily_prices`, writing one row per symbol per session. Run in chunks (symbol batches per session) to stay inside edge-function limits and to keep the write volume manageable — roughly 2,800 rows per session, ~340k rows total.
+### Phase 1 — Probe the two broken Kotak routes (must run first)
+Write a one-off diagnostic edge function that, using the live system session:
+- Tries the charts request against the alternatives — DC base vs. the `gw-napi` gateway host, `/charts/v2/history` vs. the interval/segment variants — and reports which returns candles.
+- Enumerates every `quote_type` on `quotes/neosymbol/nse_cm|2421/<type>` (`all`, `depth`, `ltp`, `ohlc`, `market_depth`, `quote`, `full`, `52w`) and dumps the top-level keys of each response.
 
-**3. Label neutral-context backfill rows**
-Sector strength, RS-vs-NIFTY regime and news/AI context are not reconstructible historically. Mark those buckets in the row's `coverage` jsonb as `neutral` (not `present`), and exclude neutral-context rows from the calibration fit so r² is not flattered by synthetic inputs.
+The exact fixes below depend on what this returns; if no chart route works on this gateway, Phase 2 uses the local-data path instead and I'll say so plainly rather than pretending Kotak can serve it.
 
-**4. Forward returns from `close_adjusted`**
-Compute `fwd_ret_5d/10d/21d` from `COALESCE(close_adjusted, close)` on both legs, so a split inside the window doesn't register as a −50% failure. Only write a forward return when the full forward window exists; leave null otherwise so "maturing" stays distinguishable from "flat".
+### Phase 2 — Live, accurate charts
+- Point `kotakCandles` at whichever host/path the probe proves, and reset the tripped breaker.
+- Add `market_intraday_prices` as the **live** intraday source ahead of Yahoo: when Kotak charts fail during the session, build 1m/5m/15m bars from our own stored ticks (which are current to the minute) instead of serving delayed Yahoo. Yahoo stays the last resort and stays labelled `DELAYED`.
+- Stitch the forming candle from the live tick so the last bar tracks the LTP.
+- Keep the provenance chip truthful: `live · kotak`, `live · local`, or `delayed · yahoo`.
 
-**5. Benchmark-relative returns**
-Add `fwd_rel_5d/10d/21d` to `market_score_history` — the symbol's forward return minus NIFTY's over the identical window — and surface both absolute and relative hit rate in `market_score_band_stats`. Without this, a bull month makes every band look predictive.
+### Phase 3 — Market depth
+- Use the working `quote_type` from the probe; keep the multi-variant walk as a fallback and cache the winner per isolate.
+- Widen the parser to the shape the probe reveals (nested `buy`/`sell`, flat `bp/bq/bno`, or whatever Kotak actually returns) and add a unit test with the captured payload so it can't silently regress.
+- Prefer the WS relay's pushed book when the relay is alive; only poll REST otherwise (already wired, currently unused because nothing is pushing).
+- Replace "Broker feed hiccup" with a specific reason when the ladder genuinely isn't available.
 
-**6. Liquidity filter in calibration**
-Fit only on rows whose symbol was liquid/tradable on the snapshot date (turnover + price floor, matching the screener's `is_liquid_tradable` definition). Store the flag on the history row at write time rather than re-deriving it later.
+### Phase 4 — Breakout Intelligence
+- Prioritise the symbol on screen: when a user opens Analysis for a symbol with no history, queue it at the front of the backfill drain so its sparkline fills within a cycle instead of waiting for the alphabetical drain.
+- Raise the drain batch size and widen the cron window so the universe finishes in days, not weeks.
+- Make the nightly aggregates pass write **full-context** (`context_neutral = false`) rows so `fit_score_calibration` has fittable input; surface "0 full-context sessions so far" in the panel instead of a bare "not fitted yet".
+- Show per-bucket attribution from the stored `buckets` jsonb once the fit has rows, and keep the neutral-row caveat visible.
 
-**7. Purge legacy calibration rows**
-Delete the 12 `breakout_v2:*` rows once v4 rows are fitted, so nothing reads v2 percentile stats as v4 weights.
+### Phase 5 — Verify
+Re-poll depth and candles for NILKAMAL against the live session, confirm `getDepth ok:true` and `history_source: kotak_neo` in provider health, and screenshot the Analysis page.
 
-**8. Per-bucket attribution**
-Fit each of the 8 bucket contributions from the stored `buckets` jsonb against forward returns, writing one calibration row per bucket (`component`, `weight`, `r2`, `sample_n`) plus a row for the total score. This is what lets the panel say *which* section carries signal.
-
-**9. Sample-size guard**
-Bands and buckets with n < 200 matured rows report `sample_n` but no hit rate; the UI already renders "insufficient sample" for these.
-
-**10. Populate `market_score_distribution`**
-Write the daily v4 distribution (n, p50/p70/p90, max, strong/moderate/watch cut-offs) for every backfilled session and going forward, so percentile band cut-offs have a source.
-
-**11. Retention**
-Add `market_score_history` to `prune_old_data` with a ~400-day window and a `system_retention_config` key, and add `(trade_date, model)` plus `(symbol, exchange, model, trade_date DESC)` indexes for the pending-evaluation scan and the per-symbol panel read.
-
-## Technical work
-
-```text
-migration
-  ALTER market_score_history  + fwd_rel_5d/10d/21d, is_liquid_tradable, context_neutral
-  CREATE INDEX  (symbol, exchange, model, trade_date DESC)
-  CREATE INDEX  (trade_date, model) WHERE fwd_ret_21d IS NULL
-  REPLACE VIEW  market_score_band_stats  + relative hit rate / avg
-  REPLACE FUNC  prune_old_data           + market_score_history (400d)
-  INSERT        system_retention_config  ('market_score_history', 400)
-
-edge
-  market-aggregates      → also write distribution rows + history snapshot
-  market-score-backfill  → new one-off: replay ~120 sessions, chunked by session
-  market-score-evaluate  → nightly: fill matured fwd_ret_* / fwd_rel_*, refit
-                           calibration (per bucket + total), purge v2 rows
-
-ui
-  Settings → Sync gains a "Backfill score history" action with progress
-```
-
-Score maths is unchanged. The panel's honest empty states remain until the backfill and first evaluation pass complete; after that, forward returns mature progressively — the 21-day column stays sparse for the most recent three weeks by construction.
+## Technical notes
+- Files: `_shared/market/kotakClient.ts` (chart URL, depth variants/parser), `_shared/market/provider.ts` (fallback ordering), `market-candles/index.ts` (local intraday source), `MarketDepthLadder.tsx`, `ScoreHistoryPanel.tsx`, `market-score-backfill`.
+- No schema changes needed for Phases 1–3; Phase 4 is cron/params plus panel copy.
+- The circuit breaker stays — it's what stopped 9,658 duplicate health rows/day — but it needs a manual reset after the URL fix.

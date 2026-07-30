@@ -541,6 +541,38 @@ Deno.serve(async (req) => {
         .then(() => {}, () => {});
     }
 
+    // ---- Live forming bar -------------------------------------------------
+    // Kotak has no candles API (structural, not an outage), so intraday
+    // HISTORY is Yahoo's — and Yahoo is ~15 minutes behind. The broker's QUOTE
+    // route is live and healthy on the same session, so stitch the real-time
+    // print onto the tail: the last bucket becomes a live forming candle
+    // instead of the chart flatlining 15 minutes in the past.
+    if (nseSessionOpen() && raw.length > 0) {
+      try {
+        const seeded = await quoteSeedCandle(provider, symbol, exchange, timeframe);
+        if (seeded && seeded.candle.close > 0) {
+          const bucket = seeded.candle.time;
+          const tail = raw[raw.length - 1];
+          if (tail && tail.time >= bucket) {
+            // Yahoo already published this bucket — only lift the close/extremes
+            // to the live print, never rewrite the open.
+            tail.close = seeded.candle.close;
+            tail.high = Math.max(tail.high, seeded.candle.close);
+            tail.low = Math.min(tail.low, seeded.candle.close);
+          } else {
+            // volume 0, not the quote's day-cumulative figure — that would
+            // render a single forming bar taller than the whole session.
+            raw = [...raw, { ...seeded.candle, open: tail?.close ?? seeded.candle.open, volume: 0 }];
+          }
+          if (seeded.source === "kotak" || seeded.source === "kotak_neo") {
+            providerName = "quote";
+            delayedMinutes = undefined;
+            reason = reason ?? "live_tail_on_yahoo_history";
+          }
+        }
+      } catch { /* history alone is still worth serving */ }
+    }
+
     const candles = raw.map((c) => ({
       time: c.time,
       open: c.open, high: c.high, low: c.low, close: c.close,
@@ -552,7 +584,7 @@ Deno.serve(async (req) => {
     const session = await computeMarketSession(svc, exchange);
     const historySource: "kotak_neo" | "yahoo" | "cache" | "mixed" | "none" =
       providerName === "quote" || providerName === "quote_delayed"
-        ? (candles.length > 1 ? "cache" : "none")
+        ? (candles.length > 1 ? (meta.source === "yahoo" ? "yahoo" : "cache") : "none")
         : providerName;
     // Intraday candle liveness — recorded per actual serving provider so the
     // Feed Routing page can distinguish "Kotak served it" from "Kotak was

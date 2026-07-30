@@ -27,7 +27,7 @@ async function probe(url: string, headers: Record<string, string>) {
   try {
     const r = await fetch(url, { headers: { accept: "application/json", ...headers } });
     const text = await r.text();
-    return { url, headers: Object.keys(headers), status: r.status, ms: Date.now() - t0, body: text.replace(/\s+/g, " ").slice(0, 300) };
+    return { url, headers: Object.keys(headers), status: r.status, ms: Date.now() - t0, body: text.replace(/\s+/g, " ").slice(0, 1500) };
   } catch (e) {
     return { url, headers: Object.keys(headers), status: 0, ms: Date.now() - t0, body: e instanceof Error ? e.message : String(e) };
   }
@@ -137,7 +137,7 @@ Deno.serve(async (req) => {
 
     // Known-good NSE cash token for the probe (defaults to RELIANCE).
     const body = await req.json().catch(() => ({}));
-    const symbol = String(body?.symbol ?? "RELIANCE");
+    const symbol = String(url.searchParams.get("symbol") ?? body?.symbol ?? "RELIANCE").toUpperCase();
     const { data: stock } = await svc.from("market_stocks")
       .select("symbol,token,kotak_segment").eq("symbol", symbol).eq("exchange", "NSE").maybeSingle();
     if (!stock?.token) return errorResponse(req, `no instrument token for ${symbol}`, 404);
@@ -155,8 +155,17 @@ Deno.serve(async (req) => {
     ];
 
     const sIdQs = serverId ? `?sId=${encodeURIComponent(serverId)}` : "";
-    const mode = String(body?.mode ?? "quotes");
-    const routes = mode === "history" ? [] : [
+    const mode = String(url.searchParams.get("mode") ?? body?.mode ?? "quotes");
+    // mode=depth enumerates every quote_type this gateway might serve a
+    // 5-level order book on. getQuotes works on this exact path, so an empty
+    // book means the quote_type is wrong, not the session.
+    const DEPTH_TYPES = [
+      "all", "depth", "market_depth", "marketdepth", "depth5", "depth20",
+      "full", "quote", "ohlc", "ltp", "52w", "greeks",
+    ];
+    const routes = mode === "history" ? []
+      : mode === "depth" ? DEPTH_TYPES.map((t) => `${base}/script-details/1.0/quotes/neosymbol/${enc}/${t}`)
+      : [
       `${base}/script-details/1.0/quotes/neosymbol/${enc}/all`,
       `${base}/script-details/1.0/quotes/neosymbol/${enc}/ltp`,
       `${base}/script-details/1.0/quotes/neosymbol/${enc}/all${sIdQs}`,
@@ -164,6 +173,7 @@ Deno.serve(async (req) => {
       `${base}/Orders/2.0/quick/user/positions${sIdQs}`,
       `${base}/portfolio/v1/holdings`,
     ];
+
 
 
     const results: unknown[] = [];

@@ -69,10 +69,11 @@ Deno.serve(async (req) => {
 
     let upserted = 0;
     let fetched = 0;
-    const errors: string[] = [];
+    const errors: string[] = [];      // our fault: a write failed
+    const feedErrors: string[] = [];  // upstream's fault: the news feed was down
     for (const { symbol, exchange } of symbols) {
       const { items, error: fetchErr } = await fetchStockNews(symbol, names.get(`${exchange}:${symbol}`));
-      if (fetchErr) { errors.push(`${exchange}:${symbol}: ${fetchErr}`); continue; }
+      if (fetchErr) { feedErrors.push(`${exchange}:${symbol}: ${fetchErr}`); continue; }
       fetched += items.length;
       if (items.length === 0) continue;
       const rows = items.slice(0, 15).map((it) => ({
@@ -89,10 +90,26 @@ Deno.serve(async (req) => {
       if (error) errors.push(`${exchange}:${symbol}: ${error.message}`);
       else upserted += rows.length;
     }
+    // A 502 here means "this function is broken". An upstream news provider
+    // answering 503 is neither our failure nor actionable by the caller — it
+    // used to be raised as a hard 502, which the UI surfaced as a blank
+    // screen for what is really a transient, empty-news condition. Only a
+    // failed DATABASE WRITE is a genuine server error now; feed outages come
+    // back as a successful, explicitly degraded response.
     if (errors.length > 0 && upserted === 0) {
       return errorResponse(req, `news sync failed — ${errors[0]}`, 502);
     }
-    return jsonResponse(req, { ok: true, symbols: symbols.length, fetched, upserted, synced_at: new Date().toISOString(), errors: errors.length ? errors : undefined });
+    return jsonResponse(req, {
+      ok: true,
+      degraded: feedErrors.length > 0 || errors.length > 0,
+      symbols: symbols.length,
+      fetched,
+      upserted,
+      synced_at: new Date().toISOString(),
+      errors: errors.length ? errors : undefined,
+      feed_errors: feedErrors.length ? feedErrors : undefined,
+    });
+
 
 
   } catch (e) {

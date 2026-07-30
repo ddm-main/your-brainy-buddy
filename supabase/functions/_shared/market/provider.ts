@@ -12,6 +12,7 @@ import {
   kotakConvertPosition,
   kotakCandles,
   KOTAK_CANDLES_ROUTE,
+  KOTAK_HISTORY_SUPPORTED,
   kotakDepth,
   kotakHoldings,
   kotakHoldingsEnvelope,
@@ -662,7 +663,17 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
     // Kotak historical candles when we have an instrument token; else Yahoo.
     async getOHLCV(symbol, exchange, range, interval, meta) {
       if (meta) meta.source = "kotak_neo";
-      // Resolve through the SAME alias-aware token map the quote path uses.
+      // Kotak Neo publishes no historical/candle API at all (see
+      // KOTAK_HISTORY_SUPPORTED in kotakClient.ts — every charts route 404s on
+      // a live session and Kotak's support page confirms it). Asking is a
+      // guaranteed wasted round-trip per symbol per run, so go straight to the
+      // history sources we actually have. `no_broker_history` tells the UI the
+      // reason is structural, not an outage.
+      if (!KOTAK_HISTORY_SUPPORTED) {
+        if (meta) { meta.source = "yahoo"; meta.reason = "no_broker_history"; }
+        return yahoo.getOHLCV(symbol, exchange, range, interval, meta);
+      }
+
       // A direct market_stocks lookup missed every index the UI asks for by
       // its trading alias ("NIFTY", "BANKNIFTY", "INDIA VIX"), which is why
       // index candles permanently logged "no token" and fell to Yahoo even
