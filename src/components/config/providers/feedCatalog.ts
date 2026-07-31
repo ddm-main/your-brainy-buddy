@@ -76,14 +76,22 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
       },
       {
         id: "candles_1d", label: "Daily candles", desc: "Unsupported by Kotak Neo; served by Yahoo/NSE history",
-        surface: "candles_1d", table: { name: "market_daily_prices", column: "created_at" },
+        table: { name: "market_daily_prices", column: "created_at" },
         usedBy: [SCREENER, BREAKOUT, BACKTEST, AI_ENGINE],
+        note: "Not probed against Kotak — the broker publishes no candle API.",
       },
       {
         id: "candles_intraday", label: "Intraday candles", desc: "Unsupported by Kotak Neo; served by Yahoo chart fallback",
-        surface: "candles_intraday", table: { name: "market_intraday_prices", column: "fetched_at" },
+        table: { name: "market_intraday_prices", column: "fetched_at" },
         usedBy: [MARKET_OVERVIEW, PLANNER, AUTOTRADE],
+        note: "Not probed against Kotak — the broker publishes no candle API.",
       },
+      {
+        id: "indices", label: "Index quotes", desc: "Unsupported by Kotak Neo; Nifty / Bank Nifty levels come from Yahoo/NSE",
+        usedBy: [MARKET_OVERVIEW],
+        note: "Not probed against Kotak — its quote API carries no index tokens.",
+      },
+
       {
         id: "funds", label: "Funds / margin", desc: "Available and used margin",
         surface: "funds", table: { name: "market_funds", column: "synced_at" },
@@ -405,9 +413,14 @@ export const ROUTED_FEEDS: RoutedFeed[] = [
   { id: "depth", label: "Market depth", desc: "5-level bid / ask ladder", group: "live",
     chain: ["kotak"], surface: "depth", routable: false, sessionOnly: true,
     note: "Broker-only, live — never persisted. Empty ladder outside market hours is normal." },
+  // Kotak Neo's quote API has no index instruments (NSE:^NSEI always returns
+  // empty), so indices are Yahoo-first by design — Kotak stays in the chain
+  // only as a theoretical fallback and is marked unsupported.
   { id: "indices", label: "Indices", desc: "Nifty / Bank Nifty / VIX / global index levels", group: "live",
-    chain: ["kotak", "yahoo"], surface: "index_quotes",
+    chain: ["yahoo", "kotak"], surface: "index_quotes",
+    unsupported: { kotak: "Kotak Neo publishes no index quote tokens — indices are Yahoo/NSE-served." },
     heartbeat: "indices", freshMins: 15, sessionOnly: true },
+
 
   // ---- History -----------------------------------------------------------
   // Kotak Neo publishes no candle API (confirmed by Kotak support; /charts/v2

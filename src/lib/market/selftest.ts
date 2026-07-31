@@ -5,7 +5,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 
-export type SurfaceState = "ok" | "degraded" | "failed";
+// "not_configured" — a provider with no credentials/key. It is a setup state,
+// never an outage, and must be excluded from every health tally.
+export type SurfaceState = "ok" | "degraded" | "failed" | "not_configured";
 export type SurfaceProbe = {
   surface: string;
   provider: string;
@@ -68,7 +70,14 @@ export function useFeedFreshness() {
 export const freshKey = (table: { name: string; column: string } | undefined) =>
   table ? `${table.name}.${table.column}` : "";
 
-const RANK: Record<SurfaceState, number> = { ok: 0, degraded: 1, failed: 2 };
+// Healthiest first. not_configured ranks below a real failure: if any
+// configured provider answered we want that verdict, and an unconfigured
+// provider should only surface when nothing else covers the surface.
+const RANK: Record<SurfaceState, number> = { ok: 0, degraded: 1, failed: 2, not_configured: 3 };
+
+/** Probe rows older than this are ignored: a surface that stopped being probed
+ *  must decay to "unknown" instead of holding yesterday's healthy verdict. */
+export const PROBE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 /** Collapse multi-provider rows to one row per surface — the healthiest wins,
  *  because a feed served by its fallback is still a working feed. The primary's
@@ -78,7 +87,11 @@ export type SurfaceHealth = SurfaceProbe & { primary?: SurfaceProbe; onFallback:
 export function bestBySurface(rows: SurfaceProbe[]): Record<string, SurfaceHealth> {
   const best: Record<string, SurfaceProbe> = {};
   const primary: Record<string, SurfaceProbe> = {};
+  const cutoff = Date.now() - PROBE_MAX_AGE_MS;
   for (const r of rows) {
+    // Stale rows (and rows written under a legacy provider spelling) must not
+    // outvote today's result — that is how "depth LIVE" survived a day.
+    if (new Date(r.checked_at).getTime() < cutoff) continue;
     const cur = best[r.surface];
     if (!cur || RANK[r.state] < RANK[cur.state] || (RANK[r.state] === RANK[cur.state] && r.checked_at > cur.checked_at)) {
       best[r.surface] = r;
@@ -96,15 +109,21 @@ export function bestBySurface(rows: SurfaceProbe[]): Record<string, SurfaceHealt
   return out;
 }
 
+
 export function summarize(rows: SurfaceProbe[]) {
   const best = Object.values(bestBySurface(rows));
+  // "Down" means no provider could serve the surface at all. A surface whose
+  // primary failed but whose fallback answered is degraded, never down.
   const down = best.filter((r) => r.state === "failed").length;
-  // A feed that only survives because the fallback answered is not "healthy".
   const degraded = best.filter((r) => r.state === "degraded" || r.onFallback).length;
+  const notConfigured = best.filter((r) => r.state === "not_configured").length;
+  const worst = best.filter((r) => r.state === "failed" || r.state === "degraded" || r.onFallback)
+    .map((r) => r.surface);
   const newest = rows.reduce<string | null>(
     (acc, r) => (!acc || r.checked_at > acc ? r.checked_at : acc), null);
-  return { total: best.length, ok: best.length - down - degraded, down, degraded, checkedAt: newest };
+  return { total: best.length, ok: best.length - down - degraded - notConfigured, down, degraded, notConfigured, checkedAt: newest, affected: worst };
 }
+
 
 /** 24h success rate + median latency per provider, from the health log. */
 export type ProviderStats = { attempts: number; okRate: number; p50: number | null };

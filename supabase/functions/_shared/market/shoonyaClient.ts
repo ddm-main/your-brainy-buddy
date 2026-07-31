@@ -33,6 +33,23 @@ export const SHOONYA_GENACSTOK_CONTENT_TYPE = "text/plain";
 export const SHOONYA_WS = "wss://api.shoonya.com/NorenWSAPI/";
 export const SHOONYA_WS_LEGACY = "wss://api.shoonya.com/NorenWSTP/";
 
+function edgeEnv(name: string): string | null {
+  try {
+    const deno = (globalThis as unknown as { Deno?: { env?: { get?: (key: string) => string | undefined } } }).Deno;
+    return deno?.env?.get?.(name)?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function shoonyaProxyConfig(): { url: string; secret: string } | null {
+  const url = edgeEnv("SHOONYA_PROXY_URL");
+  if (!url) return null;
+  const secret = edgeEnv("SHOONYA_PROXY_SECRET");
+  if (!secret) throw new ShoonyaError("Shoonya static-IP proxy is configured without SHOONYA_PROXY_SECRET", 500);
+  return { url, secret };
+}
+
 /** Where to send the user to authorize this app. */
 export function shoonyaOAuthUrl(clientId: string, redirectUrl?: string | null, state?: string | null): string {
   const u = new URL(SHOONYA_OAUTH_AUTHORIZE);
@@ -114,7 +131,18 @@ export async function shoonyaPost<T = any>(
   const headers: Record<string, string> = { "Content-Type": contentType };
   if (jKey) headers["Authorization"] = `Bearer ${jKey}`;
 
-  const send = () => fetch(`${host}/${route}`, { method: "POST", headers, body });
+  const send = () => {
+    const proxy = shoonyaProxyConfig();
+    if (!proxy) return fetch(`${host}/${route}`, { method: "POST", headers, body });
+    return fetch(proxy.url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${proxy.secret}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ base: host, route, jData, jKey: jKey || null, contentType }),
+    });
+  };
 
   // The gateway occasionally answers 5xx from nginx — a broker-side blip, so
   // retry the same host. There is no sibling host to fall back to any more.
@@ -287,11 +315,11 @@ export async function shoonyaLoginWithCode(
       const ip = await shoonyaEgressIp();
       throw new ShoonyaError(
         "Shoonya rejected the request because the calling IP is not whitelisted (INVALID_IP). " +
-        (ip
-          ? `Add this exact IP in Shoonya PRISM → API Key → IP whitelist: ${ip}. `
-          : "Add the calling server IP in Shoonya PRISM → API Key → IP whitelist. ") +
-        "Note that this backend runs on a shared cloud with a rotating egress IP, so a single whitelisted IP may stop matching later — " +
-        "if Shoonya lets you save a range (or 0.0.0.0), use that; otherwise re-check this message for the current IP after each failure. " +
+        (edgeEnv("SHOONYA_PROXY_URL")
+          ? "Whitelist the public IP of the configured Shoonya static-IP proxy in PRISM → API Key → IP whitelist. "
+          : (ip
+            ? `This Supabase Edge request left from ${ip}, but that IP can rotate. Configure SHOONYA_PROXY_URL/SHOONYA_PROXY_SECRET to use a static-IP proxy, then whitelist that proxy IP in PRISM. `
+            : "This backend uses rotating Supabase Edge egress. Configure SHOONYA_PROXY_URL/SHOONYA_PROXY_SECRET to use a static-IP proxy, then whitelist that proxy IP in PRISM. ")) +
         "The authorization code itself is fine; get a fresh one after whitelisting and try again.",
         400,
       );

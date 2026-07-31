@@ -29,7 +29,7 @@ export async function callCreds(body: Record<string, unknown>) {
   return j;
 }
 
-export type SurfaceState = "ok" | "degraded" | "failed";
+export type SurfaceState = "ok" | "degraded" | "failed" | "not_configured";
 export type SurfaceResult = {
   ok: boolean;
   /** New three-state signal; older payloads only carry `ok`. */

@@ -113,16 +113,21 @@ export function useScoreHistory(symbol: string | null | undefined, exchange = "N
   });
 }
 
-/** Universe-wide hit rate / mean forward return per score band. */
-export function useScoreBandStats() {
+/**
+ * Universe-wide hit rate / mean forward return per score band.
+ * population "fit" = liquid + full-context rows only (what the model is fitted
+ * on); "all" includes replayed neutral-context and illiquid snapshots.
+ */
+export function useScoreBandStats(population: "fit" | "all" = "fit") {
   return useQuery({
-    queryKey: ["market", "score-band-stats", SCORE_MODEL],
+    queryKey: ["market", "score-band-stats", SCORE_MODEL, population],
     staleTime: 10 * 60_000,
     queryFn: async (): Promise<ScoreBandStat[]> => {
       const { data, error } = await (supabase as any)
         .from("market_score_band_stats")
         .select("*")
-        .eq("model", SCORE_MODEL);
+        .eq("model", SCORE_MODEL)
+        .eq("population", population);
       if (error) throw error;
       return (data ?? []).map((r: any): ScoreBandStat => ({
         band: r.band,

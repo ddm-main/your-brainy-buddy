@@ -502,7 +502,7 @@ export default function BrokerConnectPanel() {
               <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6 }}>
                 <b style={{ color: "var(--accent)" }}>One-time setup in Shoonya PRISM → API Key:</b>
                 <div>1. Paste the Redirect URL below into the app's <i>Redirect URL</i> field exactly and save.</div>
-                <div>2. Whitelist your static IP in the same screen (Shoonya rejects codes from un-whitelisted callers with <i>“no data”</i>).</div>
+                <div>2. Whitelist the static Shoonya proxy server IP in the same screen; Supabase Edge IPs rotate and should not be copied one by one.</div>
                 <div>3. Copy Client ID + Secret Code here, Save, then click Authorize.</div>
               </div>
               <div>

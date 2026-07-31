@@ -105,6 +105,9 @@ export default function ProviderDetail({
       const state = probe.state ?? (probe.ok ? "ok" : "failed");
       if (state === "ok") { tone = "ok"; label = "live"; }
       else if (state === "degraded") { tone = "warn"; label = probe.ok ? "degraded" : "busy — retry"; }
+      // A provider nobody connected has no health to report — showing it as a
+      // red "failed" feed was the single biggest source of false alarms here.
+      else if (state === "not_configured") { tone = "neutral"; label = "not configured"; }
       else { tone = "err"; label = "failed"; }
     } else if (f.table) {
       const ft = freshnessTone(fresh);

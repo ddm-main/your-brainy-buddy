@@ -10,6 +10,7 @@
     "dev": "vite --host 0.0.0.0 --port 8080",
     "dev:api": "PORT=3960 HUD_HOST=127.0.0.1 node Apps/hud/server.mjs",
     "relay": "node --env-file=.env Apps/relay/kotak-ws-relay.mjs",
+    "shoonya:proxy": "node --env-file=.env Apps/relay/shoonya-proxy.mjs",
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "preview": "vite preview --host 0.0.0.0 --port 8080",

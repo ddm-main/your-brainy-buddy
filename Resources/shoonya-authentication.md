@@ -42,6 +42,22 @@ Success is detected by the presence of `access_token`; when Shoonya also returns
 - Reauthorization requires a fresh, single-use authorization code.
 - The PRISM Redirect URL should not include the preview domain, `/market/settings`, or copied `state` / `redirect_uri` query parameters.
 
+## IP whitelist requirement
+
+Shoonya validates the IP address that calls `GenAcsTok` and later Noren API routes. Supabase Edge Functions run on shared cloud infrastructure and their outbound IP can rotate, so repeatedly copying the latest `INVALID_IP` address into PRISM is not durable.
+
+Use the static-IP proxy instead:
+
+1. Run `Apps/relay/shoonya-proxy.mjs` on a VPS or machine with a stable public IP.
+2. Put that machine behind HTTPS, ending at `/shoonya`.
+3. Set Supabase Edge secrets:
+   - `SHOONYA_PROXY_URL=https://<proxy-host>/shoonya`
+   - `SHOONYA_PROXY_SECRET=<same strong secret used by the proxy>`
+4. Whitelist the proxy machine's public IP in Shoonya PRISM → API Key → IP whitelist.
+5. Keep the PRISM Redirect URL as the Supabase callback URL above.
+
+When the proxy secrets are absent, JARVIS falls back to direct Supabase Edge calls; Shoonya may then reject the request with `INVALID_IP` again.
+
 ## References
 
 - Shoonya API documentation: https://shoonya.com/api-documentation

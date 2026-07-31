@@ -26,6 +26,8 @@ const AutoTrade = lazy(() => import("@/routes/market/AutoTrade"));
 const PortfolioOverview = lazy(() => import("@/routes/market/PortfolioOverview"));
 const Orders = lazy(() => import("@/routes/market/Orders"));
 const GTT = lazy(() => import("@/routes/market/GTT"));
+const ScoreDetail = lazy(() => import("@/routes/market/ScoreDetail"));
+const Calibration = lazy(() => import("@/routes/market/Calibration"));
 
 
 type Sub = MarketSub;
@@ -117,6 +119,8 @@ export default function Market() {
               <Route path="breakout" element={<Navigate to="/market/screener/breakout" replace />} />
               <Route path="analysis" element={<Navigate to="/market/screener" replace />} />
               <Route path="analysis/:symbol" element={<Analysis />} />
+              <Route path="score/:symbol" element={<ScoreDetail />} />
+              <Route path="calibration" element={<Calibration />} />
               <Route path="backtesting" element={<Backtesting />} />
               <Route path="planner" element={<Planner />} />
               <Route path="ai" element={<AIEngine />} />

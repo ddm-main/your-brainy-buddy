@@ -3788,6 +3788,78 @@ export type Database = {
         }
         Relationships: []
       }
+      market_score_model_versions: {
+        Row: {
+          band_cuts: Json | null
+          created_at: string
+          id: string
+          is_active: boolean
+          model: string
+          notes: string | null
+          source_run_id: string | null
+          updated_at: string
+          weights: Json
+        }
+        Insert: {
+          band_cuts?: Json | null
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          model: string
+          notes?: string | null
+          source_run_id?: string | null
+          updated_at?: string
+          weights: Json
+        }
+        Update: {
+          band_cuts?: Json | null
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          model?: string
+          notes?: string | null
+          source_run_id?: string | null
+          updated_at?: string
+          weights?: Json
+        }
+        Relationships: []
+      }
+      market_score_optimizer_runs: {
+        Row: {
+          baseline: Json | null
+          best: Json | null
+          candidates: Json
+          created_at: string
+          created_by: string | null
+          id: string
+          model: string
+          params: Json
+          sample_n: number | null
+        }
+        Insert: {
+          baseline?: Json | null
+          best?: Json | null
+          candidates?: Json
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          model?: string
+          params?: Json
+          sample_n?: number | null
+        }
+        Update: {
+          baseline?: Json | null
+          best?: Json | null
+          candidates?: Json
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          model?: string
+          params?: Json
+          sample_n?: number | null
+        }
+        Relationships: []
+      }
       market_scoring_calibration: {
         Row: {
           component: string
@@ -6296,6 +6368,7 @@ export type Database = {
           liquid_n: number | null
           model: string | null
           neutral_n: number | null
+          population: string | null
           rel_hit_rate_10d: number | null
           rel_hit_rate_21d: number | null
           rel_hit_rate_5d: number | null
@@ -6848,6 +6921,42 @@ export type Database = {
           exchange: string
           market_cap: number
           sector: string
+          symbol: string
+        }[]
+      }
+      market_score_cohort: {
+        Args: { _days?: number; _model?: string; _threshold?: number }
+        Returns: {
+          avg_rel_21d: number
+          avg_ret_10d: number
+          avg_ret_21d: number
+          avg_ret_5d: number
+          avg_score: number
+          hit_rate_21d: number
+          matured_21: number
+          matured_5: number
+          n_qualified: number
+          trade_date: string
+        }[]
+      }
+      market_score_cohort_symbols: {
+        Args: {
+          _days?: number
+          _limit?: number
+          _model?: string
+          _threshold?: number
+        }
+        Returns: {
+          appearances: number
+          avg_score: number
+          best_ret_21d: number
+          exchange: string
+          first_date: string
+          first_rel_21d: number
+          first_ret_21d: number
+          first_ret_5d: number
+          last_date: string
+          max_score: number
           symbol: string
         }[]
       }

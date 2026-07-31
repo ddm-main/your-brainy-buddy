@@ -298,8 +298,6 @@ export function isLiveOnlyNseIndex(symbol: string, exchange = "NSE"): boolean {
   return exchange.toUpperCase() === "NSE" && LIVE_ONLY_NSE_INDEX_SYMBOLS.has(symbol.toUpperCase());
 }
 
-const INDEX_QUOTE_TYPES = ["all", "ltp", "ohlc"] as const;
-const indexQuoteRouteCache = new Map<string, { segment: string; quoteType: typeof INDEX_QUOTE_TYPES[number] }>();
 
 
 async function getTokenMap(svc: SupabaseClient): Promise<Map<string, TokenEntry>> {
@@ -411,9 +409,18 @@ function yahooRangeFor(interval: string, requestedRange: string): string {
 // the actual data path: fire-and-forget, errors swallowed.
 //
 // Disk budget: this table used to grow ~23k rows/day (~7 MB/day) on a 500 MB
-// free-tier database. Failures are always kept (that's what we debug with);
-// successes are sampled, since they only serve as a background heartbeat.
-const HEALTH_SUCCESS_SAMPLE = 0.05;
+// free-tier database.
+//
+// Sampling must be SYMMETRIC. Keeping 100% of failures while sampling 5% of
+// successes made the stored rows a 20x-magnified picture of failure, and the
+// Providers page computes its "24h success rate" straight off those rows — so
+// a healthy provider read as broken. Same rate both ways: the ratio in the
+// table is now the real ratio, and a repeated failure still lands within a few
+// polls. Repeat suppression keeps an identical error from being written more
+// than once a minute per provider+endpoint.
+const HEALTH_SAMPLE = 0.05;
+const REPEAT_ERROR_WINDOW_MS = 60_000;
+const lastLoggedError = new Map<string, { msg: string; at: number }>();
 
 function logProviderHealth(
   svc: SupabaseClient,
@@ -423,7 +430,13 @@ function logProviderHealth(
   latencyMs: number,
   error?: string,
 ): void {
-  if (ok && Math.random() > HEALTH_SUCCESS_SAMPLE) return;
+  if (!ok) {
+    const k = `${provider}:${endpoint}`;
+    const msg = (error ?? "").slice(0, 200);
+    const prev = lastLoggedError.get(k);
+    if (prev && prev.msg === msg && Date.now() - prev.at < REPEAT_ERROR_WINDOW_MS) return;
+    lastLoggedError.set(k, { msg, at: Date.now() });
+  } else if (Math.random() > HEALTH_SAMPLE) return;
   svc.from("market_provider_health").insert({
     provider, endpoint, ok, latency_ms: Math.round(latencyMs),
     error: error ? error.slice(0, 500) : null,
@@ -565,21 +578,6 @@ const parseKotakDate = (obj: any): string | null => {
 
 type ParsedQuoteRequest = { key: string; exchange: string; symbol: string };
 
-function isKnownIndexRequest(p: ParsedQuoteRequest, entry?: TokenEntry): boolean {
-  const canonical = keyFor(p.exchange, p.symbol);
-  const known = KNOWN_INDEX_TOKENS[canonical];
-  return !!known && (!entry?.token || String(entry.token) === String(known));
-}
-
-function indexSegmentsFor(exchange: string, storedSegment?: string | null): string[] {
-  const ex = exchange.toUpperCase();
-  const candidates = ex === "BSE"
-    ? [storedSegment, "bse_indices", "bse_cm"]
-    : [storedSegment, "nse_indices", "nse_cm"];
-  return candidates
-    .map((s) => String(s ?? "").trim().toLowerCase())
-    .filter((s, i, arr) => !!s && arr.indexOf(s) === i);
-}
 
 function kotakQuoteMaps(raw: any[]): { byNeoSymbol: Map<string, any>; byTokenOnly: Map<string, any> } {
   const byNeoSymbol = new Map<string, any>();
@@ -610,10 +608,7 @@ function kotakQuoteMaps(raw: any[]): { byNeoSymbol: Map<string, any>; byTokenOnl
   return { byNeoSymbol, byTokenOnly };
 }
 
-function kotakRawForEntry(raw: any[], entry: TokenEntry): any | null {
-  const maps = kotakQuoteMaps(raw);
-  return maps.byNeoSymbol.get(`${entry.segment}|${entry.token}`) ?? maps.byTokenOnly.get(String(entry.token)) ?? null;
-}
+
 
 function quoteRowFromKotak(p: ParsedQuoteRequest, r: any): QuoteRow | null {
   if (!r) return null;
@@ -647,39 +642,12 @@ function quoteRowFromKotak(p: ParsedQuoteRequest, r: any): QuoteRow | null {
   };
 }
 
-async function resolveKotakIndexQuote(
-  svc: SupabaseClient,
-  s: KotakSettings,
-  p: ParsedQuoteRequest,
-  entry: TokenEntry,
-): Promise<QuoteRow | null> {
-  const canonical = keyFor(p.exchange, p.symbol);
-  const cached = indexQuoteRouteCache.get(canonical);
-  const routes = [
-    ...(cached ? [cached] : []),
-    ...indexSegmentsFor(p.exchange, entry.segment).flatMap((segment) =>
-      INDEX_QUOTE_TYPES.map((quoteType) => ({ segment, quoteType }))),
-  ].filter((r, i, arr) => arr.findIndex((x) => x.segment === r.segment && x.quoteType === r.quoteType) === i);
+// resolveKotakIndexQuote() lived here. Removed: Kotak Neo answers no index
+// quote on any segment/quote-type combination, so the retry matrix was pure
+// latency and pure noise in market_provider_health. Indices are resolved by
+// resolveIndexQuotes() (NSE/BSE native → Yahoo → stored close) before the
+// broker is consulted at all.
 
-  let lastErr: unknown = null;
-  for (const route of routes) {
-    try {
-      const raw = await withKotakSession(svc, s, encryptValue, (ss) =>
-        kotakQuotes(ss, [`${route.segment}|${entry.token}`], route.quoteType));
-      const r = kotakRawForEntry(raw, { ...entry, segment: route.segment });
-      const row = quoteRowFromKotak(p, r);
-      if (row) {
-        indexQuoteRouteCache.set(canonical, route);
-        return row;
-      }
-    } catch (e) {
-      lastErr = e;
-      const status = (e as { status?: number } | null)?.status;
-      if (status === 401 || status === 403 || status === 429 || (typeof status === "number" && status >= 500)) throw e;
-    }
-  }
-  return null;
-}
 
 // In-isolate circuit breaker for Kotak getQuotes. After N consecutive batch
 // failures, skip Kotak briefly and serve Yahoo per-symbol instead of hammering
@@ -717,46 +685,35 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
     async getQuotes(keys, opts) {
       const allowFallback = opts?.allowFallback !== false;
       // Resolve instrument tokens from the cached market_stocks map; unresolved keys fall back to Yahoo per-symbol.
-      const parsed = keys.map((k) => ({ key: k, ...parseKey(k) }));
+      const parsedAll = keys.map((k) => ({ key: k, ...parseKey(k) }));
+
+      const out: QuoteRow[] = [];
+      const failedFromKotak: typeof parsedAll = [];
+
+      // Indices are never asked of Kotak. Every quote-type/segment combination
+      // returns an empty row (verified: 1,048 consecutive "missing index rows"
+      // failures in 24h at ~2.9s each), so the call only added latency to the
+      // index poll, tanked the broker's health stats and flooded
+      // market_provider_health. NSE/BSE native → Yahoo → stored close is the
+      // real chain and always has been the one that served the UI.
+      const indexReqs = parsedAll.filter((p) => isIndexSymbol(p.symbol));
+      const parsed = parsedAll.filter((p) => !isIndexSymbol(p.symbol));
+      if (allowFallback && indexReqs.length > 0) {
+        try {
+          out.push(...(await resolveIndexQuotes(
+            svc,
+            indexReqs.map((p) => ({ key: p.key, exchange: p.exchange, symbol: p.symbol })),
+            [],
+          )));
+        } catch (e) { console.error("[market] index chain failed:", e); }
+      }
+
       const tokenBySymbol = await getTokenMap(svc);
       const tokenEntryFor = (p: { exchange: string; symbol: string }) => tokenBySymbol.get(keyFor(p.exchange, p.symbol));
       const withToken = parsed.filter((p) => tokenEntryFor(p));
       const without = parsed.filter((p) => !tokenEntryFor(p));
 
-      const out: QuoteRow[] = [];
-      const failedFromKotak: typeof parsed = [];
-
-      const indexReqs = withToken.filter((p) => isKnownIndexRequest(p, tokenEntryFor(p)));
-      const normalReqs = withToken.filter((p) => !isKnownIndexRequest(p, tokenEntryFor(p)));
-
-      if (indexReqs.length > 0) {
-        const idxResults = await Promise.all(indexReqs.map(async (p) => {
-          const t0 = Date.now();
-          if (kotakBreakerOpen()) return { row: null as QuoteRow | null, failed: p, latency: 0, error: "kotak quote breaker open" };
-          try {
-            const entry = tokenEntryFor(p);
-            if (!entry) return { row: null as QuoteRow | null, failed: p, latency: Date.now() - t0, error: "no token" };
-            const row = await resolveKotakIndexQuote(svc, s, p, entry);
-            return { row, failed: row ? null : p, latency: Date.now() - t0, error: row ? null : "no index quote row" };
-          } catch (e) {
-            return { row: null as QuoteRow | null, failed: p, latency: Date.now() - t0, error: e instanceof Error ? e.message : String(e) };
-          }
-        }));
-        const okCount = idxResults.filter((r) => r.row).length;
-        logProviderHealth(
-          svc,
-          "kotak_neo",
-          "getQuotes:index",
-          okCount > 0,
-          Math.max(...idxResults.map((r) => r.latency), 0),
-          okCount === indexReqs.length ? undefined : `missing index rows: ${idxResults.filter((r) => r.failed).map((r) => r.failed?.key).join(",")}`,
-        );
-        if (okCount > 0) kotakBreakerRecordSuccess();
-        for (const r of idxResults) {
-          if (r.row) out.push(r.row);
-          else if (r.failed) failedFromKotak.push(r.failed);
-        }
-      }
+      const normalReqs = withToken;
 
       // Split batches by Kotak segment. One 500 on nse_indices used to fail
       // the equity batch too — a poll-wide collapse to 0 across the UI.

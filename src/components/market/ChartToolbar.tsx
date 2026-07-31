@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CandlestickChart, LineChart, AreaChart, BarChart3, Activity, Bell, LayoutGrid, MoreHorizontal, Maximize2, ExternalLink, Settings, Camera, Save, Search, Trash2, TrendingUp, Waves } from "lucide-react";
+import { CandlestickChart, LineChart, AreaChart, BarChart3, Activity, Bell, LayoutGrid, Save, Search, Trash2, TrendingUp, Waves } from "lucide-react";
 import { Menu, MenuItem, MenuGroup, MenuDivider } from "@/components/hud/Menu";
 import type { ChartType } from "@/components/market/CandleChart";
 import {
@@ -246,62 +246,6 @@ export function ChartToolbar({
         </Menu>
       )}
 
-      {/* Settings */}
-      {onSettings && (
-        <Menu label="Settings" icon={<Settings size={12} />} width={210}>
-          <MenuGroup title="Display">
-            <MenuItem checkbox selected={s.grid} onClick={() => onSettings((p) => ({ ...p, grid: !p.grid }))}>Grid lines</MenuItem>
-            <MenuItem checkbox selected={s.priceLine} onClick={() => onSettings((p) => ({ ...p, priceLine: !p.priceLine }))}>Price line</MenuItem>
-            <MenuItem checkbox selected={s.sessionBreaks} onClick={() => onSettings((p) => ({ ...p, sessionBreaks: !p.sessionBreaks }))}>Session breaks</MenuItem>
-            <MenuItem checkbox selected={s.magnet} onClick={() => onSettings((p) => ({ ...p, magnet: !p.magnet }))}>Magnet crosshair</MenuItem>
-
-          </MenuGroup>
-          <MenuDivider />
-          <MenuGroup title="Scale">
-            <MenuItem checkbox selected={s.logScale} onClick={() => onSettings((p) => ({ ...p, logScale: !p.logScale }))}>Logarithmic</MenuItem>
-          </MenuGroup>
-        </Menu>
-      )}
-
-      <Menu label="More" icon={<MoreHorizontal size={12} />} width={230} align="end" showCaret={false}>
-        {(close) => (
-          <>
-            <MenuGroup title="Actions">
-              {onResetStudies && (
-                <MenuItem onClick={() => { onResetStudies(); close(); }}>
-                  Reset indicators
-                </MenuItem>
-              )}
-              {onScreenshot && (
-                <MenuItem onClick={() => { onScreenshot(); close(); }}>
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                    <Camera size={11} /> Take screenshot
-                  </span>
-                </MenuItem>
-              )}
-              <MenuItem onClick={() => { onFullscreen(); close(); }}>
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                  <Maximize2 size={11} /> Fullscreen · F
-                </span>
-              </MenuItem>
-            </MenuGroup>
-            <MenuDivider />
-            <MenuGroup title="External">
-              <a
-                className="mk-menu-item"
-                href={`https://www.tradingview.com/chart/?symbol=${exchange}:${symbol}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={close}
-              >
-                <span className="mk-menu-item-check" />
-                <span style={{ flex: 1, textAlign: "left" }}>Open on tradingview.com</span>
-                <ExternalLink size={11} style={{ opacity: 0.6 }} />
-              </a>
-            </MenuGroup>
-          </>
-        )}
-      </Menu>
 
       <div style={{ flex: 1, minWidth: 8 }} />
 

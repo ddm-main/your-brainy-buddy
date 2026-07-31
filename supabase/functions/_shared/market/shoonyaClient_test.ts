@@ -8,6 +8,7 @@ import {
   sha256Hex,
   shoonyaOAuthUrl,
   shoonyaInputError,
+  shoonyaPost,
   shoonyaTokenRequest,
 } from "./shoonyaClient.ts";
 
@@ -73,4 +74,34 @@ Deno.test("GenAcsTok request includes uid and exact checksum", async () => {
   assertEquals(request.code, "returned-code");
   assertEquals(request.checksum, await sha256Hex("FA000001_Usecretreturned-code"));
   assertMatch(request.checksum, /^[a-f0-9]{64}$/);
+});
+
+Deno.test("Shoonya post can route through the static-IP proxy", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalUrl = Deno.env.get("SHOONYA_PROXY_URL");
+  const originalSecret = Deno.env.get("SHOONYA_PROXY_SECRET");
+  Deno.env.set("SHOONYA_PROXY_URL", "https://proxy.example/shoonya");
+  Deno.env.set("SHOONYA_PROXY_SECRET", "unit-secret");
+  const captured: Array<{ url: string; init: RequestInit }> = [];
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    captured.push({ url: String(input), init: init ?? {} });
+    return Promise.resolve(new Response(JSON.stringify({ stat: "Ok", lp: "1" }), { status: 200, headers: { "Content-Type": "application/json" } }));
+  }) as typeof fetch;
+  try {
+    await shoonyaPost(SHOONYA_BASE, "GetQuotes", { uid: "FA000001", exch: "NSE", token: "22" }, "session-token");
+    const request = captured[0];
+    assert(request);
+    assertEquals(request.url, "https://proxy.example/shoonya");
+    const headers = new Headers(request.init.headers);
+    assertEquals(headers.get("Authorization"), "Bearer unit-secret");
+    const body = JSON.parse(String(request.init.body));
+    assertEquals(body.base, SHOONYA_BASE);
+    assertEquals(body.route, "GetQuotes");
+    assertEquals(body.jKey, "session-token");
+    assertEquals(body.jData.token, "22");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl == null) Deno.env.delete("SHOONYA_PROXY_URL"); else Deno.env.set("SHOONYA_PROXY_URL", originalUrl);
+    if (originalSecret == null) Deno.env.delete("SHOONYA_PROXY_SECRET"); else Deno.env.set("SHOONYA_PROXY_SECRET", originalSecret);
+  }
 });

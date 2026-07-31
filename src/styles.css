@@ -1538,10 +1538,20 @@ textarea.hud-input:focus {
   gap: 12px;
   min-height: 0;
   overflow-y: auto;
-  padding: 2px 6px 12px 2px;
+  padding: 0 4px 6px 2px;
 }
 .mk-anl-rail::-webkit-scrollbar { width: 6px; }
 .mk-anl-rail::-webkit-scrollbar-thumb { background: rgba(53,214,237,0.18); border-radius: 3px; }
+
+/* Compact density for the analysis workbench: tighter panel chrome and rows
+   so the rail shows more signal per screen without shrinking type. */
+.mk-anl-grid { gap: 10px; }
+.mk-anl-rail { gap: 8px; }
+.mk-anl-grid .hud-panel > header { padding: 5px 10px !important; gap: 8px !important; }
+.mk-anl-grid .hud-panel > header + div { padding: 8px 10px !important; }
+.mk-anl-grid .hud-panel > header + div > *:last-child { margin-bottom: 0 !important; }
+.mk-anl-rail .hud-panel > header + div > div[style*="justify-content: space-between"] { padding-top: 2px !important; padding-bottom: 2px !important; }
+
 
 /* Flow panels: hide the animated shimmer overlay that occasionally paints
    outside on re-renders and causes visible "overlap" between stacked panels. */
@@ -1556,8 +1566,9 @@ textarea.hud-input:focus {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 6px;
-  margin-bottom: 8px;
+  padding: 3px 5px;
+  margin-bottom: 5px;
+
   border: 1px solid var(--edge);
   border-radius: 3px;
   background: rgba(4,16,22,0.55);

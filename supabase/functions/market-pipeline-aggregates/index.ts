@@ -681,14 +681,27 @@ Deno.serve(async (req) => {
           v >= SCORE_BAND_STRONG ? "strong"
           : v >= SCORE_BAND_MODERATE ? "moderate"
           : v >= SCORE_BAND_WEAK ? "watch" : "weak";
+        // Percentile of the v4 score within the liquid universe, so a snapshot
+        // can be read back relative to the tape it was taken in.
+        const v4RankPool = scored.filter((x) => x.liquidityOk && x.v4 != null)
+          .map((x) => ({ k: `${x.symbol}|${x.exchange}`, v: x.v4 as number }))
+          .sort((a, b) => a.v - b.v);
+        const histRank = new Map<string, number>();
+        v4RankPool.forEach((it, i) =>
+          histRank.set(it.k, v4RankPool.length > 1 ? Math.round((i / (v4RankPool.length - 1)) * 1000) / 10 : 50));
+
         const histRows = scored
           .filter((x) => x.v4 != null)
           .map((x) => ({
             symbol: x.symbol, exchange: x.exchange,
             trade_date: latestTradeDate, model: "breakout_v4",
             score: x.v4, band: bandOf(x.v4 as number),
-            rank_pct: null as number | null,
+            rank_pct: histRank.get(`${x.symbol}|${x.exchange}`) ?? null,
             close: x.close, buckets: x.v4Buckets ?? null, coverage: x.v4Coverage ?? null,
+            // Stamped here or the calibration fit silently drops every live row.
+            is_liquid_tradable: x.liquidityOk,
+            // This pass runs with full market context (regime, sector strength).
+            context_neutral: false,
           }));
         for (let i = 0; i < histRows.length; i += 500) {
           const { error } = await svc.from("market_score_history")
@@ -696,58 +709,13 @@ Deno.serve(async (req) => {
           if (!error) history.written += Math.min(500, histRows.length - i);
         }
 
-        // Evaluate older snapshots whose forward windows have now elapsed.
-        const closeNow = new Map(scored.map((x) => [`${x.symbol}|${x.exchange}`, x.close]));
-        const { data: pending } = await svc.from("market_score_history")
-          .select("id,symbol,exchange,trade_date,close,fwd_ret_5d,fwd_ret_10d,fwd_ret_21d")
-          .is("fwd_ret_21d", null)
-          .lt("trade_date", latestTradeDate)
-          .order("trade_date", { ascending: true })
-          .limit(4000);
-        const sessionsBetween = (a: string, b: string) =>
-          // Calendar days × 5/7 is a close-enough session count for bucketing
-          // a feedback window; exactness here buys nothing.
-          Math.round(((Date.parse(b) - Date.parse(a)) / 86_400_000) * (5 / 7));
-        for (const h of pending ?? []) {
-          const now = closeNow.get(`${h.symbol}|${h.exchange}`);
-          if (now == null || h.close == null || Number(h.close) <= 0) continue;
-          const ret = ((Number(now) - Number(h.close)) / Number(h.close)) * 100;
-          const age = sessionsBetween(h.trade_date as string, latestTradeDate);
-          const patch: Record<string, unknown> = {};
-          if (age >= 5 && h.fwd_ret_5d == null) patch.fwd_ret_5d = Math.round(ret * 100) / 100;
-          if (age >= 10 && h.fwd_ret_10d == null) patch.fwd_ret_10d = Math.round(ret * 100) / 100;
-          if (age >= 21) { patch.fwd_ret_21d = Math.round(ret * 100) / 100; patch.evaluated_at = new Date().toISOString(); }
-          if (Object.keys(patch).length === 0) continue;
-          const { error } = await svc.from("market_score_history").update(patch).eq("id", h.id);
-          if (!error) history.evaluated++;
-        }
-
-        // Fit: how well did the score explain the realised 21-day return?
-        const { data: done } = await svc.from("market_score_history")
-          .select("score,fwd_ret_21d")
-          .eq("model", "breakout_v4")
-          .not("fwd_ret_21d", "is", null)
-          .limit(20000);
-        const pairs = (done ?? [])
-          .map((d) => [Number(d.score), Number(d.fwd_ret_21d)] as [number, number])
-          .filter(([a, b]) => Number.isFinite(a) && Number.isFinite(b));
-        if (pairs.length >= 200) {
-          const nP = pairs.length;
-          const mx = pairs.reduce((s, p) => s + p[0], 0) / nP;
-          const my = pairs.reduce((s, p) => s + p[1], 0) / nP;
-          let sxy = 0, sxx = 0, syy = 0;
-          for (const [x, y] of pairs) { sxy += (x - mx) * (y - my); sxx += (x - mx) ** 2; syy += (y - my) ** 2; }
-          const slope = sxx > 0 ? sxy / sxx : 0;
-          const r = sxx > 0 && syy > 0 ? sxy / Math.sqrt(sxx * syy) : 0;
-          await svc.from("market_scoring_calibration").insert({
-            model_version: "breakout_v4",
-            component: "score_vs_fwd_ret_21d",
-            weight: Math.round(slope * 10000) / 10000,
-            r2: Math.round(r * r * 10000) / 10000,
-            sample_n: nP,
-            computed_at: new Date().toISOString(),
-          });
-        }
+        // Forward returns, calibration and the band distribution are NOT
+        // computed here any more. The old inline loop wrote *today's* return
+        // into fwd_ret_5d/10d/21d alike (a 40-session-old snapshot got its
+        // 40-day return stamped as its "5-day" return) and used unadjusted
+        // closes, which corrupted every band statistic. market-score-evaluate
+        // owns that now via evaluate_score_history_forward() /
+        // fit_score_calibration() / refresh_score_distribution().
       }
     } catch { /* feedback loop is additive — never fail the run */ }
 

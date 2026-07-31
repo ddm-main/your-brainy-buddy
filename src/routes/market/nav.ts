@@ -18,7 +18,7 @@ export const MARKET_GROUPS: MarketGroup[] = [
     key: "screener",
     label: "Screener",
     to: "/market/screener",
-    match: (p) => /^\/market\/(screener|breakout)/.test(p),
+    match: (p) => /^\/market\/(screener|breakout|calibration|score)/.test(p),
   },
   {
     key: "portfolio",
@@ -45,6 +45,7 @@ export const MARKET_SUBS: Record<string, MarketSub[]> = {
   screener: [
     { to: "/market/screener", label: "Stocks" },
     { to: "/market/screener/breakout", label: "Breakout" },
+    { to: "/market/calibration", label: "Calibration" },
   ],
   portfolio: [
     { to: "/market/portfolio", label: "Overview" },

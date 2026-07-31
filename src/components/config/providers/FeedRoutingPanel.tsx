@@ -11,11 +11,11 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import HudPanel from "@/components/hud/HudPanel";
-import { Chip } from "@/components/hud/HudControls";
+import { Btn, Chip } from "@/components/hud/HudControls";
 import { supabase } from "@/integrations/supabase/client";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { useSurfaceProbes, bestBySurface, useFeedFreshness, freshKey, useProviderStats24h, canonicalProviderId, SELFTEST_QUERY_KEY } from "@/lib/market/selftest";
+import { useRunSelfTest, useSurfaceProbes, bestBySurface, useFeedFreshness, freshKey, useProviderStats24h, canonicalProviderId, SELFTEST_QUERY_KEY } from "@/lib/market/selftest";
 import {
   ROUTED_FEEDS, ROUTED_PROVIDER_LABEL, FEED_GROUP_LABEL,
   type RoutedProvider, type RoutedFeed, type FeedGroup,
@@ -33,12 +33,14 @@ const sel: React.CSSProperties = {
 };
 
 type PrefRow = { feed_id: string; provider: string | null; fallback_provider: string | null };
-type SurfaceResult = { ok: boolean; state: "ok" | "degraded" | "failed"; provider_used: string; detail: string; checked_at: string };
+type SurfaceResult = { ok: boolean; state: "ok" | "degraded" | "failed" | "not_configured"; provider_used: string; detail: string; checked_at: string };
 type Heartbeat = { feed_id: string; provider: string; ok: boolean; latency_ms: number | null; detail: string | null; symbols: number | null; observed_at: string };
-type Status = "LIVE" | "DELAYED" | "FALLBACK" | "DOWN" | "IDLE";
+// NOT SET = the route needs credentials nobody has entered yet. Distinct from
+// DOWN so an unconnected broker stops painting the panel red.
+type Status = "LIVE" | "DELAYED" | "FALLBACK" | "DOWN" | "IDLE" | "NOT SET";
 
 const STATUS_TONE: Record<Status, "ok" | "warn" | "err" | "neutral" | "accent"> = {
-  LIVE: "ok", DELAYED: "warn", FALLBACK: "accent", DOWN: "err", IDLE: "neutral",
+  LIVE: "ok", DELAYED: "warn", FALLBACK: "accent", DOWN: "err", IDLE: "neutral", "NOT SET": "neutral",
 };
 
 /** NSE cash session, Mon–Fri 09:15–15:30 IST — used so a quiet feed after
@@ -54,10 +56,13 @@ function nseSessionOpen(now = new Date()): boolean {
 /** Map the resolver's provider ids onto the probe's provider names. */
 function sameProvider(routed: RoutedProvider, used: string): boolean {
   const u = (used || "").toLowerCase();
-  if (routed === "kotak") return u.includes("kotak");
-  if (routed === "alpha") return u.includes("alpha");
-  if (routed === "computed") return u.includes("computed") || u.includes("local");
-  return u.includes(routed);
+  // "computed"/"cache" never reach the canonical id map — they are local
+  // paths, not vendors, so they keep a substring check.
+  if (routed === "computed") return u.includes("computed") || u.includes("local") || u.includes("cache");
+  // Everything else goes through the single canonical id used server-side, so
+  // "kotak" vs "kotak_neo" and "alpha" vs "alpha_vantage" can no longer read
+  // as two different providers and mislabel a healthy primary as a fallback.
+  return canonicalProviderId(routed) === canonicalProviderId(u);
 }
 
 function providerLabelFromProbe(used: string): string {
@@ -82,6 +87,7 @@ const agoLabel = (iso: string): string => {
 export default function FeedRoutingPanel() {
   const qc = useQueryClient();
   const push = useUi((s) => s.push);
+  const selfTest = useRunSelfTest();
 
   const { data: prefs = [] } = useQuery({
     queryKey: ["market", "feed-prefs"],
@@ -216,7 +222,10 @@ export default function FeedRoutingPanel() {
     if (probe) {
       const answered = probe.provider || "unknown";
       const providerLabel = providerLabelFromProbe(answered);
-      const health = `probe ${probe.state} · ${agoLabel(probe.checked_at)}`;
+      const health = `probe ${probe.state} · ${agoLabel(probe.checked_at)}${probe.latency_ms != null ? ` · ${probe.latency_ms}ms` : ""}`;
+      if (probe.state === "not_configured") {
+        return { status: "NOT SET", detail: probe.detail || `${providerLabel} needs to be connected first`, servedBy: providerLabel, health, primaryProbe: null };
+      }
       if (!probe.ok || probe.state === "failed") {
         if (f.sessionOnly && !open) {
           return { status: "IDLE", detail: `Market closed — ${probe.detail || "no live data outside session"}.`, servedBy: "—", health, primaryProbe: null };
@@ -310,12 +319,27 @@ export default function FeedRoutingPanel() {
       index="RTE"
       live={(tally.DOWN ?? 0) > 0 ? "err" : (tally.FALLBACK ?? 0) + (tally.DELAYED ?? 0) > 0 ? "warn" : "ok"}
       bodyClass="overflow-visible"
-      // Testing lives in one place — the "test all" button on the Providers
-      // panel below runs the same self-test for every provider and feed.
+      // The same self-test the Providers panel runs, surfaced here too — this
+      // is the table people are staring at when they want to re-check.
+      actions={
+        <Btn size="sm" disabled={selfTest.isPending} onClick={async () => {
+          try {
+            const r = await selfTest.mutateAsync();
+            const p = (r as any)?.providers ?? {};
+            const okN = Object.values(p).filter((x: any) => x?.ok).length;
+            push(`Self-test complete — ${okN}/${Object.keys(p).length} providers ok`, "ok");
+          } catch (e) {
+            push(toSafeError(e, "Self-test failed").message, "err");
+          }
+        }}>
+          {selfTest.isPending ? "testing…" : "test everything"}
+        </Btn>
+      }
     >
+
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-          {(["LIVE", "DELAYED", "FALLBACK", "DOWN", "IDLE"] as Status[]).map((s) => (
+          {(["LIVE", "DELAYED", "FALLBACK", "DOWN", "IDLE", "NOT SET"] as Status[]).map((s) => (
             <Chip key={s} tone={STATUS_TONE[s] as never}>{tally[s] ?? 0} {s.toLowerCase()}</Chip>
           ))}
           {overridden > 0 && (
@@ -403,19 +427,38 @@ export default function FeedRoutingPanel() {
                             {f.routable === false ? (
                               <span style={{ fontSize: 10, color: "var(--text-muted)" }}>fixed</span>
                             ) : (
-                              <select
-                                value={primary}
-                                disabled={save.isPending}
-                                onChange={(e) => save.mutate({ feedId: f.id, primary: e.target.value, fallback })}
-                                className="focus-outline" style={sel}
-                              >
-                                <option value="auto">Auto (default chain)</option>
-                                {f.chain.filter((p) => !unsupported[p]).map((p) => (
-                                  <option key={p} value={p}>{ROUTED_PROVIDER_LABEL[p]}</option>
-                                ))}
-                              </select>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                <select
+                                  value={primary}
+                                  disabled={save.isPending}
+                                  onChange={(e) => save.mutate({ feedId: f.id, primary: e.target.value, fallback })}
+                                  className="focus-outline" style={sel}
+                                >
+                                  <option value="auto">Auto (default chain)</option>
+                                  {f.chain.filter((p) => !unsupported[p]).map((p) => (
+                                    <option key={p} value={p}>{ROUTED_PROVIDER_LABEL[p]}</option>
+                                  ))}
+                                </select>
+                                {(primary !== "auto" || fallback !== "auto") && (
+                                  <button
+                                    className="focus-outline"
+                                    title="Your manual override for this feed — click to reset to the default chain"
+                                    disabled={save.isPending}
+                                    onClick={() => save.mutate({ feedId: f.id, primary: "auto", fallback: "auto" })}
+                                    style={{
+                                      fontSize: 9, fontFamily: "var(--font-hud)", letterSpacing: "0.1em",
+                                      textTransform: "uppercase", color: "var(--accent)",
+                                      border: "1px solid var(--edge-strong)", background: "transparent",
+                                      padding: "2px 5px", cursor: "pointer", whiteSpace: "nowrap",
+                                    }}
+                                  >
+                                    yours · reset
+                                  </button>
+                                )}
+                              </div>
                             )}
                           </td>
+
                           <td style={cell}>
                             {f.routable === false || f.chain.length < 2 ? (
                               <span style={{ fontSize: 10, color: "var(--text-muted)" }}>—</span>

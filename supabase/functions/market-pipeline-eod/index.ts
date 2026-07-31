@@ -144,6 +144,12 @@ Deno.serve(async (req) => {
       }
     }
     let contextPreserved = 0;
+    // Per-symbol coverage failures ("insufficient candles", Yahoo 404 on a
+    // delisted ticker) are NOT provider outages, and writing one health row
+    // per symbol both slandered the broker on the Providers page (617 rows in
+    // 24h attributed to kotak_neo for symbols it never served) and burned
+    // disk. Collect them and write ONE summary row for the run instead.
+    const symbolErrors: string[] = [];
 
     const work = [...candidates];
     const workers = Array.from({ length: CONCURRENCY }, async () => {
@@ -165,10 +171,7 @@ Deno.serve(async (req) => {
           // prices included), and log the anomaly so it's visible instead of
           // silently corrupting the stored series.
           if (snap.changePct != null && Math.abs(snap.changePct) > 40) {
-            await svc.from("market_provider_health").insert({
-              provider: (provider as any).name ?? "unknown", endpoint: "market-pipeline-eod", ok: false,
-              error: `outlier rejected: ${stock.symbol} close ${snap.close} is ${snap.changePct.toFixed(1)}% from prior close — not written`,
-            });
+            symbolErrors.push(`outlier rejected: ${stock.symbol} close ${snap.close} is ${snap.changePct.toFixed(1)}% from prior close — not written`);
             throw new Error("price outlier rejected");
           }
 
@@ -416,10 +419,7 @@ Deno.serve(async (req) => {
               ? [(err as any).message, (err as any).details, (err as any).hint, (err as any).code]
                 .filter(Boolean).join(" | ") || JSON.stringify(err).slice(0, 300)
               : String(err));
-          await svc.from("market_provider_health").insert({
-            provider: (provider as any).name ?? "unknown", endpoint: "market-pipeline-eod", ok: false,
-            error: `${stock.symbol}: ${detail}`,
-          });
+          if (symbolErrors.length < 50) symbolErrors.push(`${stock.symbol}: ${detail}`);
         } finally {
           // Success: mark sync fresh and reset the attempt counter.
           // Failure: bump attempts (capped by the outer picker at 3/day) but
@@ -451,7 +451,17 @@ Deno.serve(async (req) => {
     });
     await Promise.all(workers);
 
-    return jsonResponse(req, { ok: true, processed: candidates.length, succeeded: okCount, failed: failCount, context_preserved: contextPreserved, local_rescored: localRescored, drained: candidates.length < CHUNK });
+    // One row for the whole run, attributed to the pipeline (not the broker).
+    if (symbolErrors.length > 0) {
+      await svc.from("market_provider_health").insert({
+        provider: "pipeline",
+        endpoint: "market-pipeline-eod",
+        ok: false,
+        error: `${failCount} of ${candidates.length} symbols failed — ${symbolErrors.slice(0, 10).join(" ; ")}`.slice(0, 500),
+      });
+    }
+
+    return jsonResponse(req, { ok: true, processed: candidates.length, succeeded: okCount, failed: failCount, symbol_errors: symbolErrors.slice(0, 20), context_preserved: contextPreserved, local_rescored: localRescored, drained: candidates.length < CHUNK });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }
