@@ -347,6 +347,18 @@ Deno.serve(async (req) => {
             near_resistance: snap.nearResistance,
             resistance_level: snap.resistance,
             support_level: snap.support,
+            // Round-trip fidelity: market-pipeline-aggregates re-scores v4 from
+            // these columns alone. Anything the scorer reads and we don't store
+            // is silently dropped from the score the UI shows.
+            support_fallback: snap.supportFallback ?? null,
+            resistance_fallback: snap.resistanceFallback ?? null,
+            resistance_above: snap.resistanceAbove ?? null,
+            breakout_state: snap.breakoutStateKind ?? null,
+            breakout_level_cleared: snap.breakoutLevelCleared ?? null,
+            rolling_high_20_touches: snap.rollingHigh20Touches ?? null,
+            rolling_high_20_touch_quality: snap.rollingHigh20TouchQuality ?? null,
+            macd_hist_rising: snap.macdHistRising ?? null,
+            atr_contracting: snap.atrContracting ?? null,
             sector: stock.sector ?? null,
             rolling_high_20: snap.rollingHigh20 ?? null,
             rolling_high_55: snap.rollingHigh55 ?? null,
@@ -356,12 +368,20 @@ Deno.serve(async (req) => {
             base_duration_days: snap.baseDurationDays ?? null,
             close_in_range_pct: snap.closeInRangePct ?? null,
             breakout_freshness_days: snap.breakoutFreshnessDays ?? null,
+            // Age of the CURRENT state, fresh or failed. breakout_freshness_days
+            // is only set while a breakout is alive, so without this a failed
+            // breakout lost its age on the DB round-trip and the recency-scoped
+            // failed_breakout penalty could never fire in the aggregates pass.
+            breakout_state_days: snap.breakoutStateDays ?? null,
             pivot_level: snap.pivotLevel ?? null,
             pivot_touches: snap.pivotTouches ?? null,
             pivot_touch_quality: snap.pivotTouchQuality ?? null,
             rel_volume_median30: snap.relVolumeMedian30 ?? null,
             bars_available: snap.barsAvailable ?? candles.length,
             vol_dryup_ratio: snap.volDryUpRatio ?? null,
+            vol_dryup_ratio_base: snap.volDryUpRatioBase ?? null,
+            ema_cross_20_50_days: snap.emaCross2050FreshDays ?? null,
+            ema_cross_50_200_days: snap.emaCross50200FreshDays ?? null,
             // True 55-session return. Relative strength compares this against
             // the Nifty's own 55-session return — same horizon, both sides.
             ret_55d: (() => {
@@ -378,6 +398,7 @@ Deno.serve(async (req) => {
             weekly_rsi14: weekly?.rsi14W ?? null,
             weekly_trend_up: weekly?.trendUpW ?? null,
             weekly_higher_lows: weekly?.higherLowsW ?? null,
+            weekly_bars: weekly?.barsW ?? null,
             vwap: vwapLast,
             supertrend: st.line.at(-1) ?? null,
             supertrend_dir: supertrendDir,

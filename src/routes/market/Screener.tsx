@@ -82,7 +82,8 @@ const COLUMNS: ColSpec[] = [
   { id: "ret_5d",             label: "5D %",          align: "right" },
   { id: "ret_21d",            label: "1M %",          align: "right" },
   { id: "ret_ytd",            label: "YTD %",         align: "right" },
-  { id: "breakout_score",     label: "Breakout",      align: "right", default: true },
+  { id: "breakout_score_v4",  label: "Breakout",      align: "right", default: true },
+  { id: "breakout_score",     label: "Breakout (v2)", align: "right" },
   { id: "prebreakout_score",  label: "Pre-BO",        align: "right" },
   { id: "swing_score",        label: "Swing",         align: "right" },
   { id: "intraday_score",     label: "Intraday",      align: "right" },
@@ -94,7 +95,7 @@ const COLUMNS: ColSpec[] = [
 // intent). Every user lands on the same lean default view:
 // Stock, LTP, 1D Return, Volume, 52w Δ, Breakout.
 const DEFAULT_COLS = [
-  "symbol", "close", "change_pct", "volume", "pct_from_52w_high", "breakout_score",
+  "symbol", "close", "change_pct", "volume", "pct_from_52w_high", "breakout_score_v4",
 ];
 // v5: bumped so browsers holding a prior selection pick up the current
 // default instead of rendering a stale column set.
@@ -545,7 +546,7 @@ function ScreenerInner() {
   // Always default-sort by breakout_score, regardless of active filters —
   // previously a "change_pct" filter silently switched the default sort to
   // 1D Return instead.
-  const defaultSorting = useMemo<SortingState>(() => [{ id: "breakout_score", desc: true }], []);
+  const defaultSorting = useMemo<SortingState>(() => [{ id: "breakout_score_v4", desc: true }], []);
   const [sorting, setSorting] = useState<SortingState>(defaultSorting);
   useEffect(() => { setSorting(defaultSorting); }, [defaultSorting]);
 
@@ -759,21 +760,27 @@ function ScreenerInner() {
       ret_5d:  { header: "5D %",  accessorKey: "ret_5d",  meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
       ret_21d: { header: "1M %",  accessorKey: "ret_21d", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
       ret_ytd: { header: "YTD %", accessorKey: "ret_ytd", meta: { align: "right" }, cell: ({ getValue }) => <PctCell value={getValue() as number | null} /> },
+      breakout_score_v4: {
+        header: "Breakout", accessorKey: "breakout_score_v4", meta: { align: "right" },
+        // v4 buckets, so the popover breakdown sums to the number above it —
+        // the old pairing showed a v4 score over a v2 component map.
+        cell: ({ row }) => <ScoreBadge score={row.original.breakout_score_v4} components={row.original.breakout_v4_buckets ?? undefined} label="breakout v4 buckets" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
+      },
       breakout_score: {
-        header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },
-        cell: ({ row }) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" onClick={() => nav(`/market/ai/${row.original.symbol}`)} />,
+        header: "Breakout (v2)", accessorKey: "breakout_score", meta: { align: "right" },
+        cell: ({ row }) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
       },
       prebreakout_score: {
         header: "Pre-BO", accessorKey: "prebreakout_score", meta: { align: "right" },
-        cell: ({ row }) => <ScoreBadge score={row.original.prebreakout_score} components={row.original.score_components?.prebreakout} label="pre-breakout components" onClick={() => nav(`/market/ai/${row.original.symbol}`)} />,
+        cell: ({ row }) => <ScoreBadge score={row.original.prebreakout_score} components={row.original.score_components?.prebreakout} label="pre-breakout components" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
       },
       swing_score: {
         header: "Swing", accessorKey: "swing_score", meta: { align: "right" },
-        cell: ({ row }) => <ScoreBadge score={row.original.swing_score} components={row.original.swing_components} label="swing components" onClick={() => nav(`/market/ai/${row.original.symbol}`)} />,
+        cell: ({ row }) => <ScoreBadge score={row.original.swing_score} components={row.original.swing_components} label="swing components" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
       },
       intraday_score: {
         header: "Intraday", accessorKey: "intraday_score", meta: { align: "right" },
-        cell: ({ row }) => <ScoreBadge score={row.original.intraday_score} components={row.original.intraday_components} label="intraday components" onClick={() => nav(`/market/ai/${row.original.symbol}`)} />,
+        cell: ({ row }) => <ScoreBadge score={row.original.intraday_score} components={row.original.intraday_components} label="intraday components" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
       },
       avg_turnover_cr: {
         header: "Turnover (₹Cr)", accessorKey: "avg_turnover_cr", meta: { align: "right" },

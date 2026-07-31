@@ -24,7 +24,8 @@ import { todayIstDateString } from "@/lib/market/liveSnapshot";
 import { quoteKey } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore, useTicksRevision } from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
-import { ChevronDown, ChevronRight, LineChart, Info } from "lucide-react";
+import { ChevronDown, ChevronRight, LineChart, Info, PieChart } from "lucide-react";
+import { ScoreWeightsDialog } from "@/components/market/ScoreWeightsDialog";
 
 // ---- Status presentation ----
 const STATUS_META: Record<BreakoutStatus, { label: string; color: string; rule: string }> = {
@@ -69,16 +70,23 @@ function scoreBandColor(score: number | null): string {
   return "var(--err)";
 }
 
-// Tiny score-trend sparkline (0-100 scaled). Nulls are sessions the pipeline
-// skipped: the line breaks there instead of pretending the days were adjacent.
+// Tiny score-trend sparkline. Scaled to the episode's own range (with a 10pt
+// floor) — a fixed 0-100 axis made a 47→78 collapse look like a 70→72 drift.
+// Nulls are sessions the pipeline skipped: the line breaks there instead of
+// pretending the days were adjacent.
 function Sparkline({ points }: { points: (number | null)[] }) {
   const known = points.filter((p): p is number => p != null);
   if (known.length === 0) return <span style={{ color: "var(--text-muted)" }}>—</span>;
-  const w = 64, h = 18, max = 100, min = 0;
+  const w = 64, h = 18;
+  const lo = Math.min(...known), hi = Math.max(...known);
+  const mid = (lo + hi) / 2;
+  const span = Math.max(hi - lo, 10);
+  const min = mid - span / 2, max = mid + span / 2;
   const y = (v: number) => h - ((v - min) / (max - min)) * h;
+  const title = `${lo.toFixed(0)} → ${known[known.length - 1].toFixed(0)} (peak ${hi.toFixed(0)})`;
   if (known.length === 1) {
     return (
-      <svg width={w} height={h} style={{ display: "block" }}>
+      <svg width={w} height={h} style={{ display: "block" }}><title>{title}</title>
         <circle cx={w / 2} cy={y(known[0])} r={2} fill="var(--accent)" />
       </svg>
     );
@@ -93,7 +101,7 @@ function Sparkline({ points }: { points: (number | null)[] }) {
   }).filter(Boolean).join(" ");
   const up = known[known.length - 1] >= known[0];
   return (
-    <svg width={w} height={h} style={{ display: "block" }}>
+    <svg width={w} height={h} style={{ display: "block" }}><title>{title}</title>
       <path d={d} fill="none" stroke={up ? "var(--ok)" : "var(--err)"} strokeWidth={1.5} />
     </svg>
   );
@@ -105,6 +113,7 @@ function BreakoutInner() {
   const [minScore, setMinScore] = useState<number>(0);
   const [search, setSearch] = useState("");
   const [legendOpen, setLegendOpen] = useState(false);
+  const [weightsOpen, setWeightsOpen] = useState(false);
 
   // One query for everything — all three views are derived client-side.
   const { data: episodes = [], isFetching, error } = useBreakoutTracker(true);
@@ -122,12 +131,19 @@ function BreakoutInner() {
   const liveTicks = useLiveTickStore.getState().ticks;
   void _ticksRev; // re-render on any tick flush; read fresh map above
 
+  // The relay subscription is capped: past ~100 symbols the tick fan-out costs
+  // more than it informs. Rows beyond the cap fall back to the EOD close, which
+  // is fine — but it must be visible, not silent, or the table looks live when
+  // its tail is a day old.
+  const LIVE_TICK_CAP = 100;
   const tickKeys = useMemo(
-    () => episodes.slice(0, 100).map((e) => quoteKey(e.exchange, e.symbol)).sort(),
+    () => episodes.slice(0, LIVE_TICK_CAP).map((e) => quoteKey(e.exchange, e.symbol)).sort(),
     [episodes],
   );
+  const uncappedLive = Math.max(0, episodes.length - LIVE_TICK_CAP);
   const tickKeysSig = tickKeys.join(",");
   useEffect(() => { subscribeSymbolsForTicks(tickKeys); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [tickKeysSig]);
+
 
   const allRows = useMemo<Row[]>(() => episodes.map((e) => {
     const meta = metaMap?.get(metaKey(e.exchange, e.symbol)) ?? null;
@@ -150,6 +166,13 @@ function BreakoutInner() {
       rollingHigh20: meta.rolling_high_20 ?? null,
       rollingHigh55: meta.rolling_high_55 ?? null,
       breakoutFreshnessDays: meta.breakout_freshness_days ?? null,
+      // Without the explicit state a broken-down breakout (freshness null)
+      // rendered as COILED / NO SETUP — the friendliest possible label.
+      breakoutStateKind: meta.breakout_state ?? null,
+      // Recency of that state — the failed_breakout penalty is scoped to it,
+      // so without this the live recompute under-penalises a fresh failure.
+      breakoutStateDays: meta.breakout_state_days ?? meta.breakout_freshness_days ?? null,
+      breakoutLevelCleared: meta.breakout_level_cleared ?? null,
       atrContracting: (meta.base_tightness ?? 1) < 0.04,
       baseTightness: meta.base_tightness ?? null,
       baseDurationDays: meta.base_duration_days ?? null,
@@ -193,7 +216,9 @@ function BreakoutInner() {
       cell: ({ row }) => (
         <ScoreBadge
           score={row.original.last_score}
-          components={row.original.meta?.score_components?.breakout ?? null}
+          // last_score is v4, so the popover must show v4 buckets — pairing it
+          // with the legacy v2 component map never summed to the number shown.
+          components={row.original.meta?.breakout_v4_buckets ?? null}
           onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange)}`)}
         />
       ),
@@ -202,7 +227,12 @@ function BreakoutInner() {
       // "Setup" not "Stage": Status already owns the episode lifecycle
       // vocabulary, and two columns both called a stage read as contradictory
       // when one says EXTENDED and the other says Active.
-      id: "stage", header: "Setup", accessorKey: "stage",
+      id: "stage", accessorKey: "stage",
+      header: () => (
+        <span title="Today's technical read, independent of the episode: COILED (volatility contracting) → ARMED (coiled at a pivot) → TRIGGERED (pivot cleared) → EXTENDED (stretched above EMA20).">
+          Setup
+        </span>
+      ),
       cell: ({ row }) => {
         const r = row.original;
         return (
@@ -219,9 +249,11 @@ function BreakoutInner() {
       cell: ({ row }) => {
         const v = row.original.rank_pct;
         return (
-          <span title="Percentile of the score within that session's liquid universe"
+          <span title={v == null
+            ? "Not computed for this episode — written from the next aggregates pass onward"
+            : "Percentile of the score within that session's liquid universe"}
                 style={{ textAlign: "right", display: "block", color: v == null ? "var(--text-muted)" : undefined }}>
-            {v == null ? "—" : `${v.toFixed(0)}`}
+            {v == null ? "n/a" : `${v.toFixed(0)}`}
           </span>
         );
       },
@@ -272,7 +304,10 @@ function BreakoutInner() {
       // Unknown MAE sorts to the bottom in both directions rather than
       // crowding the top of a "worst drawdown" sort with blanks.
       id: "mae", header: "MAE %", accessorFn: (r) => r.mae_pct ?? Number.NEGATIVE_INFINITY, meta: { align: "right" },
-      cell: ({ row }) => <PctCell value={row.original.mae_pct} />,
+      cell: ({ row }) => (row.original.mae_pct == null
+        ? <span title="Not computed for this episode — written from the next aggregates pass onward"
+                style={{ textAlign: "right", display: "block", color: "var(--text-muted)" }}>n/a</span>
+        : <PctCell value={row.original.mae_pct} />),
     },
     {
       id: "relvol", header: "Rel Vol", accessorFn: (r) => r.rel_volume ?? -1, meta: { align: "right" },
@@ -294,7 +329,12 @@ function BreakoutInner() {
       },
     },
     {
-      id: "status", header: "Status", accessorKey: "status",
+      id: "status", accessorKey: "status",
+      header: () => (
+        <span title="Where the episode stands in its lifecycle — Active / Extended / Cooled / Failed / Closed. Expand the legend above for each rule.">
+          Status
+        </span>
+      ),
       cell: ({ row }) => {
         const m = STATUS_META[row.original.status];
         return <span title={m.rule} style={{ color: m.color, fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase" }}>{m.label}</span>;
@@ -347,6 +387,16 @@ function BreakoutInner() {
           style={{ ...inputStyle, width: 180 }}
         />
 
+        <button
+          onClick={() => setWeightsOpen(true)}
+          className="hud-btn" data-variant="ghost" data-size="sm"
+          title="How the 100 points are split across sections"
+        >
+          <PieChart size={12} style={{ marginRight: 4 }} /> Score breakdown
+        </button>
+
+        <ScoreWeightsDialog open={weightsOpen} onOpenChange={setWeightsOpen} />
+
         <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: "var(--font-hud)", fontSize: 10, color: relayAlive ? "var(--ok)" : "var(--text-muted)", letterSpacing: "0.1em", textTransform: "uppercase" }}>
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: relayAlive ? "var(--ok)" : "var(--text-muted)" }} />
@@ -358,7 +408,7 @@ function BreakoutInner() {
         </div>
       </div>
 
-      {/* Model legend */}
+      {/* Model legend — one line, details on demand */}
       <div style={{ border: "1px solid var(--edge)" }}>
         <button
           onClick={() => setLegendOpen((o) => !o)}
@@ -366,29 +416,24 @@ function BreakoutInner() {
           style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", justifyContent: "flex-start" }}
         >
           {legendOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          <Info size={12} /> How the breakout tracker works
+          <Info size={12} /> Enters at score ≥ {SCORE_BAND_STRONG} + liquidity gate, then tracked forward
+          {uncappedLive > 0 && (
+            <span style={{ color: "var(--warn)" }}>
+              · live prices on top {LIVE_TICK_CAP}; {uncappedLive} more show last close
+            </span>
+          )}
+
         </button>
         {legendOpen && (
-          <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6 }}>
-            <div style={{ marginBottom: 6 }}>
-              A stock enters the tracker when its <strong>breakout score reaches {SCORE_BAND_STRONG}</strong> and it clears the
-              liquidity gate (enough turnover to be tradable). From then on the nightly pass follows it forward until it
-              fails, extends or ages out.
-            </div>
+          <div style={{ padding: "6px 12px 8px", fontSize: 10, color: "var(--text-dim)", lineHeight: 1.6 }}>
             {(Object.keys(STATUS_META) as BreakoutStatus[]).map((s) => (
-              <div key={s} style={{ display: "flex", gap: 8, padding: "1px 0" }}>
-                <span style={{ color: STATUS_META[s].color, minWidth: 70, fontFamily: "var(--font-hud)", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em" }}>
+              <div key={s} style={{ display: "flex", gap: 8 }}>
+                <span style={{ color: STATUS_META[s].color, minWidth: 66, fontFamily: "var(--font-hud)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
                   {STATUS_META[s].label}
                 </span>
                 <span>{STATUS_META[s].rule}</span>
               </div>
             ))}
-            <div style={{ marginTop: 6, color: "var(--text-muted)" }}>
-              <strong>Setup</strong> is today's technical picture, independent of the episode's status: COILED (volatility
-              contracting) → ARMED (coiled at a pivot) → TRIGGERED (pivot cleared) → EXTENDED (stretched above EMA20).
-              <strong> Status</strong> is where the episode stands in its lifecycle. Peak %, MAE % and Health are blank on
-              the detection session — nothing has happened after entry yet.
-            </div>
           </div>
         )}
       </div>
@@ -398,6 +443,9 @@ function BreakoutInner() {
           <EmptyState hint={String((error as Error).message)}>failed to load tracker</EmptyState>
         ) : (
           <DataTable<Row>
+            // Remount per view so the default score-first sort is re-applied
+            // instead of carrying the previous view's sort silently.
+            key={view}
             columns={columns}
             data={rows}
             numbered

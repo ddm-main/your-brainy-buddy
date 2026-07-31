@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import {
   breakoutScore,
+  breakoutScoreV4,
   preBreakoutScore,
   classifyRegime,
   evaluateLiquidity,
@@ -64,6 +66,9 @@ const baseSnap: IndicatorSnapshot = {
   rsPercentile: null,
   closeInRangePct: null,
   breakoutFreshnessDays: null,
+  // The v4 readability gate refuses to score an unknown history length, so the
+  // shared fixture must state one; 300 sessions = fully readable chart.
+  barsAvailable: 300,
   ema20Series: [],
   ema50Series: [],
   ema200Series: [],
@@ -577,5 +582,162 @@ describe("breakout scoring audit fixes", () => {
   it("scores a base_duration of 0 as no base at all", () => {
     const { components } = breakoutScore({ ...baseSnap, baseDurationDays: 0 }, fullCtx);
     expect(components.base_duration).toBe(0);
+  });
+});
+
+// ---- v4 DB round-trip fidelity ------------------------------------------
+// market-pipeline-aggregates re-scores v4 from persisted columns, so every
+// field the scorer reads must survive snapshot → row → snapshot. When a new
+// factor is added and its column isn't persisted, the score published to the
+// UI silently loses it — this test is the tripwire.
+describe("v4 snapshot round-trip", () => {
+  const V4_READ_FIELDS = [
+    "close", "changePct", "volume", "volAvg20", "volAvg30", "relVolume",
+    "ema20", "ema50", "ema100", "ema200", "rsi14", "macd", "macdSignal",
+    "macdHist", "macdHistRising", "adx14", "atr14", "atrPct", "bbUpper",
+    "bbLower", "bbWidth", "bbSqueeze", "atrContracting", "high52w", "low52w",
+    "pctFrom52wHigh", "aboveEma200", "higherLows", "support", "resistance",
+    "nearResistance", "supportFallback", "resistanceFallback", "resistanceAbove",
+    "rollingHigh20", "rollingHigh55", "rollingHigh20Touches",
+    "rollingHigh20TouchQuality", "obvSlope20", "baseTightness", "baseDepthPct",
+    "baseDurationDays", "rsPercentile", "closeInRangePct",
+    "breakoutFreshnessDays", "breakoutStateKind", "breakoutLevelCleared",
+    "pivotLevel", "pivotTouches", "pivotTouchQuality", "relVolumeMedian30",
+    "barsAvailable", "volDryUpRatio",
+  ];
+
+  // Column each field must be persisted into by market-pipeline-eod.
+  const COLUMN_FOR: Record<string, string> = {
+    changePct: "change_pct", volAvg20: "vol_avg20", volAvg30: "vol_avg30",
+    relVolume: "rel_volume", macdSignal: "macd_signal", macdHist: "macd_hist",
+    macdHistRising: "macd_hist_rising", atrPct: "atr_pct", bbUpper: "bb_upper",
+    bbLower: "bb_lower", bbWidth: "bb_width", bbSqueeze: "bb_squeeze",
+    atrContracting: "atr_contracting", high52w: "high_52w", low52w: "low_52w",
+    pctFrom52wHigh: "pct_from_52w_high", aboveEma200: "above_ema200",
+    higherLows: "higher_lows", support: "support_level",
+    resistance: "resistance_level", nearResistance: "near_resistance",
+    supportFallback: "support_fallback", resistanceFallback: "resistance_fallback",
+    resistanceAbove: "resistance_above", rollingHigh20: "rolling_high_20",
+    rollingHigh55: "rolling_high_55",
+    rollingHigh20Touches: "rolling_high_20_touches",
+    rollingHigh20TouchQuality: "rolling_high_20_touch_quality",
+    obvSlope20: "obv_slope_20", baseTightness: "base_tightness",
+    baseDepthPct: "base_depth_pct", baseDurationDays: "base_duration_days",
+    rsPercentile: "rs_percentile", closeInRangePct: "close_in_range_pct",
+    breakoutFreshnessDays: "breakout_freshness_days",
+    breakoutStateKind: "breakout_state",
+    breakoutLevelCleared: "breakout_level_cleared", pivotLevel: "pivot_level",
+    pivotTouches: "pivot_touches", pivotTouchQuality: "pivot_touch_quality",
+    relVolumeMedian30: "rel_volume_median30", barsAvailable: "bars_available",
+    volDryUpRatio: "vol_dryup_ratio",
+  };
+
+  const eodSrc = readFileSync(
+    new URL("../supabase/functions/market-pipeline-eod/index.ts", import.meta.url), "utf8");
+  const aggSrc = readFileSync(
+    new URL("../supabase/functions/market-pipeline-aggregates/index.ts", import.meta.url), "utf8");
+  const snapFromRowSrc = aggSrc.slice(
+    aggSrc.indexOf("function snapFromRow"),
+    aggSrc.indexOf("function weeklyFromRow"));
+
+  for (const field of V4_READ_FIELDS) {
+    const col = COLUMN_FOR[field] ?? field;
+    it(`persists and rebuilds ${field}`, () => {
+      // rsPercentile is cross-sectional — it only exists once the whole universe
+      // is ranked, so market-pipeline-aggregates computes it rather than reading
+      // it back from the EOD row.
+      if (field !== "rsPercentile") expect(eodSrc.includes(`${col}:`)).toBe(true);
+      expect(snapFromRowSrc.includes(field)).toBe(true);
+    });
+  }
+});
+
+describe("v4 round 3 — bucket fixes", () => {
+  const ctx: MarketContext = { regime: "neutral" };
+
+  it("illiquid rel-volume scores zero instead of renormalising its weight away", () => {
+    const hot: IndicatorSnapshot = { ...baseSnap, relVolumeMedian30: 3 };
+    const thin = breakoutScoreV4({ s: hot, ctx, avgTurnoverCr: 0.1 });
+    const liquid = breakoutScoreV4({ s: hot, ctx, avgTurnoverCr: 50 });
+    expect(thin.components["volume.rel_volume_30d"]).toBe(0);
+    expect(thin.buckets.volume).toBeLessThan(liquid.buckets.volume);
+  });
+
+  it("missing MACD histogram does not dock the factor", () => {
+    const known = breakoutScoreV4({ s: { ...baseSnap, macdHistRising: true }, ctx });
+    const unknown = breakoutScoreV4({ s: { ...baseSnap, macdHistRising: null }, ctx });
+    expect(unknown.components["indicators.macd"]).toBeCloseTo(known.components["indicators.macd"], 5);
+  });
+
+  it("dry-up is read from the base window, not through the breakout bar", () => {
+    const withBase = breakoutScoreV4({
+      s: { ...baseSnap, volDryUpRatio: 1.8, volDryUpRatioBase: 0.55 }, ctx,
+    });
+    const noBase = breakoutScoreV4({ s: { ...baseSnap, volDryUpRatio: 1.8 }, ctx });
+    expect(withBase.components["volume.vol_dryup"]).toBeGreaterThan(
+      noBase.components["volume.vol_dryup"],
+    );
+  });
+
+  it("EMA cross ages fall back to the snapshot fields", () => {
+    const fresh = breakoutScoreV4({
+      s: { ...baseSnap, emaCross2050FreshDays: 0, emaCross50200FreshDays: 0 }, ctx,
+    });
+    const below = breakoutScoreV4({
+      s: { ...baseSnap, emaCross2050FreshDays: -1, emaCross50200FreshDays: -1 }, ctx,
+    });
+    expect(fresh.components["setups.cross_20_50"]).toBeGreaterThan(0.9);
+    expect(below.components["setups.cross_20_50"]).toBe(0);
+    expect(fresh.buckets.setups).toBeGreaterThan(below.buckets.setups);
+  });
+
+  it("coverage haircut stays inside 0.90-1.00", () => {
+    const r = breakoutScoreV4({ s: baseSnap, ctx });
+    expect(r.components.coverage_mult).toBeLessThanOrEqual(1);
+    expect(r.components.coverage_mult).toBeGreaterThanOrEqual(0.9);
+  });
+});
+
+describe("v4 round 4 — gate, penalty order, failed-breakout recency", () => {
+  const ctx: MarketContext = { regime: "neutral" };
+
+  it("refuses to score when the history length is unknown", () => {
+    const { barsAvailable: _drop, ...noBars } = baseSnap as IndicatorSnapshot & { barsAvailable?: number };
+    const r = breakoutScoreV4({ s: noBars as IndicatorSnapshot, ctx });
+    expect(r.score).toBeNull();
+    expect(r.unavailableReason).toMatch(/history length unknown/i);
+  });
+
+  it("refuses to score a chart that is too short", () => {
+    const r = breakoutScoreV4({ s: { ...baseSnap, barsAvailable: 30 }, ctx });
+    expect(r.score).toBeNull();
+    expect(r.unavailableReason).toMatch(/sessions of history/i);
+  });
+
+  it("charges a point penalty at face value regardless of regime", () => {
+    // Penalties are deducted AFTER the multipliers, so the 25-point illiquidity
+    // charge costs 25 points in a bearish tape exactly as in a neutral one.
+    const gate: LiquidityGate = { ok: false, reasons: ["avg turnover below floor"] };
+    const thin = { s: baseSnap, avgTurnoverCr: 0.01, liquidity: gate };
+    const neutral = breakoutScoreV4({ ...thin, ctx });
+    const bearish = breakoutScoreV4({ ...thin, ctx: { regime: "bearish" } as MarketContext });
+    expect(neutral.penalties.illiquid).toBe(25);
+    expect(bearish.penalties.illiquid).toBe(25);
+  });
+
+  it("fires the failed-breakout penalty only inside the recency window", () => {
+    const failed = {
+      ...baseSnap,
+      breakoutStateKind: "failed",
+      breakoutLevelCleared: 105,
+      close: 102,
+    } as IndicatorSnapshot;
+    const recent = breakoutScoreV4({ s: { ...failed, breakoutStateDays: 2 }, ctx });
+    const old = breakoutScoreV4({ s: { ...failed, breakoutStateDays: 120 }, ctx });
+    const unknown = breakoutScoreV4({ s: { ...failed, breakoutStateDays: null }, ctx });
+    expect(recent.penalties.failed_breakout).toBeGreaterThan(0);
+    expect(old.penalties.failed_breakout).toBeUndefined();
+    expect(unknown.penalties.failed_breakout).toBeUndefined();
+    expect(recent.score!).toBeLessThan(old.score!);
   });
 });

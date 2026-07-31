@@ -6,8 +6,9 @@
 // no historical fundamentals table) — the UI flags this to the user.
 
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
-import { computeSnapshot, type Candle } from "../_shared/market/indicators.ts";
-import { breakoutScore, preBreakoutScore, type MarketContext } from "../_shared/market/scoring.ts";
+import { computeSnapshot, computeWeeklySnapshot, type Candle } from "../_shared/market/indicators.ts";
+import { detectPatterns } from "../_shared/market/indicators-advanced.ts";
+import { breakoutScoreV4, preBreakoutScore, evaluateLiquidity, type MarketContext } from "../_shared/market/scoring.ts";
 
 type Universe = "all" | "nifty50" | "nifty500";
 
@@ -212,7 +213,39 @@ Deno.serve(async (req) => {
         relStrengthNifty: null,
         deliveryPct: null,
       };
-      const bo = breakoutScore(ind, ctx);
+      // v4 — the same engine the EOD pipeline, the score explainer and the live
+      // Analysis recompute use. This path used to run the legacy v2 scorer, so
+      // an as-of replay of a session disagreed with the stored score for it.
+      const p = detectPatterns(candles);
+      // Same liquidity gate the EOD pipeline applies. Without it this replay
+      // skipped the 25-point illiquidity penalty and dropped the relative-volume
+      // factor as "turnover unknown", so an as-of run disagreed with the score
+      // actually stored for that session — the exact drift this path exists to
+      // rule out.
+      const avgTurnoverCr = ind.volAvg20 != null && ind.close != null
+        ? (ind.volAvg20 * ind.close) / 1e7
+        : null;
+      const liquidity = evaluateLiquidity({
+        close: ind.close,
+        marketCapCr: snap.market_cap != null ? Number(snap.market_cap) : null,
+        avgTurnoverCr,
+      });
+      const bo = breakoutScoreV4({
+        s: ind,
+        ctx,
+        patterns: {
+          bullishEngulfing: p.bullish_engulfing, bearishEngulfing: p.bearish_engulfing,
+          hammer: p.hammer, shootingStar: p.shooting_star, doji: p.doji,
+          cupAndHandle: p.cup_and_handle, cupAndHandleTriggered: p.cup_and_handle_triggered,
+          flag: p.flag, ascendingTriangle: p.ascending_triangle,
+          doubleBottom: p.double_bottom, inverseHeadShoulders: p.inverse_head_shoulders,
+          fallingWedge: p.falling_wedge,
+        },
+        weekly: computeWeeklySnapshot(candles),
+        barsAvailable: candles.length,
+        liquidity,
+        avgTurnoverCr,
+      });
       const pb = preBreakoutScore(ind, ctx);
       const last = candles[candles.length - 1];
       const prev = candles[candles.length - 2] ?? null;
@@ -237,6 +270,11 @@ Deno.serve(async (req) => {
           fundamentals: "latest_snapshot",
           technicals: "recomputed",
           market_context: asOfCtx.available ? "historical" : "unavailable",
+          // A replay runs v4 without relative strength, delivery %, fundamentals
+          // or tier percentiles, so its number is NOT comparable to the stored
+          // one. Stamp the model so the UI can label it instead of implying the
+          // two measurements agree.
+          model: "breakout_v4_partial_context",
         },
 
         trade_date: new Date(last.time * 1000).toISOString().slice(0, 10),
@@ -280,8 +318,16 @@ Deno.serve(async (req) => {
         sector_strength: ctx.sectorStrength,
         rel_strength_nifty: null,
         breakout_score: bo.score,
+        // Same number under the v4 name, so anything ranking on v4 (screener,
+        // breakout board) works identically in a replay.
+        breakout_score_v4: bo.score,
+        breakout_v4_components: { buckets: bo.buckets, factors: bo.components, penalties: bo.penalties },
+        breakout_v4_coverage: bo.coverage,
         prebreakout_score: pb.score,
-        score_components: { breakout: bo.components, prebreakout: pb.components },
+        score_components: {
+          breakout: { ...bo.buckets, ...bo.components, ...bo.penalties },
+          prebreakout: pb.components,
+        },
 
         ret_5d: retNPct(candles, 5),
         ret_21d: retNPct(candles, 21),

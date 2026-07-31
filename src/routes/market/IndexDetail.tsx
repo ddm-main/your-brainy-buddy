@@ -536,7 +536,7 @@ function ConstituentsPanel({ slug, onRow }: { slug: string; onRow: (sym: string)
     { header: "RVol", accessorKey: "rel_volume", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue(), 1) },
     { header: "RSI", accessorKey: "rsi14", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue(), 0) },
     { header: "Breakout", accessorKey: "breakout_score", meta: { align: "right" },
-      cell: ({ row }) => <ScoreBadge score={row.original.breakout_score as number | null} label="breakout score" onClick={() => nav(`/market/ai/${row.original.symbol}`)} /> },
+      cell: ({ row }) => <ScoreBadge score={row.original.breakout_score as number | null} label="breakout score" onClick={() => nav(`/market/score/${encodeURIComponent(String(row.original.symbol))}/explain?exchange=NSE`)} /> },
   ], [liveByKey, nav]);
 
   return (

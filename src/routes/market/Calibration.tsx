@@ -92,6 +92,10 @@ export default function Calibration() {
     split_ok?: boolean;
     split_date?: string | null;
     test_n?: number;
+    population?: string;
+    live_rows?: number;
+    neutral_rows?: number;
+
     message?: string;
     ok?: boolean;
   } | null>(null);
@@ -111,6 +115,10 @@ export default function Calibration() {
   // The fit records which population it could actually use — a replayed
   // (neutral-context) fit is weaker evidence and must say so.
   const popRow = calibration.find((c) => c.component.startsWith("population:")) ?? null;
+  // The fit refuses to run on a thin sample and records why — surface that
+  // reason instead of a bare "not fitted yet".
+  const insufficient = calibration.find((c) => c.component.startsWith("coverage:insufficient")) ?? null;
+
 
   const run = () => {
     optimize.mutate({ days: searchDays, threshold, horizon, iterations: 400 }, {
@@ -131,6 +139,13 @@ export default function Calibration() {
             <Chip>n {fitLine.sample_n ?? "—"}</Chip>
           </>
         ) : <Chip tone="warn">not fitted yet</Chip>}
+        {insufficient && (
+          <Chip tone="warn">
+            insufficient evidence — {insufficient.component.slice("coverage:insufficient ".length)} ·{" "}
+            {insufficient.sample_n} matured rows (need ≥ 60 symbols and ≥ 20 sessions)
+          </Chip>
+        )}
+
         {popRow && (
           <Chip tone={popRow.component.endsWith("full_context") ? "ok" : "warn"}>
             fitted on {popRow.component.slice("population:".length).replace(/_/g, " ")} · {popRow.sample_n} rows
@@ -330,14 +345,23 @@ export default function Calibration() {
               <Chip>{result.sessions} sessions</Chip>
               <Chip>{horizon} horizon</Chip>
               {result.symbols != null && <Chip>{result.symbols} symbols</Chip>}
+              {result.population && <Chip>{result.population.replace(/_/g, " ")}</Chip>}
               <Chip>{result.split_ok ? `hold-out ${result.test_n} rows after ${result.split_date}` : "no hold-out — in-sample only"}</Chip>
             </div>
+            {result.population === "replayed_neutral" && (
+              <div style={{ fontSize: 10, color: "var(--warn)", lineHeight: 1.6, marginBottom: 6 }}>
+                Fitted on replayed context-neutral rows ({result.neutral_rows ?? 0} available) because only{" "}
+                {result.live_rows ?? 0} live full-context rows have matured. Replayed rows carry no regime or
+                sector context — these weights are not live evidence.
+              </div>
+            )}
             {!result.split_ok && (
               <div style={{ fontSize: 10, color: "var(--warn)", lineHeight: 1.6, marginBottom: 6 }}>
                 Too few sessions to hold any out — these numbers are in-sample and will flatter the
                 search. Treat them as a hypothesis, not a result.
               </div>
             )}
+
             <div style={{ fontSize: 10, fontFamily: "var(--font-hud)", display: "grid", gridTemplateColumns: "1.8fr repeat(7, 1fr)", gap: 6 }}>
               <span style={{ color: "var(--text-muted)" }}>weights</span>
               <span style={{ textAlign: "right", color: "var(--text-muted)" }}>spread</span>

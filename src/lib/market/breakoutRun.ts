@@ -60,6 +60,12 @@ export interface BreakoutSymbolMeta {
   near_resistance: boolean | null;
   resistance_level: number | null;
   score_components: { breakout?: Record<string, number> } | null;
+  /** v4 bucket points — the breakdown that matches the v4 score on the row. */
+  breakout_v4_buckets?: Record<string, number> | null;
+  breakout_state?: string | null;
+  /** Sessions since that state began — set for failed states too. */
+  breakout_state_days?: number | null;
+  breakout_level_cleared?: number | null;
   // Trigger geometry, read from market_stock_scores (not exposed by the
   // screener view) so the stage read can reach TRIGGERED / EXTENDED.
   rolling_high_20?: number | null;
@@ -137,22 +143,41 @@ export function useBreakoutTracker(includeClosed = false, enabled = true) {
 
 /** Per-symbol daily score history for the trend sparkline / detail view. */
 export function useBreakoutSymbolMeta(keys: { symbol: string; exchange: string }[]) {
+  // Keyed by exchange:symbol, so the fetch must be exchange-aware too — a dual
+  // listed name used to have one exchange's row overwrite the other's, and the
+  // map lookup then returned null (no name, LTP, rel-vol or Setup on the row).
+  const pairs = Array.from(new Set(keys.map((k) => `${k.exchange}:${k.symbol}`))).sort();
   const symbols = Array.from(new Set(keys.map((k) => k.symbol))).sort();
-  const sig = symbols.join(",");
+  const sig = pairs.join(",");
   return useQuery({
     queryKey: ["market", "breakout-symbol-meta", sig],
     queryFn: async (): Promise<Map<string, BreakoutSymbolMeta>> => {
       const out = new Map<string, BreakoutSymbolMeta>();
       if (symbols.length === 0) return out;
+      const wanted = new Set(pairs);
       const cols = "symbol,exchange,company_name,close,rel_volume,atr14,ema20,bb_squeeze,near_resistance,resistance_level,score_components";
-      for (let i = 0; i < symbols.length; i += 300) {
-        const chunk = symbols.slice(i, i + 300);
-        const { data, error } = await (supabase as any)
-          .from("market_screener_rows")
-          .select(cols)
-          .in("symbol", chunk);
+      const geoCols = "symbol,exchange,trade_date,rolling_high_20,rolling_high_55,breakout_freshness_days,base_tightness,base_duration_days,pivot_level,breakout_state,breakout_state_days,breakout_level_cleared,breakout_v4_components";
+
+      // Both passes cover the same symbol chunks and neither depends on the
+      // other's result, so they run together instead of as a serial waterfall
+      // (previously 2 x ceil(n/300) sequential round-trips).
+      const chunks: string[][] = [];
+      for (let i = 0; i < symbols.length; i += 300) chunks.push(symbols.slice(i, i + 300));
+
+      const [screenerRes, geoRes] = await Promise.all([
+        Promise.all(chunks.map((chunk) => (supabase as any)
+          .from("market_screener_rows").select(cols).in("symbol", chunk))),
+        Promise.all(chunks.map((chunk) => (supabase as any)
+          .from("market_stock_scores").select(geoCols).in("symbol", chunk)
+          // Newest bar first, so the de-dupe below keeps the current session
+          // when the table still holds prior trade_dates for a symbol.
+          .order("trade_date", { ascending: false }))),
+      ]);
+
+      for (const { data, error } of screenerRes) {
         if (error) throw error;
         for (const r of data ?? []) {
+          if (!wanted.has(`${r.exchange}:${r.symbol}`)) continue;
           out.set(metaKey(r.exchange, r.symbol), {
             symbol: r.symbol,
             exchange: r.exchange,
@@ -169,20 +194,28 @@ export function useBreakoutSymbolMeta(keys: { symbol: string; exchange: string }
           });
         }
       }
+
       // The screener view doesn't expose the trigger geometry (rolling highs,
       // freshness, base tightness), so the stage read could never reach
-      // TRIGGERED — it fell back to COILED/LOADING for every row. Pull those
+      // TRIGGERED — it fell back to COILED/no-setup for every row. Pull those
       // columns straight from the scores table for the tracked names only.
-      for (let i = 0; i < symbols.length; i += 300) {
-        const chunk = symbols.slice(i, i + 300);
-        const { data } = await (supabase as any)
-          .from("market_stock_scores")
-          .select("symbol,exchange,rolling_high_20,rolling_high_55,breakout_freshness_days,base_tightness,base_duration_days,pivot_level")
-          .in("symbol", chunk);
+      const seenGeo = new Set<string>();
+      for (const { data } of geoRes) {
         for (const r of data ?? []) {
           const key = metaKey(r.exchange, r.symbol);
-          const base = out.get(key);
-          if (!base) continue;
+          if (!wanted.has(`${r.exchange}:${r.symbol}`)) continue;
+          if (seenGeo.has(key)) continue; // first row = newest trade_date
+          seenGeo.add(key);
+          // A tracked name missing from the screener view (it filters on
+          // liquidity//freshness) used to be dropped here entirely, so its row
+          // rendered with no stage and no company name at all. Seed a minimal
+          // record instead — geometry we have is better than a blank row.
+          const base = out.get(key) ?? {
+            symbol: r.symbol, exchange: r.exchange, company_name: null,
+            ltp: null, rel_volume: null, atr14: null, ema20: null, close: null,
+            bb_squeeze: null, near_resistance: null, resistance_level: null,
+            score_components: null,
+          } as BreakoutSymbolMeta;
           out.set(key, {
             ...base,
             rolling_high_20: num(r.rolling_high_20),
@@ -191,11 +224,16 @@ export function useBreakoutSymbolMeta(keys: { symbol: string; exchange: string }
             breakout_freshness_days: num(r.breakout_freshness_days),
             base_tightness: num(r.base_tightness),
             base_duration_days: num(r.base_duration_days),
+            breakout_state: r.breakout_state ?? null,
+            breakout_state_days: num(r.breakout_state_days),
+            breakout_level_cleared: num(r.breakout_level_cleared),
+            breakout_v4_buckets: (r.breakout_v4_components as any)?.buckets ?? null,
           });
         }
       }
       return out;
     },
+
     staleTime: 60_000,
     enabled: symbols.length > 0,
   });
@@ -208,6 +246,8 @@ export function useBreakoutHistory(symbol: string | null, exchange = "NSE") {
       if (!symbol) return [];
       const { data, error } = await (supabase as any)
         .from("market_breakout_snapshots")
+        // market-pipeline-aggregates writes the v4 score into this column (the
+        // tracked model), so the sparkline already matches the badge.
         .select("symbol,exchange,trade_date,breakout_score,close")
         .eq("symbol", symbol)
         .eq("exchange", exchange)

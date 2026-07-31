@@ -32,6 +32,13 @@ const ramp = (v: number, lo: number, hi: number) =>
 // one of the reasons nothing ever crossed the 70 "strong" band. Full credit
 // now lands at the universe's ~p90 accumulation slope.
 export const OBV_SLOPE_FULL = 0.02;
+// v4 keeps its own OBV normalisation constant so tuning the v4 volume bucket
+// can't silently move every legacy v2 score (and its stored history).
+export const V4_OBV_SLOPE_FULL = 0.02;
+// Realistically reachable bull-pattern bonus. breakoutPatternBonus caps at 8,
+// but that requires nearly every detector firing at once; normalising against
+// the theoretical cap made the 11-point bucket unreachable in practice.
+export const V4_PATTERN_BONUS_FULL = 6;
 
 // Optional pattern + level context — passed through by the pipeline / live
 // recompute so the breakout scorer can reward chart patterns when they print
@@ -351,13 +358,28 @@ export interface LiquidityGate {
   ok: boolean;
   reasons: string[];
 }
+// Single source of truth for "is this counter liquid enough to trust its
+// volume?". Three-state on purpose: null means we simply do not know, which is
+// neither a pass nor a hard fail — callers decide. The hard gate below treats
+// unknown as a fail (we will not certify liquidity we cannot see); the v4
+// volume bucket drops the factor instead of crediting it.
+export function turnoverLiquid(avgTurnoverCr: number | null | undefined): boolean | null {
+  if (avgTurnoverCr == null || !Number.isFinite(avgTurnoverCr)) return null;
+  return avgTurnoverCr >= LIQUIDITY_MIN_TURNOVER_CR;
+}
+
 export function evaluateLiquidity(input: LiquidityInput): LiquidityGate {
   const reasons: string[] = [];
   if (input.close == null || input.close < LIQUIDITY_MIN_PRICE) reasons.push(`price below ₹${LIQUIDITY_MIN_PRICE}`);
   if (input.marketCapCr == null || input.marketCapCr < LIQUIDITY_MIN_MARKET_CAP_CR) reasons.push(`market cap below ₹${LIQUIDITY_MIN_MARKET_CAP_CR}Cr`);
-  if (input.avgTurnoverCr == null || input.avgTurnoverCr < LIQUIDITY_MIN_TURNOVER_CR) reasons.push(`avg turnover below ₹${LIQUIDITY_MIN_TURNOVER_CR}Cr/day`);
+  if (turnoverLiquid(input.avgTurnoverCr) !== true) {
+    reasons.push(input.avgTurnoverCr == null
+      ? "avg turnover unknown"
+      : `avg turnover below ₹${LIQUIDITY_MIN_TURNOVER_CR}Cr/day`);
+  }
   return { ok: reasons.length === 0, reasons };
 }
+
 
 export interface ScoreResultV3 extends ScoreResult {
   liquidityOk: boolean;
@@ -419,7 +441,9 @@ export interface IndicatorSnapshotLike {
   adx14: number | null;
   macd: number | null;
   macdSignal: number | null;
-  macdHistRising: boolean;
+  // Nullable: "unknown" must stay distinguishable from "not rising" (the v4
+  // MACD factor abstains on null instead of docking the stock 40%).
+  macdHistRising: boolean | null;
   relVolume: number | null;
   obvSlope20?: number | null;
   baseTightness?: number | null;
@@ -755,7 +779,7 @@ export const V4_MIN_BARS = 120;
 
 // A bucket needs at least this share of its own sub-factors (by sub-weight)
 // present before it counts as covered at all.
-const BUCKET_MIN_COVERAGE = 0.35;
+export const BUCKET_MIN_COVERAGE = 0.35;
 // Below this share of TOTAL weight covered, the chart is unreadable and we
 // refuse to emit a number — a 20 that means "no data" is worse than no score.
 const MIN_TOTAL_COVERAGE = 0.45;
@@ -855,11 +879,18 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   // ---- 0. Readability gate ------------------------------------------------
   // Refuse to score a chart that isn't there. "20 because the setup is bad"
   // and "20 because we have 40 bars" must never look the same.
+  //
+  // An UNKNOWN bar count is also a refusal. The old guard was
+  // `bars != null && bars < V4_MIN_BARS`, so a snapshot that never populated
+  // barsAvailable skipped the gate entirely and a 30-bar chart scored as if
+  // fully readable — the exact failure the gate exists to prevent.
   const bars = input.barsAvailable ?? s.barsAvailable ?? null;
-  if (bars != null && bars < V4_MIN_BARS) {
+  if (bars == null || bars < V4_MIN_BARS) {
     return {
       score: null, rawBeforePenalty: null,
-      unavailableReason: `only ${bars} sessions of history — needs ${V4_MIN_BARS} to read the chart`,
+      unavailableReason: bars == null
+        ? "history length unknown — cannot confirm the chart is readable"
+        : `only ${bars} sessions of history — needs ${V4_MIN_BARS} to read the chart`,
       buckets: {}, coverage: {}, components: {}, penalties: {},
       fundamentalMultiplier: 1,
       liquidityOk: liquidity.ok, liquidityReasons: liquidity.reasons,
@@ -876,37 +907,60 @@ export function breakoutScoreV4(input: V4Input): V4Result {
     ? s.volume / s.volAvg30
     : (s.relVolume ?? null);
   const rel30 = s.relVolumeMedian30 ?? relMean30;
-  const turnoverOk = input.avgTurnoverCr == null || input.avgTurnoverCr >= LIQUIDITY_MIN_TURNOVER_CR;
+  // Three-state, shared with evaluateLiquidity: true = liquid, false = known
+  // thin, null = unknown. Previously this read `== null || >= floor`, i.e.
+  // unknown turnover was assumed liquid here while the liquidity gate treated
+  // the very same null as an outright fail — one field, two opposite biases.
+  const turnoverOk = turnoverLiquid(input.avgTurnoverCr);
   // Prefer the size-tier percentile when the caller computed one: a 2.5× day on
   // a large cap is a far rarer event than on a micro cap.
-  const relVolFactor = !turnoverOk ? null
+  // Known-illiquid is a real 0, not missing data: nulling it renormalised the
+  // 45% weight onto OBV / dry-up / delivery, so a thin counter had its volume
+  // bucket carried by the three soft factors instead of being marked down.
+  // Unknown turnover, by contrast, drops the factor (null) rather than crediting it.
+  const relVolFactor = turnoverOk === false ? 0
+    : turnoverOk == null ? null
     : input.tierRelVolumePct != null ? ramp(input.tierRelVolumePct, 50, 95)
     : rel30 == null ? null : ramp(rel30, 1, 3);
+
+  // Dry-up belongs to the BASE window: measured through today the breakout bar
+  // inflates the 5D average and kills the factor exactly when the setup is best
+  // (and made rel-volume and dry-up mutually exclusive, capping the bucket).
+  const dryUp = s.volDryUpRatioBase ?? s.volDryUpRatio ?? null;
   const volume = rollup([
     ["rel_volume_30d", 0.45, relVolFactor],
-    ["obv_slope", 0.20, s.obvSlope20 == null ? null : ramp(s.obvSlope20, 0, OBV_SLOPE_FULL)],
-    ["vol_dryup", 0.15, s.volDryUpRatio == null ? null : 1 - ramp(s.volDryUpRatio, 0.6, 1)],
+    ["obv_slope", 0.20, s.obvSlope20 == null ? null : ramp(s.obvSlope20, 0, V4_OBV_SLOPE_FULL)],
+    ["vol_dryup", 0.15, dryUp == null ? null : 1 - ramp(dryUp, 0.6, 1)],
     ["delivery_pct", 0.20, ctx.deliveryPct == null ? null : ramp(ctx.deliveryPct, 30, 65)],
   ]);
 
   // ---- 2. Indicators ------------------------------------------------------
   const rsi = s.rsi14;
   const rsiVal = rsi == null ? null
-    : rsi <= 45 ? 0
-    : rsi < 60 ? (rsi - 45) / 15
+    // Floor softened to 40: a base breakout often prints RSI in the low 50s,
+    // and the old hard 0 at 45 zeroed a quarter of the bucket for those.
+    : rsi <= 40 ? 0
+    : rsi < 60 ? (rsi - 40) / 20
     : rsi <= 75 ? 1
     : rsi < 85 ? (85 - rsi) / 10
     : 0;
+  // A null histogram read means "can't tell", so MACD is scored on the
+  // line/signal cross alone and rescaled — never docked 0.4 for a data gap.
   const macdVal = s.macd == null || s.macdSignal == null
     ? null
-    : (s.macd > s.macdSignal ? 0.6 : 0) + (s.macdHistRising ? 0.4 : 0);
+    : s.macdHistRising == null
+      ? (s.macd > s.macdSignal ? 1 : 0)
+      : (s.macd > s.macdSignal ? 0.6 : 0) + (s.macdHistRising ? 0.4 : 0);
   // ATR% sanity: too quiet can't travel, too wild can't be held. 2–6% ideal.
   const atrPct = s.atrPct;
-  const atrVal = input.tierAtrPct != null
+  // The tier percentile is only meaningful when this symbol actually has a
+  // volatility read; without that guard the factor reported data it never had
+  // and inflated bucket coverage.
+  const atrVal = atrPct == null ? null
+    : input.tierAtrPct != null
     // Tier-relative: mid-range volatility for the size tier is what travels;
     // both extremes of the tier are penalised.
     ? 1 - Math.abs(input.tierAtrPct - 55) / 55
-    : atrPct == null ? null
     : atrPct < 2 ? ramp(atrPct, 0.5, 2)
     : atrPct <= 6 ? 1
     : 1 - ramp(atrPct, 6, 14);
@@ -915,20 +969,38 @@ export function breakoutScoreV4(input: V4Input): V4Result {
     ["macd", 0.20, macdVal],
     ["adx", 0.20, s.adx14 == null ? null : ramp(s.adx14, 15, 30)],
     ["atr_pct", 0.10, atrVal],
-    ["percent_b", 0.10, adv?.percentB == null ? null : ramp(adv.percentB, 0.5, 1)],
+    // Capped at %B = 1: past the upper band this is overextension, which the
+    // overextension penalty already charges for — don't pay for it here too.
+    ["percent_b", 0.10, adv?.percentB == null ? null : ramp(Math.min(adv.percentB, 1), 0.5, 1)],
     ["mfi", 0.10, adv?.mfi14 == null ? null : ramp(adv.mfi14, 50, 80)],
     ["supertrend", 0.05, adv?.supertrendDir == null ? null : (adv.supertrendDir === 1 ? 1 : 0)],
   ]);
 
   // ---- 3. Setups / EMA structure -----------------------------------------
+  // Cross ages come from the snapshot when the caller didn't pass them
+  // explicitly — for a long time NOTHING passed them, so both cross factors
+  // were permanently null and the 25% of this bucket they own never existed.
+  const cross2050 = input.emaCross2050FreshDays ?? s.emaCross2050FreshDays ?? null;
+  const cross50200 = input.emaCross50200FreshDays ?? s.emaCross50200FreshDays ?? null;
+  // Weekly trend through rollup, so one missing weekly sub-signal renormalises
+  // within the factor instead of scoring a silent zero.
+  // computeWeeklySnapshot returns null below 25 weekly bars, so any snapshot
+  // that exists here already has enough history — the old `barsW <= 0` /
+  // `barsW < 3` guards were unreachable and implied edge-case handling that
+  // does not live here. Missing history means `weekly == null`, full stop.
+  const weeklyVal = weekly == null ? null : rollup([
+    ["above_ema20w", 0.50, weekly.ema20W == null ? null : (weekly.aboveEma20W ? 1 : 0)],
+    ["trend_up_w", 0.30, weekly.rsi14W == null ? null : (weekly.trendUpW ? 1 : 0)],
+    ["higher_lows_w", 0.20, weekly.higherLowsW ? 1 : 0],
+  ]).value;
+
   const setups = rollup([
     ["ema_alignment", 0.30, s.ema20 == null || s.ema50 == null || s.ema200 == null
       ? null : (s.emaAligned ? 1 : (s.ema20 > s.ema50 ? 0.5 : 0))],
     ["above_ema200", 0.25, s.ema200 == null ? null : (s.aboveEma200 ? 1 : 0)],
-    ["cross_20_50", 0.15, freshCross(input.emaCross2050FreshDays)],
-    ["cross_50_200", 0.10, freshCross(input.emaCross50200FreshDays)],
-    ["weekly_trend", 0.20, weekly == null ? null
-      : ((weekly.aboveEma20W ? 0.5 : 0) + (weekly.trendUpW ? 0.3 : 0) + (weekly.higherLowsW ? 0.2 : 0))],
+    ["cross_20_50", 0.15, freshCross(cross2050)],
+    ["cross_50_200", 0.10, freshCross(cross50200)],
+    ["weekly_trend", 0.20, weeklyVal],
   ]);
 
   // ---- 4. Support / resistance & trigger ---------------------------------
@@ -938,10 +1010,17 @@ export function breakoutScoreV4(input: V4Input): V4Result {
     ? Math.max(clusterPivot, rollPivot)
     : (clusterPivot ?? rollPivot);
   const usingCluster = clusterPivot != null && (rollPivot == null || clusterPivot >= rollPivot);
-  // Volume-weighted touch quality when the indicator pass supplied it: a level
-  // rejected on heavy volume is a real supply zone; three thin pokes are not.
-  const touchStrength = s.pivotTouchQuality ?? s.pivotTouches ?? 0;
-  const pivotQuality = usingCluster ? 0.75 + 0.25 * ramp(touchStrength, 1, 3.5) : 0.75;
+  // Volume-weighted touch quality of the level that actually WON. Grading only
+  // the cluster path structurally capped every new-high breakout at 0.75 even
+  // when the rolling high was itself a heavily defended ceiling — so the
+  // rolling-high path now gets its own touch read, and an unknown read falls
+  // back to the neutral 0.85 rather than the floor.
+  const touchStrength = usingCluster
+    ? (s.pivotTouchQuality ?? s.pivotTouches ?? null)
+    : (s.rollingHigh20TouchQuality ?? s.rollingHigh20Touches ?? null);
+  const pivotQuality = touchStrength == null
+    ? 0.85
+    : 0.75 + 0.25 * ramp(touchStrength, 1, 3.5);
   const cir = s.closeInRangePct;
   // Gap-and-fade guard: a pivot cleared by the opening print and then given
   // back into the close is not a breakout. Below a hard floor of 35% close-in-
@@ -952,7 +1031,13 @@ export function breakoutScoreV4(input: V4Input): V4Result {
     : 0.5 + 0.5 * ramp(cir, 35, 70);
   let triggerVal: number | null = null;
   if (pivot != null && close != null && atr != null) {
-    triggerVal = ramp((close - pivot) / atr, 0, 1) * pivotQuality * closeQuality;
+    const atrsAbove = (close - pivot) / atr;
+    // Extension taper: full credit used to run unbounded, so a name already 6
+    // ATR past its pivot scored exactly like a clean day-one clearance and only
+    // the separate overextension penalty pushed back. Credit fades from 2.5 ATR
+    // above the pivot — the move is real, but it is no longer an entry.
+    const extTaper = 1 - 0.45 * ramp(atrsAbove, 2.5, 6);
+    triggerVal = ramp(atrsAbove, 0, 1) * pivotQuality * closeQuality * extTaper;
     // Pre-trigger coil right under a real ceiling still earns partial credit.
     if (close <= pivot) {
       const atrsBelow = (pivot - close) / atr;
@@ -961,23 +1046,41 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   } else if (s.pctFrom52wHigh != null) {
     triggerVal = ramp(s.pctFrom52wHigh, -15, 0) * 0.8;
   }
-  const atSupport = atr != null && s.support != null && close != null && !(s.supportFallback ?? false)
-    ? Math.abs(close - s.support) / atr <= 0.5
-    : false;
+  const supportReal = s.support != null && !(s.supportFallback ?? false);
+  const supportAtrs = supportReal && atr != null && close != null
+    ? Math.abs(close - s.support!) / atr
+    : null;
+  const atSupport = supportAtrs != null && supportAtrs <= 0.5;
+  // Distance-graded, and null (renormalised away) when the "support" is only the
+  // lookback low. The old flat 0.3 handed every symbol with any support value a
+  // third of the factor for nothing.
+  const supportDefence = supportAtrs == null ? null : 1 - ramp(supportAtrs, 0.5, 3);
+  // Freshness is a real 0 when there is no live breakout or the last one failed
+  // — only genuinely unknown state may be renormalised away, otherwise the 10%
+  // weight silently migrated to the trigger and rewarded non-breakouts.
+  const freshKind = s.breakoutStateKind ?? null;
+  const freshVal = s.breakoutFreshnessDays != null
+    ? Math.max(0, 1 - s.breakoutFreshnessDays / 5)
+    : freshKind === "none" || freshKind === "failed" ? 0
+    : null;
   const levels = rollup([
     // close-in-range is folded into the trigger above rather than scored
     // independently — paying for it twice let a gap-up fade rank well.
     ["trigger", 0.45, triggerVal],
-    ["freshness", 0.10, s.breakoutFreshnessDays == null ? null : Math.max(0, 1 - s.breakoutFreshnessDays / 5)],
+    ["freshness", 0.10, freshVal],
     ["base_tightness", 0.15, s.baseTightness == null ? null : 1 - ramp(s.baseTightness, 0.02, 0.08)],
     ["base_depth", 0.10, s.baseDepthPct == null ? null : 1 - ramp(s.baseDepthPct, 8, 30)],
     ["base_duration", 0.10, s.baseDurationDays == null ? null : ramp(s.baseDurationDays, 10, 30)],
-    ["support_defence", 0.10, s.support == null ? null : (atSupport ? 1 : 0.3)],
+    ["support_defence", 0.10, supportDefence],
   ]);
 
   // ---- 5. Range & strength -----------------------------------------------
   const strength = rollup([
-    ["pos_52w", 0.25, s.pctFrom52wHigh == null ? null : ramp(s.pctFrom52wHigh, -35, -1)],
+    // The old ramp saturated at -1%, so a retest and a fresh all-time high were
+    // indistinguishable. Reserve the top tenth of the factor for actually
+    // taking out the high.
+    ["pos_52w", 0.25, s.pctFrom52wHigh == null ? null
+      : 0.9 * ramp(s.pctFrom52wHigh, -35, -3) + 0.1 * ramp(s.pctFrom52wHigh, -3, 0)],
     ["rel_strength", 0.25, ctx.relStrengthNifty == null ? null : ramp(ctx.relStrengthNifty, -5, 15)],
     ["rs_percentile", 0.20, s.rsPercentile == null ? null : ramp(s.rsPercentile, 50, 90)],
     ["sector_strength", 0.20, ctx.sectorStrength],
@@ -986,8 +1089,23 @@ export function breakoutScoreV4(input: V4Input): V4Result {
 
   // ---- 6. Chart patterns --------------------------------------------------
   const pat = breakoutPatternBonus(patterns, s.nearResistance, atSupport, s.higherLows);
-  const patterns6 = patterns
-    ? { value: clamp(pat.bonus / 8, 0, 1), coverage: 1, detail: { pattern_bonus: Math.round((pat.bonus / 8) * 1000) / 1000 } }
+  // Coverage tracks whether the detector had enough history to have an opinion.
+  // Claiming full coverage for an all-false flag set scored "we looked, nothing
+  // there" identically to "we never looked" — and an UNKNOWN bar count used to
+  // count as "enough history", which is the same mistake inverted.
+  const patternBars = input.barsAvailable ?? s.barsAvailable ?? null;
+  const patternsScored = patterns != null && patternBars != null && patternBars >= 60;
+
+  const patterns6 = patternsScored
+    ? {
+        // Normalised against the reachable bonus, not the theoretical cap.
+        value: clamp(pat.bonus / V4_PATTERN_BONUS_FULL, 0, 1),
+        coverage: 1,
+        detail: {
+          pattern_bonus: Math.round(clamp(pat.bonus / V4_PATTERN_BONUS_FULL, 0, 1) * 1000) / 1000,
+          pattern_count: pat.labels.length,
+        },
+      }
     : { value: null, coverage: 0, detail: {} as Record<string, number> };
 
   // ---- 7. Fundamentals — a MULTIPLIER, not points -------------------------
@@ -1017,8 +1135,13 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   const sentiment = rollup([
     ["ai_verdict", 0.50, verdictBase == null ? null : 0.5 + (verdictBase - 0.5) * clamp(conf ?? 0.6, 0, 1)],
     ["news_sentiment", 0.30, sent == null || sent.newsCount === 0 || sent.newsSentiment == null
-      ? null : clamp((sent.newsSentiment + 1) / 2, 0, 1)],
-    ["event_clear", 0.20, sent?.eventInDays == null ? null : ramp(sent.eventInDays, 0, 5)],
+      // Shrink toward neutral by article count: one stale headline must not
+      // carry the same weight as broad, consistent coverage.
+      ? null
+      : clamp(0.5 + (clamp((sent.newsSentiment + 1) / 2, 0, 1) - 0.5) * ramp(sent.newsCount, 1, 5), 0, 1)],
+    // Ramps over 3→10 sessions only. Inside 2 sessions the hard event-blackout
+    // cap below takes over, and the old 0→5 ramp charged for the same fact twice.
+    ["event_clear", 0.20, sent?.eventInDays == null ? null : ramp(sent.eventInDays, 3, 10)],
   ]);
 
   // ---- Weight renormalisation --------------------------------------------
@@ -1063,7 +1186,13 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   }
   const raw = (weighted / weightHave) * 100;
 
-  // ---- Penalties (points, applied after renormalisation, 0 floor) --------
+  // ---- Penalties ----------------------------------------------------------
+  // Point penalties are deducted AFTER the multipliers, not before. Deducting
+  // first let the regime / fundamentals / coverage multipliers dilute them: a
+  // 25-point illiquidity penalty cost only ~21 points in a bearish regime, and
+  // the event blackout (applied post-multiplier) never diluted at all — two
+  // penalty families in the same map with incompatible units. Now a stated
+  // penalty costs exactly what it says.
   const penalties: Record<string, number> = {};
   let penalty = 0;
   if (atr != null && s.ema20 != null && close != null) {
@@ -1083,16 +1212,29 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   // the base. Freshness decay alone only stops paying points; a failure is
   // strictly worse than never having triggered, and the deeper the re-entry
   // the worse it is (up to 1 ATR back inside = full penalty).
-  if (pivot != null && close != null && close < pivot &&
-      s.breakoutFreshnessDays != null && s.breakoutFreshnessDays > 0 && s.breakoutFreshnessDays <= 10) {
-    const depth = atr != null ? ramp((pivot - close) / atr, 0.1, 1) : 0.5;
+  //
+  // The recency window reads breakoutStateDays, which is kept for the failed
+  // state too. breakoutFreshnessDays is fresh-only by construction, so the old
+  // `(s.breakoutFreshnessDays ?? 1) <= 10` was always true — a breakout that
+  // failed months ago was charged as if it had failed yesterday.
+  const failedLevel = s.breakoutLevelCleared ?? pivot;
+  const failedDays = s.breakoutStateDays ?? null;
+  if (freshKind === "failed" && failedLevel != null && close != null && close < failedLevel &&
+      failedDays != null && failedDays <= 10) {
+    const depth = atr != null ? ramp((failedLevel - close) / atr, 0.1, 1) : 0.5;
     const p = 5 + 9 * depth;
     penalties.failed_breakout = Math.round(p * 10) / 10; penalty += p;
   }
   if (!liquidity.ok) { penalties.illiquid = 25; penalty += 25; }
 
   const regimeMult = ctx.regime === "bullish" ? 1.05 : ctx.regime === "bearish" ? 0.85 : 1;
-  let total = clamp((raw - penalty) * regimeMult * fundMult, 0, 100);
+  // Coverage haircut: renormalisation rescales the present buckets back to 100,
+  // so a symbol with no sentiment / patterns / fundamentals was graded on ~65
+  // points and then compared head-to-head with a fully-covered name that had to
+  // earn the hard buckets too. A thin score now reads slightly thin.
+  const coverageMult = 0.9 + 0.1 * clamp(coverShare, 0, 1);
+  const adjusted = clamp(raw * regimeMult * fundMult * coverageMult, 0, 100);
+  let total = clamp(adjusted - penalty, 0, 100);
 
   // Event blackout: results / ex-date inside two sessions makes the setup
   // un-tradable, not merely weaker — a binary event decides the next print, not
@@ -1106,6 +1248,9 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   components.regime_mult = Math.round(regimeMult * 100) / 100;
   components.fundamental_mult = Math.round(fundMult * 1000) / 1000;
   components.coverage_share = Math.round(coverShare * 100) / 100;
+  components.coverage_mult = Math.round(coverageMult * 1000) / 1000;
+  components.score_before_penalty = Math.round(adjusted * 10) / 10;
+
 
   return {
     score: Math.round(total),

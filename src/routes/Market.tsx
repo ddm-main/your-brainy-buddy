@@ -1,7 +1,7 @@
 // Market — group tabs live in the global TopBar; only the second-level
 // SubTabStrip renders here.
 import { useEffect, useRef } from "react";
-import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { lazy, Suspense } from "react";
 import ErrorBoundary from "@/components/hud/ErrorBoundary";
 import { useMarketAutoSync } from "@/lib/market/useAutoSync";
@@ -20,7 +20,6 @@ const Analysis = lazy(() => import("@/routes/market/Analysis"));
 const Backtesting = lazy(() => import("@/routes/market/Backtesting"));
 const MarketSettings = lazy(() => import("@/routes/market/Settings"));
 const Planner = lazy(() => import("@/routes/market/Planner"));
-const AIEngine = lazy(() => import("@/routes/market/AIEngine"));
 const IndexDetail = lazy(() => import("@/routes/market/IndexDetail"));
 const AutoTrade = lazy(() => import("@/routes/market/AutoTrade"));
 const PortfolioOverview = lazy(() => import("@/routes/market/PortfolioOverview"));
@@ -32,6 +31,15 @@ const Calibration = lazy(() => import("@/routes/market/Calibration"));
 
 
 type Sub = MarketSub;
+
+// The standalone AI Analysis page is gone — a score is now explained by the
+// breakout scoring page, so old /market/ai/:symbol links land there.
+function AiRedirect() {
+  const { symbol } = useParams();
+  return <Navigate to={`/market/score/${encodeURIComponent(symbol ?? "")}/explain?exchange=NSE`} replace />;
+}
+
+
 
 
 const tabBase: React.CSSProperties = {
@@ -125,8 +133,8 @@ export default function Market() {
               <Route path="calibration" element={<Calibration />} />
               <Route path="backtesting" element={<Backtesting />} />
               <Route path="planner" element={<Planner />} />
-              <Route path="ai" element={<AIEngine />} />
-              <Route path="ai/:symbol" element={<AIEngine />} />
+              <Route path="ai" element={<Navigate to="/market/screener" replace />} />
+              <Route path="ai/:symbol" element={<AiRedirect />} />
               <Route path="index/:symbol" element={<IndexDetail />} />
               <Route path="autotrade" element={<AutoTrade />} />
               <Route path="settings" element={<MarketSettings />} />

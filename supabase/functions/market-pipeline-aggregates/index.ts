@@ -56,14 +56,22 @@ function rawV4Detail(v4: {
 
 // v2 fix: `atrContracting` and `macdHistRising` used to be read from yesterday's
 // `score_components`, which is circular (score → components → tomorrow's score).
-// Derive them from raw indicator columns instead so today's score reflects
-// today's tape.
+// v4 fix: they were then *proxied* here (`bb_width < 0.06`, `macd_hist > 0`),
+// which is not the same measurement — "positive" is not "rising", and BB width
+// is not ATR compression. market-pipeline-eod now persists the real booleans
+// (it holds the series); read those and only fall back to the proxy when the
+// row predates the migration.
 function snapFromRow(r: any): IndicatorSnapshot {
-  // bb_width < 0.06 (~6% of price) is a reasonable "squeeze / contracting"
-  // proxy when a rolling bbWidth history isn't in the row.
   const bbw = typeof r.bb_width === "number" ? r.bb_width : null;
-  const atrContracting = bbw != null ? bbw < 0.06 : false;
-  const macdHistRising = typeof r.macd_hist === "number" && r.macd_hist > 0;
+  const atrContracting = typeof r.atr_contracting === "boolean"
+    ? r.atr_contracting
+    : (bbw != null ? bbw < 0.06 : false);
+  // null (not false) when the row has no stored flag: "we can't tell" must not
+  // read as "not rising", which silently docked 40% of the MACD factor. The
+  // macd_hist > 0 proxy is only a last resort for pre-migration rows.
+  const macdHistRising: boolean | null = typeof r.macd_hist_rising === "boolean"
+    ? r.macd_hist_rising
+    : (typeof r.macd_hist === "number" ? r.macd_hist > 0 : null);
   return {
     close: r.close ?? 0,
     changePct: r.change_pct,
@@ -96,6 +104,11 @@ function snapFromRow(r: any): IndicatorSnapshot {
     support: r.support_level,
     resistance: r.resistance_level,
     nearResistance: !!r.near_resistance,
+    // Without these the "don't credit support defence off a lookback low" rule
+    // is inert in the pass that produces the published score.
+    supportFallback: r.support_fallback ?? undefined,
+    resistanceFallback: r.resistance_fallback ?? undefined,
+    resistanceAbove: r.resistance_above ?? null,
     macdHistRising,
     rollingHigh20: r.rolling_high_20 ?? null,
     rollingHigh55: r.rolling_high_55 ?? null,
@@ -106,6 +119,17 @@ function snapFromRow(r: any): IndicatorSnapshot {
     rsPercentile: r.rs_percentile ?? null,
     closeInRangePct: r.close_in_range_pct ?? null,
     breakoutFreshnessDays: r.breakout_freshness_days ?? null,
+    // Explicit state: without it the freshness factor reads `undefined` and its
+    // weight is renormalised away, and `failed_breakout` can never fire.
+    breakoutStateKind: r.breakout_state ?? null,
+    // Age of that state. Falls back to the freshness column for pre-migration
+    // rows, which is correct for a live breakout and null for a failed one.
+    breakoutStateDays: r.breakout_state_days ?? r.breakout_freshness_days ?? null,
+    breakoutLevelCleared: r.breakout_level_cleared ?? null,
+    rollingHigh20Touches: r.rolling_high_20_touches ?? null,
+    rollingHigh20TouchQuality: r.rolling_high_20_touch_quality != null
+      ? Number(r.rolling_high_20_touch_quality)
+      : null,
     // Persisted by market-pipeline-eod (which has the candles); without these
     // the refinement pass would silently re-score on a weaker pivot.
     pivotLevel: r.pivot_level ?? null,
@@ -114,6 +138,9 @@ function snapFromRow(r: any): IndicatorSnapshot {
     relVolumeMedian30: r.rel_volume_median30 != null ? Number(r.rel_volume_median30) : null,
     barsAvailable: r.bars_available != null ? Number(r.bars_available) : null,
     volDryUpRatio: r.vol_dryup_ratio ?? null,
+    volDryUpRatioBase: r.vol_dryup_ratio_base ?? null,
+    emaCross2050FreshDays: r.ema_cross_20_50_days ?? null,
+    emaCross50200FreshDays: r.ema_cross_50_200_days ?? null,
 
     ema20Series: [],
     ema50Series: [],
@@ -134,7 +161,7 @@ function weeklyFromRow(r: any): WeeklySnapshot | null {
     aboveEma20W: !!r.weekly_ema20 && r.weekly_close > r.weekly_ema20,
     trendUpW: !!r.weekly_trend_up,
     higherLowsW: !!r.weekly_higher_lows,
-    barsW: 0,
+    barsW: r.weekly_bars != null ? Number(r.weekly_bars) : 0,
   };
 }
 
@@ -534,7 +561,12 @@ Deno.serve(async (req) => {
       const batch = rows.slice(i, i + 50);
       await Promise.all(batch.map(async (r) => {
         const rank = sectorRank.get(r.sector || "Unknown");
-        const sectorStrength = rank != null && nSectors > 1 ? 1 - (rank - 1) / (nSectors - 1) : 0.5;
+        // null, not 0.5, when the sector ranking is unavailable: a made-up
+        // mid-grade counted as real data toward the strength bucket's coverage
+        // and handed every stock 20% of that bucket for nothing.
+        const sectorStrength = rank != null && nSectors > 1
+          ? 1 - (rank - 1) / (nSectors - 1)
+          : null;
         // Like-for-like: the stock's 55-session return minus the index's own
         // 55-session return over the same window.
         const stockRs = rsOf(r);
@@ -595,7 +627,7 @@ Deno.serve(async (req) => {
 
         const nowIso = new Date().toISOString();
         const { error } = await svc.from("market_stock_scores").update({
-          sector_strength: Math.round(sectorStrength * 100) / 100,
+          sector_strength: sectorStrength == null ? null : Math.round(sectorStrength * 100) / 100,
           rel_strength_nifty: relStrength != null ? Math.round(relStrength * 100) / 100 : null,
           rs_percentile: rsPercentile,
           breakout_score: bs.score,
@@ -687,9 +719,11 @@ Deno.serve(async (req) => {
     // flag it so the UI can grey it instead of presenting it as today's read.
     let staleFlagged = 0;
     if (latestTradeDate) {
-      const { count } = await svc.from("market_stock_scores")
+      // `select(cols, opts)` on an update builder is valid at runtime but the
+      // Deno-resolved supabase-js overloads only see the 1-arg form.
+      const { count } = await (svc.from("market_stock_scores")
         .update({ is_stale: true })
-        .lt("trade_date", latestTradeDate)
+        .lt("trade_date", latestTradeDate) as any)
         .select("symbol", { count: "exact", head: true });
       staleFlagged = count ?? 0;
     }
@@ -777,7 +811,12 @@ Deno.serve(async (req) => {
     // re-runs on the same trade_date refresh values without double-counting
     // days_tracked or re-appending the score trend.
     const tracking = { snapshots: 0, opened: 0, updated_ep: 0, failed: 0, closed: 0 };
+    // Write failures inside the tracking block used to vanish entirely: the
+    // whole phase shared one catch and the per-chunk errors were dropped, so a
+    // broken column silently stopped the tracker while the run reported ok.
+    const trackingErrors: string[] = [];
     try {
+
       // The tracker follows the SAME model the UI, the score-explain page and
       // the Calibration Lab use: v4. It used to open and tick episodes on the
       // legacy `breakoutScore` while displaying v4 next to it, so "Health" and
@@ -842,7 +881,9 @@ Deno.serve(async (req) => {
         const { error } = await svc.from("market_breakout_snapshots")
           .upsert(chunk, { onConflict: "symbol,exchange,trade_date" });
         if (!error) tracking.snapshots += chunk.length;
+        else trackingErrors.push(`snapshot: ${error.message}`);
       }
+
 
       // 2. Load open episodes (active/extended/cooled) and re-evaluate each.
       const openEps: any[] = [];
@@ -886,8 +927,16 @@ Deno.serve(async (req) => {
         if (!now || now.close == null) continue; // no data today — leave untouched
         const nowScore = v4Of(now) ?? now.breakout;
         const alreadyToday = e.last_evaluated_date === today;
-        const entry = Number(e.entry_close) || now.close;
+        // Entry price correction: an episode opened earlier *today* may have
+        // been stamped from a partial intraday close. While it is still the
+        // same session the entry is provisional, so re-read it — every return,
+        // MAE and follow-through number downstream is measured off this price,
+        // and a stale intraday entry poisons all of them for the episode's
+        // whole life. From the next session onward entry is immutable history.
+        const openedToday = e.first_detected_date === today;
+        const entry = openedToday ? now.close : (Number(e.entry_close) || now.close);
         const prevDays = alreadyToday ? Math.max(0, (e.days_tracked ?? 1) - 1) : (e.days_tracked ?? 1);
+
         // A re-run on the same session must not count as another session. The
         // stored counter already includes today's increment, so reverse it
         // before ticking again — without this an intraday re-run marched the
@@ -972,9 +1021,13 @@ Deno.serve(async (req) => {
       }
       for (let i = 0; i < epUpdates.length; i += 500) {
         const chunk = epUpdates.slice(i, i + 500);
-        await svc.from("market_breakout_tracker")
+        const { error } = await svc.from("market_breakout_tracker")
           .upsert(chunk, { onConflict: "symbol,exchange,first_detected_date" });
+        // Silently discarding this meant episodes stopped advancing while the
+        // run still reported a healthy tracking block.
+        if (error) trackingErrors.push(`tick: ${error.message}`);
       }
+
 
       // 3. Open fresh episodes for today's qualifiers with no open episode.
       // Cooldown: a name that just failed shouldn't reopen the next session on
@@ -1025,17 +1078,25 @@ Deno.serve(async (req) => {
       for (let i = 0; i < newEps.length; i += 500) {
         const chunk = newEps.slice(i, i + 500);
         // ignoreDuplicates: a symbol that already has today's episode (rare
-        // same-day re-run) isn't reset to a fresh entry.
+        // same-day re-run) isn't reset to a fresh entry. Entry-price
+        // corrections for an episode opened earlier today are handled in
+        // phase 2, which re-reads the close — so nothing is frozen by this.
         const { error } = await svc.from("market_breakout_tracker")
           .upsert(chunk, { onConflict: "symbol,exchange,first_detected_date", ignoreDuplicates: true });
         if (!error) tracking.opened += chunk.length;
+        else trackingErrors.push(`open: ${error.message}`);
       }
+
     } catch (e) {
       // Tracking is additive — never let it fail the whole aggregates run.
+      trackingErrors.push(e instanceof Error ? e.message : String(e));
+    }
+    if (trackingErrors.length) {
       await svc.from("market_provider_health").insert({
         provider: "aggregates", endpoint: "breakout-tracking", ok: false,
-        latency_ms: 0, error: (e instanceof Error ? e.message : String(e)).slice(0, 500),
+        latency_ms: 0, error: trackingErrors.join(" | ").slice(0, 500),
       }).then(() => {}, () => {});
+
     }
 
     // ---- Threshold calibration telemetry ----
@@ -1071,6 +1132,8 @@ Deno.serve(async (req) => {
       ranked,
       rescore_error: rescoreFirstError,
       breakout_tracking: tracking,
+      breakout_tracking_errors: trackingErrors.slice(0, 5),
+
       score_distribution: dist,
       stale_flagged: staleFlagged,
       v4_calibration: calibration,

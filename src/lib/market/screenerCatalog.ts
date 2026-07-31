@@ -185,7 +185,8 @@ export const FILTERS: FilterDef[] = [
   { id: "ret_ytd",            label: "YTD Return",        category: "momentum",   kind: "number", unit: "%", min: -90, max: 300, step: 1, scope: "tech" },
 
   // Signals
-  { id: "breakout_score",     label: "Breakout Score",    category: "signals",    kind: "number", min: 0, max: 100, step: 5, scope: "tech" },
+  { id: "breakout_score_v4",  label: "Breakout Score",    category: "signals",    kind: "number", min: 0, max: 100, step: 5, scope: "tech" },
+  { id: "breakout_score",     label: "Breakout Score (legacy v2)", category: "signals", kind: "number", min: 0, max: 100, step: 5, scope: "tech" },
   { id: "prebreakout_score",  label: "Pre-Breakout Score",category: "signals",    kind: "number", min: 0, max: 100, step: 5, scope: "tech" },
   { id: "bb_squeeze",         label: "BB Squeeze",        category: "signals",    kind: "boolean", scope: "tech" },
   { id: "higher_lows",        label: "Higher Lows",       category: "signals",    kind: "boolean", scope: "tech" },
@@ -467,7 +468,7 @@ export const PRESETS: Preset[] = [
 
   // ===== Momentum / Technical =====
   { id: "breakout", name: "Breakout Candidates", group: "Technical", desc: "High breakout score + volume + uptrend",
-    filters: [{ id: "breakout_score", min: 65 }, { id: "rel_volume", min: 1.5 }, { id: "above_ema_200", bool: true }] },
+    filters: [{ id: "breakout_score_v4", min: 65 }, { id: "rel_volume", min: 1.5 }, { id: "above_ema_200", bool: true }] },
   { id: "coiled", name: "Coiled Springs", group: "Technical", desc: "BB squeeze + high pre-breakout score",
     filters: [{ id: "prebreakout_score", min: 60 }, { id: "bb_squeeze", bool: true }] },
   { id: "momentum", name: "Momentum Leaders", group: "Technical", desc: "Strong RSI, positive RS vs Nifty",

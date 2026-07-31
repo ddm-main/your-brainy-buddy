@@ -132,8 +132,12 @@ Deno.serve(async (req) => {
     const retCol = `fwd_ret_${horizon}`;
     const relCol = `fwd_rel_${horizon}`;
 
-    // Page through matured snapshots that carry bucket detail.
-    const rows: Row[] = [];
+    // Page through matured snapshots that carry bucket detail. Full-context
+    // (live) rows and replayed context-neutral rows are collected separately:
+    // excluding the neutral ones outright emptied the pool entirely while the
+    // live history was still maturing, so the optimizer could never run.
+    const liveRows: Row[] = [];
+    const neutralRows: Row[] = [];
     const PAGE = 1000;
     for (let from = 0; from < 60_000; from += PAGE) {
       const { data, error } = await svc.from("market_score_history")
@@ -147,7 +151,6 @@ Deno.serve(async (req) => {
       if (error) return errorResponse(req, error.message, 500);
       if (!data?.length) break;
       for (const d of data as Record<string, unknown>[]) {
-        if (d.context_neutral === true) continue;
         if (d.is_liquid_tradable === false) continue;
         const buckets = (d.buckets ?? {}) as Record<string, number>;
         const coverage = (d.coverage ?? {}) as Record<string, number>;
@@ -171,7 +174,7 @@ Deno.serve(async (req) => {
         let liveSum = 0;
         for (const b of present) liveSum += raw[b] * BASE[b] * (100 / presentW);
         const adjust = Number(d.score ?? 0) - liveSum;
-        rows.push({
+        (d.context_neutral === true ? neutralRows : liveRows).push({
           symbol: String(d.symbol),
           trade_date: String(d.trade_date),
           score: Number(d.score ?? 0),
@@ -184,6 +187,12 @@ Deno.serve(async (req) => {
       if (data.length < PAGE) break;
     }
 
+    // Prefer live rows; fall back to the replayed neutral pool only when the
+    // live one cannot support a fit, and name the population in the response
+    // so nobody mistakes a replay for live evidence.
+    const population = liveRows.length >= 100 ? "full_context" : "replayed_neutral";
+    const rows = population === "full_context" ? liveRows : neutralRows;
+
     // Thin the overlap, then split train / test by date.
     const allDates = Array.from(new Set(rows.map((r) => r.trade_date))).sort();
     const keepDates = deoverlap
@@ -191,6 +200,7 @@ Deno.serve(async (req) => {
       : new Set(allDates);
     const usable = rows.filter((r) => keepDates.has(r.trade_date));
     const usedDates = Array.from(keepDates).sort();
+
     const cut = usedDates[Math.max(0, Math.floor(usedDates.length * (1 - testFraction)) - 1)] ?? "";
     const trainRows = usable.filter((r) => r.trade_date <= cut);
     const testRows = usable.filter((r) => r.trade_date > cut);
@@ -203,11 +213,15 @@ Deno.serve(async (req) => {
       return jsonResponse(req, {
         ok: false,
         reason: "not_enough_history",
-        message: `only ${usable.length} non-overlapping matured snapshots with bucket detail in the last ${days} days — need 100+. Run market-score-backfill and market-score-evaluate first.`,
+        population,
+        message: `only ${usable.length} non-overlapping matured snapshots with bucket detail in the last ${days} days (live pool ${liveRows.length}, replayed pool ${neutralRows.length}) — need 100+. Run market-score-backfill and market-score-evaluate first.`,
         sample_n: usable.length,
         raw_rows: rows.length,
+        live_rows: liveRows.length,
+        neutral_rows: neutralRows.length,
       });
     }
+
 
     const baseline = evaluate(fitRows, BASE, threshold);
     const baselineTest = splitOk ? evaluate(testRows, BASE, threshold) : null;
@@ -265,7 +279,7 @@ Deno.serve(async (req) => {
       const { data: ins } = await svc.from("market_score_optimizer_runs").insert({
         model,
         params: {
-          days, threshold, horizon, iterations, since,
+          days, threshold, horizon, iterations, since, population,
           deoverlap, test_fraction: testFraction, split_ok: splitOk, split_date: cut,
         },
         baseline: { weights: BASE, metrics: baseline, test_metrics: baselineTest },
@@ -280,12 +294,16 @@ Deno.serve(async (req) => {
     return jsonResponse(req, {
       ok: true, run_id: runId, model,
       params: { days, threshold, horizon, iterations, deoverlap, test_fraction: testFraction },
+      population,
+      live_rows: liveRows.length,
+      neutral_rows: neutralRows.length,
       sample_n: fitRows.length,
       test_n: testRows.length,
       split_ok: splitOk,
       split_date: cut,
       symbols: new Set(usable.map((r) => r.symbol)).size,
       sessions: usedDates.length,
+
       baseline: { weights: BASE, metrics: baseline, test_metrics: baselineTest },
       candidates: top,
       best: winner,

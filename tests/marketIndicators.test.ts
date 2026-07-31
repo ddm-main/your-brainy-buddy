@@ -243,3 +243,44 @@ describe("totp (RFC 6238 SHA-1 vectors)", () => {
     expect(code).toMatch(/^\d{6}$/);
   });
 });
+
+// ---- Levels & trigger fixes (breakout state, base windowing) --------------
+import { breakoutState, baseEndIndex, baseMetrics as baseMetricsFn } from "../supabase/functions/_shared/market/indicators";
+
+function mkFlatCandles(closes: number[]) {
+  return closes.map((c, i) => ({
+    time: 1700000000 + i * 86400, open: c, high: c * 1.005, low: c * 0.995, close: c, volume: 100000,
+  }));
+}
+
+describe("breakoutState", () => {
+  it("reports fresh with days since the clearing bar", () => {
+    const flat = Array.from({ length: 40 }, () => 100);
+    const c = mkFlatCandles([...flat, 106, 107]);
+    const r = breakoutState(c, 20, 10);
+    expect(r.state).toBe("fresh");
+    expect(r.days).toBe(1);
+  });
+  it("reports failed when price fell back under the cleared level", () => {
+    const flat = Array.from({ length: 40 }, () => 100);
+    const c = mkFlatCandles([...flat, 106, 99]);
+    const r = breakoutState(c, 20, 10);
+    expect(r.state).toBe("failed");
+    expect(r.level).toBeGreaterThan(99);
+  });
+  it("reports none when there was never a breakout", () => {
+    expect(breakoutState(mkFlatCandles(Array.from({ length: 60 }, () => 100)), 20, 10).state).toBe("none");
+  });
+});
+
+describe("baseMetrics windowing", () => {
+  it("keeps base duration intact when measured up to the pre-breakout bar", () => {
+    const flat = Array.from({ length: 40 }, (_, i) => 100 + (i % 2 ? 0.2 : -0.2));
+    const c = mkFlatCandles([...flat, 112]);
+    const endIdx = baseEndIndex(c, 101, 15);
+    expect(endIdx).toBe(c.length - 2);
+    const through = baseMetricsFn(c, 30);
+    const upTo = baseMetricsFn(c, 30, endIdx);
+    expect(upTo.durationDays ?? 0).toBeGreaterThan(through.durationDays ?? 0);
+  });
+});

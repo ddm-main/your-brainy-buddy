@@ -40,11 +40,11 @@ export const V4_BUCKETS: BucketSpec[] = [
     blurb: "Where price sits against its pivot, and the quality of the base underneath it.",
     factors: [
       { key: "trigger", w: 0.45, label: "Trigger", what: "How far the close is above the pivot (max of the cluster level and the 20-day high), in ATRs, scaled by how many volume-weighted touches the level has and where the bar closed in its range.", full: "Close a full ATR or more above a well-touched pivot, closing in the top third of the bar. A close below the pivot earns at most 45% partial credit, decaying to nothing 1.5 ATR below." },
-      { key: "freshness", w: 0.10, label: "Freshness", what: "Sessions since the breakout print.", full: "Breakout happened today; zero after 5 sessions." },
+      { key: "freshness", w: 0.10, label: "Freshness", what: "Sessions since the breakout print.", full: "Breakout happened today; zero after 5 sessions, and zero outright when there is no live breakout or the last one failed." },
       { key: "base_tightness", w: 0.15, label: "Base tightness", what: "Width of the consolidation before the move.", full: "Base range at or under 2% of price; nothing at 8%+." },
       { key: "base_depth", w: 0.10, label: "Base depth", what: "Peak-to-trough drawdown inside the base.", full: "8% or shallower; nothing at 30%+." },
       { key: "base_duration", w: 0.10, label: "Base duration", what: "How long the base has been building.", full: "30 sessions or more; nothing under 10." },
-      { key: "support_defence", w: 0.10, label: "Support defence", what: "Whether price is sitting on a real, non-fallback support.", full: "Close within half an ATR of a genuine support level; 0.3 otherwise." },
+      { key: "support_defence", w: 0.10, label: "Support defence", what: "How close price sits to a real, non-fallback support.", full: "Close within half an ATR of a genuine support level; fades to zero by 3 ATR, and is not scored at all when the only 'support' is the lookback low." },
     ],
   },
   {
@@ -53,9 +53,9 @@ export const V4_BUCKETS: BucketSpec[] = [
     weight: 16,
     blurb: "Is real money behind the move, or is it a thin drift?",
     factors: [
-      { key: "rel_volume_30d", w: 0.45, label: "Relative volume", what: "Today's volume against the 30-day median (or the size-tier percentile when available). Dropped entirely below the turnover floor — 3x volume on an illiquid counter is noise.", full: "3x the 30-day median, or the 95th percentile within its market-cap tier." },
+      { key: "rel_volume_30d", w: 0.45, label: "Relative volume", what: "Today's volume against the 30-day median (or the size-tier percentile when available). Scores zero below the turnover floor — 3x volume on an illiquid counter is noise, not conviction.", full: "3x the 30-day median, or the 95th percentile within its market-cap tier." },
       { key: "obv_slope", w: 0.20, label: "OBV slope", what: "20-session on-balance-volume trend — accumulation vs distribution.", full: "Strongly rising OBV." },
-      { key: "vol_dryup", w: 0.15, label: "Volume dry-up", what: "Volume contraction into the base, which precedes clean expansions.", full: "Base volume at 60% of normal or less." },
+      { key: "vol_dryup", w: 0.15, label: "Volume dry-up", what: "Volume contraction into the base, measured up to the last pre-breakout bar so the breakout's own expansion doesn't cancel it.", full: "Base volume at 60% of normal or less." },
       { key: "delivery_pct", w: 0.20, label: "Delivery %", what: "Share of traded quantity actually delivered — intent, not day-trade churn.", full: "65% delivery or higher; nothing at 30%." },
     ],
   },
@@ -65,11 +65,11 @@ export const V4_BUCKETS: BucketSpec[] = [
     weight: 16,
     blurb: "Classic momentum and volatility reads, each capped so no single one dominates.",
     factors: [
-      { key: "rsi", w: 0.25, label: "RSI (14)", what: "Momentum, scored as a window rather than 'higher is better'.", full: "RSI between 60 and 75. Below 45 and above 85 both score zero." },
-      { key: "macd", w: 0.20, label: "MACD", what: "MACD above signal (0.6) plus a rising histogram (0.4).", full: "Above signal with a rising histogram." },
+      { key: "rsi", w: 0.25, label: "RSI (14)", what: "Momentum, scored as a window rather than 'higher is better'.", full: "RSI between 60 and 75. Below 40 and above 85 both score zero." },
+      { key: "macd", w: 0.20, label: "MACD", what: "MACD above signal (0.6) plus a rising histogram (0.4). When histogram history is missing, the cross alone carries the factor instead of being marked down.", full: "Above signal with a rising histogram." },
       { key: "adx", w: 0.20, label: "ADX (14)", what: "Trend strength.", full: "ADX 30+; nothing at 15 or below." },
       { key: "atr_pct", w: 0.10, label: "ATR %", what: "Volatility sanity — too quiet cannot travel, too wild cannot be held.", full: "2–6% daily ATR, or mid-range volatility for its size tier." },
-      { key: "percent_b", w: 0.10, label: "Bollinger %B", what: "Position inside the Bollinger band.", full: "At or above the upper band." },
+      { key: "percent_b", w: 0.10, label: "Bollinger %B", what: "Position inside the Bollinger band, capped at the upper band — riding beyond it is overextension, charged as a penalty instead.", full: "At the upper band." },
       { key: "mfi", w: 0.10, label: "MFI (14)", what: "Money-flow index — volume-weighted momentum.", full: "MFI 80+; nothing at 50 or below." },
       { key: "supertrend", w: 0.05, label: "Supertrend", what: "Supertrend direction.", full: "Direction is up (binary)." },
     ],
@@ -96,7 +96,7 @@ export const V4_BUCKETS: BucketSpec[] = [
       { key: "pos_52w", w: 0.25, label: "Position in 52w range", what: "Distance from the 52-week high.", full: "Within 1% of the 52-week high; nothing at −35%." },
       { key: "rel_strength", w: 0.25, label: "RS vs NIFTY", what: "Outperformance against the index.", full: "+15% or better against NIFTY; nothing at −5%." },
       { key: "rs_percentile", w: 0.20, label: "RS percentile", what: "Rank of that relative strength inside the universe.", full: "90th percentile; nothing at the 50th." },
-      { key: "sector_strength", w: 0.20, label: "Sector strength", what: "How the stock's sector is performing.", full: "Sector at the top of the tape." },
+      { key: "sector_strength", w: 0.20, label: "Sector strength", what: "How the stock's sector is performing. Dropped when sector ranking is unavailable rather than assumed average.", full: "Sector at the top of the tape." },
       { key: "breadth", w: 0.10, label: "Market regime", what: "Overall breadth regime.", full: "Bullish regime; 0.5 neutral, 0 bearish." },
     ],
   },
@@ -106,7 +106,7 @@ export const V4_BUCKETS: BucketSpec[] = [
     weight: 11,
     blurb: "Detected classical formations, netted against bearish ones.",
     factors: [
-      { key: "pattern_bonus", w: 1, label: "Pattern bonus", what: "Net bullish pattern score (cup-and-handle, flag, triangle, higher lows near resistance…), normalised against the 8-point maximum. Bearish formations are charged separately as a penalty.", full: "A full-strength bullish formation confirmed at resistance." },
+      { key: "pattern_bonus", w: 1, label: "Pattern bonus", what: "Net bullish pattern score (cup-and-handle, flag, triangle, higher lows near resistance…), normalised against a reachable 6-point ceiling. Needs 60+ sessions of history; bearish formations are charged separately as a penalty.", full: "Two or three bullish formations confirmed together at resistance." },
     ],
   },
   {
@@ -116,8 +116,8 @@ export const V4_BUCKETS: BucketSpec[] = [
     blurb: "The AI verdict, the news tape, and whether a binary event is about to decide the print.",
     factors: [
       { key: "ai_verdict", w: 0.50, label: "AI verdict", what: "The stored AI recommendation, pulled toward neutral by its own confidence.", full: "A high-confidence strong buy." },
-      { key: "news_sentiment", w: 0.30, label: "News sentiment", what: "Average sentiment over the recent news window. Dropped when there is no news.", full: "Uniformly positive coverage." },
-      { key: "event_clear", w: 0.20, label: "Event clearance", what: "Sessions until results or an ex-date.", full: "5+ sessions clear of any event. Inside 2 sessions the whole score is hard-capped into the WATCH band." },
+      { key: "news_sentiment", w: 0.30, label: "News sentiment", what: "Average sentiment over the recent news window, shrunk toward neutral when only one or two articles back it. Dropped when there is no news.", full: "Uniformly positive coverage across 5+ articles." },
+      { key: "event_clear", w: 0.20, label: "Event clearance", what: "Sessions until results or an ex-date.", full: "10+ sessions clear of any event. Inside 2 sessions the whole score is hard-capped into the WATCH band." },
     ],
   },
 ];

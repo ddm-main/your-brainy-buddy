@@ -239,7 +239,14 @@ export function higherLows(lows: number[], lookback = 40, count = 3): boolean {
 // Detect swing pivots (fractals) with configurable side-strength. Right-side
 // window is allowed to shrink at the tail so the most recent swing isn't
 // silently dropped (the previous implementation ignored the last two bars).
-type Pivot = { price: number; index: number; volume: number };
+//
+// A pivot found with fewer than `strength` bars to its right is flagged
+// `provisional`: it has not been confirmed by subsequent price action and can
+// still be taken out tomorrow. At the very last bar `rightBars` is 0, so
+// today's own high would otherwise register as a fully confirmed level — and
+// then be read as a level price has "cleared", which is circular. Consumers
+// that decide what price broke through must drop provisional pivots.
+type Pivot = { price: number; index: number; volume: number; provisional: boolean };
 function findPivots(
   window: Candle[],
   side: "high" | "low",
@@ -263,10 +270,11 @@ function findPivots(
       if (side === "high" ? other >= val : other <= val) { ok = false; break; }
     }
     if (!ok) continue;
-    out.push({ price: val, index: i, volume: c.volume });
+    out.push({ price: val, index: i, volume: c.volume, provisional: rightBars < strength });
   }
   return out;
 }
+
 
 // Cluster pivots by ATR% band, weight by touches + recency + volume.
 //
@@ -322,11 +330,17 @@ export function supportResistance(
   resistanceTouches: number;
   supportFallback: boolean;
   resistanceFallback: boolean;
+  // Strongest clustered level strictly ABOVE the last close. `resistance`
+  // tolerates a level up to 0.25×ATR below price (so a just-cleared ceiling
+  // still shows), which made "near resistance" impossible to satisfy whenever
+  // that tolerance kicked in. This field is the honest ceiling for that test.
+  resistanceAbove: number | null;
 } {
   const empty = {
     support: null, resistance: null,
     supportTouches: 0, resistanceTouches: 0,
     supportFallback: false, resistanceFallback: false,
+    resistanceAbove: null,
   };
   const window = candles.slice(-lookback);
   if (window.length < 20) return empty;
@@ -366,7 +380,41 @@ export function supportResistance(
     support = lo;
     supportFallback = true;
   }
-  return { support, resistance, supportTouches, resistanceTouches, supportFallback, resistanceFallback };
+  const strictAbove = hiClusters
+    .filter((c) => c.price > lastClose)
+    .sort((a, b) => b.strength - a.strength || a.price - b.price)[0];
+  const winHigh = Math.max(...window.map((c) => c.high));
+  const resistanceAbove = strictAbove?.price ?? (winHigh > lastClose ? winHigh : null);
+  return {
+    support, resistance, supportTouches, resistanceTouches,
+    supportFallback, resistanceFallback, resistanceAbove,
+  };
+}
+
+// Touch count / volume-weighted touch quality of an arbitrary price level:
+// how many clustered swing highs sit within the ATR-scaled band of it. Used so
+// a breakout over the rolling-20 high can be graded on the SAME level-quality
+// scale as one over a cluster pivot, instead of being flatly discounted.
+export function levelTouchQuality(
+  candles: Candle[],
+  level: number | null,
+  lookback = 250,
+): { touches: number; touchQuality: number } {
+  const none = { touches: 0, touchQuality: 0 };
+  if (level == null || !(level > 0)) return none;
+  const window = candles.slice(-lookback);
+  if (window.length < 20) return none;
+  const lastClose = window[window.length - 1].close;
+  const atrV = lastDefined(atr(window, 14)) ?? lastClose * 0.02;
+  const band = Math.max(0.003, (0.5 * atrV) / lastClose);
+  const clusters = clusterPivots(
+    findPivots(window, "high", 3), band, window.length, medianOf(window.map((c) => c.volume)),
+  );
+  let touches = 0, touchQuality = 0;
+  for (const c of clusters) {
+    if (Math.abs(c.price - level) / level <= band) { touches += c.touches; touchQuality += c.touchQuality; }
+  }
+  return { touches, touchQuality: Math.round(touchQuality * 100) / 100 };
 }
 
 // The breakout pivot proper: the strongest clustered swing-high level that
@@ -386,9 +434,13 @@ export function resistancePivot(
   const atrV = lastDefined(atr(window, 14)) ?? lastClose * 0.02;
   if (!(atrV > 0)) return none;
   const band = Math.max(0.003, (0.5 * atrV) / lastClose);
+  // Provisional pivots are excluded here: an unconfirmed swing high at the tail
+  // (often today's own high) must not become "the level price cleared".
   const clusters = clusterPivots(
-    findPivots(window, "high", 3), band, window.length, medianOf(window.map((c) => c.volume)),
+    findPivots(window, "high", 3).filter((p) => !p.provisional),
+    band, window.length, medianOf(window.map((c) => c.volume)),
   );
+
   const cleared = clusters
     .filter((c) => c.price <= lastClose && (lastClose - c.price) / atrV <= maxAtrsBelow)
     // prefer the strongest (touches + recency); tie-break to the higher level
@@ -411,6 +463,46 @@ export function volumeDryUpRatio(volumes: number[], shortN = 5, longN = 20): num
   const longAvg = volumes.slice(-longN).reduce((a, b) => a + b, 0) / longN;
   if (!(longAvg > 0)) return null;
   return shortAvg / longAvg;
+}
+
+// Same ratio, measured on the window ENDING at `endIdx` instead of today.
+// Dry-up is a property of the base, not of the breakout bar: measured through
+// today, the expansion being scored inflates the 5D average and collapses the
+// dry-up factor exactly when the setup is at its best.
+export function volumeDryUpRatioAt(
+  volumes: number[], endIdx: number, shortN = 5, longN = 20,
+): number | null {
+  const end = Math.min(endIdx, volumes.length - 1);
+  if (end + 1 < longN) return null;
+  const win = volumes.slice(0, end + 1);
+  return volumeDryUpRatio(win, shortN, longN);
+}
+
+// Sessions since `fast` crossed above `slow` and stayed there. 0 = crossed
+// today; -1 = fast is currently BELOW slow (a real "no cross", which
+// freshCross() scores as 0); null = not enough data / the cross happened
+// before the lookback, which the scorer must treat as unknown.
+export function emaCrossFreshDays(
+  fast: (number | null)[], slow: (number | null)[], lookback = 60,
+): number | null {
+  const last = Math.min(fast.length, slow.length) - 1;
+  if (last < 1) return null;
+  const at = (i: number): number | null => {
+    const f = fast[i], s = slow[i];
+    if (f == null || s == null) return null;
+    return f > s ? 1 : 0;
+  };
+  const now = at(last);
+  if (now == null) return null;
+  if (now === 0) return -1;
+  for (let i = last; i >= Math.max(1, last - lookback); i--) {
+    const cur = at(i), prev = at(i - 1);
+    if (cur == null) return null;
+    if (cur === 1 && prev === 0) return last - i;
+  }
+  // Above, but the cross is older than the lookback: that is a known-stale
+  // cross (scores 0 through the 25-session decay), not missing data.
+  return lookback;
 }
 
 
@@ -458,28 +550,49 @@ export function rollingHighExclToday(candles: Candle[], period = 20): number | n
   return Number.isFinite(h) ? h : null;
 }
 
-// Sessions since the price first cleared the rolling-N high. 0 = broke out today.
-// Null when no breakout in the last `lookback` sessions.
-export function breakoutFreshnessDays(candles: Candle[], period = 20, lookback = 10): number | null {
-  if (candles.length < period + 2) return null;
+// Explicit three-state breakout read. The old single "freshness days or null"
+// answer collapsed three very different situations into null — no breakout at
+// all, and a breakout that has since failed back under its level — which meant
+// the scorer renormalised the factor away instead of scoring it 0, and the
+// failed-breakout penalty could never fire.
+export type BreakoutStateKind = "fresh" | "failed" | "none";
+export interface BreakoutStateRead {
+  state: BreakoutStateKind;
+  // Sessions since the clearing bar (0 = today). Null when state is "none".
+  days: number | null;
+  // The level that was cleared, for the failure-depth penalty.
+  level: number | null;
+}
+export function breakoutState(candles: Candle[], period = 20, lookback = 10): BreakoutStateRead {
+  const none: BreakoutStateRead = { state: "none", days: null, level: null };
+  if (candles.length < period + 2) return none;
+  const lastClose = candles[candles.length - 1].close;
   for (let k = 0; k < lookback && k < candles.length - period - 1; k++) {
     const i = candles.length - 1 - k;
     const win = candles.slice(i - period, i);
     let h = -Infinity;
     for (const c of win) if (c.high > h) h = c.high;
-    if (candles[i].close > h) {
-      // The breakout only counts if price is STILL above the pivot it cleared —
-      // a breakout that has since failed back below the level is not "fresh".
-      if (candles[candles.length - 1].close <= h) return null;
-      // Check that the previous session did NOT close above the same-shifted high.
-      if (k === lookback - 1) return k;
+    if (!(candles[i].close > h)) continue;
+    // Only count the FIRST bar that cleared the level: if the previous session
+    // already closed above its own shifted high, this is a continuation bar and
+    // the real breakout is older. Applied uniformly — the old code skipped this
+    // check on the last iteration, which could report a stale breakout as 9d.
+    if (i - period - 1 >= 0) {
       const prevWin = candles.slice(i - period - 1, i - 1);
       let ph = -Infinity;
       for (const c of prevWin) if (c.high > ph) ph = c.high;
-      if (candles[i - 1].close <= ph) return k;
+      if (candles[i - 1].close > ph) continue;
     }
+    return { state: lastClose > h ? "fresh" : "failed", days: k, level: h };
   }
-  return null;
+  return none;
+}
+
+// Backwards-compatible wrapper: sessions since the price first cleared the
+// rolling-N high, and null when there is no *live* breakout.
+export function breakoutFreshnessDays(candles: Candle[], period = 20, lookback = 10): number | null {
+  const r = breakoutState(candles, period, lookback);
+  return r.state === "fresh" ? r.days : null;
 }
 
 // Where today's close lies in its daily range, 0..100. 100 = at high, 0 = at low.
@@ -489,33 +602,67 @@ export function closeInRangePct(c: Candle): number | null {
   return ((c.close - c.low) / rng) * 100;
 }
 
-// Base metrics: measure the last `window` sessions as a consolidation base.
-export function baseMetrics(candles: Candle[], window = 30): {
+// Base metrics: measure `window` sessions as a consolidation base, ending at
+// `endIdx` (inclusive). `endIdx` matters: measuring through the breakout bar
+// let the thrust itself inflate SD and hi−lo depth and push price out of the
+// duration band, so tightness/depth/duration all collapsed at exactly the
+// moment the trigger fired. Callers pass the last bar BELOW the pivot.
+export function baseMetrics(
+  candles: Candle[],
+  window = 30,
+  endIdx: number = candles.length - 1,
+): {
   tightness: number | null;
   depthPct: number | null;
   durationDays: number | null;
 } {
-  if (candles.length < window) return { tightness: null, depthPct: null, durationDays: null };
-  const slice = candles.slice(-window);
+  const nothing = { tightness: null, depthPct: null, durationDays: null };
+  const end = Math.min(endIdx, candles.length - 1);
+  if (end + 1 < window) return nothing;
+  const slice = candles.slice(end + 1 - window, end + 1);
   const closes = slice.map((c) => c.close);
-  const mean = closes.reduce((a, b) => a + b, 0) / closes.length;
-  if (mean === 0) return { tightness: null, depthPct: null, durationDays: null };
-  const variance = closes.reduce((a, b) => a + (b - mean) ** 2, 0) / closes.length;
-  const sd = Math.sqrt(variance);
-  const tightness = sd / mean; // lower = tighter
+  const n = closes.length;
+  const mean = closes.reduce((a, b) => a + b, 0) / n;
+  if (mean === 0) return nothing;
+  // Detrended tightness: SD of the residuals around the least-squares line, not
+  // around the flat mean — otherwise a clean rising base reads as "loose" purely
+  // because it trends.
+  const xMean = (n - 1) / 2;
+  let num = 0, den = 0;
+  for (let i = 0; i < n; i++) { num += (i - xMean) * (closes[i] - mean); den += (i - xMean) ** 2; }
+  const slope = den === 0 ? 0 : num / den;
+  let resVar = 0;
+  for (let i = 0; i < n; i++) {
+    const fit = mean + slope * (i - xMean);
+    resVar += (closes[i] - fit) ** 2;
+  }
+  const tightness = Math.sqrt(resVar / n) / mean; // lower = tighter
   let hi = -Infinity, lo = Infinity;
   for (const c of slice) { if (c.high > hi) hi = c.high; if (c.low < lo) lo = c.low; }
   const depthPct = hi > 0 ? ((hi - lo) / hi) * 100 : null;
-  // Duration = trailing sessions where close stayed within ±(depthPct*0.75)% of mean.
+  // Duration = trailing sessions (up to endIdx) whose close stayed within
+  // ±(depthPct*0.75)% of the base mean.
   let duration = 0;
   const band = Math.abs(depthPct ?? 0) * 0.75;
-  for (let i = candles.length - 1; i >= 0; i--) {
+  for (let i = end; i >= 0; i--) {
     if (Math.abs((candles[i].close - mean) / mean) * 100 <= band) duration++;
     else break;
   }
-  // A real 0 means "no base at all" (price is outside the band today) — it must
-  // stay 0, not fall back to `window` and score as a mature base.
+  // A real 0 means "no base at all" (price is outside the band) — it must stay
+  // 0, not fall back to `window` and score as a mature base.
   return { tightness, depthPct, durationDays: duration };
+}
+
+// Index of the last bar that closed at/below `level` — where the base that
+// price is breaking out of actually ends. Falls back to the final bar when
+// price never traded under the level inside `maxBack`.
+export function baseEndIndex(candles: Candle[], level: number | null, maxBack = 15): number {
+  const last = candles.length - 1;
+  if (level == null || !(level > 0)) return last;
+  for (let i = last; i >= Math.max(0, last - maxBack); i--) {
+    if (candles[i].close <= level) return i;
+  }
+  return Math.max(0, last - maxBack);
 }
 
 
@@ -626,7 +773,8 @@ export interface IndicatorSnapshot {
   resistanceTouches?: number;
   supportFallback?: boolean;
   resistanceFallback?: boolean;
-  macdHistRising: boolean;
+  // null = not enough histogram history to judge (never "not rising").
+  macdHistRising: boolean | null;
   // Rolling N-day highs (scoring v2 breakout trigger). Optional: pipelines that
   // haven't been updated still work — the trigger falls back to pctFrom52wHigh.
   rollingHigh20?: number | null;
@@ -639,17 +787,41 @@ export interface IndicatorSnapshot {
   rsPercentile?: number | null;       // 0..100 vs universe over 55 sessions
   closeInRangePct?: number | null;    // 0..100 — where today closed within its daily range
   breakoutFreshnessDays?: number | null; // sessions since 20d high was first cleared; 0 = today
+  // Explicit breakout state: "fresh" (still above the level it cleared),
+  // "failed" (cleared it, then fell back inside) or "none". Distinguishes a
+  // real 0 from missing data for the freshness factor.
+  breakoutStateKind?: BreakoutStateKind | null;
+  // Sessions since the clearing bar, kept for BOTH "fresh" and "failed".
+  // breakoutFreshnessDays is deliberately fresh-only (it feeds a decay factor
+  // that must not pay out on a dead breakout), which left the failed-breakout
+  // penalty with no way to tell yesterday's failure from one three months old.
+  breakoutStateDays?: number | null;
+  breakoutLevelCleared?: number | null;
+
   pivotLevel?: number | null;         // strongest cleared swing-high cluster (real base ceiling)
   pivotTouches?: number | null;       // how many swing highs formed that cluster
   // Volume-weighted touch count for that cluster: heavy-volume rejections
   // count for more than thin pokes at the same price.
   pivotTouchQuality?: number | null;
+  // Same touch grading for the rolling-20 high, so a genuine new-high breakout
+  // is scored on level quality rather than flatly discounted.
+  rollingHigh20Touches?: number | null;
+  rollingHigh20TouchQuality?: number | null;
+  // Strongest clustered level strictly above the close (see supportResistance).
+  resistanceAbove?: number | null;
   // Rel volume vs the MEDIAN of the prior 30 sessions (spike-resistant).
   relVolumeMedian30?: number | null;
   // Sessions of price history behind this snapshot — below ~120 the chart is
   // not readable and the scorer refuses to emit a number.
   barsAvailable?: number | null;
   volDryUpRatio?: number | null;      // 5D avg volume / 20D avg volume; <1 = drying up
+  // Same ratio measured on the base window (ending at the last pre-breakout
+  // bar) — this is the one the v4 volume bucket scores.
+  volDryUpRatioBase?: number | null;
+  // Sessions since the EMA crossed up: 0 = today, -1 = currently below (real
+  // 0), null = unknown. Feeds the setups bucket's two cross factors.
+  emaCross2050FreshDays?: number | null;
+  emaCross50200FreshDays?: number | null;
 
   // series for chart overlays (aligned to candles)
   ema20Series: (number | null)[];
@@ -712,25 +884,45 @@ export function computeSnapshot(candles: Candle[]): IndicatorSnapshot | null {
   const sr = supportResistance(candles, 250);
   // ATR-scaled "near resistance": within 0.5×ATR% of the level (min 1%).
   const nearBand = atrV != null && close ? Math.max(0.01, (0.5 * atrV) / close) : 0.03;
+  // Measured against the ceiling strictly ABOVE the close: `sr.resistance`
+  // tolerates a level up to 0.25×ATR under price, and whenever that tolerance
+  // applied this flag could never be true.
+  const nearLevel = sr.resistanceAbove ?? sr.resistance;
   const nearRes =
-    sr.resistance != null && close >= sr.resistance * (1 - nearBand) && close < sr.resistance;
+    nearLevel != null && close >= nearLevel * (1 - nearBand) && close < nearLevel;
 
   const macdHistSeries = m.hist.filter((v): v is number => v != null);
-  const macdHistRising =
-    macdHistSeries.length >= 3 &&
-    macdHistSeries[macdHistSeries.length - 1] > macdHistSeries[macdHistSeries.length - 2] &&
-    macdHistSeries[macdHistSeries.length - 2] > macdHistSeries[macdHistSeries.length - 3];
+  // null when there simply isn't enough histogram history to judge — the
+  // scorer must not read "we can't tell" as "not rising" and dock the factor.
+  const macdHistRising: boolean | null =
+    macdHistSeries.length < 3
+      ? null
+      : macdHistSeries[macdHistSeries.length - 1] > macdHistSeries[macdHistSeries.length - 2] &&
+        macdHistSeries[macdHistSeries.length - 2] > macdHistSeries[macdHistSeries.length - 3];
 
   // v2 scoring inputs
   const obvSeries = obv(candles);
   const obvSlope20 = normalizedSlope(obvSeries, 20);
   const rH20 = rollingHighExclToday(candles, 20);
   const rH55 = rollingHighExclToday(candles, 55);
-  const freshness = breakoutFreshnessDays(candles, 20, 10);
   const cir = closeInRangePct(last);
-  const base = baseMetrics(candles, 30);
   const pivot = resistancePivot(candles, 250);
+  const bkState = breakoutState(candles, 20, 10);
+  const freshness = bkState.state === "fresh" ? bkState.days : null;
+  // Measure the base up to the last bar that was still under the pivot, so the
+  // breakout thrust doesn't destroy the very base quality it broke out of.
+  const pivotForBase = Math.max(pivot.level ?? -Infinity, rH20 ?? -Infinity);
+  const base = baseMetrics(
+    candles, 30,
+    baseEndIndex(candles, Number.isFinite(pivotForBase) ? pivotForBase : null, 15),
+  );
+  const rh20Q = levelTouchQuality(candles, rH20, 250);
   const dryUp = volumeDryUpRatio(volumes, 5, 20);
+  // Base-window dry-up (see volumeDryUpRatioAt) plus the two EMA-cross ages.
+  const baseEnd = baseEndIndex(candles, Number.isFinite(pivotForBase) ? pivotForBase : null, 15);
+  const dryUpBase = volumeDryUpRatioAt(volumes, baseEnd, 5, 20);
+  const cross2050 = emaCrossFreshDays(e20, e50, 60);
+  const cross50200 = emaCrossFreshDays(e50, e200, 60);
 
 
   return {
@@ -779,12 +971,22 @@ export function computeSnapshot(candles: Candle[]): IndicatorSnapshot | null {
     baseDurationDays: base.durationDays,
     closeInRangePct: cir,
     breakoutFreshnessDays: freshness,
+    breakoutStateKind: bkState.state,
+    breakoutStateDays: bkState.days,
+
+    breakoutLevelCleared: bkState.level,
     pivotLevel: pivot.level,
     pivotTouches: pivot.touches,
     pivotTouchQuality: pivot.touchQuality,
+    rollingHigh20Touches: rh20Q.touches,
+    rollingHigh20TouchQuality: rh20Q.touchQuality,
+    resistanceAbove: sr.resistanceAbove,
     relVolumeMedian30: relVolumeMedian(volumes, 30),
     barsAvailable: candles.length,
     volDryUpRatio: dryUp,
+    volDryUpRatioBase: dryUpBase,
+    emaCross2050FreshDays: cross2050,
+    emaCross50200FreshDays: cross50200,
 
     ema20Series: e20,
     ema50Series: e50,

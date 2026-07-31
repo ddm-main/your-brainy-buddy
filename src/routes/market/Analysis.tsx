@@ -371,15 +371,17 @@ export default function Analysis() {
   // Daily candles independent of the chart's selected timeframe (`tf` may be
   // intraday) — this is what the live technical recompute always uses.
   const { data: dailyCandleData } = useCandles(sym, "1D", exchange);
-  const liveScore = useMemo(
-    () => computeLiveScore(dailyCandleData?.candles, quote, score, breadth),
-    [dailyCandleData, quote, score, breadth],
-  );
   const { data: sectors = [] } = useSectorStrength();
   const depthVisible = useDepthPanelVisible();
   const { data: depth } = useDepth(sym, exchange, depthVisible);
   const { data: fundData } = useFundamentals(sym, exchange);
   const fund = fundData?.fundamentals as any | undefined;
+  // market_cap is stored in rupees; the liquidity gate works in ₹ Cr.
+  const marketCapCr = fund?.market_cap != null ? Number(fund.market_cap) / 1e7 : null;
+  const liveScore = useMemo(
+    () => computeLiveScore(dailyCandleData?.candles, quote, score, breadth, marketCapCr),
+    [dailyCandleData, quote, score, breadth, marketCapCr],
+  );
   const { data: insightData, isLoading: insightLoading, error: insightError } = useStockInsight(sym);
   const refreshInsight = useRefreshStockInsight();
   const { data: news = [], error: newsError } = useMarketNews(sym, exchange);

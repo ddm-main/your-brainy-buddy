@@ -127,16 +127,21 @@ export interface OptimizerCandidate {
 export interface OptimizerRun {
   id: string;
   model: string;
-  params: { days?: number; threshold?: number; horizon?: string; iterations?: number };
+  params: { days?: number; threshold?: number; horizon?: string; iterations?: number; population?: string };
   baseline: { weights: Record<string, number>; metrics: OptimizerMetrics; test_metrics?: OptimizerMetrics | null } | null;
   candidates: OptimizerCandidate[];
   best: OptimizerCandidate | null;
   sample_n: number | null;
   symbols?: number | null;
   sessions?: number | null;
+  /** Which pool the fit ran on: live full-context rows or replayed neutral ones. */
+  population?: string | null;
+  live_rows?: number | null;
+  neutral_rows?: number | null;
   split_ok?: boolean;
   split_date?: string | null;
   test_n?: number | null;
+
   created_at: string;
 }
 

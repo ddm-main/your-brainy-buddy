@@ -23,7 +23,8 @@ export const FILTER_TO_COL: Record<string, string> = {
   fii_holding: "fii_holding", institutional_holding: "institutional_holding",
   rsi: "rsi", adx: "adx",
   ret_5d: "ret_5d", ret_21d: "ret_21d", ret_ytd: "ret_ytd",
-  breakout_score: "breakout_score", prebreakout_score: "prebreakout_score",
+  breakout_score: "breakout_score", breakout_score_v4: "breakout_score_v4",
+  prebreakout_score: "prebreakout_score",
   sector: "sector", industry: "industry",
   // Previously missing — filtering by these narrowed results but the
   // matching column never rendered, making the match criterion invisible.

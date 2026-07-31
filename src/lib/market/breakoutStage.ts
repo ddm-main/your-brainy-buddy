@@ -4,7 +4,9 @@
 
 import type { IndicatorSnapshot } from "../../../supabase/functions/_shared/market/indicators";
 
-export type BreakoutStage = "LOADING" | "COILED" | "ARMED" | "TRIGGERED" | "EXTENDED";
+// NO DATA (nothing to read) and NO SETUP (read fine, nothing forming) are
+// different facts and used to share the single "LOADING" label.
+export type BreakoutStage = "NO DATA" | "NO SETUP" | "COILED" | "ARMED" | "TRIGGERED" | "EXTENDED" | "FAILED";
 
 export interface StageRead {
   stage: BreakoutStage;
@@ -12,26 +14,39 @@ export interface StageRead {
 }
 
 export function deriveBreakoutStage(s: IndicatorSnapshot | null | undefined): StageRead {
-  if (!s) return { stage: "LOADING", detail: "no snapshot" };
+  if (!s) return { stage: "NO DATA", detail: "no technical snapshot for this symbol" };
 
   const pivot = s.pivotLevel ?? s.rollingHigh20 ?? null;
   const atr = s.atr14 ?? null;
 
-  // EXTENDED — trigger fired but price is now stretched too far above EMA20.
+  // FAILED — a breakout fired and price fell back inside the base. This used to
+  // render as COILED/NO SETUP (freshness is null once the breakout fails), i.e.
+  // the friendliest label for the worst tape. It has to be checked first.
+  if (s.breakoutStateKind === "failed") {
+    const lvl = s.breakoutLevelCleared ?? pivot;
+    return {
+      stage: "FAILED",
+      detail: lvl != null ? `lost ${lvl.toFixed(2)} after clearing it` : "breakout gave back the level",
+    };
+  }
+
+  const fresh = s.breakoutFreshnessDays;
+  const triggered = pivot != null && s.close > pivot && fresh != null && fresh <= 3;
+  const triggerDetail = fresh === 0 ? "cleared pivot today" : `${fresh}d since trigger`;
+
+  // EXTENDED — price is stretched too far above EMA20. When the trigger is also
+  // fresh, say both: a strong day-one breakout labelled only "chase risk" reads
+  // as if nothing happened.
   if (atr != null && atr > 0 && s.ema20 != null) {
     const atrsAboveEma = (s.close - s.ema20) / atr;
     if (atrsAboveEma >= 3) {
-      return { stage: "EXTENDED", detail: `${atrsAboveEma.toFixed(1)}× ATR above EMA20 — chase risk` };
+      const base = `${atrsAboveEma.toFixed(1)}× ATR above EMA20 — chase risk`;
+      return { stage: "EXTENDED", detail: triggered ? `${triggerDetail}, ${base}` : base };
     }
   }
 
   // TRIGGERED — close above the strongest pivot within the last few sessions.
-  if (pivot != null && s.close > pivot) {
-    const fresh = s.breakoutFreshnessDays;
-    if (fresh != null && fresh <= 3) {
-      return { stage: "TRIGGERED", detail: fresh === 0 ? "cleared pivot today" : `${fresh}d since trigger` };
-    }
-  }
+  if (triggered) return { stage: "TRIGGERED", detail: triggerDetail };
 
   const coiled = !!(s.bbSqueeze || s.atrContracting ||
     (s.baseTightness != null && s.baseTightness < 0.04 && (s.baseDurationDays ?? 0) >= 15));
@@ -49,13 +64,15 @@ export function deriveBreakoutStage(s: IndicatorSnapshot | null | undefined): St
 
   if (coiled) return { stage: "COILED", detail: s.bbSqueeze ? "BB squeeze" : "volatility contracting" };
 
-  return { stage: "LOADING", detail: "no setup yet" };
+  return { stage: "NO SETUP", detail: "no coil, trigger or extension in the current read" };
 }
 
 export const STAGE_TONE: Record<BreakoutStage, "ok" | "accent" | "warn" | "err" | "neutral"> = {
-  LOADING: "neutral",
+  "NO DATA": "neutral",
+  "NO SETUP": "neutral",
   COILED: "accent",
   ARMED: "ok",
   TRIGGERED: "ok",
   EXTENDED: "warn",
+  FAILED: "err",
 };

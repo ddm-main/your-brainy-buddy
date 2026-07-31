@@ -5,9 +5,10 @@
 // rerun the exact same indicator/scoring math the backend uses. Only ever
 // applied to the single symbol currently open in Analysis — not the whole
 // universe.
-import { computeSnapshot, type Candle, type IndicatorSnapshot } from "../../../supabase/functions/_shared/market/indicators";
-import { detectPatterns, type PatternFlags } from "../../../supabase/functions/_shared/market/indicators-advanced";
-import { breakoutScore, type BreakoutPatterns, type MarketContext, type ScoreResult } from "../../../supabase/functions/_shared/market/scoring";
+import { computeSnapshot, computeWeeklySnapshot, type Candle, type IndicatorSnapshot } from "../../../supabase/functions/_shared/market/indicators";
+import { detectPatterns, mfi, percentB, supertrend, type PatternFlags } from "../../../supabase/functions/_shared/market/indicators-advanced";
+import { breakoutScoreV4, evaluateLiquidity, type AdvancedSignals, type BreakoutPatterns, type MarketContext } from "../../../supabase/functions/_shared/market/scoring";
+import { vwap } from "../../../supabase/functions/_shared/market/indicators-advanced";
 import { marketOpen } from "./hooks";
 import type { BreadthDaily, CandleDto, Quote, StockScore } from "./types";
 
@@ -57,7 +58,11 @@ export function withLivePrice(dailyCandles: CandleDto[], quote: Quote | undefine
 
 export interface LiveScore {
   snapshot: IndicatorSnapshot;
-  breakout: ScoreResult;
+  // Deliberately the SAME v4 engine the EOD pipeline and the UI's score
+  // explainer use — the live view used to run the legacy v2 scorer, so the
+  // number moved by several points at the open for no reason other than which
+  // function computed it.
+  breakout: { score: number | null; components: Record<string, number> };
   patterns: PatternFlags;
 }
 
@@ -72,6 +77,9 @@ export function computeLiveScore(
   quote: Quote | undefined,
   eodScore: StockScore | undefined,
   breadth: BreadthDaily | null | undefined,
+  // Market cap in ₹ Cr, when the caller has fundamentals loaded. Optional: the
+  // recompute must still work on first paint, before that query resolves.
+  marketCapCr?: number | null,
 ): LiveScore | null {
   if (!dailyCandles || dailyCandles.length === 0) return null;
   const candles = withLivePrice(dailyCandles, quote);
@@ -112,9 +120,51 @@ export function computeLiveScore(
     inverseHeadShoulders: patterns.inverse_head_shoulders,
     fallingWedge: patterns.falling_wedge,
   };
+  const st = supertrend(candles);
+  const mfiSeries = mfi(candles, 14);
+  const vwapSeries = vwap(candles);
+  const vwapLast = vwapSeries[vwapSeries.length - 1] ?? null;
+  const stDir = st.dir[st.dir.length - 1] ?? null;
+  const adv: AdvancedSignals = {
+    vwapRel: vwapLast != null && vwapLast > 0 ? (snapshot.close - vwapLast) / vwapLast : null,
+    percentB: percentB(snapshot.close, snapshot.bbUpper, snapshot.bbLower),
+    mfi14: mfiSeries[mfiSeries.length - 1] ?? null,
+    supertrendDir: stDir === 1 || stDir === -1 ? stDir : null,
+    patterns: {
+      bullishEngulfing: patterns.bullish_engulfing, hammer: patterns.hammer, doji: patterns.doji,
+      cupAndHandle: patterns.cup_and_handle, flag: patterns.flag,
+      ascendingTriangle: patterns.ascending_triangle,
+      bearishEngulfing: patterns.bearish_engulfing, shootingStar: patterns.shooting_star,
+    },
+  };
+  // Liquidity feeds two things in v4: the 25-point illiquidity penalty and the
+  // turnover floor under the relative-volume factor. Omitting it here made the
+  // live recompute read "turnover unknown" and silently drop that factor, so
+  // the live score drifted from the stored one for no reason but a missing
+  // argument. Market cap is only gated on when the caller supplies it —
+  // otherwise the cap leg abstains rather than falsely failing the stock.
+  const avgTurnoverCr = snapshot.volAvg20 != null && snapshot.close != null
+    ? (snapshot.volAvg20 * snapshot.close) / 1e7
+    : null;
+  const liquidity = marketCapCr != null
+    ? evaluateLiquidity({ close: snapshot.close, marketCapCr, avgTurnoverCr })
+    : { ok: true, reasons: [] };
+  const v4 = breakoutScoreV4({
+    s: snapshot,
+    ctx,
+    patterns: bp,
+    weekly: computeWeeklySnapshot(candles),
+    adv,
+    barsAvailable: candles.length,
+    liquidity,
+    avgTurnoverCr,
+  });
   return {
     snapshot,
-    breakout: breakoutScore(snapshot, ctx, bp),
+    breakout: {
+      score: v4.score,
+      components: { ...v4.buckets, ...v4.components, ...v4.penalties },
+    },
     patterns,
   };
 }

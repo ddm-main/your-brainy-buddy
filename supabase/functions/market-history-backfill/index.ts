@@ -36,7 +36,7 @@ const CIRCUIT_HOURS = 6;
 
 const isTimeout = (msg: string) => msg.includes("57014") || msg.includes("statement timeout");
 
-interface Body { limit?: number; min_bars?: number; force?: boolean }
+interface Body { limit?: number; min_bars?: number; force?: boolean; symbols?: string[]; exchange?: string }
 
 
 Deno.serve(async (req) => {
@@ -77,15 +77,26 @@ Deno.serve(async (req) => {
       }
     }
 
-    const { data: candidates, error } = await svc.rpc("market_history_backfill_candidates", {
-      _limit: limit, _min_bars: minBars,
-    });
-    if (error) return errorResponse(req, error.message, 500);
-    const work = (candidates ?? []) as {
-      symbol: string; exchange: string; bars: number;
-    }[];
+    // Explicit list: benchmarks (^NSEI and friends) are inactive INDEX rows, so
+    // the candidate RPC never offers them — yet every relative return in the
+    // calibration depends on their history being as deep as the score history.
+    const explicit = Array.isArray(body.symbols)
+      ? body.symbols.map((s) => String(s).trim()).filter(Boolean).slice(0, 100)
+      : [];
+    let work: { symbol: string; exchange: string; bars: number }[];
+    if (explicit.length) {
+      const ex = typeof body.exchange === "string" && body.exchange ? body.exchange : "NSE";
+      work = explicit.map((symbol) => ({ symbol, exchange: ex, bars: 0 }));
+    } else {
+      const { data: candidates, error } = await svc.rpc("market_history_backfill_candidates", {
+        _limit: limit, _min_bars: minBars,
+      });
+      if (error) return errorResponse(req, error.message, 500);
+      work = (candidates ?? []) as { symbol: string; exchange: string; bars: number }[];
+    }
 
     if (work.length === 0) return jsonResponse(req, { ok: true, processed: 0, drained: true });
+
 
     const { provider } = await getServiceProvider(svc);
 

@@ -367,7 +367,7 @@ export default function MarketDashboard() {
   // already conveyed by the filter chip itself). With no active saved filter,
   // fall back to a compact breakout table.
   const breakoutColumns = useMemo<ColumnDef<BreakoutDisplayRow, any>[]>(() => {
-    const colMap = overviewColumnMap<BreakoutDisplayRow>((symbol) => nav(`/market/ai/${symbol}`));
+    const colMap = overviewColumnMap<BreakoutDisplayRow>((symbol) => nav(`/market/score/${encodeURIComponent(symbol)}/explain?exchange=NSE`));
     // Core columns always lead, in this fixed order, regardless of which
     // saved screener/filters are active — otherwise MCAP/breakout_score
     // silently disappear or reorder whenever the active filter set doesn't

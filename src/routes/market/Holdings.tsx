@@ -286,7 +286,7 @@ export default function Holdings() {
                       })()}
                     </td>
                     <td style={td}>
-                      <ScoreBadge score={scores[quoteKey(h.exchange, h.symbol)]?.breakout_score} components={scores[quoteKey(h.exchange, h.symbol)]?.score_components?.breakout} label="breakout components" onClick={() => nav(`/market/ai/${h.symbol}`)} />
+                      <ScoreBadge score={scores[quoteKey(h.exchange, h.symbol)]?.breakout_score} components={scores[quoteKey(h.exchange, h.symbol)]?.score_components?.breakout} label="breakout components" onClick={() => nav(`/market/score/${encodeURIComponent(h.symbol)}/explain?exchange=${encodeURIComponent(h.exchange ?? "NSE")}`)} />
                     </td>
                     <td style={td}><Chip tone={q?.stale ? "warn" : h.source === "manual" ? "neutral" : "accent"}>{q?.stale ? "stale" : h.source}</Chip></td>
                     <td style={td}>

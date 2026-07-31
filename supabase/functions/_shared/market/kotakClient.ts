@@ -846,7 +846,7 @@ export function parseKotakLimits(j: any): KotakFundsSnapshot {
     const parts = [snap.net_cash, snap.collateral].filter((n): n is number => n != null);
     if (parts.length) {
       snap.available_margin = parts.reduce((a, b) => a + b, 0) - (snap.used_margin ?? 0);
-      (snap as Record<string, unknown>).available_is_derived = true;
+      (snap as unknown as Record<string, unknown>).available_is_derived = true;
     }
   }
   const anyValue = snap.net_cash != null || snap.available_margin != null

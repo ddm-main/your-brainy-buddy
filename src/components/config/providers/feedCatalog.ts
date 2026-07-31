@@ -49,7 +49,6 @@ const PORTFOLIO: UsedBy = { label: "Portfolio", to: "/market/portfolio" };
 const BREAKOUT: UsedBy = { label: "Breakout", to: "/market/breakout" };
 const AUTOTRADE: UsedBy = { label: "AutoTrade", to: "/market/autotrade" };
 const GTT: UsedBy = { label: "GTT", to: "/market/gtt" };
-const AI_ENGINE: UsedBy = { label: "AI Engine", to: "/market/ai" };
 const PLANNER: UsedBy = { label: "Planner", to: "/market/planner" };
 const BACKTEST: UsedBy = { label: "Backtesting", to: "/market/backtesting" };
 const INTEL: UsedBy = { label: "Finance Intelligence", to: "/finance/intelligence" };
@@ -79,7 +78,7 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
       {
         id: "candles_1d", label: "Daily candles", desc: "Unsupported by Kotak Neo; served by Yahoo/NSE history",
         table: { name: "market_daily_prices", column: "created_at" },
-        usedBy: [SCREENER, BREAKOUT, BACKTEST, AI_ENGINE],
+        usedBy: [SCREENER, BREAKOUT, BACKTEST],
         note: "Not probed against Kotak — the broker publishes no candle API.",
       },
       {
@@ -140,7 +139,7 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
       {
         id: "candles_1d", label: "Daily candles", desc: "Native EOD series from Noren (no Yahoo needed)",
         surface: "candles_1d", table: { name: "market_daily_prices", column: "created_at" },
-        usedBy: [SCREENER, BREAKOUT, BACKTEST, AI_ENGINE],
+        usedBy: [SCREENER, BREAKOUT, BACKTEST],
       },
       {
         id: "candles_intraday", label: "Intraday candles", desc: "Native TPSeries bars (1/3/5/15/30/60m)",
@@ -196,7 +195,7 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
       {
         id: "fundamentals", label: "Fundamentals", desc: "Market cap, PE, ratios (global sync)",
         table: { name: "market_fundamentals_global", column: "updated_at" },
-        usedBy: [SCREENER, AI_ENGINE],
+        usedBy: [SCREENER],
       },
       {
         id: "indices", label: "Indices", desc: "Nifty / Sensex / global index levels",
@@ -219,7 +218,7 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
       {
         id: "profile", label: "Company profile", desc: "Name, sector, industry, market cap",
         table: { name: "market_fundamentals_global", column: "updated_at" },
-        usedBy: [SCREENER, AI_ENGINE],
+        usedBy: [SCREENER],
       },
       {
         id: "ratios", label: "Ratios", desc: "PE / PB / ROE / debt-equity",
@@ -229,7 +228,7 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
       {
         id: "statements", label: "Financial statements", desc: "Balance sheet and cash-flow lines",
         table: { name: "market_fundamentals_global", column: "updated_at" },
-        usedBy: [AI_ENGINE],
+        usedBy: [SCREENER],
       },
       {
         id: "shares", label: "Shares outstanding", desc: "Float used for market-cap maths",
@@ -257,7 +256,7 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
       {
         id: "rsi", label: "RSI", desc: "Relative strength index",
         table: { name: "market_indicators_cache", column: "computed_at" },
-        usedBy: [SCREENER, AI_ENGINE],
+        usedBy: [SCREENER],
       },
       {
         id: "macd", label: "MACD", desc: "Trend / momentum oscillator",
@@ -328,7 +327,7 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
       {
         id: "news", label: "Announcements", desc: "Company announcements and circulars",
         table: { name: "market_news", column: "created_at" },
-        usedBy: [MARKET_OVERVIEW, AI_ENGINE],
+        usedBy: [MARKET_OVERVIEW],
       },
     ],
   },

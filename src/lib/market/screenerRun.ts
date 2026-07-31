@@ -91,6 +91,10 @@ export interface ScreenerRow {
   sector_strength: number | null;
   rel_strength_nifty: number | null;
   breakout_score: number | null;
+  /** v4 breakout score — the model the explain view and the Breakout board
+   *  use. Not in the screener view, merged in from market_stock_scores. */
+  breakout_score_v4: number | null;
+  breakout_v4_buckets: Record<string, number> | null;
   prebreakout_score: number | null;
   score_components: { breakout?: Record<string, number>; prebreakout?: Record<string, number> } | null;
   ret_5d: number | null;
@@ -168,6 +172,32 @@ async function fetchScreenerRows(): Promise<any[]> {
     if (chunk.length < 1000) break;
   }
   return rows;
+}
+
+// The screener view exposes only the legacy v2 score, but the board, the badge
+// popover and /market/score/:sym/explain all read v4 — ranking on v2 while
+// showing v4 is how a "top breakout" list ends up disagreeing with every
+// number printed next to it. Merge v4 in from the scores table and rank on it.
+async function mergeV4Scores(rows: any[]): Promise<any[]> {
+  const byKey = new Map<string, any>();
+  for (const r of rows) byKey.set(`${r.exchange}:${r.symbol}`, r);
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await (supabase as any)
+      .from("market_stock_scores")
+      .select("symbol,exchange,breakout_score_v4,breakout_v4_components")
+      .range(from, from + 999);
+    if (error) break; // v4 columns unavailable — fall back to the legacy rank
+    const chunk = data ?? [];
+    for (const r of chunk) {
+      const target = byKey.get(`${r.exchange}:${r.symbol}`);
+      if (!target) continue;
+      target.breakout_score_v4 = r.breakout_score_v4 ?? null;
+      target.breakout_v4_buckets = (r.breakout_v4_components as any)?.buckets ?? null;
+    }
+    if (chunk.length < 1000) break;
+  }
+  const rank = (r: any) => r.breakout_score_v4 ?? r.breakout_score ?? -1;
+  return rows.sort((a, b) => rank(b) - rank(a) || String(a.symbol).localeCompare(String(b.symbol)));
 }
 
 // Universe filtering is done client-side against the single "all rows" fetch —
@@ -288,6 +318,8 @@ function toScreenerRow(s: any, idxSets: { NIFTY50: Set<string>; BANKNIFTY: Set<s
     sector_strength:   num(s.sector_strength),
     rel_strength_nifty: num(s.rel_strength_nifty),
     breakout_score:    s.breakout_score ?? null,
+    breakout_score_v4: s.breakout_score_v4 ?? null,
+    breakout_v4_buckets: s.breakout_v4_buckets ?? (s.breakout_v4_components as any)?.buckets ?? null,
     prebreakout_score: s.prebreakout_score ?? null,
     score_components:  s.score_components ?? null,
     swing_score:        s.swing_score ?? null,
@@ -379,8 +411,11 @@ export function useScreenerData(universe: UniverseId, asOfDate: string | null = 
       ]);
       const filtered = applyUniverseFilter(allRows, universeSet);
       if (filtered.length === 0) return [];
-      const idxSets = await fetchIndexMembershipSets(filtered.map((s) => s.symbol));
-      return filtered.map((s) => toScreenerRow(s, idxSets));
+      const [idxSets, ranked] = await Promise.all([
+        fetchIndexMembershipSets(filtered.map((s) => s.symbol)),
+        mergeV4Scores(filtered),
+      ]);
+      return ranked.map((s) => toScreenerRow(s, idxSets));
     },
     // A back-date run is deterministic and expensive — cache it for the session.
     staleTime: asOfDate ? Infinity : 60_000,
