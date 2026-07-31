@@ -132,11 +132,15 @@ function isKotakSessionError(error: KotakError): boolean {
 // only place in this backend besides yahooClient.ts that needs this).
 async function kotakFetch(url: string, init: RequestInit, attempt = 1): Promise<any> {
   const r = await fetch(url, init);
-  if (r.status === 429 && attempt <= 2) {
+  // Kotak's APIM gateway burst-limits aggressively; a ~400ms linear backoff
+  // with two tries was far too weak. Exponential (0.8s → 1.6s → 3.2s → 6.4s)
+  // with jitter, honouring Retry-After when the gateway sends one.
+  if (r.status === 429 && attempt <= 4) {
     const retryAfterSec = Number(r.headers.get("retry-after"));
-    const delayMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+    const base = Number.isFinite(retryAfterSec) && retryAfterSec > 0
       ? retryAfterSec * 1000
-      : 400 * attempt;
+      : 800 * 2 ** (attempt - 1);
+    const delayMs = base + Math.floor(Math.random() * 250);
     await new Promise((res) => setTimeout(res, delayMs));
     return kotakFetch(url, init, attempt + 1);
   }
@@ -172,6 +176,14 @@ export interface KotakSession {
   apiBase: string;
 }
 
+/** "9876543210" | "09876543210" | "919876543210" | "+919876543210" → "+919876543210" */
+export function normalizeKotakMobile(raw: string): string {
+  const digits = (raw || "").replace(/[^\d]/g, "").replace(/^0+/, "");
+  const local = digits.length > 10 && digits.startsWith("91") ? digits.slice(2) : digits;
+  return `+91${local}`;
+}
+
+
 // Kotak Neo v2 login. Two-step: tradeApiLogin (TOTP) then tradeApiValidate (MPIN).
 // Both hit https://mis.kotaksecurities.com. The validate response carries the
 // `baseUrl` used for every subsequent authenticated call.
@@ -186,7 +198,10 @@ export async function kotakLogin(
   if (!mpin) throw new KotakError("MPIN not configured", 400);
   if (!s.ucc) throw new KotakError("UCC not configured", 400);
 
-  const mobileNumber = mobile.startsWith("+") ? mobile : `+91${mobile.replace(/^0+/, "")}`;
+  // A stored number may already carry the country code ("91XXXXXXXXXX") — the
+  // old `+91${...}` prefix turned that into +9191XXXXXXXXXX and Kotak rejected
+  // the login. Normalise to a single leading +91.
+  const mobileNumber = normalizeKotakMobile(mobile);
 
   const login = await kotakFetch(`${LOGIN_HOST}/login/1.0/tradeApiLogin`, {
     method: "POST",
@@ -264,21 +279,36 @@ export async function kotakLogin(
 // fine. Since we're generating (not verifying) a code, there's no way to
 // know the skew direction in advance — try the adjacent windows before
 // giving up, mirroring the ±1-step tolerance a normal TOTP verifier would
-// apply. Runs at most once/day per user (market-kotak-refresh cron), so the
-// extra attempts on a real failure are negligible.
+// apply.
+//
+// BUT: when the broker explicitly answers "invalid OTP", an adjacent window
+// cannot help (the secret/registration is wrong), and hammering three codes
+// back-to-back is exactly what trips a broker-side lockout. Stop on that
+// answer, and space the remaining attempts with jitter.
+export function isInvalidOtpAnswer(e: unknown): boolean {
+  const msg = `${e instanceof Error ? e.message : String(e)} ${(e as KotakError)?.body ?? ""}`;
+  return /invalid\s*(otp|totp)|otp\s*(is\s*)?(invalid|incorrect|wrong)|incorrect\s*(otp|totp)/i.test(msg);
+}
+
 export async function kotakAutoLogin(s: KotakSettings): Promise<KotakSession> {
   const secret = await dec(s.totp_secret_enc);
   if (!secret) throw new KotakError("TOTP secret not configured", 400);
   const now = Date.now();
   let lastErr: unknown;
-  for (const offsetMs of [0, -30_000, 30_000]) {
+  const offsets = [0, -30_000, 30_000];
+  for (let i = 0; i < offsets.length; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, 750 + Math.floor(Math.random() * 750)));
     try {
-      const code = await totp(secret, { timeMs: now + offsetMs });
+      const code = await totp(secret, { timeMs: now + offsets[i] });
       return await kotakLogin(s, code);
     } catch (e) {
       lastErr = e;
+      // Explicit rejection of the code itself — retrying another window only
+      // burns attempts against the broker's lockout counter.
+      if (isInvalidOtpAnswer(e)) throw e;
     }
   }
+
   throw lastErr;
 }
 
@@ -579,27 +609,38 @@ const dnum = (v: unknown): number => {
 // Flat Neo shape: level 1 has no suffix, levels 2-5 use suffix 1..4, while
 // order counts use 1..5 across all five levels (yes, really — that asymmetry
 // is exactly how Kotak documents it).
-function parseFlatSide(d: any, p: string, q: string, o: string) {
+// `q` accepts several candidate quantity keys because the gateway is not
+// consistent: the buy side is bq/bs, the sell side sq/ss. Reading the sell
+// quantity from the BUY key (the old bug) silently produced zero/garbage ask
+// sizes with no error raised.
+export function parseFlatSide(d: any, p: string, q: string | string[], o: string) {
+  const qKeys = Array.isArray(q) ? q : [q];
   const rows: Array<{ price: number; qty: number; orders: number }> = [];
   for (let i = 0; i < 5; i++) {
     const sfx = i === 0 ? "" : String(i);
     const price = dnum(d[`${p}${sfx}`]);
     if (price <= 0) continue;
+    let qty = 0;
+    for (const k of qKeys) {
+      const v = dnum(d[`${k}${sfx}`]);
+      if (v > 0) { qty = v; break; }
+    }
     rows.push({
       price,
-      qty: dnum(d[`${q}${sfx}`]),
+      qty,
       orders: dnum(d[`${o}${i + 1}`]),
     });
   }
   return rows;
 }
 
+
 function parseNestedSide(raw: unknown) {
   if (!Array.isArray(raw)) return [];
   return raw
     .map((r: any) => ({
       price: dnum(r?.price ?? r?.p ?? r?.bp ?? r?.sp),
-      qty: dnum(r?.quantity ?? r?.qty ?? r?.q ?? r?.bq ?? r?.bs),
+      qty: dnum(r?.quantity ?? r?.qty ?? r?.q ?? r?.bq ?? r?.sq ?? r?.bs ?? r?.ss),
       orders: dnum(r?.orders ?? r?.n ?? r?.no ?? r?.bno ?? r?.sno),
     }))
     .filter((r) => r.price > 0)
@@ -618,8 +659,8 @@ function extractBook(d: any): KotakDepthBook | null {
   // 2) Flat websocket-style keys, on either the envelope or the depth node.
   if (bids.length === 0 && asks.length === 0) {
     for (const src of [book, d]) {
-      const fb = parseFlatSide(src, "bp", "bq", "bno");
-      const fa = parseFlatSide(src, "sp", "bs", "sno");
+      const fb = parseFlatSide(src, "bp", ["bq", "bs"], "bno");
+      const fa = parseFlatSide(src, "sp", ["sq", "ss"], "sno");
       if (fb.length || fa.length) { bids = fb; asks = fa; break; }
     }
   }
@@ -769,20 +810,45 @@ export function parseKotakLimits(j: any): KotakFundsSnapshot {
     }
     return null;
   };
+  // Field names verified against a live /quick/user/limits payload: the
+  // account fields are the *Prsnt family (AmtUntilizedPrsnt = amount still
+  // unutilised, AmountUtilizedPrsnt = used), plus RmsCollateral / NotionalCash
+  // / RmsPayInAmt. Kotak sends every number as a string.
   const snap: KotakFundsSnapshot = {
-    net_cash: pickNum(["Net", "net", "netCash", "NetCash"]),
-    available_margin: pickNum(["CashAvailable", "cashAvailable", "AvailableMargin", "availableMargin", "MarginAvailable", "marginAvailable", "AvlblCash", "avlblCash"]),
-    used_margin: pickNum(["MarginUsed", "marginUsed", "MarginUtilized", "marginUtilized", "Utilised", "utilised", "MarginUtilised", "marginUtilised"]),
-    collateral: pickNum(["Collateral", "collateral", "CollateralAmount", "collateralAmount", "CollateralValue", "collateralValue"]),
-    payin_amount: pickNum(["Payin", "payin", "PayIn", "payIn", "PayinAmount", "payinAmount"]),
-    cash_balance: pickNum(["Cash", "cash", "CashBalance", "cashBalance", "OpeningBalance", "openingBalance"]),
-    payout_amount: pickNum(["Payout", "payout", "PayOut", "payOut", "PayoutAmount", "payoutAmount"]),
-    span_margin: pickNum(["SPAN", "span", "SpanMargin", "spanMargin"]),
-    exposure_margin: pickNum(["Exposure", "exposure", "ExposureMargin", "exposureMargin"]),
-    realized_mtm: pickNum(["Realized", "realized", "RealisedMtoM", "realisedMtoM", "RealisedPnL", "realisedPnL"]),
-    unrealized_mtm: pickNum(["Unrealized", "unrealized", "UnrealisedMtoM", "unrealisedMtoM", "UnrealisedPnL", "unrealisedPnL", "MtoM", "mtoM"]),
+    net_cash: pickNum(["Net", "net", "netCash", "NetCash", "NotionalCash"]),
+    available_margin: pickNum([
+      "CashAvailable", "cashAvailable", "AvailableMargin", "availableMargin",
+      "MarginAvailable", "marginAvailable", "AvlblCash", "avlblCash",
+      "AmtUntilizedPrsnt", "AmtUtilizedPrsnt",
+    ]),
+    used_margin: pickNum([
+      "MarginUsed", "marginUsed", "MarginUtilized", "marginUtilized",
+      "Utilised", "utilised", "MarginUtilised", "marginUtilised",
+      "AmountUtilizedPrsnt", "MarginUsedPrsnt",
+    ]),
+    collateral: pickNum([
+      "Collateral", "collateral", "CollateralAmount", "collateralAmount",
+      "CollateralValue", "collateralValue", "RmsCollateral",
+    ]),
+    payin_amount: pickNum(["Payin", "payin", "PayIn", "payIn", "PayinAmount", "payinAmount", "RmsPayInAmt"]),
+    cash_balance: pickNum(["Cash", "cash", "CashBalance", "cashBalance", "OpeningBalance", "openingBalance", "NotionalCash"]),
+    payout_amount: pickNum(["Payout", "payout", "PayOut", "payOut", "PayoutAmount", "payoutAmount", "RmsPayOutAmt"]),
+    span_margin: pickNum(["SPAN", "span", "SpanMargin", "spanMargin", "SpanMarginPrsnt"]),
+    exposure_margin: pickNum(["Exposure", "exposure", "ExposureMargin", "exposureMargin", "ExposureMarginPrsnt"]),
+    realized_mtm: pickNum(["Realized", "realized", "RealisedMtoM", "realisedMtoM", "RealisedPnL", "realisedPnL", "RealizedMtomPrsnt"]),
+    unrealized_mtm: pickNum(["Unrealized", "unrealized", "UnrealisedMtoM", "unrealisedMtoM", "UnrealisedPnL", "unrealisedPnL", "MtoM", "mtoM", "UnrealizedMtomPrsnt"]),
     raw: d,
   };
+  // Kotak omits any explicit "available" key for cash-only accounts. Derive it
+  // from what it does report instead of reporting null — a real zero balance
+  // must read as "₹0 available", not as a broken feed.
+  if (snap.available_margin == null) {
+    const parts = [snap.net_cash, snap.collateral].filter((n): n is number => n != null);
+    if (parts.length) {
+      snap.available_margin = parts.reduce((a, b) => a + b, 0) - (snap.used_margin ?? 0);
+      (snap as Record<string, unknown>).available_is_derived = true;
+    }
+  }
   const anyValue = snap.net_cash != null || snap.available_margin != null
     || snap.used_margin != null || snap.collateral != null || snap.payin_amount != null
     || snap.cash_balance != null;
@@ -795,6 +861,7 @@ export function parseKotakLimits(j: any): KotakFundsSnapshot {
   }
   return snap;
 }
+
 
 
 // Kotak Neo Trade API expects order endpoints as application/x-www-form-urlencoded
@@ -840,7 +907,9 @@ export async function kotakModifyOrder(
 ): Promise<KotakOrderResult> {
   requireServerId(s);
   const h = await sessionHeaders(s);
-  const body: Record<string, string> = { on: orderId, nOrdNo: orderId };
+  // Only `on` (order number) is documented. The extra `nOrdNo` was speculative
+  // and Kotak 400s on unexpected fields elsewhere in this API family.
+  const body: Record<string, string> = { on: orderId };
   if (changes.quantity != null) body.qt = String(changes.quantity);
   if (changes.price != null) body.pr = String(changes.price);
   if (changes.triggerPrice != null) body.tp = String(changes.triggerPrice);
@@ -963,7 +1032,20 @@ export async function withKotakSession<T>(
           session_token_enc: await encrypt(sess.editToken),
         };
       });
-      return await fn(fresh);
+      // The retried call was previously unguarded: a session that keeps
+      // failing after a successful re-login was never marked expired, so the
+      // UI happily reported "connected" while every call 401'd.
+      try {
+        return await fn(fresh);
+      } catch (retryErr) {
+        if (retryErr instanceof KotakError && isKotakSessionError(retryErr)) {
+          await svc
+            .from("market_api_settings")
+            .update({ connection_status: "expired", last_error: "Session expired — re-login required" })
+            .eq("id", s.id);
+        }
+        throw retryErr;
+      }
     }
     if (!retryOnAuthError) {
       // Do not mark the entire broker disconnected from a non-retryable order

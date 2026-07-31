@@ -312,11 +312,11 @@ export function useSyncPositions() {
   return useMutation({
     mutationFn: () => callMarketFn("market-sync-positions"),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["market", "positions"] });
-      qc.invalidateQueries({ queryKey: ["market", "funds"] });
-      qc.invalidateQueries({ queryKey: ["market", "realized-daily"] });
-      qc.invalidateQueries({ queryKey: ["market", "holdings"] });
-      qc.invalidateQueries({ queryKey: ["market", "portfolio-last-sync"] });
+      for (const key of [
+        ["market", "positions"], ["market", "funds"], ["market", "realized-daily"],
+        ["market", "holdings"], ["market", "portfolio-last-sync"],
+        ["market", "feed-freshness"], ["market", "surface-probes"],
+      ]) qc.invalidateQueries({ queryKey: key });
     },
   });
 }
@@ -326,10 +326,11 @@ export function useSyncHoldings() {
   return useMutation({
     mutationFn: () => callMarketFn<{ ok: boolean; inserted?: number; updated?: number; removed?: number }>("market-sync-holdings"),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["market", "holdings"] });
-      qc.invalidateQueries({ queryKey: ["market", "funds"] });
-      qc.invalidateQueries({ queryKey: ["market", "settings"] });
-      qc.invalidateQueries({ queryKey: ["market", "portfolio-last-sync"] });
+      for (const key of [
+        ["market", "holdings"], ["market", "funds"], ["market", "settings"],
+        ["market", "portfolio-last-sync"], ["market", "feed-freshness"],
+        ["market", "surface-probes"],
+      ]) qc.invalidateQueries({ queryKey: key });
     },
   });
 }
@@ -541,11 +542,13 @@ export interface DepthResponse {
   reason?: string;
 }
 
-export function useDepth(symbol: string | undefined, exchange = "NSE") {
+export function useDepth(symbol: string | undefined, exchange = "NSE", enabled = true) {
   return useQuery<DepthResponse, Error>({
     queryKey: ["market", "depth", symbol ?? "", exchange],
     queryFn: () => callMarketFn<DepthResponse>("market-depth", { symbol, exchange }),
-    enabled: !!symbol,
+    // `enabled` lets the page kill the poll outright when the ladder is
+    // hidden — a hidden panel must cost zero edge-function invocations.
+    enabled: !!symbol && enabled,
     // 1s polling only pays off when the ladder actually has rows. When the
     // broker returns an empty book the old fixed 1s loop hammered the edge
     // function 3,600x/hour for nothing. Back off by reason: structurally

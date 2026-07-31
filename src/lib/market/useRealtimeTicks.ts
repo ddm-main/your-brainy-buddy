@@ -73,10 +73,10 @@ export function subscribeSymbolsForTicks(keys: string[]): void {
 // that window so a long-open Analysis tab keeps its ladder.
 const DEPTH_RENEW_MS = 30_000;
 
-/** Ask the relay to push the order book for `symbol` while the panel is mounted. */
-export function useLiveDepthSubscription(symbol: string | null | undefined): void {
+/** Ask the relay to push the order book for `symbol` while the panel is visible. */
+export function useLiveDepthSubscription(symbol: string | null | undefined, enabled = true): void {
   useEffect(() => {
-    if (!symbol) return;
+    if (!symbol || !enabled) return;
     const sym = symbol.toUpperCase();
     const send = () => {
       sharedChannel?.send({ type: "broadcast", event: "depth_subscribe", payload: { symbols: [sym] } })
@@ -85,7 +85,7 @@ export function useLiveDepthSubscription(symbol: string | null | undefined): voi
     send();
     const timer = setInterval(send, DEPTH_RENEW_MS);
     return () => clearInterval(timer);
-  }, [symbol]);
+  }, [symbol, enabled]);
 }
 
 

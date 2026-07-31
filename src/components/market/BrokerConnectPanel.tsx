@@ -125,10 +125,9 @@ export default function BrokerConnectPanel() {
     setKotak(k);
     if (k) {
       setConsumerKey(k.consumer_key ?? ""); setUcc(k.ucc ?? "");
-      if (k.mobile_number_enc) {
-        try { const r = await callFn("market-kotak-mobile", {}); setMobile(r?.mobile_number ?? ""); }
-        catch { /* non-critical */ }
-      }
+      // Credentials are never sent back to the browser — the saved mobile is
+      // shown as a masked hint only (matching MPIN/TOTP), not decrypted here.
+      setMobile("");
     }
   }, [push]);
 
@@ -416,7 +415,9 @@ export default function BrokerConnectPanel() {
             <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>
               Connected as <b style={{ color: "var(--accent)" }}>{kotak.greeting_name}</b>
               {kotak?.token_expires_at && (
-                <> · {autoLoginEnabled ? "fresh" : "valid"} until {new Date(kotak.token_expires_at).toLocaleDateString([], { day: "2-digit", month: "short" })}</>
+                new Date(kotak.token_expires_at).getTime() <= Date.now()
+                  ? <> · <span style={{ color: "var(--danger)" }}>session expired — reconnect</span></>
+                  : <> · {autoLoginEnabled ? "fresh" : "valid"} until {new Date(kotak.token_expires_at).toLocaleDateString([], { day: "2-digit", month: "short" })}</>
               )}
             </div>
           )}
@@ -432,7 +433,7 @@ export default function BrokerConnectPanel() {
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                     <Field label="Consumer Key" value={consumerKey} setValue={setConsumerKey} placeholder="From Kotak Neo → Trade API" saved={!!kotak?.consumer_key} />
                     <Field label="UCC (Client Code)" value={ucc} setValue={setUcc} placeholder="e.g. ABC123" saved={!!kotak?.ucc} />
-                    <Field label="Mobile Number" value={mobile} setValue={setMobile} placeholder="+91XXXXXXXXXX" saved={!!kotak?.mobile_number_enc} />
+                    <Field label="Mobile Number" value={mobile} setValue={setMobile} placeholder={kotak?.mobile_number_enc ? "•••••• saved" : "+91XXXXXXXXXX"} saved={!!kotak?.mobile_number_enc} />
                     <Field label="MPIN" value={mpin} setValue={setMpin} placeholder="6-digit" type="password" saved={!!kotak?.mpin_enc} />
                     <Field label="TOTP Secret" value={totpSecret} setValue={setTotpSecret} placeholder="Base32 — enables auto-login" type="password" saved={!!kotak?.totp_secret_enc} />
                   </div>

@@ -1,67 +1,73 @@
+# Breakout section — audit findings and rebuild
 
-# Market Config — feed & provider audit
+Verified against the code and live database (9 tracker episodes: 6 active from 2026-07-31, 2 cooled, 1 failed; 9 snapshot rows across 2 days; 13 symbols scored >= 70 today out of 2,927).
 
-Everything below was verified against the live database and the current code, not inferred.
+## Why "no results / filters not working" happens
 
-## What is actually broken
+1. **Screener filters are inherited silently.** The Breakout page reads the Screener's own localStorage key (`screener.state.v2`) on mount. Any filter left on the Screener page is applied to the tracker with no visible indication that it came from elsewhere.
+2. **Filters are evaluated against the wrong row shape.** Tracker episodes are joined to a live screener row only when `exchange === "NSE"` and the symbol is still in the loaded universe. When the join misses, the page builds a synthetic row containing only symbol, exchange, sector, market_cap, close and score. That synthetic row has no `instrument_type` and no `trade_date`, so `rowIsApplicable` rejects it for every `eq`- and `tech`-scoped filter, and `filterMatches` returns false for all technical/fundamental filters. Result: adding almost any filter empties the table.
+3. **Boolean and enum filters hard-fail on missing fields.** Any signals filter (BB squeeze, near resistance, pattern flags) drops every tracked row that lacks a matching screener row, because enum/boolean predicates must prove a match.
+4. **The tracked universe is genuinely tiny.** Episodes only open at `breakout_score >= 70` **and** the liquidity gate. Today that is 6 new names. With any filter on top, empty results are the normal outcome — the filter rail is the wrong control surface for a 9-row table.
 
-### 1. Kotak is called for indices on every poll, always fails, and is charged for it
-`kotakProvider.getQuotes` still routes any tokened index through `resolveKotakIndexQuote`, even though the capability matrix already declares Kotak incapable of `index_quotes`. Evidence from the last 24h of `market_provider_health`:
+## Decision: drop filtering, rank by score
 
-- `getQuotes:index` — **1,048 rows, 100% failed**, avg latency **2,913 ms**, error `missing index rows: NSE:^NSEI,NSE:^NSEBANK,NSE:^INDIAVIX`
-- `getQuotes` — **539 failures** with `no quote rows for BSE:^BSESN` (Sensex, same cause)
+Remove the entire filter rail and the Screener-state inheritance. The breakout list is already a scored, gated set — it should be presented as a ranked list, sorted by breakout score, with the score front and centre.
 
-Consequences, all real: the index poll waits ~3 s on a call that can never succeed before the NSE/BSE/Yahoo chain even starts; Kotak's 24h success rate on the Providers page reads ~40% when its equity quote path is healthy; and these rows are the single largest writer into a database already at 430 MB of the 500 MB limit.
+## Additional issues found
 
-Fix: never send an index key to Kotak. Filter index requests out at the top of `kotakProvider.getQuotes` (using `isIndexSymbol` + the BSE alias list) and hand them straight to `resolveIndexQuotes`. Drop `resolveKotakIndexQuote` and its health logging. The index chain becomes NSE/BSE native → Yahoo → stored close, which is what already serves every displayed index today.
+**Data / pipeline**
 
-### 2. Provider health is polluted, so every stat and sparkline on the Providers page is wrong
-- Failures are logged unsampled while successes are sampled at 5%, so the table over-represents failures by 20x — the "24h success rate" is not a success rate at all.
-- `market-pipeline-eod` writes one `kotak_neo` health row **per symbol** for `insufficient candles` / `yahoo chart …404` (617 rows/24h). These are data-coverage problems for symbols that Kotak never served; attributing them to the broker is simply wrong.
+- **Entry price is the close of the detection day**, so every day-1 episode shows exactly 0.00% return (confirmed: all six of today's rows are 0). There is no record of the trigger/pivot price, so day-1 follow-through is unmeasurable.
+- **Snapshots are written only for qualifiers (>= 70).** Names scoring 60–69 leave no trail, so a stock that approaches the threshold for days and then breaks out has no visible run-up, and the calibration/cohort work has an artificially truncated sample.
+- **A name that fails on its detection day is never openable again in the same episode**, and the "New today" view reads only open episodes — a breakout detected today that immediately failed disappears from "New today" entirely.
+- **`score_trend` only advances on days the pipeline runs with data**; a skipped session leaves no gap marker, so the sparkline compresses time.
+- **Non-NSE episodes can never join a screener row** (the symbol map is NSE-only), so BSE tracking is structurally blind.
+- **Default sort is `followthrough_score`**, not the breakout score — the strongest new signal of the day can sit below a stale, well-behaved older episode.
 
-Fix: sample failures at the same rate as successes for high-frequency endpoints (keep 100% for the low-frequency `market-test-connection` probe), stop pipeline-EOD symbol errors from writing provider health at all (they belong in the pipeline's own error summary), and compute the Providers 24h rate from `endpoint = 'market-test-connection'` plus the live quote endpoints only.
+**UI / behaviour**
 
-### 3. "Which provider is fastest for this feed" cannot be answered today
-`recordSurfaceProbes` stamps the **whole run's** latency onto every surface of a provider, so Kotak's `quotes`, `depth`, `funds`, `holdings`, `positions` all carry the same number (and service providers carry the reachability-probe latency). The current rows show `latency_ms: null` for the broker/Yahoo probes entirely.
+- The whole screener universe (~2,900 rows, all columns) is fetched on every visit purely to look up company names and LTP for at most a few dozen rows.
+- Switching to "All + history" refetches the tracker as a separate query instead of filtering the already-loaded set.
+- `initialSort` is fixed at mount; the "New today" label falls back to the last detection date, which can silently show Friday's list titled as today's.
+- Status meaning (active / extended / cooled / failed / closed) is never explained anywhere on the page.
+- No per-row link into the score explanation, despite `/market/score` now living under Breakout.
+- No detection-day context on the row: rel-volume, pivot distance, stage (COILED / ARMED / TRIGGERED / EXTENDED) all exist in the codebase and none surface here.
 
-Fix: time each surface probe individually inside `surfaceReport` and store that per-row. Then the Feed Routing panel can show, per feed, each candidate provider's measured latency and mark the fastest healthy one — which is the routing evidence you asked for.
+## What I will build
 
-### 4. Surfaces that report a state they did not earn
-- **NSE `bhavcopy` and `candles_1d`** are hard-coded to "ok" from the generic reachability check (`out["bhavcopy"] = { ok: true, ... }`). Only `constituents` and `corp_actions` run a real assertion — and `constituents` is currently **failing** ("NSE returned no Nifty 50 constituents") while sitting on the primary path.
-- **`funds` / kotak_neo** is degraded on `available margin not reported (used=0)` — correct classification, but it has been degraded continuously, so the Kotak limits call needs its own look rather than a permanent amber.
-- **Shoonya** probes run and fail with "authorization is required" (29 rows/24h). An unauthorized broker is *not configured*, not *failed*.
+**1. Remove filtering**
+- Delete the filter rail, the `screener.state.v2` inheritance, and all `filterMatches` use from `Breakout.tsx`.
+- Table goes full width.
 
-Fix: give bhavcopy a real assertion (latest bhavcopy date vs last trading day) and candles_1d a real NSE history call; add a `not_configured` state that Shoonya (and any keyless provider without credentials) resolves to, excluded from the down/degraded tallies; investigate the Kotak limits payload and, if the field genuinely isn't published on this account type, report funds as "partial — margin not published" instead of degraded-forever.
+**2. Score-first ranking**
+- Default sort: `last_score` descending, then follow-through as tiebreak.
+- Add a score-threshold quick control (All / >= 60 / >= 70 / >= 80) as the only narrowing control — a single slider-style chip row, not a filter system.
+- Add a plain text search box for symbol/company.
+- Score band colouring on the row so strong / moderate / weak is readable at a glance.
 
-### 5. Feed Routing labels vs. probe providers
-The panel compares heartbeat/probe provider strings against catalog chain ids (`kotak`, `yahoo`, `nse`, `fmp`, `alpha`) while the writers store canonical ids (`kotak_neo`, `alpha_vantage`). That mismatch is what produces "Kotak Neo did not answer — served by Yahoo Finance" on feeds whose Kotak probe is green.
+**3. Views**
+- Keep three views but fix them: **Tracking** (open episodes), **New today** (episodes whose `first_detected_date` is today, including ones that already failed — so this view queries the full set), **All + history**.
+- Load the full tracker once and derive all three views client-side.
 
-Fix: canonicalise both sides through the existing `canonicalProviderId` before comparing, in the catalog chains as well as in the panel's `sameProvider` / `providerLabelFromProbe`.
+**4. Row enrichment**
+- Add a Stage column driven by the existing `deriveBreakoutStage` logic where the snapshot is available.
+- Add rel-volume and days-tracked columns.
+- Row menu: open Analysis, open Score explanation, add to watchlist.
 
-## Feed-by-feed routing after the fixes
+**5. Explain the model on the page**
+- A collapsible legend describing the qualify threshold (70), the liquidity gate, and each lifecycle status with its trigger rule (fail at -6%, extend at +8%, cool after 3 sub-threshold sessions, close at 15 sessions).
 
-| Feed | Primary | Fallbacks | Why |
-|---|---|---|---|
-| Equity quotes / LTP | Kotak Neo | Yahoo (off-session only) | Broker tick is realtime; Yahoo is ~15 min delayed and must never substitute intraday |
-| Index quotes | NSE allIndices (NSE), BSE feed (Sensex) | Yahoo → stored close | Exchange-native and undelayed; Kotak removed entirely |
-| Market depth | Kotak Neo | none | Only source of a 5-level ladder; idle off-session |
-| Daily candles | Yahoo | NSE bhavcopy → cache | Kotak publishes no candle API |
-| Intraday candles | Yahoo | quote-built bars | same |
-| Funds / holdings / positions / orders | Kotak Neo | none | Account data has one source |
-| Bhavcopy / constituents / corp actions | NSE | BSE for corp actions | Exchange of record |
-| Fundamentals / company info / shares | FMP | — | Only keyed source |
-| Indicators | Alpha Vantage | local computation from daily candles | Alpha is rate-limited and currently failing its probe |
+**6. Lighter data path**
+- Replace the full `useScreenerData("all")` fetch with a targeted lookup of just the tracked symbols (company name, LTP, rel volume, instrument fields).
+- Match the screener row on symbol **and** exchange so non-NSE episodes join correctly.
 
-## Improvements beyond the bug fixes
-
-1. Per-feed latency and success columns in Feed Routing, with a "fastest healthy provider" marker and a one-click "route this feed to X" that writes the per-user override already supported.
-2. A `not_configured` chip so providers with no credentials stop looking like outages.
-3. Local RSI/indicator computation from `market_daily_prices` as the Alpha Vantage fallback — removes a rate-limited external dependency from the score pipeline.
-4. Retention on `market_provider_health` tightened to 3 days for high-frequency endpoints (7 days kept for the self-test probe), plus the write reductions above — meaningful relief on the 430 MB / 500 MB database.
-5. Probe rows keyed by `(surface, provider)` with a canonical-id check so no legacy spelling can be resurrected.
+**7. Pipeline corrections (separate, after the UI lands)**
+- Record a `trigger_price` (pivot / prior high) alongside `entry_close` so day-1 return is meaningful.
+- Widen snapshot capture to `breakout_score >= 60` so near-misses build history for calibration.
+- Let the "New today" set include same-day failures.
 
 ## Technical notes
 
-Files to change: `supabase/functions/_shared/market/provider.ts` (index short-circuit, health sampling, remove `resolveKotakIndexQuote`), `supabase/functions/_shared/market/selftest.ts` (per-surface latency, real NSE assertions, `not_configured` state, Shoonya gating), `supabase/functions/_shared/market/heartbeat.ts` (unchanged unless latency needed), `src/lib/market/selftest.ts` (state handling, stats source filter), `src/components/config/providers/feedCatalog.ts` + `FeedRoutingPanel.tsx` + `ProviderDetail.tsx` (canonical ids, latency columns, not-configured chip), `supabase/functions/market-pipeline-eod` (stop writing per-symbol provider health), plus one migration for the `market_surface_probes` state enum widening and the health-retention job.
-
-No order-placement, credential, or trading-logic paths are touched.
+- Files: `src/routes/market/Breakout.tsx` (rewrite), `src/lib/market/breakoutRun.ts` (single full-set query + targeted symbol lookup), no change to `screenerCatalog.ts`.
+- Pipeline changes touch `supabase/functions/market-pipeline-aggregates/index.ts` and `supabase/functions/_shared/market/scoring.ts`; the `trigger_price` addition needs one migration adding a nullable column to `market_breakout_tracker`.
+- Waves 1–6 are frontend-only and ship first; wave 7 follows once the list is confirmed correct.

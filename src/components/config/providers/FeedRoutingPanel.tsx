@@ -3,22 +3,20 @@
 // selectors. Preferences live in market_feed_prefs (per user, RLS-scoped);
 // the edge resolver builds the chain as primary → fallback → built-in chain.
 //
-// Status is derived from two honest signals:
-//   • the live surface probe (market-test-connection, mode "surfaces") —
-//     who actually answered, and did they answer at all;
-//   • the freshness of the table the feed lands in.
-// Feeds with neither (write paths) report IDLE rather than pretending.
+// Status derivation itself lives in `@/lib/market/feedStatus` so this panel and
+// the navbar chip can never report different numbers again.
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
+import { useQueryClient, useMutation } from "@tanstack/react-query";
 import HudPanel from "@/components/hud/HudPanel";
 import { Btn, Chip } from "@/components/hud/HudControls";
 import { supabase } from "@/integrations/supabase/client";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { useRunSelfTest, useSurfaceProbes, bestBySurface, useFeedFreshness, freshKey, useProviderStats24h, canonicalProviderId, SELFTEST_QUERY_KEY } from "@/lib/market/selftest";
+import { useRunSelfTest, useProviderStats24h, canonicalProviderId, SELFTEST_QUERY_KEY } from "@/lib/market/selftest";
+import { useFeedStatus, STATUS_TONE, type Status } from "@/lib/market/feedStatus";
 import {
-  ROUTED_FEEDS, ROUTED_PROVIDER_LABEL, FEED_GROUP_LABEL,
-  type RoutedProvider, type RoutedFeed, type FeedGroup,
+  ROUTED_PROVIDER_LABEL, FEED_GROUP_LABEL,
+  type RoutedProvider, type FeedGroup,
 } from "./feedCatalog";
 
 const cell: React.CSSProperties = { padding: "5px 8px", verticalAlign: "middle", borderBottom: "1px solid var(--edge)" };
@@ -32,102 +30,13 @@ const sel: React.CSSProperties = {
   border: "1px solid var(--edge-strong)", padding: "4px 6px", minWidth: 132,
 };
 
-type PrefRow = { feed_id: string; provider: string | null; fallback_provider: string | null };
-type SurfaceResult = { ok: boolean; state: "ok" | "degraded" | "failed" | "not_configured"; provider_used: string; detail: string; checked_at: string };
-type Heartbeat = { feed_id: string; provider: string; ok: boolean; latency_ms: number | null; detail: string | null; symbols: number | null; observed_at: string };
-// NOT SET = the route needs credentials nobody has entered yet. Distinct from
-// DOWN so an unconnected broker stops painting the panel red.
-type Status = "LIVE" | "DELAYED" | "FALLBACK" | "DOWN" | "IDLE" | "NOT SET";
-
-const STATUS_TONE: Record<Status, "ok" | "warn" | "err" | "neutral" | "accent"> = {
-  LIVE: "ok", DELAYED: "warn", FALLBACK: "accent", DOWN: "err", IDLE: "neutral", "NOT SET": "neutral",
-};
-
-/** NSE cash session, Mon–Fri 09:15–15:30 IST — used so a quiet feed after
- *  the close reads as IDLE rather than DOWN. */
-function nseSessionOpen(now = new Date()): boolean {
-  const ist = new Date(now.getTime() + (now.getTimezoneOffset() + 330) * 60_000);
-  const day = ist.getDay();
-  if (day === 0 || day === 6) return false;
-  const mins = ist.getHours() * 60 + ist.getMinutes();
-  return mins >= 555 && mins <= 930;
-}
-
-/** Map the resolver's provider ids onto the probe's provider names. */
-function sameProvider(routed: RoutedProvider, used: string): boolean {
-  const u = (used || "").toLowerCase();
-  // "computed"/"cache" never reach the canonical id map — they are local
-  // paths, not vendors, so they keep a substring check.
-  if (routed === "computed") return u.includes("computed") || u.includes("local") || u.includes("cache");
-  // Everything else goes through the single canonical id used server-side, so
-  // "kotak" vs "kotak_neo" and "alpha" vs "alpha_vantage" can no longer read
-  // as two different providers and mislabel a healthy primary as a fallback.
-  return canonicalProviderId(routed) === canonicalProviderId(u);
-}
-
-function providerLabelFromProbe(used: string): string {
-  const u = (used || "").toLowerCase();
-  if (u.includes("kotak")) return ROUTED_PROVIDER_LABEL.kotak;
-  if (u.includes("yahoo")) return ROUTED_PROVIDER_LABEL.yahoo;
-  if (u.includes("nse")) return ROUTED_PROVIDER_LABEL.nse;
-  if (u.includes("fmp")) return ROUTED_PROVIDER_LABEL.fmp;
-  if (u.includes("alpha")) return ROUTED_PROVIDER_LABEL.alpha;
-  if (u.includes("cache")) return "Cache";
-  return used || "provider";
-}
-
-const agoLabel = (iso: string): string => {
-  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60_000));
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  if (mins < 60 * 24) return `${Math.round(mins / 60)}h ago`;
-  return `${Math.round(mins / 1440)}d ago`;
-};
-
 export default function FeedRoutingPanel() {
   const qc = useQueryClient();
   const push = useUi((s) => s.push);
   const selfTest = useRunSelfTest();
 
-  const { data: prefs = [] } = useQuery({
-    queryKey: ["market", "feed-prefs"],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("market_feed_prefs").select("feed_id, provider, fallback_provider");
-      if (error) throw error;
-      return (data ?? []) as PrefRow[];
-    },
-    staleTime: 60_000,
-  });
-
-  // Freshness of every table a feed lands in — one RPC for all of them, and
-  // one shared query key/shape so this panel and Provider Detail cannot
-  // poison each other's cache (they previously stored different shapes here).
-  const { data: freshness = {} } = useFeedFreshness();
-
-  // Stored probe results, written by market-selftest (manual "test
-  // everything" + the pg_cron schedule). Reading them instead of probing on
-  // mount means status is correct the moment the page opens and survives a
-  // reload; the button below refreshes them for every provider at once.
-  const { data: probeRows = [] } = useSurfaceProbes();
-  const surfaces = useMemo(() => bestBySurface(probeRows), [probeRows]);
+  const { rows, tally, accountTally, prefs, sessionOpen, holiday } = useFeedStatus();
   const { data: providerStats = {} } = useProviderStats24h();
-
-  // Who actually served each live feed, most recently. Written by the serving
-  // edge functions themselves, so this is the one signal that cannot lie
-  // about liveness the way a batch-written cache table did.
-  const { data: heartbeats = {} } = useQuery({
-    queryKey: ["market", "feed-heartbeats"],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("market_feed_heartbeat")
-        .select("feed_id, provider, ok, latency_ms, detail, symbols, observed_at");
-      if (error) throw error;
-      return Object.fromEntries(((data ?? []) as Heartbeat[]).map((h) => [h.feed_id, h]));
-    },
-    refetchInterval: 30_000,
-    staleTime: 15_000,
-  });
 
   const prefFor = (feedId: string) => prefs.find((p) => p.feed_id === feedId);
 
@@ -159,157 +68,72 @@ export default function FeedRoutingPanel() {
     onError: (e) => push(toSafeError(e, "Could not save feed routing").message, "err"),
   });
 
-  type Row = { status: Status; detail: string; servedBy: string; health: string; primaryProbe: string | null };
-
-  /** Compact "primary probed X ago · Yms" line for FALLBACK / DOWN rows —
-   *  the missing signal from the old UI: "when did we last try the primary?" */
-  const primaryProbeLine = (f: RoutedFeed, primary: RoutedProvider): string | null => {
-    const s = f.surface ? surfaces[f.surface] : undefined;
-    const p = s?.primary;
-    if (!p) return null;
-    const label = ROUTED_PROVIDER_LABEL[primary];
-    const state = p.ok ? "ok" : (p.state === "degraded" ? "degraded" : "failed");
-    const lat = p.latency_ms != null ? ` · ${p.latency_ms}ms` : "";
-    return `${label} probed ${agoLabel(p.checked_at)} — ${state}${lat}`;
-  };
-
-  const statusFor = (f: RoutedFeed): Row => {
-    const pref = prefFor(f.id);
-    const pinned = pref?.provider && pref.provider !== "auto" ? (pref.provider as RoutedProvider) : undefined;
-    const primary = pinned ?? f.chain[0];
-    const probe = f.surface ? surfaces[f.surface] : undefined;
-    const hb = f.heartbeat ? (heartbeats as Record<string, Heartbeat>)[f.heartbeat] : undefined;
-    const ts = f.table ? freshness[freshKey(f.table)] : undefined;
-    const ageMin = ts ? (Date.now() - new Date(ts).getTime()) / 60_000 : null;
-    const stale = ageMin != null && f.freshMins != null && ageMin > f.freshMins;
-    const seen = ts ? `last data ${new Date(ts).toLocaleString()}` : "no cached rows";
-    const open = nseSessionOpen();
-    const selectedChain = [primary, pref?.fallback_provider as RoutedProvider | undefined]
-      .filter((p): p is RoutedProvider => Boolean(p));
-    const inSelectedChain = (answered: string) => selectedChain.some((p) => sameProvider(p, answered));
-    const primaryProbe = primaryProbeLine(f, primary);
-
-    // 1) Heartbeat wins for live-serving feeds: it records who really answered
-    //    the last real user request, not a synthetic probe or a batch cache.
-    if (hb) {
-      const hbAge = (Date.now() - new Date(hb.observed_at).getTime()) / 60_000;
-      const label = providerLabelFromProbe(hb.provider);
-      const health = `${label} · ${agoLabel(hb.observed_at)}${hb.latency_ms != null ? ` · ${hb.latency_ms}ms` : ""}`;
-      const fresh = hbAge <= (f.sessionOnly && !open ? 60 * 24 * 4 : (f.freshMins ?? 30));
-      if (!hb.ok) {
-        return { status: "DOWN", detail: hb.detail || `${label} returned nothing`, servedBy: label, health, primaryProbe };
-      }
-      if (!fresh) {
-        return f.sessionOnly && !open
-          ? { status: "IDLE", detail: `Market closed — last served by ${label} ${agoLabel(hb.observed_at)}.`, servedBy: label, health, primaryProbe: null }
-          : { status: "DELAYED", detail: `Last served ${agoLabel(hb.observed_at)} — older than this feed's ${f.freshMins}m window.`, servedBy: label, health, primaryProbe };
-      }
-      if (!sameProvider(primary, hb.provider) && !inSelectedChain(hb.provider)) {
-        return {
-          status: "FALLBACK",
-          detail: `${ROUTED_PROVIDER_LABEL[primary]} did not answer — served by ${label}${hb.detail ? ` (${hb.detail})` : ""}.`,
-          servedBy: label, health, primaryProbe,
-        };
-      }
-      return {
-        status: "LIVE",
-        detail: `${label} served ${hb.symbols ?? 0} symbol(s) ${agoLabel(hb.observed_at)} — real-time, no cache in the path.`,
-        servedBy: label, health, primaryProbe: null,
-      };
-    }
-
-    // 2) Otherwise the surface probe.
-    if (probe) {
-      const answered = probe.provider || "unknown";
-      const providerLabel = providerLabelFromProbe(answered);
-      const health = `probe ${probe.state} · ${agoLabel(probe.checked_at)}${probe.latency_ms != null ? ` · ${probe.latency_ms}ms` : ""}`;
-      if (probe.state === "not_configured") {
-        return { status: "NOT SET", detail: probe.detail || `${providerLabel} needs to be connected first`, servedBy: providerLabel, health, primaryProbe: null };
-      }
-      if (!probe.ok || probe.state === "failed") {
-        if (f.sessionOnly && !open) {
-          return { status: "IDLE", detail: `Market closed — ${probe.detail || "no live data outside session"}.`, servedBy: "—", health, primaryProbe: null };
-        }
-        if (ts && !stale && f.chain.length > 1) {
-          return { status: "FALLBACK", detail: `${ROUTED_PROVIDER_LABEL[primary]} probe failed — fallback data is fresh. ${seen}`, servedBy: "fallback", health, primaryProbe };
-        }
-        return { status: "DOWN", detail: probe.detail || "probe failed", servedBy: "—", health, primaryProbe };
-      }
-      if (!sameProvider(primary, answered) && !inSelectedChain(answered)) {
-        return { status: "FALLBACK", detail: `${ROUTED_PROVIDER_LABEL[primary]} did not answer — served by ${providerLabel}. ${seen}`, servedBy: providerLabel, health, primaryProbe };
-      }
-      if (probe.state === "degraded" || stale) {
-        if (f.sessionOnly && !open) {
-          return { status: "IDLE", detail: `Market closed — ${seen}.`, servedBy: providerLabel, health, primaryProbe: null };
-        }
-        return { status: "DELAYED", detail: `${probe.detail} · ${seen}`, servedBy: providerLabel, health, primaryProbe: null };
-      }
-      return { status: "LIVE", detail: `${providerLabel} answered · ${seen}`, servedBy: providerLabel, health, primaryProbe: null };
-    }
-
-    // 3) Batch/reference feeds: table freshness is the right signal.
-    if (!f.table) return { status: "IDLE", detail: f.note ?? "No probe for this feed", servedBy: ROUTED_PROVIDER_LABEL[primary], health: "not probed", primaryProbe: null };
-    if (!ts) return { status: "DOWN", detail: "never synced", servedBy: "—", health: "no data", primaryProbe: null };
-    if (stale && f.sessionOnly && !open) {
-      return { status: "IDLE", detail: `Market closed — ${seen}.`, servedBy: ROUTED_PROVIDER_LABEL[primary], health: `cache · ${agoLabel(ts)}`, primaryProbe: null };
-    }
-    return stale
-      ? { status: "DELAYED", detail: seen, servedBy: ROUTED_PROVIDER_LABEL[primary], health: `cache · ${agoLabel(ts)}`, primaryProbe: null }
-      : { status: "LIVE", detail: seen, servedBy: ROUTED_PROVIDER_LABEL[primary], health: `cache · ${agoLabel(ts)}`, primaryProbe: null };
-  };
-
-  const rows = useMemo(() => ROUTED_FEEDS.map((f) => ({ f, ...statusFor(f) })),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [prefs, surfaces, freshness, heartbeats]);
-
-  // Auto-retry primary when any feed is on fallback OR delayed: re-probe the
-  // affected providers with a backoff so the panel can promote back to LIVE
-  // without a manual click. Runs only while the tab is visible.
-  const retryRef = useRef<{ at: number; attempts: number }>({ at: 0, attempts: 0 });
-  useEffect(() => {
-    const retryProviders = new Set<string>();
+  // Auto-retry the primary of any feed on fallback/delayed, with a backoff.
+  // Keyed on the *set of providers to retry* rather than on `rows`: the old
+  // effect re-ran (and fired an immediate probe) on every status refresh,
+  // which turned the backoff into a burst of background probes.
+  const retryKey = useMemo(() => {
+    const set = new Set<string>();
     for (const r of rows) {
       if (r.status !== "FALLBACK" && r.status !== "DELAYED") continue;
       const primary = (prefFor(r.f.id)?.provider as RoutedProvider | undefined) ?? r.f.chain[0];
-      if (primary === "kotak") retryProviders.add("kotak_neo");
-      else if (primary === "alpha") retryProviders.add("alpha_vantage");
-      else if (primary && primary !== "computed") retryProviders.add(primary);
+      if (primary === "kotak") set.add("kotak_neo");
+      else if (primary === "alpha") set.add("alpha_vantage");
+      else if (primary && primary !== "computed") set.add(primary);
     }
-    if (retryProviders.size === 0) { retryRef.current = { at: 0, attempts: 0 }; return; }
-    if (typeof document !== "undefined" && document.hidden) return;
+    return [...set].sort().join(",");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, prefs]);
+
+  const attemptsRef = useRef(0);
+  const [lastRetryAt, setLastRetryAt] = useState(0);
+
+  useEffect(() => {
+    if (!retryKey) { attemptsRef.current = 0; return; }
+    const providers = retryKey.split(",");
+    let cancelled = false;
+    let at = 0;
 
     const tick = async () => {
-      const attempts = retryRef.current.attempts;
+      if (cancelled) return;
+      if (typeof document !== "undefined" && document.hidden) return;
       // Backoff: 30s → 2m → 10m, then hold at 10m.
+      const attempts = attemptsRef.current;
       const wait = attempts === 0 ? 30_000 : attempts === 1 ? 120_000 : 600_000;
-      if (Date.now() - retryRef.current.at < wait) return;
-      retryRef.current = { at: Date.now(), attempts: attempts + 1 };
+      if (at && Date.now() - at < wait) return;
+      at = Date.now();
+      attemptsRef.current = attempts + 1;
+      setLastRetryAt(at);
       try {
-        await Promise.all([...retryProviders].map((p) =>
+        await Promise.all(providers.map((p) =>
           supabase.functions.invoke("market-test-connection", { body: { provider: p, mode: "surfaces" } })
         ));
-        qc.invalidateQueries({ queryKey: SELFTEST_QUERY_KEY as unknown as string[] });
-      } catch { /* silent — this is a background recovery loop */ }
+        if (!cancelled) qc.invalidateQueries({ queryKey: SELFTEST_QUERY_KEY as unknown as string[] });
+      } catch { /* silent — background recovery loop */ }
     };
 
     const iv = setInterval(tick, 15_000);
-    // Fire once immediately on transition into fallback/delayed.
-    tick();
-    return () => clearInterval(iv);
-  }, [rows, prefs, qc]);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [retryKey, qc]);
 
-  // Show the "auto-probing" pill only when a retry actually fired in the last
-  // 90s — otherwise it lies about background activity between backoff windows.
+  // "auto-probing" pill only while a retry actually fired recently.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const iv = setInterval(() => setNow(Date.now()), 10_000);
     return () => clearInterval(iv);
   }, []);
-  const anyRetrying = rows.some((r) => r.status === "FALLBACK" || r.status === "DELAYED")
-    && retryRef.current.at > 0 && (now - retryRef.current.at) < 90_000;
+  const anyRetrying = !!retryKey && lastRetryAt > 0 && now - lastRetryAt < 90_000;
 
-  const tally = rows.reduce((a, r) => ({ ...a, [r.status]: (a[r.status] ?? 0) + 1 }), {} as Record<Status, number>);
+  const counts: Record<Status, number> = {
+    LIVE: tally.live, DELAYED: tally.delayed, FALLBACK: tally.fallback,
+    DOWN: tally.down, IDLE: tally.idle, "NOT SET": tally.notSet,
+  };
+  const accountCounts: Record<Status, number> = {
+    LIVE: accountTally.live, DELAYED: accountTally.delayed, FALLBACK: accountTally.fallback,
+    DOWN: accountTally.down, IDLE: accountTally.idle, "NOT SET": accountTally.notSet,
+  };
   const overridden = prefs.length;
+
 
   const groups: FeedGroup[] = ["live", "history", "account", "reference"];
 
@@ -317,7 +141,7 @@ export default function FeedRoutingPanel() {
     <HudPanel
       title="Feed Routing"
       index="RTE"
-      live={(tally.DOWN ?? 0) > 0 ? "err" : (tally.FALLBACK ?? 0) + (tally.DELAYED ?? 0) > 0 ? "warn" : "ok"}
+      live={counts.DOWN + accountCounts.DOWN > 0 ? "err" : counts.FALLBACK + counts.DELAYED + accountCounts.DELAYED > 0 ? "warn" : "ok"}
       bodyClass="overflow-visible"
       // The same self-test the Providers panel runs, surfaced here too — this
       // is the table people are staring at when they want to re-check.
@@ -325,9 +149,12 @@ export default function FeedRoutingPanel() {
         <Btn size="sm" disabled={selfTest.isPending} onClick={async () => {
           try {
             const r = await selfTest.mutateAsync();
-            const p = (r as any)?.providers ?? {};
-            const okN = Object.values(p).filter((x: any) => x?.ok).length;
-            push(`Self-test complete — ${okN}/${Object.keys(p).length} providers ok`, "ok");
+            const raw = (r as any)?.providers;
+            const list: any[] = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? Object.values(raw) : [];
+            const okN = list.filter((x: any) => x?.ok).length;
+            push(list.length
+              ? `Self-test complete — ${okN}/${list.length} providers ok`
+              : "Self-test complete", "ok");
           } catch (e) {
             push(toSafeError(e, "Self-test failed").message, "err");
           }
@@ -339,9 +166,13 @@ export default function FeedRoutingPanel() {
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: 10, color: "var(--text-dim)", textTransform: "uppercase" }}>Platform · {tally.ok}/{tally.total} healthy</span>
           {(["LIVE", "DELAYED", "FALLBACK", "DOWN", "IDLE", "NOT SET"] as Status[]).map((s) => (
-            <Chip key={s} tone={STATUS_TONE[s] as never}>{tally[s] ?? 0} {s.toLowerCase()}</Chip>
+            <Chip key={s} tone={STATUS_TONE[s] as never}>{counts[s]} {s.toLowerCase()}</Chip>
           ))}
+          <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+            {holiday ? "NSE holiday" : sessionOpen ? "session open" : "session closed"} · idle feeds count as healthy
+          </span>
           {overridden > 0 && (
             <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
               {overridden} routed manually (per-user override)
@@ -353,6 +184,10 @@ export default function FeedRoutingPanel() {
             </span>
           )}
         </div>
+
+
+
+
 
 
         <div style={{ overflowX: "auto" }}>
@@ -374,9 +209,26 @@ export default function FeedRoutingPanel() {
                   <Fragment key={g}>
                     <tr>
                       <td colSpan={5} style={{ ...head, background: "var(--panel, transparent)", color: "var(--accent)" }}>
-                        {FEED_GROUP_LABEL[g]}
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                          <span>{FEED_GROUP_LABEL[g]}</span>
+                          {g === "account" && (
+                            <>
+                              <span style={{ color: "var(--text-dim)" }}>
+                                your broker account · {accountTally.ok}/{accountTally.total} healthy
+                              </span>
+                              {(["LIVE", "DELAYED", "FALLBACK", "DOWN", "IDLE", "NOT SET"] as Status[])
+                                .filter((s) => accountCounts[s] > 0)
+                                .map((s) => (
+                                  <Chip key={`account-${s}`} tone={STATUS_TONE[s] as never}>
+                                    {accountCounts[s]} {s.toLowerCase()}
+                                  </Chip>
+                                ))}
+                            </>
+                          )}
+                        </div>
                       </td>
                     </tr>
+
                     {groupRows.map(({ f, status, detail, servedBy, health, primaryProbe }) => {
                       const pref = prefFor(f.id);
                       const primary = (pref?.provider ?? "auto") as RoutedProvider | "auto";

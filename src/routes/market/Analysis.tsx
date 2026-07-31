@@ -20,6 +20,7 @@ import type { CorporateActionRow } from "@/lib/market/hooks";
 import { marketOpen } from "@/lib/market/hooks";
 import { useBreadth, useCandles, useCorporateActions, useDepth, useFundamentals, useMarketNews, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores, useSyncNewsAndActions } from "@/lib/market/hooks";
 import { MarketDepthLadder } from "@/components/market/MarketDepthLadder";
+import { useDepthPanelVisible } from "@/lib/market/depthPanelPrefs";
 import { computeLiveScore } from "@/lib/market/liveSnapshot";
 import { readPatterns } from "@/lib/market/patternLabels";
 import { deriveBreakoutStage, STAGE_TONE } from "@/lib/market/breakoutStage";
@@ -50,21 +51,6 @@ const defaultState: Persisted = {
   settings: DEFAULT_SETTINGS,
 };
 
-// Human-readable provenance for the degraded-source chip in the panel header.
-function chartStatusText(cd: {
-  history_source?: string | null; provider?: string | null; last_bar_source?: string | null;
-  freshness_ms?: number | null; delayed_minutes?: number | null; cached_at?: string | null;
-}): string {
-  const hist = cd.history_source ?? cd.provider ?? "unknown";
-  const last = cd.last_bar_source ?? cd.provider ?? "unknown";
-  const fresh = cd.freshness_ms != null ? `${Math.max(1, Math.round(cd.freshness_ms / 60_000))}m old` : null;
-  if (last === "quote") return `LIVE LAST BAR · history: ${hist} (broker has no candles API)`;
-  if (last === "quote_delayed") return `LIVE QUOTE ~${cd.delayed_minutes ?? 15}m delayed · history: ${hist}`;
-  if (last === "cache") return `CACHED${cd.cached_at ? ` · last fetch ${new Date(cd.cached_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}${fresh ? ` · ${fresh}` : ""}`;
-  if (last === "yahoo" && cd.delayed_minutes) return `DELAYED ~${cd.delayed_minutes}m · Yahoo fallback${fresh ? ` · ${fresh}` : ""}`;
-  if (hist !== last) return `MIXED · history ${hist} · last bar ${last}`;
-  return `DEGRADED · ${last}${fresh ? ` · ${fresh}` : ""}`;
-}
 
 // Bars belonging to the newest trading day — the default viewport for
 // intraday charts (history stays loaded, just scrolled out of view).
@@ -246,16 +232,16 @@ export default function Analysis() {
 
   // Keyboard shortcuts (TradingView-style):
   //   F        toggle fullscreen
-  //   1..7     select timeframe (1m,5m,15m,1h,1D,1W,1M)
+  //   1..5     select timeframe (1m,5m,15m,1h,1D)
   //   ,  .     cycle timeframe left / right
   useEffect(() => {
-    const TF_KEYS = ["1m","5m","15m","1h","1D","1W","1M"];
+    const TF_KEYS = ["1m","5m","15m","1h","1D"];
     const onKey = (e: KeyboardEvent) => {
       const el = document.activeElement as HTMLElement | null;
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === "f" || e.key === "F") { if (!fs) setFs(true); return; }
-      if (/^[1-7]$/.test(e.key)) { setTf(TF_KEYS[Number(e.key) - 1]); return; }
+      if (/^[1-5]$/.test(e.key)) { setTf(TF_KEYS[Number(e.key) - 1]); return; }
       if (e.key === "," || e.key === ".") {
         const i = TF_KEYS.indexOf(tf);
         if (i < 0) return;
@@ -390,7 +376,8 @@ export default function Analysis() {
     [dailyCandleData, quote, score, breadth],
   );
   const { data: sectors = [] } = useSectorStrength();
-  const { data: depth } = useDepth(sym, exchange);
+  const depthVisible = useDepthPanelVisible();
+  const { data: depth } = useDepth(sym, exchange, depthVisible);
   const { data: fundData } = useFundamentals(sym, exchange);
   const fund = fundData?.fundamentals as any | undefined;
   const { data: insightData, isLoading: insightLoading, error: insightError } = useStockInsight(sym);
@@ -555,35 +542,7 @@ export default function Analysis() {
           style={{ flex: 1, minHeight: 0 }}
           actions={
             <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-              {/* Degraded-source provenance sits here, right before the exchange chip. */}
-              {candleData && candleData.candles.length > 0 && candleData.degraded && (
-                <span
-                  title={chartStatusText(candleData)}
-                  style={{
-                    display: "inline-flex", gap: 6, alignItems: "center",
-                    maxWidth: 420, padding: "2px 6px", borderRadius: 2,
-                    background: "rgba(24,32,40,0.75)", border: "1px solid var(--edge)",
-                    fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.14em",
-                    textTransform: "uppercase", color: "var(--warn, #f0b429)",
-                  }}
-                >
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {chartStatusText(candleData)}
-                    {candleData.market_session && candleData.market_session !== "open" ? ` · ${candleData.market_session}` : ""}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => refetch()}
-                    disabled={isFetching}
-                    style={{
-                      padding: "1px 5px", background: "transparent",
-                      border: "1px solid var(--edge)", color: "var(--text-dim)",
-                      fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.14em",
-                      textTransform: "uppercase", cursor: isFetching ? "wait" : "pointer",
-                    }}
-                  >{isFetching ? "…" : "retry"}</button>
-                </span>
-              )}
+              {/* Degraded-source provenance removed. */}
               <Chip tone="neutral">{exchange}</Chip>
             </div>
 
@@ -744,9 +703,6 @@ export default function Analysis() {
             const stageTone = STAGE_TONE[stage.stage];
             const chipTone = stageTone === "neutral" ? undefined : stageTone;
             const band = score?.breakout_band ?? null;
-            const rankPct = score?.breakout_v4_rank_pct ?? null;
-            const coverage = score?.breakout_v4_coverage ?? null;
-            const covered = coverage ? Object.entries(coverage).filter(([, v]) => Number(v) > 0) : [];
             const reason = score?.score_unavailable_reason ?? null;
             // A score with no coverage and a genuinely weak setup must never
             // look the same — say why instead of printing a low number.
@@ -762,37 +718,25 @@ export default function Analysis() {
             }
             return (
               <>
-                <Row label="Breakout Score">
+                <Row label={liveScore && quote?.ltp && sessionOpen ? "Breakout Score (live)" : "Breakout Score (EOD)"}>
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                     <ScoreBadge
                       score={breakoutScore}
                       components={components}
                       label="breakout components"
-                      onClick={() => nav(`/market/ai/${sym}`)}
+                      onClick={() => nav(`/market/score/${encodeURIComponent(sym)}/explain?exchange=${encodeURIComponent(exchange)}`)}
                     />
                     {band && <Chip tone={band === "STRONG" ? "ok" : band === "WEAK" ? "warn" : "accent"}>{band}</Chip>}
                     {chipTone && <Chip tone={chipTone}>{stage.stage}</Chip>}
                   </span>
                 </Row>
-                {stage.detail && (
+                {/* "no snapshot" is a not-loaded-yet placeholder, not a verdict —
+                    never render it as if it were analysis. */}
+                {stage.detail && stage.detail !== "no snapshot" && (
                   <div style={{ fontSize: 10, color: "var(--text-muted)", padding: "2px 0 4px", textAlign: "right" }}>
                     {stage.detail}
                   </div>
                 )}
-                {rankPct != null && (
-                  <Row label="Universe Rank" mono>
-                    top {fmtNum(100 - rankPct, 1)}%
-                  </Row>
-                )}
-                <Row label="Coverage">
-                  <span style={{ fontSize: 10, color: "var(--text-muted)", textAlign: "right" }}>
-                    {covered.length > 0
-                      ? `${covered.length} of 7 buckets · ${covered.map(([k]) => k).join(", ")}`
-                      : score?.score_coverage != null
-                        ? `${Math.round(Number(score.score_coverage) * 100)}% of inputs present`
-                        : "coverage not recorded"}
-                  </span>
-                </Row>
                 <ScoreHistoryPanel symbol={sym} exchange={exchange} />
               </>
             );

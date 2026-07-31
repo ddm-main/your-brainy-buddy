@@ -258,6 +258,38 @@ function sessionBucketFor(epochSec: number, timeframe: string): number {
   return open + Math.floor(elapsed / intervalSec) * intervalSec;
 }
 
+// Some feeds (broker quote snapshots in particular) report the RUNNING DAY
+// TOTAL volume on every bar rather than the volume traded inside that bar.
+// Rendered as-is that produces the classic "staircase" volume pane. Detect a
+// per-session non-decreasing volume series and convert it back to per-bar
+// deltas. A genuine per-bar series is essentially never monotonic for 3+ bars.
+function decumulate<T extends { time: number; volume: number }>(bars: T[]): T[] {
+  if (bars.length < 3) return bars;
+  const sorted = [...bars].sort((a, b) => a.time - b.time);
+  const bySession = new Map<number, T[]>();
+  for (const b of sorted) {
+    const day = sessionOpenSecFor(b.time);
+    const list = bySession.get(day);
+    if (list) list.push(b); else bySession.set(day, [b]);
+  }
+  const out: T[] = [];
+  for (const list of bySession.values()) {
+    const vols = list.map((b) => Number(b.volume) || 0);
+    const monotonic = list.length >= 3 && vols.every((v, i) => i === 0 || v >= vols[i - 1]) &&
+      vols[vols.length - 1] > vols[0];
+    if (!monotonic) { out.push(...list); continue; }
+    const deltas: number[] = [];
+    for (let i = 1; i < vols.length; i++) deltas.push(Math.max(0, vols[i] - vols[i - 1]));
+    // The first recorded bar carries everything traded before recording began;
+    // charting it raw would leave one absurd spike. Cap it at the typical bar.
+    const sortedDeltas = [...deltas].sort((a, b) => a - b);
+    const median = sortedDeltas[Math.floor(sortedDeltas.length / 2)] ?? 0;
+    out.push({ ...list[0], volume: Math.min(vols[0], median) });
+    for (let i = 1; i < list.length; i++) out.push({ ...list[i], volume: deltas[i - 1] });
+  }
+  return out.sort((a, b) => a.time - b.time);
+}
+
 async function loadKotakTickBars(
   svc: ReturnType<typeof svcClient>,
   symbol: string,
@@ -266,20 +298,20 @@ async function loadKotakTickBars(
 ): Promise<OutCandle[]> {
   const dayStart = new Date(istSessionDayStartSec() * 1000).toISOString();
   const { data } = await svc.from("market_intraday_prices")
-    .select("ts,open,high,low,close,volume,source")
+    .select("ts,open,high,low,close,volume,cum_volume,source")
     .eq("symbol", symbol).eq("exchange", exchange).eq("timeframe", "1m")
     .gte("ts", dayStart)
     .order("ts", { ascending: true })
     .limit(500);
 
-  const oneMinute = ((data ?? []) as Array<Record<string, unknown>>)
+  const oneMinute = decumulate(((data ?? []) as Array<Record<string, unknown>>)
     .filter((r) => String(r.source ?? "").startsWith("kotak"))
     .map((r) => ({
       time: Math.floor(new Date(String(r.ts)).getTime() / 1000),
       open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close),
       volume: Number(r.volume ?? 0),
     }))
-    .filter((c) => Number.isFinite(c.time) && Number.isFinite(c.close) && c.close > 0);
+    .filter((c) => Number.isFinite(c.time) && Number.isFinite(c.close) && c.close > 0));
 
   if (timeframe === "1m") return oneMinute;
   const byBucket = new Map<number, OutCandle>();
@@ -627,11 +659,11 @@ Deno.serve(async (req) => {
           .eq("symbol", symbol).eq("exchange", exchange).eq("timeframe", timeframe)
           .order("ts", { ascending: false }).limit(500);
         if (cached && cached.length > 0) {
-          raw = cached.reverse().map((r: Record<string, unknown>) => ({
+          raw = decumulate(cached.reverse().map((r: Record<string, unknown>) => ({
             time: Math.floor(new Date(String(r.ts)).getTime() / 1000),
             open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close),
             volume: Number(r.volume ?? 0),
-          }));
+          })));
           providerName = "cache";
           cachedAt = String((cached[cached.length - 1] as Record<string, unknown>).fetched_at ?? "");
           reason = reason ?? "broker_503_cache";

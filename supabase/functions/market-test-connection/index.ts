@@ -119,11 +119,18 @@ Deno.serve(async (req) => {
       await svc.from("market_api_settings")
         .update({ connection_status: "connected", last_error: null })
         .eq("id", settings.id);
-    } else if (settings && !result.ok && requested === "shoonya") {
+    } else if (settings && !result.ok) {
+      // Previously only Shoonya persisted a failure, so a failed Kotak test
+      // left the stored status at "connected" and the config page kept
+      // claiming a healthy session right after a test that just failed.
+      // A session-shaped failure is "expired"; anything else is "error".
+      const detail = result.detail ?? "Broker connection test failed";
+      const expired = /401|403|unauthor|session|token|expired|re-?login/i.test(detail);
       await svc.from("market_api_settings")
-        .update({ connection_status: "error", last_error: result.detail ?? "Shoonya connection test failed" })
+        .update({ connection_status: expired ? "expired" : "error", last_error: detail })
         .eq("id", settings.id);
     }
+
     // When probing the "active" pathway (or Kotak directly), also probe
     // Yahoo so the UI can distinguish "Kotak down → Yahoo reachable" from
     // "everything down". Kept lightweight; never blocks a Kotak-success path.

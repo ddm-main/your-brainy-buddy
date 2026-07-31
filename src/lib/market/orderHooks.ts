@@ -4,7 +4,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "./api";
-import { marketOpen } from "./hooks";
+import { liveInterval, marketOpen } from "./hooks";
 
 export interface FundsRow {
   net_cash: number | null;
@@ -102,7 +102,9 @@ export function useBrokerOrders() {
   return useQuery({
     queryKey: ["market", "broker-orders"],
     queryFn: () => callMarketFn<{ orders: BrokerOrder[]; source: string }>("market-orders"),
-    refetchInterval: marketOpen() ? 10_000 : false,
+    // Function form: `marketOpen()` evaluated at mount froze the cadence for
+    // the whole session (open the page pre-open and it never refreshed again).
+    refetchInterval: liveInterval(10_000, false, 30_000),
   });
 }
 
@@ -110,9 +112,10 @@ export function useBrokerTrades() {
   return useQuery({
     queryKey: ["market", "broker-trades"],
     queryFn: () => callMarketFn<{ trades: BrokerTrade[]; source: string }>("market-trades"),
-    refetchInterval: marketOpen() ? 15_000 : false,
+    refetchInterval: liveInterval(15_000, false, 30_000),
   });
 }
+
 
 export function useMarketOrderMutations() {
   const qc = useQueryClient();
@@ -126,18 +129,20 @@ export function useMarketOrderMutations() {
   };
   const place = useMutation({
     mutationFn: async (input: PlaceOrderInput) => {
-      const r = await callMarketFn<{ ok: boolean; order_id?: string; status?: string; error?: string; code?: string; session_expired?: boolean; retryable?: boolean; verification_required?: boolean }>(
+      const r = await callMarketFn<{ ok: boolean; order_id?: string; status?: string; error?: string; code?: string; session_expired?: boolean; retryable?: boolean; verification_required?: boolean; http_status?: number }>(
         "market-order-place",
         input as unknown as Record<string, unknown>,
       );
       // The ambiguous-broker-session case is returned as HTTP 200 with
       // ok:false so the platform runtime tracker doesn't flag it as an
       // Edge Function crash. Re-throw as MarketFunctionError so the ticket's
-      // existing recovery branch handles it uniformly.
+      // existing recovery branch handles it uniformly — carrying the REAL
+      // status (200), not a fabricated 409 that no server ever returned.
       if (r && r.ok === false) {
         const { MarketFunctionError } = await import("@/lib/market/api");
-        throw new MarketFunctionError(r.error || "Order status unknown", 409, r as unknown as Record<string, unknown>);
+        throw new MarketFunctionError(r.error || "Order status unknown", r.http_status ?? 200, r as unknown as Record<string, unknown>);
       }
+
       return r as { ok: true; order_id: string; status: string };
     },
     onSuccess: invalidate,

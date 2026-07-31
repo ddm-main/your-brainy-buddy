@@ -42,16 +42,19 @@ export function KotakReconnectModal() {
 
   // Fresh check every time the Market shell mounts, i.e. every time the
   // section is actually opened — not just once per page load.
-  useEffect(() => { setDismissed(false); setNeedsOtp(false); setMsg(null); }, []);
+  // If the broker already issued an OTP challenge, open straight on the OTP
+  // field — starting on "Reconnect now" discarded the outstanding challenge.
+  const pendingOtp = kotak?.connection_status === "pending_otp";
+  useEffect(() => { setDismissed(false); setNeedsOtp(pendingOtp); setMsg(null); }, [pendingOtp]);
 
   // Screener chip (and anywhere else) can force the modal open again after
   // the user dismissed it — otherwise they'd be stuck on Yahoo until the
   // next page load.
   useEffect(() => {
-    const onOpen = () => { setDismissed(false); setNeedsOtp(false); setMsg(null); };
+    const onOpen = () => { setDismissed(false); setNeedsOtp(pendingOtp); setMsg(null); };
     window.addEventListener("kotak:reconnect", onOpen);
     return () => window.removeEventListener("kotak:reconnect", onOpen);
-  }, []);
+  }, [pendingOtp]);
 
   const reconnect = async () => {
     setBusy(true); setMsg(null);

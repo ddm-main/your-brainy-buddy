@@ -24,7 +24,6 @@ export default function ProvidersPanel() {
   const push = useUi((s) => s.push);
   const qc = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
-  const [live, setLive] = useState<Partial<Record<ProviderId, { ok: boolean; detail: string | null; at: string }>>>({});
   const [selected, setSelected] = useState<ProviderId | null>(null);
   const [editing, setEditing] = useState<ProviderId | null>(null);
   const [keyInput, setKeyInput] = useState("");
@@ -77,7 +76,6 @@ export default function ProvidersPanel() {
       const j = await callTest({ provider: p });
       const ok = !!j?.ok;
       const detail = clean((j?.detail as string) ?? (j?.error as string));
-      if (mounted.current) setLive((s) => ({ ...s, [p]: { ok, detail, at: new Date().toISOString() } }));
       push(ok ? `${PROVIDERS[p].name} OK` : `${PROVIDERS[p].name} failed${detail ? `: ${detail}` : ""}`, ok ? "ok" : "err");
       // The test writes fresh surface rows too — refresh both, or the feed
       // table keeps showing the pre-test state until the next cron tick.
@@ -87,7 +85,6 @@ export default function ProvidersPanel() {
       ]);
     } catch (e) {
       const msg = clean(toSafeError(e, "Test failed").message);
-      if (mounted.current) setLive((s) => ({ ...s, [p]: { ok: false, detail: msg, at: new Date().toISOString() } }));
       push(msg ?? "Test failed", "err");
     } finally { if (mounted.current) setBusy(null); }
   };
@@ -107,7 +104,6 @@ export default function ProvidersPanel() {
       const j = await callTest({ provider });
       const ok = !!j?.ok;
       const detail = clean((j?.detail as string) ?? (j?.error as string));
-      if (mounted.current) setLive((s) => ({ ...s, [provider]: { ok, detail, at: new Date().toISOString() } }));
       push(ok ? `${PROVIDERS[provider].name} key saved and verified` : `${PROVIDERS[provider].name} key saved, test failed${detail ? `: ${detail}` : ""}`, ok ? "ok" : "err");
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["market", "provider-credentials"] }),
@@ -143,7 +139,6 @@ export default function ProvidersPanel() {
     const cred = credFor(p);
     const rawHp = historyFor.get(p)?.[0] ?? null;
     const hp = cred?.updated_at && rawHp?.created_at && new Date(rawHp.created_at).getTime() < new Date(cred.updated_at).getTime() ? null : rawHp;
-    const lv = live[p];
     // A saved key OR the edge-secret fallback counts as configured; the panel
     // can't see edge secrets, so only flag it as "check key" after a failure.
     const keyMissing = meta.edit === "key" && !cred?.key_set && hp?.ok === false;
@@ -153,10 +148,7 @@ export default function ProvidersPanel() {
     let detail: string | null = null;
     let at: string | null = null;
 
-    if (lv) {
-      tone = lv.ok ? "ok" : "err"; label = lv.ok ? "reachable" : "failed";
-      detail = lv.detail; at = lv.at;
-    } else if (cred?.last_tested_at && cred.last_test_ok != null) {
+    if (cred?.last_tested_at && cred.last_test_ok != null) {
       tone = cred.last_test_ok ? "ok" : "err";
       label = cred.last_test_ok ? "reachable" : "failed";
       detail = clean(cred.last_test_detail);
@@ -173,7 +165,7 @@ export default function ProvidersPanel() {
     } else {
       tone = "neutral"; label = "untested";
     }
-    if (!lv && (p === "kotak_neo" || p === "shoonya") && hp && !hp.ok) label = "degraded → yahoo";
+    if ((p === "kotak_neo" || p === "shoonya") && hp && !hp.ok) label = "degraded → yahoo";
 
     return { p, meta, cred, tone, label, detail, at };
   });
@@ -194,7 +186,7 @@ export default function ProvidersPanel() {
           onBack={() => setSelected(null)}
           onEdit={openEdit}
           onTest={test}
-          liveDetail={live[selected] ?? null}
+          liveDetail={null}
         />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -205,15 +197,9 @@ export default function ProvidersPanel() {
           live={anyBad ? "err" : anyWarn ? "warn" : "ok"}
           bodyClass="overflow-visible"
           actions={
-            <Btn size="sm" disabled={selfTest.isPending || busy !== null} onClick={async () => {
-              try {
-                const r = await selfTest.mutateAsync();
-                push(r?.down ? `Self-test done — ${r.down} provider(s) down` : "All providers tested", r?.down ? "warn" : "ok");
-              } catch (e) { push(clean(toSafeError(e, "Self-test failed").message) ?? "Self-test failed", "err"); }
-            }}>
-              <TestTube2 size={11} style={{ marginRight: 4 }} />
-              {selfTest.isPending ? "testing…" : "test all"}
-            </Btn>
+            <span style={{ fontSize: 9, color: "var(--text-muted)", fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
+              {selfTest.isPending ? "testing…" : "use “test everything” above"}
+            </span>
           }
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>

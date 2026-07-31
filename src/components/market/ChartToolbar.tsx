@@ -18,8 +18,6 @@ export const TIMEFRAMES = [
   { key: "15m", label: "15m", intraday: true },
   { key: "1h", label: "1h", intraday: true },
   { key: "1D", label: "1D", intraday: false },
-  { key: "1W", label: "1W", intraday: false },
-  { key: "1M", label: "1M", intraday: false },
 ] as const;
 
 // Viewport ranges for non-intraday charts. These only move the visible
@@ -38,7 +36,7 @@ export type ChartRange = typeof CHART_RANGES[number]["key"];
 export function rangeToBars(range: ChartRange, tf: string): number | null {
   const years = CHART_RANGES.find((r) => r.key === range)?.years ?? null;
   if (years == null) return null;
-  const perYear = tf === "1M" ? 12 : tf === "1W" ? 52 : 250;
+  const perYear = 250;
   return Math.round(years * perYear);
 }
 
@@ -123,7 +121,7 @@ export function ChartToolbar({
     <div className="mk-chart-toolbar" role="toolbar" aria-label="Chart controls">
       {/* Interval — inline segmented buttons (TradingView / Kite pattern).
           Keyboard: press number for quick TF switch (1=1m, 2=5m, 3=15m,
-          4=1h, 5=1D, 6=1W, 7=1M). See Analysis.tsx keydown handler. */}
+          4=1h, 5=1D). See Analysis.tsx keydown handler. */}
       <div className="mk-tf-seg" role="group" aria-label="Chart timeframe">
         {TIMEFRAMES.map((t) => (
           <button

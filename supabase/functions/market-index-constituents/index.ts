@@ -10,27 +10,9 @@ import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 // already capped by the in-memory cache.
 const limiter = createMarketLimiter(30, 60_000);
 
-const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" };
-
-// slug → niftyindices CSV filename
-const SLUG_TO_FILE: Record<string, string> = {
-  nifty50: "ind_nifty50list.csv",
-  niftynext50: "ind_niftynext50list.csv",
-  nifty100: "ind_nifty100list.csv",
-  nifty200: "ind_nifty200list.csv",
-  nifty500: "ind_nifty500list.csv",
-  niftymidcap100: "ind_niftymidcap100list.csv",
-  niftysmallcap100: "ind_niftysmallcap100list.csv",
-  niftybank: "ind_niftybanklist.csv",
-  niftyit: "ind_niftyitlist.csv",
-  niftyauto: "ind_niftyautolist.csv",
-  niftypharma: "ind_niftypharmalist.csv",
-  niftyfmcg: "ind_niftyfmcglist.csv",
-  niftymetal: "ind_niftymetallist.csv",
-  niftyrealty: "ind_niftyrealtylist.csv",
-  niftyenergy: "ind_niftyenergylist.csv",
-  niftyfinservice: "ind_niftyfinancelist.csv",
-};
+// CSV parsing + mirror fallback live in the shared module so the self-test
+// probe checks this exact path instead of NSE's blocked JSON API.
+import { fetchCsvMembers, SLUG_TO_FILE, type IndexMember as Member } from "../_shared/market/indexConstituents.ts";
 
 const SLUG_TO_KEY: Record<string, string> = {
   nifty50: "NIFTY50",
@@ -51,60 +33,6 @@ const SLUG_TO_KEY: Record<string, string> = {
   niftyenergy: "NIFTYENERGY",
 };
 
-// CSV parser respecting double-quoted fields.
-function parseCsvLine(line: string): string[] {
-  const out: string[] = [];
-  let cur = "";
-  let inQuote = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (inQuote) {
-      if (ch === '"') {
-        if (line[i + 1] === '"') { cur += '"'; i++; }
-        else inQuote = false;
-      } else cur += ch;
-    } else {
-      if (ch === '"') inQuote = true;
-      else if (ch === ",") { out.push(cur); cur = ""; }
-      else cur += ch;
-    }
-  }
-  out.push(cur);
-  return out.map((s) => s.trim());
-}
-
-interface Member { symbol: string; company: string; industry: string | null }
-
-async function fetchCsvMembers(file: string): Promise<Member[]> {
-  const urls = [
-    `https://niftyindices.com/IndexConstituent/${file}`,
-    `https://archives.nseindia.com/content/indices/${file}`,
-  ];
-  for (const url of urls) {
-    try {
-      const r = await fetch(url, { headers: UA });
-      if (!r.ok) continue;
-      const text = await r.text();
-      const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-      if (lines.length < 2) continue;
-      const header = parseCsvLine(lines[0]).map((h) => h.toLowerCase());
-      const iSym = header.findIndex((h) => h === "symbol");
-      const iCo = header.findIndex((h) => h.includes("company") || h.includes("name"));
-      const iInd = header.findIndex((h) => h.includes("industry") || h.includes("sector"));
-      if (iSym < 0) continue;
-      const out: Member[] = [];
-      for (let i = 1; i < lines.length; i++) {
-        const cols = parseCsvLine(lines[i]);
-        const sym = cols[iSym]?.toUpperCase();
-        if (!sym || !/^[A-Z0-9&-]+$/.test(sym)) continue;
-        out.push({ symbol: sym, company: iCo >= 0 ? cols[iCo] ?? "" : "", industry: iInd >= 0 ? cols[iInd] ?? null : null });
-      }
-      if (out.length > 5) return out;
-    } catch { /* try next */ }
-  }
-  return [];
-}
-
 // 5-min in-memory cache
 const CACHE = new Map<string, { at: number; members: Member[] }>();
 const TTL = 5 * 60_000;
@@ -114,7 +42,7 @@ async function loadMembers(slug: string): Promise<{ members: Member[]; reason?: 
   if (!file) return { members: [], reason: "unsupported slug" };
   const cached = CACHE.get(slug);
   if (cached && Date.now() - cached.at < TTL) return { members: cached.members };
-  const members = await fetchCsvMembers(file);
+  const { members } = await fetchCsvMembers(file);
   if (members.length > 0) CACHE.set(slug, { at: Date.now(), members });
   return members.length > 0 ? { members } : { members: [], reason: "empty upstream" };
 }

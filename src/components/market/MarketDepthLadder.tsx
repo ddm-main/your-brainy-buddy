@@ -11,8 +11,27 @@ import { HudPanel } from "@/components/hud/HudPanel";
 import type { DepthResponse } from "@/lib/market/hooks";
 import { useLiveDepth } from "@/lib/market/liveDepthStore";
 import { useLiveDepthSubscription } from "@/lib/market/useRealtimeTicks";
+import { useDepthPanelStore } from "@/lib/market/depthPanelPrefs";
 
 type Level = { price: number; qty: number; orders?: number };
+
+function ToggleButton({ visible, onClick }: { visible: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="hud-label"
+      aria-expanded={visible}
+      style={{
+        fontSize: 9, letterSpacing: ".08em", padding: "2px 8px",
+        border: "1px solid var(--edge)", borderRadius: 2,
+        background: "transparent", color: "var(--text-dim)", cursor: "pointer",
+      }}
+    >
+      {visible ? "Hide" : "Show"}
+    </button>
+  );
+}
 
 export function MarketDepthLadder({
   depth,
@@ -23,13 +42,40 @@ export function MarketDepthLadder({
   symbol?: string;
   exchange?: string;
 }) {
-  useLiveDepthSubscription(symbol);
+  const visible = useDepthPanelStore((s) => s.visible);
+  const toggle = useDepthPanelStore((s) => s.toggle);
+  useLiveDepthSubscription(symbol, visible);
   const pushed = useLiveDepth(symbol ? `${exchange.toUpperCase()}:${symbol.toUpperCase()}` : null);
 
-  const bidsSrc = pushed?.bids.length || pushed?.asks.length ? pushed.bids : depth?.bids;
-  const asksSrc = pushed?.bids.length || pushed?.asks.length ? pushed.asks : depth?.asks;
+  const actions = <ToggleButton visible={visible} onClick={toggle} />;
 
-  if (!pushed && !depth) return null;
+  if (!visible) {
+    return (
+      <HudPanel flow title="Market Depth" index="A2" actions={actions}>
+        <div className="hud-label" style={{ fontSize: 11, color: "var(--text-dim)" }}>
+          Order book hidden. Live depth feed paused.
+        </div>
+      </HudPanel>
+    );
+  }
+
+  // Prefer the pushed book only when it actually carries levels; otherwise the
+  // REST book wins (an empty push must not blank a good REST ladder).
+  const usePushed = (pushed?.bids.length ?? 0) > 0 || (pushed?.asks.length ?? 0) > 0;
+  const bidsSrc = usePushed ? pushed!.bids : depth?.bids;
+  const asksSrc = usePushed ? pushed!.asks : depth?.asks;
+
+  if (!usePushed && !depth) {
+    // Panel must stay mounted while the first book loads — returning null made
+    // the whole A2 slot pop in and out and reflow the grid.
+    return (
+      <HudPanel flow title="Market Depth" index="A2" actions={actions}>
+        <div className="hud-label" style={{ fontSize: 11, color: "var(--text-dim)" }}>
+          Loading order book…
+        </div>
+      </HudPanel>
+    );
+  }
   // Depth is a broker-only, market-hours-only feed. An empty book has several
   // very different causes — only ONE of them is "connect your broker", and
   // showing that message for all of them was simply wrong.
@@ -41,7 +87,7 @@ export function MarketDepthLadder({
       : code === "not_connected" ? null
       : "Broker feed hiccup — retrying.";
     return (
-      <HudPanel flow title="Market Depth" index="A2">
+      <HudPanel flow title="Market Depth" index="A2" actions={actions}>
         <div className="hud-label" style={{ fontSize: 11, lineHeight: 1.6, color: "var(--text-dim)" }}>
           {copy ?? (
             <>
@@ -58,8 +104,14 @@ export function MarketDepthLadder({
   }
 
 
-  const bids = (bidsSrc ?? []).slice(0, 5) as Level[];
-  const asks = (asksSrc ?? []).slice(0, 5) as Level[];
+  // Guard against a malformed level (NaN price/qty) poisoning the totals.
+  const clean = (levels: Level[] | undefined) =>
+    (levels ?? [])
+      .filter((l) => Number.isFinite(l?.price) && Number.isFinite(l?.qty))
+      .slice(0, 5)
+      .map((l) => ({ ...l, qty: Math.max(0, l.qty), orders: Number.isFinite(l.orders as number) ? l.orders : undefined }));
+  const bids = clean(bidsSrc as Level[] | undefined);
+  const asks = clean(asksSrc as Level[] | undefined);
 
   const cum = (levels: Level[]) => {
     let acc = 0;
@@ -76,6 +128,13 @@ export function MarketDepthLadder({
   const totalBidQty = cBids[cBids.length - 1]?.cum ?? 0;
   const totalAskQty = cAsks[cAsks.length - 1]?.cum ?? 0;
   const total = totalBidQty + totalAskQty;
+  // Total order counts across the five levels — the ladder printed a per-level
+  // "Ord" column but never totalled it, which is the number traders read.
+  const sumOrders = (levels: Level[]) =>
+    levels.reduce((n, l) => n + (Number.isFinite(l.orders as number) ? (l.orders as number) : 0), 0);
+  const totalBidOrders = sumOrders(bids);
+  const totalAskOrders = sumOrders(asks);
+  const hasOrderCounts = totalBidOrders + totalAskOrders > 0;
   // Order-book imbalance: >50% means buy pressure dominates.
   const buyPct = total > 0 ? (totalBidQty / total) * 100 : 50;
 
@@ -99,7 +158,7 @@ export function MarketDepthLadder({
         }} />
         <span style={{ color, position: "relative" }}>{level.price.toFixed(2)}</span>
         <span style={{ color: "var(--text-dim)", textAlign: "center", position: "relative" }}>
-          {level.orders ?? "—"}
+          {level.orders ? level.orders.toLocaleString("en-IN") : "—"}
         </span>
         <span style={{ color: "var(--text)", textAlign: "right", position: "relative" }}>
           {level.qty.toLocaleString("en-IN")}
@@ -109,7 +168,7 @@ export function MarketDepthLadder({
   };
 
   return (
-    <HudPanel flow title="Market Depth" index="A2">
+    <HudPanel flow title="Market Depth" index="A2" actions={actions}>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
         <div>
           <div className="hud-label" style={{
@@ -119,6 +178,17 @@ export function MarketDepthLadder({
             <span>Bid</span><span style={{ textAlign: "center" }}>Ord</span><span style={{ textAlign: "right" }}>Qty</span>
           </div>
           {cBids.map((b, i) => <Row key={i} side="bid" level={b} />)}
+          <div className="hud-label" style={{
+            display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 6,
+            padding: "4px 6px 0", fontSize: 9, color: "var(--text-dim)",
+            fontVariantNumeric: "tabular-nums",
+          }}>
+            <span>Total</span>
+            <span style={{ textAlign: "center", color: "var(--text)" }}>
+              {hasOrderCounts ? totalBidOrders.toLocaleString("en-IN") : "—"}
+            </span>
+            <span style={{ textAlign: "right", color: "var(--ok)" }}>{totalBidQty.toLocaleString("en-IN")}</span>
+          </div>
         </div>
         <div>
           <div className="hud-label" style={{
@@ -128,6 +198,17 @@ export function MarketDepthLadder({
             <span>Ask</span><span style={{ textAlign: "center" }}>Ord</span><span style={{ textAlign: "right" }}>Qty</span>
           </div>
           {cAsks.map((a, i) => <Row key={i} side="ask" level={a} />)}
+          <div className="hud-label" style={{
+            display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 6,
+            padding: "4px 6px 0", fontSize: 9, color: "var(--text-dim)",
+            fontVariantNumeric: "tabular-nums",
+          }}>
+            <span>Total</span>
+            <span style={{ textAlign: "center", color: "var(--text)" }}>
+              {hasOrderCounts ? totalAskOrders.toLocaleString("en-IN") : "—"}
+            </span>
+            <span style={{ textAlign: "right", color: "var(--danger)" }}>{totalAskQty.toLocaleString("en-IN")}</span>
+          </div>
         </div>
       </div>
       <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: 10 }}>

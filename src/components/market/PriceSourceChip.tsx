@@ -9,12 +9,28 @@
 // Read-only; subscription lifecycle is owned by `useRealtimeTicks` mounted
 // once at the app shell. Panels just render this chip.
 import { useLiveTickStore } from "@/lib/market/liveTickStore";
+import { useMarketSettings } from "@/lib/market/hooks";
+
+// The app supports more than one broker now — hardcoding "kotak" told a
+// Shoonya user their prices came from a broker they never connected.
+function useConnectedBrokerLabel(): string {
+  const { data } = useMarketSettings();
+  const rows = data ?? [];
+  const connected = rows.find(
+    (r: any) => r.connection_status === "connected" &&
+      (r.active_provider === "kotak_neo" || r.active_provider === "shoonya"),
+  ) as any;
+  if (connected?.active_provider === "shoonya") return "shoonya";
+  if (connected?.active_provider === "kotak_neo") return "kotak";
+  return "broker";
+}
 
 // The chip now renders only the status dot; the textual label is hidden to keep
 // panel headers clean. The tooltip still describes the feed state.
 export function PriceSourceChip({ compact = false, stale = false, dotOnly = false }: { compact?: boolean; stale?: boolean; dotOnly?: boolean }) {
   const connected = useLiveTickStore((s) => s.connected);
   const relayAlive = useLiveTickStore((s) => s.relayAlive);
+  const broker = useConnectedBrokerLabel();
 
   // `stale` — caller-supplied: the REST quote/index query it's paired with
   // is in react-query error state. Previously nothing surfaced this; a
@@ -23,9 +39,9 @@ export function PriceSourceChip({ compact = false, stale = false, dotOnly = fals
   const { label, tone } = stale
     ? { label: "stale", tone: "var(--err, #ef4444)" }
     : relayAlive
-    ? { label: "push · kotak", tone: "var(--ok)" }
+    ? { label: `push · ${broker}`, tone: "var(--ok)" }
     : connected
-    ? { label: "live · kotak", tone: "var(--accent-soft)" }
+    ? { label: `live · ${broker}`, tone: "var(--accent-soft)" }
     : { label: "rest", tone: "var(--text-dim)" };
 
   const title = stale

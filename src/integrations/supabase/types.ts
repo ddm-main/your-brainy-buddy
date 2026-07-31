@@ -2979,6 +2979,7 @@ export type Database = {
         Row: {
           close: number | null
           created_at: string
+          cum_volume: number | null
           exchange: string
           fetched_at: string
           high: number | null
@@ -2994,6 +2995,7 @@ export type Database = {
         Insert: {
           close?: number | null
           created_at?: string
+          cum_volume?: number | null
           exchange: string
           fetched_at?: string
           high?: number | null
@@ -3009,6 +3011,7 @@ export type Database = {
         Update: {
           close?: number | null
           created_at?: string
+          cum_volume?: number | null
           exchange?: string
           fetched_at?: string
           high?: number | null

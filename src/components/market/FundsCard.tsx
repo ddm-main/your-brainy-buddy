@@ -56,12 +56,20 @@ export function FundsCard({ compact = false }: { compact?: boolean }) {
   const notConnected = data?.not_connected === true || reasonCode === "not_connected";
 
   // Live-tick countdown so the retry timer visibly decrements. 1s cadence.
+  // Stops itself the moment the cooldown expires — it used to keep ticking
+  // (and re-rendering the whole card) forever after the window passed.
   const [, setNow] = useState(0);
   useEffect(() => {
     if (!data?.retry_after_at) return;
-    const id = setInterval(() => setNow((n) => n + 1), 1000);
+    const endsAt = new Date(data.retry_after_at).getTime();
+    if (!Number.isFinite(endsAt) || endsAt <= Date.now()) return;
+    const id = setInterval(() => {
+      setNow((n) => n + 1);
+      if (Date.now() >= endsAt) clearInterval(id);
+    }, 1000);
     return () => clearInterval(id);
   }, [data?.retry_after_at]);
+
   const retryMs = data?.retry_after_at ? new Date(data.retry_after_at).getTime() - Date.now() : 0;
   const cooling = retryMs > 0;
 

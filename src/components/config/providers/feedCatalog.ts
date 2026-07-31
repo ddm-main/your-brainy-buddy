@@ -7,7 +7,9 @@ export type EditKind = "kotak" | "broker" | "key" | "info";
 /** Keys returned by market-test-connection `mode: "surfaces"`. */
 export type SurfaceKey =
   | "quotes" | "index_quotes" | "depth" | "candles_1d" | "candles_index_1d" | "candles_intraday"
-  | "funds" | "holdings" | "positions";
+  | "funds" | "holdings" | "positions"
+  | "fundamentals" | "company_info" | "shares" | "indicators"
+  | "bhavcopy" | "constituents" | "corp_actions";
 
 export type UsedBy = { label: string; to: string };
 
@@ -44,7 +46,7 @@ const HOLDINGS: UsedBy = { label: "Holdings", to: "/market/holdings" };
 const POSITIONS: UsedBy = { label: "Positions", to: "/market/positions" };
 const ORDERS: UsedBy = { label: "Orders", to: "/market/orders" };
 const PORTFOLIO: UsedBy = { label: "Portfolio", to: "/market/portfolio" };
-const BREAKOUT: UsedBy = { label: "Breakout", to: "/market/screener/breakout" };
+const BREAKOUT: UsedBy = { label: "Breakout", to: "/market/breakout" };
 const AUTOTRADE: UsedBy = { label: "AutoTrade", to: "/market/autotrade" };
 const GTT: UsedBy = { label: "GTT", to: "/market/gtt" };
 const AI_ENGINE: UsedBy = { label: "AI Engine", to: "/market/ai" };
@@ -349,10 +351,11 @@ export function allFreshnessTargets(): { name: string; column: string }[] {
 // Mirrors resolver.ts's PRIORITY_CHAINS / FEED_FIELDS. `chain` is the built-in
 // order; pinning a provider in the UI only moves it to the front — the rest
 // stay as fallbacks so a pinned-but-down vendor degrades instead of going dark.
-export type RoutedProvider = "kotak" | "yahoo" | "nse" | "fmp" | "alpha" | "computed";
+export type RoutedProvider = "kotak" | "shoonya" | "yahoo" | "nse" | "fmp" | "alpha" | "computed";
 
 export const ROUTED_PROVIDER_LABEL: Record<RoutedProvider, string> = {
   kotak: "Kotak Neo",
+  shoonya: "Shoonya",
   yahoo: "Yahoo Finance",
   nse: "NSE",
   fmp: "Fin. Modeling Prep",
@@ -396,10 +399,19 @@ export type RoutedFeed = {
   sessionOnly?: boolean;
   /** Routing is fixed for this feed (single source, or a write path). */
   routable?: boolean;
+  /**
+   * Account-bound feed: describes ONE broker connection, not a shared data
+   * feed. Kept out of the app-wide health tally so a disconnected personal
+   * broker never reads as a platform outage.
+   */
+  perUser?: boolean;
+  /** Pulled on demand (no scheduler) — a cold table is expected, not stale. */
+  onDemand?: boolean;
   /** Providers that cannot serve this feed even though they're in scope. */
   unsupported?: Partial<Record<RoutedProvider, string>>;
   note?: string;
 };
+
 
 export const ROUTED_FEEDS: RoutedFeed[] = [
   // ---- Live market -------------------------------------------------------
@@ -411,7 +423,7 @@ export const ROUTED_FEEDS: RoutedFeed[] = [
   { id: "range_52w", label: "52-week range", desc: "52w high / low (from live quote)", group: "live",
     chain: ["kotak", "yahoo", "nse", "fmp"], surface: "quotes" },
   { id: "depth", label: "Market depth", desc: "5-level bid / ask ladder", group: "live",
-    chain: ["kotak"], surface: "depth", routable: false, sessionOnly: true,
+    chain: ["kotak", "shoonya"], surface: "depth", routable: false, sessionOnly: true,
     note: "Broker-only, live — never persisted. Empty ladder outside market hours is normal." },
   // Kotak Neo's quote API has no index instruments (NSE:^NSEI always returns
   // empty), so indices are Yahoo-first by design — Kotak stays in the chain
@@ -437,44 +449,48 @@ export const ROUTED_FEEDS: RoutedFeed[] = [
     note: "Forming last bar is stitched from the live Kotak quote so chart and price stay in sync." },
 
   { id: "bhavcopy", label: "NSE EOD bhavcopy", desc: "Official settlement OHLCV per trading day", group: "history",
-    chain: ["nse"], routable: false,
+    chain: ["nse"], routable: false, surface: "bhavcopy",
     table: { name: "market_eod_nse", column: "fetched_at" }, freshMins: 60 * 30 },
 
   // ---- Account -----------------------------------------------------------
+  // Account rows describe the signed-in user's own broker connection, so they
+  // are marked perUser and stay out of the app-wide feed tally.
   { id: "funds", label: "Funds / margin", desc: "Available and used margin", group: "account",
-    chain: ["kotak"], surface: "funds", routable: false,
+    chain: ["kotak", "shoonya"], surface: "funds", routable: false, perUser: true, onDemand: true,
     table: { name: "market_funds", column: "synced_at" }, freshMins: 60 * 24 },
   { id: "holdings", label: "Holdings", desc: "Demat holdings with average cost", group: "account",
-    chain: ["kotak"], surface: "holdings", routable: false,
+    chain: ["kotak", "shoonya"], surface: "holdings", routable: false, perUser: true, onDemand: true,
     table: { name: "market_holdings", column: "updated_at" }, freshMins: 60 * 24 },
   { id: "positions", label: "Positions", desc: "Intraday / carry-forward open positions", group: "account",
-    chain: ["kotak"], surface: "positions", routable: false,
+    chain: ["kotak", "shoonya"], surface: "positions", routable: false, perUser: true, onDemand: true,
     table: { name: "market_positions", column: "updated_at" }, freshMins: 60 * 24 },
   { id: "orders_read", label: "Orders / GTT (read)", desc: "Order book, trade book, GTT list", group: "account",
-    chain: ["kotak"], routable: false, note: "Read live from the broker on demand — not cached." },
+    chain: ["kotak", "shoonya"], routable: false, perUser: true, onDemand: true,
+    note: "Read live from the broker on demand — not cached." },
   { id: "orders_write", label: "Order placement", desc: "Place / modify / cancel, GTT, auto-trade", group: "account",
-    chain: ["kotak"], routable: false, note: "Write path — never probed (no test order is placed)." },
+    chain: ["kotak", "shoonya"], routable: false, perUser: true,
+    note: "Write path — never probed (no test order is placed)." },
 
   // ---- Reference ---------------------------------------------------------
   { id: "fundamentals", label: "Fundamentals", desc: "PE, PB, ROE, growth, margins", group: "reference",
-    chain: ["fmp", "yahoo", "nse"],
+    chain: ["fmp", "yahoo", "nse"], surface: "fundamentals",
     table: { name: "market_fundamentals_global", column: "updated_at" }, freshMins: 60 * 48 },
   { id: "company_info", label: "Company info", desc: "Name, sector, industry", group: "reference",
-    chain: ["fmp", "yahoo", "nse"],
+    chain: ["fmp", "yahoo", "nse"], surface: "company_info",
     table: { name: "market_fundamentals_global", column: "updated_at" }, freshMins: 60 * 24 * 14 },
   { id: "shares", label: "Shares outstanding", desc: "Float used for market-cap maths", group: "reference",
-    chain: ["fmp", "yahoo"],
+    chain: ["fmp", "yahoo"], surface: "shares",
     table: { name: "market_shares_outstanding", column: "updated_at" }, freshMins: 60 * 24 * 30 },
   { id: "indicators", label: "Technical indicators", desc: "RSI, MACD, ADX, moving averages", group: "reference",
-    chain: ["alpha", "computed"],
+    chain: ["alpha", "computed"], surface: "indicators",
     table: { name: "market_indicators_cache", column: "computed_at" }, freshMins: 60 * 24 },
   { id: "ownership", label: "Shareholding", desc: "Promoter / FII / DII holding", group: "reference",
     chain: ["yahoo"], routable: false },
   { id: "constituents", label: "Index constituents", desc: "Nifty / Bank Nifty membership", group: "reference",
-    chain: ["nse"], routable: false,
+    chain: ["nse"], routable: false, surface: "constituents",
     table: { name: "market_index_members", column: "updated_at" }, freshMins: 60 * 24 * 14 },
   { id: "corp_actions", label: "Corporate actions", desc: "Splits, bonuses, dividends", group: "reference",
-    chain: ["nse"], routable: false,
+    chain: ["nse"], routable: false, surface: "corp_actions",
     table: { name: "corporate_actions", column: "updated_at" }, freshMins: 60 * 24 * 14 },
   { id: "news", label: "News", desc: "Headlines per symbol", group: "reference",
     chain: ["yahoo", "nse"], routable: false,

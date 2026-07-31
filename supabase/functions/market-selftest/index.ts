@@ -8,14 +8,17 @@ import { preflight, jsonResponse, errorResponse, requireUserId, corsFor, svcClie
 import { requireCronSecret } from "../_shared/market/cron.ts";
 import { runSelfTest, pruneProbeHistory } from "../_shared/market/selftest.ts";
 
-/** NSE cash session, Mon–Fri 09:15–15:45 IST. */
+/** NSE cash session, Mon–Fri 09:15–15:30 IST. Must match the client helper in
+ *  src/lib/market/feedStatus.ts — the old 15:45 close made the UI and the cron
+ *  job disagree about whether the market was open. */
 function nseSessionOpen(now = new Date()): boolean {
   const ist = new Date(now.getTime() + 5.5 * 3600_000);
   const day = ist.getUTCDay();
   if (day === 0 || day === 6) return false;
   const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
-  return mins >= 555 && mins <= 945;
+  return mins >= 555 && mins <= 930;
 }
+
 
 /** IST calendar date (YYYY-MM-DD) for holiday lookups. */
 function istDate(now = new Date()): string {

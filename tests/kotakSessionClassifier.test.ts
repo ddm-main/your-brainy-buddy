@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isKotakSessionFailure } from "../supabase/functions/_shared/market/kotakErrorClassifier";
+import { parseKotakLimits } from "../supabase/functions/_shared/market/kotakClient";
 
 describe("Kotak session classifier", () => {
   it("treats HTTP 401 as a session failure", () => {
@@ -22,5 +23,22 @@ describe("Kotak session classifier", () => {
     expect(isKotakSessionFailure(403, "session invalid, login required")).toBe(true);
     expect(isKotakSessionFailure(403, "authentication required")).toBe(true);
     expect(isKotakSessionFailure(403, "access token invalid")).toBe(true);
+  });
+});
+
+describe("Kotak limits parser", () => {
+  it("treats a valid all-zero limits payload as ₹0 available, not missing", () => {
+    const funds = parseKotakLimits({
+      Net: 0,
+      MarginUsed: 0,
+      Collateral: 0,
+      AmountUtilizedPrsnt: 0,
+      AmtUntilizedPrsnt: 0,
+      stat: "Ok",
+      stCode: 200,
+    });
+    expect(funds.available_margin).toBe(0);
+    expect(funds.used_margin).toBe(0);
+    expect(funds.net_cash).toBe(0);
   });
 });

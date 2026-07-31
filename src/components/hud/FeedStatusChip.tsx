@@ -1,39 +1,49 @@
-// Navbar chip for data-provider / feed health. Reads the stored self-test
-// result (written by the scheduled `market-selftest` run) so it costs one
-// small query, never a live probe, and clicks through to Market Config.
+// Navbar chip for data-provider / feed health. Reads the SAME shared status
+// engine Feed Routing uses (`useFeedStatus`), so the header number and the
+// panel can never disagree again — both are "x of N platform feeds healthy".
 import { useNavigate } from "react-router-dom";
 import { Activity } from "lucide-react";
 import { useAccessStore } from "@/store/accessStore";
-import { useSurfaceProbes, summarize } from "@/lib/market/selftest";
+import { useFeedStatus } from "@/lib/market/feedStatus";
 
 export default function FeedStatusChip() {
   const nav = useNavigate();
   const canSee = useAccessStore((s) => s.role === "admin" || s.sections?.has("market") === true);
 
-  const { data: rows } = useSurfaceProbes();
+  const { tally, accountTally, checkedAt, loading, sessionOpen, holiday } = useFeedStatus();
 
   if (!canSee) return null;
 
-  const s = rows ? summarize(rows) : null;
-  const loading = !s || s.total === 0;
+  const empty = loading || tally.total === 0;
 
-  // Red means a feed has NO working provider. A feed running on its fallback
-  // (e.g. indices on Yahoo because the broker has no index tokens) is amber —
-  // the old rule painted a permanently working feed red as "IDX DOWN".
-  const color = loading
+  // Red only when a PLATFORM feed has no working provider. Problems limited to
+  // your own broker account are amber, not a platform outage — and the number
+  // shown next to it makes clear which tally is unhealthy.
+  const accountIssues = accountTally.down + accountTally.delayed + accountTally.notSet;
+  const allHealthy = tally.ok === tally.total && accountIssues === 0;
+  const color = empty
     ? "var(--text-muted)"
-    : s.down > 0 ? "var(--danger)"
-    : s.degraded > 0 ? "var(--warn, #f5a524)"
-    : "var(--ok, #38d39f)";
+    : allHealthy ? "var(--ok, #38d39f)"
+    : tally.down > 0 ? "var(--danger)"
+    : "var(--warn, #f5a524)";
 
-  const title = loading
+
+  const title = empty
     ? "Feed routing & providers — no self-test result yet"
-    : `Feed routing & providers — ${s.ok}/${s.total} feeds healthy` +
-      (s.degraded ? `, ${s.degraded} degraded` : "") +
-      (s.down ? `, ${s.down} down` : "") +
-      (s.notConfigured ? `, ${s.notConfigured} not configured` : "") +
-      (s.affected.length ? ` · ${s.affected.join(", ")}` : "") +
-      (s.checkedAt ? ` · checked ${new Date(s.checkedAt).toLocaleTimeString()}` : "");
+    : `Platform feeds — ${tally.ok}/${tally.total} healthy (${tally.live} active` +
+      (tally.fallback ? `, ${tally.fallback} on fallback` : "") +
+      (tally.idle ? `, ${tally.idle} idle` : "") + ")" +
+      (tally.delayed ? `, ${tally.delayed} delayed` : "") +
+      (tally.down ? `, ${tally.down} down` : "") +
+      (tally.notSet ? `, ${tally.notSet} not configured` : "") +
+      (tally.affected.length ? ` · ${tally.affected.join(", ")}` : "") +
+      ` · Your broker account: ${accountTally.ok}/${accountTally.total} healthy` +
+      (accountTally.down ? `, ${accountTally.down} down` : "") +
+      (accountTally.delayed ? `, ${accountTally.delayed} delayed` : "") +
+      (accountTally.notSet ? `, ${accountTally.notSet} not configured` : "") +
+      (accountTally.affected.length ? ` (${accountTally.affected.join(", ")})` : "") +
+      ` · ${holiday ? "NSE holiday" : sessionOpen ? "session open" : "session closed"}` +
+      (checkedAt ? ` · checked ${new Date(checkedAt).toLocaleTimeString()}` : "");
 
   return (
     <button
@@ -50,9 +60,12 @@ export default function FeedStatusChip() {
       aria-label={title}
     >
       <Activity size={11} />
-      <span>{loading ? "—" : `${s.ok}/${s.total}`}</span>
+      <span>{empty ? "—" : `${tally.ok}/${tally.total}`}</span>
+      {!empty && accountIssues > 0 && (
+        <span style={{ opacity: 0.85 }}>· acct {accountTally.ok}/{accountTally.total}</span>
+      )}
+
       <span style={{ width: 6, height: 6, borderRadius: "50%", background: color, boxShadow: `0 0 4px ${color}` }} />
     </button>
   );
 }
-

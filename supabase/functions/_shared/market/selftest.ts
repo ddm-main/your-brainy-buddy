@@ -7,8 +7,10 @@ import { KOTAK_SETTINGS_COLS, type KotakSettings } from "./kotakClient.ts";
 import { SHOONYA_SETTINGS_COLS, type ShoonyaSettings } from "./shoonyaClient.ts";
 import { fmpValidateKey, fmpProfile, fmpRatios } from "./fmpClient.ts";
 import { alphaValidateKey, alphaRSI } from "./alphaVantageClient.ts";
-import { nseMarketStatus, nseIndexConstituents, nseCorporateActions, nseEquityMeta } from "./nseClient.ts";
+import { nseMarketStatus, nseCorporateActions, nseEquityMeta } from "./nseClient.ts";
+import { fetchCsvMembers, SLUG_TO_FILE } from "./indexConstituents.ts";
 import { bseCirculars } from "./bseClient.ts";
+import { refreshFundsSnapshot } from "./funds.ts";
 
 // deno-lint-ignore no-explicit-any
 type Svc = any;
@@ -197,8 +199,8 @@ export async function probeServiceSurfaces(
   provider: string,
   base: { ok: boolean; detail: string | null },
   svc?: Svc,
-): Promise<Record<string, { ok: boolean; detail: string }>> {
-  const out: Record<string, { ok: boolean; detail: string }> = {};
+): Promise<Record<string, { ok: boolean; detail: string; degraded?: boolean }>> {
+  const out: Record<string, { ok: boolean; detail: string; degraded?: boolean }> = {};
   const surfaces = SERVICE_SURFACES[provider] ?? [];
   // Vendor unreachable at all — no point spending calls per surface.
   if (!base.ok) {
@@ -206,8 +208,13 @@ export async function probeServiceSurfaces(
     return out;
   }
 
-  const run = async (surface: string, fn: () => Promise<string>) => {
-    try { out[surface] = { ok: true, detail: await fn() }; }
+  // A probe may answer "working, but on the fallback path" by returning
+  // { detail, degraded: true } instead of a bare string.
+  const run = async (surface: string, fn: () => Promise<string | { detail: string; degraded?: boolean }>) => {
+    try {
+      const r = await fn();
+      out[surface] = typeof r === "string" ? { ok: true, detail: r } : { ok: true, detail: r.detail, degraded: r.degraded };
+    }
     catch (e) { out[surface] = { ok: false, detail: e instanceof Error ? e.message : String(e) }; }
   };
 
@@ -260,10 +267,28 @@ export async function probeServiceSurfaces(
       if (!meta) throw new Error("NSE quote-equity returned nothing for RELIANCE");
       return "NSE quote-equity ok (RELIANCE)";
     });
+    // Probe the path the app actually uses: the niftyindices CSV (NSE archives
+    // mirror as fallback). The old probe called NSE's api/equity-stockIndices,
+    // which is IP-blocked server-side — it reported DOWN for a feed that works.
     await run("constituents", async () => {
-      const rows = await nseIndexConstituents("NIFTY 50");
-      if (rows.length === 0) throw new Error("NSE returned no Nifty 50 constituents");
-      return `${rows.length} Nifty 50 constituents`;
+      const { members, source } = await fetchCsvMembers(SLUG_TO_FILE.nifty50);
+      if (members.length > 0) return `${members.length} Nifty 50 constituents (${source})`;
+      // Both mirrors unreachable right now — a recent stored list still keeps
+      // every consumer working, so that is degraded, not down.
+      if (!svc) throw new Error("index constituent CSV mirrors unreachable");
+      const { data } = await svc.from("market_index_members")
+        .select("symbol,updated_at").eq("index_key", "NIFTY50");
+      const rows = (data ?? []) as Array<{ updated_at: string | null }>;
+      if (rows.length === 0) throw new Error("index constituent CSV mirrors unreachable and no stored list");
+      const newest = rows.reduce((m, r) => Math.max(m, r.updated_at ? new Date(r.updated_at).getTime() : 0), 0);
+      const ageDays = newest ? Math.floor((Date.now() - newest) / 86_400_000) : null;
+      if (ageDays != null && ageDays > 30) {
+        throw new Error(`CSV mirrors unreachable and stored list is ${ageDays}d old`);
+      }
+      return {
+        detail: `stored list — ${rows.length} members${ageDays != null ? `, refreshed ${ageDays}d ago` : ""}`,
+        degraded: true,
+      };
     });
     await run("corp_actions", async () => {
       const rows = await nseCorporateActions("RELIANCE");
@@ -287,6 +312,9 @@ export async function surfaceReport(
   which: "active" | "kotak_neo" | "shoonya" | "yahoo" = "active",
 ): Promise<Record<string, SurfaceResult>> {
   let provider;
+  // Tracked so the funds probe can write a real snapshot through the shared
+  // funds helper (cooldown bookkeeping lives on this settings row).
+  let settingsId: string | null = null;
   if (which === "yahoo") {
     provider = yahooProvider(svc);
   } else if (which === "kotak_neo") {
@@ -296,6 +324,7 @@ export async function surfaceReport(
     const row = candidates.find((r) => !!r.session_token_enc && !!r.sid)
       ?? candidates.find((r) => !!r.totp_secret_enc)
       ?? candidates[0];
+    settingsId = row?.id ?? null;
     provider = row ? kotakProvider(svc, row) : yahooProvider(svc);
   } else if (which === "shoonya") {
     const { data } = await svc.from("market_api_settings").select(SHOONYA_SETTINGS_COLS)
@@ -304,10 +333,14 @@ export async function surfaceReport(
     const row = candidates.find((r) => !!r.session_token_enc)
       ?? candidates.find((r) => !!r.ucc && !!r.vendor_code && !!r.api_secret_enc)
       ?? candidates[0];
+    settingsId = (row as unknown as { id?: string })?.id ?? null;
     provider = row ? shoonyaProvider(svc, row) : yahooProvider(svc);
   } else {
-    provider = (await getActiveProvider(svc, userId)).provider;
+    const active = await getActiveProvider(svc, userId);
+    provider = active.provider;
+    settingsId = active.settings?.id ?? null;
   }
+
 
   const wrap = async (fn: () => Promise<{ detail: string; source?: string; degraded?: boolean }>): Promise<SurfaceResult> => {
     const checked_at = new Date().toISOString();
@@ -390,18 +423,31 @@ export async function surfaceReport(
       return { detail: `${c.length} 15m bars`, source: meta.source };
     },
     funds: async () => {
-      const f = await provider.getFunds();
-      if (f.source === "unavailable") throw new Error("funds not exposed by provider");
-      // An answer with no available-margin figure is not a healthy funds feed.
+      // Go through the shared snapshot path so a successful probe actually
+      // persists `market_funds`. The old probe called the broker directly and
+      // wrote only a pass/fail row, which is why the Funds card could sit on a
+      // day-old snapshot while the probe reported "ok" every hour.
+      const res = await refreshFundsSnapshot({
+        svc, userId, settingsId, provider, respectCooldown: false,
+      });
+      if (res.not_connected) throw new Error(res.reason ?? "broker not connected");
+      if (res.source !== "kotak") throw new Error(res.reason ?? "funds not exposed by provider");
+      const f = res.funds!;
+      // Only a missing figure is degraded. A broker that genuinely reports a
+      // zero balance is a working feed and must not read as an outage.
       const degraded = f.available_margin == null;
       return {
         detail: degraded
           ? `available margin not reported (used=${f.used_margin})`
-          : `available=${f.available_margin} used=${f.used_margin}`,
-        source: f.source,
+          : f.available_margin === 0 && (f.used_margin ?? 0) === 0
+          ? "broker reports a zero balance (available=0)"
+          : `available=${f.available_margin} used=${f.used_margin} (snapshot saved)`,
+        source: provider.name,
         degraded,
       };
     },
+
+
 
     holdings: async () => {
       const h = await provider.getHoldings();
@@ -459,7 +505,7 @@ export async function runSelfTest(
       const s = per[key] ?? { ok: r.ok, detail: r.detail ?? "" };
       mapped[key] = {
         ok: s.ok,
-        state: s.ok ? "ok" : "failed",
+        state: s.ok ? (s.degraded ? "degraded" : "ok") : "failed",
         provider_used: p,
         detail: s.detail ?? "",
         checked_at,
@@ -544,5 +590,14 @@ export async function pruneProbeHistory(svc: Svc, keepDays = 7): Promise<number>
     .lt("created_at", cutoff)
     .eq("endpoint", "market-test-connection");
   if (error) { console.error("probe history prune failed", error); return 0; }
-  return count ?? 0;
+  // Surface rows are upserted per (surface, provider) and never deleted, so a
+  // provider dropped from a chain kept voting on that feed's status forever.
+  // Anything not re-probed within 2 days is no longer evidence.
+  const surfaceCutoff = new Date(Date.now() - 2 * 86_400_000).toISOString();
+  const { error: sErr, count: sCount } = await svc.from("market_surface_probes")
+    .delete({ count: "exact" })
+    .lt("checked_at", surfaceCutoff);
+  if (sErr) console.error("surface probe prune failed", sErr);
+  return (count ?? 0) + (sCount ?? 0);
 }
+
