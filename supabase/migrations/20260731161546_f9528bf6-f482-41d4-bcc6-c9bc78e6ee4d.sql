@@ -1,0 +1,1 @@
+ALTER TABLE public.market_breakout_tracker ADD COLUMN IF NOT EXISTS trigger_price numeric;

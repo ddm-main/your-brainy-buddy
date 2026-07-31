@@ -121,15 +121,22 @@ export interface OptimizerCandidate {
   label: string;
   weights: Record<string, number>;
   metrics: OptimizerMetrics;
+  /** Same weights scored on the held-out later sessions, when a split existed. */
+  test_metrics?: OptimizerMetrics | null;
 }
 export interface OptimizerRun {
   id: string;
   model: string;
   params: { days?: number; threshold?: number; horizon?: string; iterations?: number };
-  baseline: { weights: Record<string, number>; metrics: OptimizerMetrics } | null;
+  baseline: { weights: Record<string, number>; metrics: OptimizerMetrics; test_metrics?: OptimizerMetrics | null } | null;
   candidates: OptimizerCandidate[];
   best: OptimizerCandidate | null;
   sample_n: number | null;
+  symbols?: number | null;
+  sessions?: number | null;
+  split_ok?: boolean;
+  split_date?: string | null;
+  test_n?: number | null;
   created_at: string;
 }
 

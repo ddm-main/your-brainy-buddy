@@ -10,6 +10,7 @@ import {
   breakoutFollowThroughScore, nextEpisodeStatus, scoreDistribution,
   breakoutScoreV4, percentileBandCuts,
   SCORE_BAND_STRONG, SCORE_BAND_MODERATE, SCORE_BAND_WEAK,
+  V4_WEIGHTS,
   type AdvancedSignals, type BreakoutStatus, type BreakoutPatterns,
   type V4Fundamentals, type V4Sentiment,
 } from "../_shared/market/scoring.ts";
@@ -18,6 +19,41 @@ import { yahooChartRetry } from "../_shared/market/yahooClient.ts";
 import { getServiceProvider } from "../_shared/market/provider.ts";
 
 // Rebuild the scorer's input from a market_stock_scores row (joined with stocks).
+// Invert the v4 renormalisation back to the raw 0..1 value each bucket carried,
+// and record the adjustments applied after the buckets (penalties, regime and
+// fundamental multipliers, event cap). With these stored, re-weighting a
+// snapshot under different bucket weights reproduces the live score exactly
+// instead of comparing pre-penalty numbers against post-penalty thresholds.
+function rawV4Detail(v4: {
+  buckets: Record<string, number>;
+  coverage: Record<string, number>;
+  components: Record<string, number>;
+  penalties: Record<string, number>;
+  rawBeforePenalty: number | null;
+  score: number | null;
+}): Record<string, unknown> {
+  const coverShare = Number(v4.components?.coverage_share ?? 0);
+  const scale = coverShare > 0 ? 1 / coverShare : 1;
+  const raw: Record<string, number> = {};
+  for (const [name, w] of Object.entries(V4_WEIGHTS)) {
+    const pts = Number(v4.buckets?.[name] ?? 0);
+    const eff = w * scale;
+    raw[name] = eff > 0 ? Math.round(Math.max(0, Math.min(1, pts / eff)) * 1000) / 1000 : 0;
+  }
+  const penaltyTotal = Object.values(v4.penalties ?? {})
+    .reduce((a, b) => a + Number(b ?? 0), 0);
+  return {
+    raw,
+    penalty_total: Math.round(penaltyTotal * 10) / 10,
+    penalties: v4.penalties ?? {},
+    regime_mult: Number(v4.components?.regime_mult ?? 1),
+    fund_mult: Number(v4.components?.fundamental_mult ?? 1),
+    coverage_share: coverShare,
+    raw_before_penalty: v4.rawBeforePenalty,
+    score: v4.score,
+  };
+}
+
 // v2 fix: `atrContracting` and `macdHistRising` used to be read from yesterday's
 // `score_components`, which is circular (score → components → tomorrow's score).
 // Derive them from raw indicator columns instead so today's score reflects
@@ -478,9 +514,17 @@ Deno.serve(async (req) => {
       sector: string | null; rel_volume: number | null;
       breakout: number; prebreakout: number; swing: number;
       liquidityOk: boolean; components: unknown;
+      // Pivot / prior-high the breakout cleared — recorded as the episode's
+      // trigger price so day-1 follow-through is measurable (entry_close on
+      // detection day is by definition a 0.00% return).
+      trigger: number | null;
       v4: number | null;
       v4Buckets?: Record<string, number>;
       v4Coverage?: Record<string, number>;
+      // Raw 0..1 bucket values plus the post-bucket adjustments, so the
+      // Calibration Lab can re-weight a snapshot exactly the way the live
+      // scorer would have — penalties and multipliers included.
+      v4Raw?: Record<string, unknown>;
     }
     const scored: Scored[] = [];
     let updated = 0;
@@ -593,8 +637,10 @@ Deno.serve(async (req) => {
           sector: r.sector ?? null, rel_volume: r.rel_volume ?? null,
           breakout: bs.score, prebreakout: ps.score, swing: sw.score,
           liquidityOk: liquidity.ok, components: scoreComponents,
+          trigger: snap.pivotLevel ?? snap.rollingHigh20 ?? null,
           v4: v4.score,
           v4Buckets: v4.buckets, v4Coverage: v4.coverage,
+          v4Raw: rawV4Detail(v4),
         });
       }));
     }
@@ -698,6 +744,9 @@ Deno.serve(async (req) => {
             score: x.v4, band: bandOf(x.v4 as number),
             rank_pct: histRank.get(`${x.symbol}|${x.exchange}`) ?? null,
             close: x.close, buckets: x.v4Buckets ?? null, coverage: x.v4Coverage ?? null,
+            // Raw bucket values + penalty/multiplier detail: lets the optimizer
+            // re-weight this snapshot into a *comparable* post-penalty score.
+            raw_buckets: x.v4Raw ?? null,
             // Stamped here or the calibration fit silently drops every live row.
             is_liquid_tradable: x.liquidityOk,
             // This pass runs with full market context (regime, sector strength).
@@ -729,15 +778,61 @@ Deno.serve(async (req) => {
     // days_tracked or re-appending the score trend.
     const tracking = { snapshots: 0, opened: 0, updated_ep: 0, failed: 0, closed: 0 };
     try {
+      // The tracker follows the SAME model the UI, the score-explain page and
+      // the Calibration Lab use: v4. It used to open and tick episodes on the
+      // legacy `breakoutScore` while displaying v4 next to it, so "Health" and
+      // "Score" described two different models and the explain link opened a
+      // number the episode was never based on. Legacy is still recorded, as a
+      // secondary column, for continuity of the older episodes.
+      const v4Of = (x: Scored): number | null => (x.v4 == null ? null : x.v4);
       const qualifiers = scored.filter(
-        (x) => x.close != null && x.liquidityOk && x.breakout >= BREAKOUT_QUALIFY_SCORE,
+        (x) => x.close != null && x.liquidityOk && (v4Of(x) ?? 0) >= BREAKOUT_QUALIFY_SCORE,
+      );
+      // Snapshot near-misses too (>= 60): a name that approaches the threshold
+      // for days before breaking out otherwise leaves no run-up history, and
+      // the calibration sample is artificially truncated at the qualify line.
+      const SNAPSHOT_MIN_SCORE = 60;
+      const snapshotSet = scored.filter(
+        (x) => x.close != null && x.liquidityOk && (v4Of(x) ?? 0) >= SNAPSHOT_MIN_SCORE,
       );
       const scoredByKey = new Map(scored.map((x) => [`${x.symbol}|${x.exchange}`, x]));
 
+      // Rank of each score inside today's liquid universe. "82" means nothing
+      // on a day when 400 names clear 80; the percentile does.
+      const rankPool = scored.filter((x) => x.liquidityOk && x.v4 != null)
+        .map((x) => ({ k: `${x.symbol}|${x.exchange}`, v: x.v4 as number }))
+        .sort((a, b) => a.v - b.v);
+      const rankPct = new Map<string, number>();
+      rankPool.forEach((it, i) => rankPct.set(
+        it.k, rankPool.length > 1 ? Math.round((i / (rankPool.length - 1)) * 1000) / 10 : 50));
+
+      // Trading sessions, newest first — taken from the pipeline's own daily
+      // distribution row so "days tracked" counts sessions, not calendar days,
+      // and a skipped session leaves a visible gap in the score trend.
+      const sessions: string[] = await (async () => {
+        const { data } = await svc.from("market_score_distribution")
+          .select("trade_date").eq("model", "breakout_v4")
+          .order("trade_date", { ascending: false }).limit(120);
+        const list = (data ?? []).map((d: any) => String(d.trade_date));
+        if (!list.includes(today)) list.unshift(today);
+        return list;
+      })();
+      const sessionIdx = new Map(sessions.map((d, i) => [d, i]));
+      // Sessions strictly between `from` and today (0 when consecutive).
+      const sessionsSince = (from: string | null): number | null => {
+        if (!from) return null;
+        const a = sessionIdx.get(from);
+        const b = sessionIdx.get(today);
+        if (a == null || b == null) return null;
+        return Math.max(0, a - b);
+      };
+
       // 1. Snapshot today's qualifiers (per-symbol daily score history).
-      const snapRows = qualifiers.map((x) => ({
+      const snapRows = snapshotSet.map((x) => ({
         symbol: x.symbol, exchange: x.exchange, trade_date: today,
-        breakout_score: x.breakout, prebreakout_score: x.prebreakout, swing_score: x.swing,
+        // breakout_score carries the v4 score (the tracked model); the legacy
+        // score stays available through market_stock_scores.
+        breakout_score: v4Of(x) ?? x.breakout, prebreakout_score: x.prebreakout, swing_score: x.swing,
         close: x.close, market_cap: x.market_cap, sector: x.sector,
         rel_volume: x.rel_volume, regime, components: x.components,
         computed_at: new Date().toISOString(),
@@ -761,41 +856,111 @@ Deno.serve(async (req) => {
       }
       const openKeys = new Set(openEps.map((e) => `${e.symbol}|${e.exchange}`));
 
+      // Today's actual bar extremes for the tracked names, so the episode
+      // records the worst drawdown it put you through (MAE) and the best price
+      // it printed — not just where it happened to close.
+      const barBySymbol = new Map<string, { high: number | null; low: number | null }>();
+      {
+        const watched = Array.from(new Set([
+          ...openEps.map((e) => String(e.symbol)),
+          ...qualifiers.map((x) => x.symbol),
+        ]));
+        for (let i = 0; i < watched.length; i += 300) {
+          const { data } = await svc.from("market_daily_prices")
+            .select("symbol,exchange,high,low")
+            .eq("trade_date", today)
+            .in("symbol", watched.slice(i, i + 300));
+          for (const d of data ?? []) {
+            barBySymbol.set(`${d.symbol}|${d.exchange}`, {
+              high: d.high == null ? null : Number(d.high),
+              low: d.low == null ? null : Number(d.low),
+            });
+          }
+        }
+      }
+
       const epUpdates: any[] = [];
       for (const e of openEps) {
         const key = `${e.symbol}|${e.exchange}`;
         const now = scoredByKey.get(key);
         if (!now || now.close == null) continue; // no data today — leave untouched
+        const nowScore = v4Of(now) ?? now.breakout;
         const alreadyToday = e.last_evaluated_date === today;
         const entry = Number(e.entry_close) || now.close;
         const prevDays = alreadyToday ? Math.max(0, (e.days_tracked ?? 1) - 1) : (e.days_tracked ?? 1);
-        const prevBelow = alreadyToday ? e.below_threshold_days ?? 0 : e.below_threshold_days ?? 0;
+        // A re-run on the same session must not count as another session. The
+        // stored counter already includes today's increment, so reverse it
+        // before ticking again — without this an intraday re-run marched the
+        // counter up until the episode cooled on its own re-runs (observed
+        // live: below_threshold_days = 5 on a 2-session-old episode).
+        const storedBelow = e.below_threshold_days ?? 0;
+        const countedTodayBelow = alreadyToday && (Number(e.last_score) || 0) < BREAKOUT_QUALIFY_SCORE;
+        const prevBelow = countedTodayBelow ? Math.max(0, storedBelow - 1) : storedBelow;
 
         const tick = nextEpisodeStatus({
           status: e.status as BreakoutStatus,
-          entryClose: entry, close: now.close, score: now.breakout,
+          entryClose: entry, close: now.close, score: nowScore,
           daysTracked: prevDays, belowThresholdDays: prevBelow,
         });
-        const peakClose = Math.max(Number(e.peak_close) || entry, now.close);
+        const bar = barBySymbol.get(key);
+        // Peak and trough measure what happened *after* entry. Seeding them at
+        // the entry price made peak return unable to go negative, so a name
+        // that only ever fell still reported "Peak +0.00%" — a number that
+        // implies it traded back to entry when it never did.
+        const prevPeak = e.peak_close == null ? null : Number(e.peak_close);
+        const peakClose = prevPeak == null ? now.close : Math.max(prevPeak, now.close);
+        const prevPeakHigh = e.peak_high == null ? null : Number(e.peak_high);
+        const todayHigh = bar?.high ?? now.close;
+        const peakHigh = Math.max(prevPeakHigh ?? todayHigh, todayHigh, peakClose);
+        const prevTrough = e.trough_low == null ? null : Number(e.trough_low);
+        const todayLow = bar?.low ?? now.close;
+        const troughLow = Math.min(prevTrough ?? todayLow, todayLow);
+        const maePct = entry > 0 ? ((troughLow - entry) / entry) * 100 : 0;
         const peakRet = entry > 0 ? ((peakClose - entry) / entry) * 100 : 0;
-        const daysTracked = alreadyToday ? (e.days_tracked ?? 1) : (e.days_tracked ?? 1) + 1;
+        // Sessions, not rows: a re-run on the same day must not advance it, and
+        // a skipped session must not compress the timeline.
+        const elapsed = sessionsSince(e.first_detected_date);
+        const daysTracked = elapsed != null
+          ? elapsed + 1
+          : (alreadyToday ? (e.days_tracked ?? 1) : (e.days_tracked ?? 1) + 1);
         const baseTrend: number[] = Array.isArray(e.score_trend) ? e.score_trend : [];
-        const scoreTrend = alreadyToday ? baseTrend : [...baseTrend, now.breakout].slice(-SCORE_TREND_CAP);
+        // Missed sessions become explicit nulls so the sparkline shows a gap
+        // instead of silently stitching two distant sessions together.
+        const gap = alreadyToday ? 0 : Math.max(0, (sessionsSince(e.last_evaluated_date) ?? 1) - 1);
+        // On a same-day re-run the trend must be corrected in place, not left
+        // alone: skipping the append froze the last point at the earlier
+        // intraday score while last_score moved on.
+        const scoreTrend = alreadyToday
+          ? (baseTrend.length ? [...baseTrend.slice(0, -1), nowScore] : [nowScore])
+          : [...baseTrend, ...Array(Math.min(gap, SCORE_TREND_CAP)).fill(null), nowScore]
+              .slice(-SCORE_TREND_CAP);
+        // Heals rows already inflated by the re-run bug: you cannot have been
+        // below the threshold on more sessions than you have been tracked.
+        const belowDays = Math.min(tick.belowThresholdDays, daysTracked);
         const ft = breakoutFollowThroughScore({
           entryClose: entry, currentClose: now.close, peakClose,
-          daysTracked, belowThresholdDays: tick.belowThresholdDays,
-          scoreTrend, lastScore: now.breakout,
+          daysTracked, belowThresholdDays: belowDays,
+          scoreTrend: scoreTrend.filter((v): v is number => typeof v === "number"),
+          lastScore: nowScore,
         });
         const terminal = tick.status === "failed" || tick.status === "closed";
 
         epUpdates.push({
           symbol: e.symbol, exchange: e.exchange, first_detected_date: e.first_detected_date,
-          entry_close: entry, detected_score: e.detected_score,
+          entry_close: entry, trigger_price: e.trigger_price ?? null,
+          detected_score: e.detected_score,
+          detected_score_legacy: e.detected_score_legacy ?? null,
+          last_score_legacy: now.breakout,
+          rank_pct: rankPct.get(key) ?? null,
           peak_close: peakClose, peak_return_pct: Math.round(peakRet * 100) / 100,
+          peak_high: Math.round(peakHigh * 100) / 100,
+          trough_low: Math.round(troughLow * 100) / 100,
+          mae_pct: Math.round(maePct * 100) / 100,
+          sessions_elapsed: elapsed,
           current_close: now.close, current_return_pct: Math.round(tick.returnPct * 100) / 100,
-          days_tracked: daysTracked, last_score: now.breakout,
+          days_tracked: daysTracked, last_score: nowScore,
           followthrough_score: ft.score, score_trend: scoreTrend,
-          status: tick.status, below_threshold_days: tick.belowThresholdDays,
+          status: tick.status, below_threshold_days: belowDays,
           sector: now.sector, market_cap: now.market_cap,
           last_evaluated_date: today,
           closed_at: terminal ? new Date().toISOString() : null,
@@ -812,15 +977,46 @@ Deno.serve(async (req) => {
       }
 
       // 3. Open fresh episodes for today's qualifiers with no open episode.
+      // Cooldown: a name that just failed shouldn't reopen the next session on
+      // the same tape — require 3 clear sessions after a terminal episode.
+      const REOPEN_COOLDOWN_SESSIONS = 3;
+      const blockedUntilSession = new Map<string, number>();
+      {
+        const since = sessions[Math.min(sessions.length - 1, 10)] ?? today;
+        const { data } = await svc.from("market_breakout_tracker")
+          .select("symbol,exchange,last_evaluated_date,status")
+          .in("status", ["failed", "closed"])
+          .gte("last_evaluated_date", since);
+        for (const d of data ?? []) {
+          const gapSessions = sessionsSince(String(d.last_evaluated_date));
+          if (gapSessions != null && gapSessions < REOPEN_COOLDOWN_SESSIONS) {
+            blockedUntilSession.set(`${d.symbol}|${d.exchange}`, gapSessions);
+          }
+        }
+      }
       const newEps = qualifiers
-        .filter((x) => !openKeys.has(`${x.symbol}|${x.exchange}`))
+        .filter((x) => {
+          const k = `${x.symbol}|${x.exchange}`;
+          return !openKeys.has(k) && !blockedUntilSession.has(k);
+        })
         .map((x) => ({
           symbol: x.symbol, exchange: x.exchange, first_detected_date: today,
-          entry_close: x.close, detected_score: x.breakout,
-          peak_close: x.close, peak_return_pct: 0,
+          entry_close: x.close, trigger_price: x.trigger,
+          detected_score: v4Of(x) ?? x.breakout,
+          detected_score_legacy: x.breakout,
+          last_score_legacy: x.breakout,
+          rank_pct: rankPct.get(`${x.symbol}|${x.exchange}`) ?? null,
+          // Peak is the best close *after* entry. On day 1 there is no such
+          // close yet, so it stays unknown instead of being pinned to entry
+          // (which is what made peak return unable to print a negative).
+          peak_close: null, peak_return_pct: null,
+          // Nothing has happened after entry yet — peak/trough/MAE are unknown,
+          // not zero. Zero here is what made day-1 rows look measured.
+          peak_high: null, trough_low: null,
+          mae_pct: null, sessions_elapsed: 0,
           current_close: x.close, current_return_pct: 0,
-          days_tracked: 1, last_score: x.breakout,
-          followthrough_score: 50, score_trend: [x.breakout],
+          days_tracked: 1, last_score: v4Of(x) ?? x.breakout,
+          followthrough_score: null, score_trend: [v4Of(x) ?? x.breakout],
           status: "active", below_threshold_days: 0,
           sector: x.sector, market_cap: x.market_cap,
           last_evaluated_date: today,

@@ -28,6 +28,12 @@ interface Row {
   score: number;
   raw: Record<string, number>;   // 0..1 per present bucket
   present: string[];
+  // Everything the live scorer did AFTER the weighted bucket sum (penalties,
+  // regime and fundamental multipliers, clamping), captured as the difference
+  // between the stored final score and the stored bucket sum. Re-weighting
+  // without it compares pre-penalty candidates against a post-penalty
+  // threshold, so the cohort metrics describe a model that does not exist.
+  adjust: number;
   ret: number | null;            // absolute forward return, chosen horizon
   rel: number | null;            // benchmark-relative forward return
 }
@@ -64,7 +70,7 @@ function rescore(row: Row, w: Record<string, number>): number {
   if (presentW <= 0) return 0;
   let pts = 0;
   for (const b of row.present) pts += (row.raw[b] ?? 0) * (w[b] ?? 0) * (100 / presentW);
-  return Math.max(0, Math.min(100, pts));
+  return Math.max(0, Math.min(100, pts + row.adjust));
 }
 
 function evaluate(rows: Row[], w: Record<string, number>, threshold: number): Metrics {
@@ -112,6 +118,14 @@ Deno.serve(async (req) => {
     const horizon: "5d" | "10d" | "21d" = ["5d", "10d", "21d"].includes(body.horizon) ? body.horizon : "21d";
     const iterations = Math.max(20, Math.min(Number(body.iterations ?? 400) || 400, 2000));
     const persist = body.persist !== false;
+    // Overlapping windows make every 21-day sample ~21x redundant, which
+    // inflates the apparent sample size and lets the search fit noise. Keep
+    // one session out of every `horizonDays` unless explicitly disabled.
+    const horizonDays = horizon === "5d" ? 5 : horizon === "10d" ? 10 : 21;
+    const deoverlap = body.deoverlap !== false;
+    // Hold out the most recent third of sessions: a weight vector is only
+    // interesting if it also wins on data the search never saw.
+    const testFraction = Math.max(0.1, Math.min(Number(body.test_fraction ?? 0.3) || 0.3, 0.5));
 
     const svc = svcClient();
     const since = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
@@ -123,7 +137,7 @@ Deno.serve(async (req) => {
     const PAGE = 1000;
     for (let from = 0; from < 60_000; from += PAGE) {
       const { data, error } = await svc.from("market_score_history")
-        .select(`symbol,trade_date,score,buckets,coverage,is_liquid_tradable,context_neutral,${retCol},${relCol}`)
+        .select(`symbol,trade_date,score,buckets,coverage,raw_buckets,is_liquid_tradable,context_neutral,${retCol},${relCol}`)
         .eq("model", model)
         .gte("trade_date", since)
         .not(relCol, "is", null)
@@ -146,15 +160,23 @@ Deno.serve(async (req) => {
         const presentW = present.reduce((s, b) => s + BASE[b], 0);
         if (presentW <= 0) continue;
         const raw: Record<string, number> = {};
+        const stored = (d.raw_buckets ?? null) as { raw?: Record<string, number> } | null;
         for (const b of present) {
+          if (stored?.raw && stored.raw[b] != null) { raw[b] = Number(stored.raw[b]); continue; }
           const eff = BASE[b] * (100 / presentW);
           raw[b] = eff > 0 ? Math.max(0, Math.min(1, Number(buckets[b] ?? 0) / eff)) : 0;
         }
+        // Bucket sum under the LIVE weights vs the score actually stored: the
+        // gap is the penalty/multiplier effect for this row.
+        let liveSum = 0;
+        for (const b of present) liveSum += raw[b] * BASE[b] * (100 / presentW);
+        const adjust = Number(d.score ?? 0) - liveSum;
         rows.push({
           symbol: String(d.symbol),
           trade_date: String(d.trade_date),
           score: Number(d.score ?? 0),
           raw, present,
+          adjust: Number.isFinite(adjust) ? adjust : 0,
           ret: d[retCol] == null ? null : Number(d[retCol]),
           rel: d[relCol] == null ? null : Number(d[relCol]),
         });
@@ -162,27 +184,52 @@ Deno.serve(async (req) => {
       if (data.length < PAGE) break;
     }
 
-    if (rows.length < 100) {
+    // Thin the overlap, then split train / test by date.
+    const allDates = Array.from(new Set(rows.map((r) => r.trade_date))).sort();
+    const keepDates = deoverlap
+      ? new Set(allDates.filter((_, i) => i % horizonDays === 0))
+      : new Set(allDates);
+    const usable = rows.filter((r) => keepDates.has(r.trade_date));
+    const usedDates = Array.from(keepDates).sort();
+    const cut = usedDates[Math.max(0, Math.floor(usedDates.length * (1 - testFraction)) - 1)] ?? "";
+    const trainRows = usable.filter((r) => r.trade_date <= cut);
+    const testRows = usable.filter((r) => r.trade_date > cut);
+    // Too few sessions to hold anything out — fall back to in-sample only and
+    // say so, rather than reporting a meaningless test score.
+    const splitOk = trainRows.length >= 100 && testRows.length >= 50;
+    const fitRows = splitOk ? trainRows : usable;
+
+    if (usable.length < 100) {
       return jsonResponse(req, {
         ok: false,
         reason: "not_enough_history",
-        message: `only ${rows.length} matured snapshots with bucket detail in the last ${days} days — need 100+. Run market-score-backfill and market-score-evaluate first.`,
-        sample_n: rows.length,
+        message: `only ${usable.length} non-overlapping matured snapshots with bucket detail in the last ${days} days — need 100+. Run market-score-backfill and market-score-evaluate first.`,
+        sample_n: usable.length,
+        raw_rows: rows.length,
       });
     }
 
-    const baseline = evaluate(rows, BASE, threshold);
+    const baseline = evaluate(fitRows, BASE, threshold);
+    const baselineTest = splitOk ? evaluate(testRows, BASE, threshold) : null;
 
     // Search: coordinate perturbation around the live weights, keeping the
     // vector normalised to 100 so scores stay on the same scale.
-    const candidates: { weights: Record<string, number>; metrics: Metrics; label: string }[] = [];
+    const candidates: {
+      weights: Record<string, number>; metrics: Metrics; label: string;
+      test_metrics: Metrics | null;
+    }[] = [];
     const seen = new Set<string>();
     const push = (w: Record<string, number>, label: string) => {
       const nw = normalise(w);
       const key = BUCKETS.map((b) => nw[b]).join("|");
       if (seen.has(key)) return;
       seen.add(key);
-      candidates.push({ weights: nw, metrics: evaluate(rows, nw, threshold), label });
+      candidates.push({
+        weights: nw,
+        metrics: evaluate(fitRows, nw, threshold),
+        test_metrics: splitOk ? evaluate(testRows, nw, threshold) : null,
+        label,
+      });
     };
 
     // 1. Single-bucket tilts — readable, explains WHICH bucket carries signal.
@@ -200,13 +247,16 @@ Deno.serve(async (req) => {
       const w: Record<string, number> = {};
       for (const b of BUCKETS) w[b] = Math.max(0, best[b] * (1 + (Math.random() - 0.5) * 1.2 * temp));
       const nw = normalise(w);
-      const m = evaluate(rows, nw, threshold);
+      const m = evaluate(fitRows, nw, threshold);
       if (m.sample_n >= 100 && m.spread > bestSpread) { best = nw; bestSpread = m.spread; }
       if (i % 25 === 0) push(nw, `search #${i}`);
     }
     push(best, "hill-climb best");
 
-    candidates.sort((a, b) => b.metrics.spread - a.metrics.spread);
+    // Rank on out-of-sample spread when there is a hold-out; a candidate that
+    // only wins in-sample is an overfit, not an improvement.
+    candidates.sort((a, b) =>
+      (b.test_metrics?.spread ?? b.metrics.spread) - (a.test_metrics?.spread ?? a.metrics.spread));
     const top = candidates.slice(0, 12);
     const winner = top[0] ?? null;
 
@@ -214,21 +264,29 @@ Deno.serve(async (req) => {
     if (persist) {
       const { data: ins } = await svc.from("market_score_optimizer_runs").insert({
         model,
-        params: { days, threshold, horizon, iterations, since },
-        baseline: { weights: BASE, metrics: baseline },
+        params: {
+          days, threshold, horizon, iterations, since,
+          deoverlap, test_fraction: testFraction, split_ok: splitOk, split_date: cut,
+        },
+        baseline: { weights: BASE, metrics: baseline, test_metrics: baselineTest },
         candidates: top,
         best: winner,
-        sample_n: rows.length,
+        sample_n: fitRows.length,
         created_by: auth.userId ?? null,
       }).select("id").maybeSingle();
       runId = (ins as { id?: string } | null)?.id ?? null;
     }
 
     return jsonResponse(req, {
-      ok: true, run_id: runId, model, params: { days, threshold, horizon, iterations },
-      sample_n: rows.length,
-      sessions: new Set(rows.map((r) => r.trade_date)).size,
-      baseline: { weights: BASE, metrics: baseline },
+      ok: true, run_id: runId, model,
+      params: { days, threshold, horizon, iterations, deoverlap, test_fraction: testFraction },
+      sample_n: fitRows.length,
+      test_n: testRows.length,
+      split_ok: splitOk,
+      split_date: cut,
+      symbols: new Set(usable.map((r) => r.symbol)).size,
+      sessions: usedDates.length,
+      baseline: { weights: BASE, metrics: baseline, test_metrics: baselineTest },
       candidates: top,
       best: winner,
     });

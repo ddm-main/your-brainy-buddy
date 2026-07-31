@@ -25,12 +25,18 @@ const BUCKETS = Object.keys(V4_WEIGHTS);
 const retColor = (v: number | null | undefined) =>
   v == null ? "var(--text-muted)" : v > 0 ? "var(--ok)" : v < 0 ? "var(--danger)" : "var(--text-dim)";
 
-function MetricRow({ label, m, base }: { label: string; m: OptimizerMetrics; base?: OptimizerMetrics }) {
+function MetricRow({ label, m, base, test }: {
+  label: string; m: OptimizerMetrics; base?: OptimizerMetrics; test?: OptimizerMetrics | null;
+}) {
   const delta = base ? m.spread - base.spread : null;
   return (
     <>
       <span style={{ color: "var(--text-dim)" }}>{label}</span>
       <span style={{ textAlign: "right", color: retColor(m.spread) }}>{m.spread.toFixed(2)}</span>
+      <span title="Same weights, on sessions the search never saw"
+            style={{ textAlign: "right", color: test ? retColor(test.spread) : "var(--text-muted)" }}>
+        {test ? test.spread.toFixed(2) : "—"}
+      </span>
       <span style={{ textAlign: "right", color: delta == null ? "var(--text-muted)" : retColor(delta) }}>
         {delta == null ? "—" : `${delta > 0 ? "+" : ""}${delta.toFixed(2)}`}
       </span>
@@ -78,10 +84,14 @@ export default function Calibration() {
   const [horizon, setHorizon] = useState<"5d" | "10d" | "21d">("21d");
   const [searchDays, setSearchDays] = useState(120);
   const [result, setResult] = useState<{
-    baseline?: { weights: Record<string, number>; metrics: OptimizerMetrics } | null;
+    baseline?: { weights: Record<string, number>; metrics: OptimizerMetrics; test_metrics?: OptimizerMetrics | null } | null;
     candidates?: OptimizerCandidate[];
     sample_n?: number;
     sessions?: number;
+    symbols?: number;
+    split_ok?: boolean;
+    split_date?: string | null;
+    test_n?: number;
     message?: string;
     ok?: boolean;
   } | null>(null);
@@ -319,18 +329,30 @@ export default function Calibration() {
               <Chip>{result.sample_n} snapshots</Chip>
               <Chip>{result.sessions} sessions</Chip>
               <Chip>{horizon} horizon</Chip>
+              {result.symbols != null && <Chip>{result.symbols} symbols</Chip>}
+              <Chip>{result.split_ok ? `hold-out ${result.test_n} rows after ${result.split_date}` : "no hold-out — in-sample only"}</Chip>
             </div>
-            <div style={{ fontSize: 10, fontFamily: "var(--font-hud)", display: "grid", gridTemplateColumns: "1.8fr repeat(6, 1fr)", gap: 6 }}>
+            {!result.split_ok && (
+              <div style={{ fontSize: 10, color: "var(--warn)", lineHeight: 1.6, marginBottom: 6 }}>
+                Too few sessions to hold any out — these numbers are in-sample and will flatter the
+                search. Treat them as a hypothesis, not a result.
+              </div>
+            )}
+            <div style={{ fontSize: 10, fontFamily: "var(--font-hud)", display: "grid", gridTemplateColumns: "1.8fr repeat(7, 1fr)", gap: 6 }}>
               <span style={{ color: "var(--text-muted)" }}>weights</span>
               <span style={{ textAlign: "right", color: "var(--text-muted)" }}>spread</span>
+              <span style={{ textAlign: "right", color: "var(--text-muted)" }}>test</span>
               <span style={{ textAlign: "right", color: "var(--text-muted)" }}>Δ vs live</span>
               <span style={{ textAlign: "right", color: "var(--text-muted)" }}>corr</span>
               <span style={{ textAlign: "right", color: "var(--text-muted)" }}>cohort rel</span>
               <span style={{ textAlign: "right", color: "var(--text-muted)" }}>cohort n</span>
               <span style={{ textAlign: "right", color: "var(--text-muted)" }}>hit</span>
-              {result.baseline && <MetricRow label="live weights" m={result.baseline.metrics} />}
+              {result.baseline && (
+                <MetricRow label="live weights" m={result.baseline.metrics} test={result.baseline.test_metrics} />
+              )}
               {result.candidates.map((c) => (
-                <MetricRow key={c.label} label={c.label} m={c.metrics} base={result.baseline?.metrics} />
+                <MetricRow key={c.label} label={c.label} m={c.metrics} test={c.test_metrics}
+                           base={result.baseline?.metrics} />
               ))}
             </div>
             {result.candidates[0] && (

@@ -696,6 +696,13 @@ export function nextEpisodeStatus(inp: EpisodeTickInput): EpisodeTickResult {
   if (inp.status === "cooled" && score >= BREAKOUT_QUALIFY_SCORE) {
     return { status: "active", belowThresholdDays, returnPct };
   }
+  // De-escalate: an "extended" episode that gives back most of the extension
+  // is not extended any more. Without this, the label was one-way — a name
+  // that ran +9% and then round-tripped to +1% stayed badged as extended
+  // until it either failed outright or aged out.
+  if (inp.status === "extended" && returnPct < EXTEND_PCT * 0.5) {
+    return { status: "active", belowThresholdDays, returnPct };
+  }
   return { status: inp.status === "extended" ? "extended" : "active", belowThresholdDays, returnPct };
 }
 

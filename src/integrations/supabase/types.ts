@@ -2135,19 +2135,27 @@ export type Database = {
           current_return_pct: number | null
           days_tracked: number
           detected_score: number | null
+          detected_score_legacy: number | null
           entry_close: number | null
           exchange: string
           first_detected_date: string
           followthrough_score: number | null
           last_evaluated_date: string | null
           last_score: number | null
+          last_score_legacy: number | null
+          mae_pct: number | null
           market_cap: number | null
           peak_close: number | null
+          peak_high: number | null
           peak_return_pct: number | null
+          rank_pct: number | null
           score_trend: Json
           sector: string | null
+          sessions_elapsed: number | null
           status: string
           symbol: string
+          trigger_price: number | null
+          trough_low: number | null
           updated_at: string
         }
         Insert: {
@@ -2158,19 +2166,27 @@ export type Database = {
           current_return_pct?: number | null
           days_tracked?: number
           detected_score?: number | null
+          detected_score_legacy?: number | null
           entry_close?: number | null
           exchange?: string
           first_detected_date: string
           followthrough_score?: number | null
           last_evaluated_date?: string | null
           last_score?: number | null
+          last_score_legacy?: number | null
+          mae_pct?: number | null
           market_cap?: number | null
           peak_close?: number | null
+          peak_high?: number | null
           peak_return_pct?: number | null
+          rank_pct?: number | null
           score_trend?: Json
           sector?: string | null
+          sessions_elapsed?: number | null
           status?: string
           symbol: string
+          trigger_price?: number | null
+          trough_low?: number | null
           updated_at?: string
         }
         Update: {
@@ -2181,19 +2197,27 @@ export type Database = {
           current_return_pct?: number | null
           days_tracked?: number
           detected_score?: number | null
+          detected_score_legacy?: number | null
           entry_close?: number | null
           exchange?: string
           first_detected_date?: string
           followthrough_score?: number | null
           last_evaluated_date?: string | null
           last_score?: number | null
+          last_score_legacy?: number | null
+          mae_pct?: number | null
           market_cap?: number | null
           peak_close?: number | null
+          peak_high?: number | null
           peak_return_pct?: number | null
+          rank_pct?: number | null
           score_trend?: Json
           sector?: string | null
+          sessions_elapsed?: number | null
           status?: string
           symbol?: string
+          trigger_price?: number | null
+          trough_low?: number | null
           updated_at?: string
         }
         Relationships: []
@@ -3739,6 +3763,7 @@ export type Database = {
           is_liquid_tradable: boolean | null
           model: string
           rank_pct: number | null
+          raw_buckets: Json | null
           score: number | null
           symbol: string
           trade_date: string
@@ -3762,6 +3787,7 @@ export type Database = {
           is_liquid_tradable?: boolean | null
           model?: string
           rank_pct?: number | null
+          raw_buckets?: Json | null
           score?: number | null
           symbol: string
           trade_date: string
@@ -3785,6 +3811,7 @@ export type Database = {
           is_liquid_tradable?: boolean | null
           model?: string
           rank_pct?: number | null
+          raw_buckets?: Json | null
           score?: number | null
           symbol?: string
           trade_date?: string
@@ -6927,42 +6954,86 @@ export type Database = {
           symbol: string
         }[]
       }
-      market_score_cohort: {
-        Args: { _days?: number; _model?: string; _threshold?: number }
-        Returns: {
-          avg_rel_21d: number
-          avg_ret_10d: number
-          avg_ret_21d: number
-          avg_ret_5d: number
-          avg_score: number
-          hit_rate_21d: number
-          matured_21: number
-          matured_5: number
-          n_qualified: number
-          trade_date: string
-        }[]
-      }
-      market_score_cohort_symbols: {
-        Args: {
-          _days?: number
-          _limit?: number
-          _model?: string
-          _threshold?: number
-        }
-        Returns: {
-          appearances: number
-          avg_score: number
-          best_ret_21d: number
-          exchange: string
-          first_date: string
-          first_rel_21d: number
-          first_ret_21d: number
-          first_ret_5d: number
-          last_date: string
-          max_score: number
-          symbol: string
-        }[]
-      }
+      market_score_cohort:
+        | {
+            Args: { _days?: number; _model?: string; _threshold?: number }
+            Returns: {
+              avg_rel_21d: number
+              avg_ret_10d: number
+              avg_ret_21d: number
+              avg_ret_5d: number
+              avg_score: number
+              hit_rate_21d: number
+              matured_21: number
+              matured_5: number
+              n_qualified: number
+              trade_date: string
+            }[]
+          }
+        | {
+            Args: {
+              _days?: number
+              _model?: string
+              _population?: string
+              _threshold?: number
+            }
+            Returns: {
+              avg_rel_21d: number
+              avg_ret_10d: number
+              avg_ret_21d: number
+              avg_ret_5d: number
+              avg_score: number
+              hit_rate_21d: number
+              matured_21: number
+              matured_5: number
+              n_qualified: number
+              trade_date: string
+            }[]
+          }
+      market_score_cohort_symbols:
+        | {
+            Args: {
+              _days?: number
+              _limit?: number
+              _model?: string
+              _threshold?: number
+            }
+            Returns: {
+              appearances: number
+              avg_score: number
+              best_ret_21d: number
+              exchange: string
+              first_date: string
+              first_rel_21d: number
+              first_ret_21d: number
+              first_ret_5d: number
+              last_date: string
+              max_score: number
+              symbol: string
+            }[]
+          }
+        | {
+            Args: {
+              _days?: number
+              _limit?: number
+              _model?: string
+              _population?: string
+              _threshold?: number
+            }
+            Returns: {
+              appearances: number
+              avg_score: number
+              best_ret_21d: number
+              exchange: string
+              first_date: string
+              first_rel_21d: number
+              first_ret_21d: number
+              first_ret_5d: number
+              last_date: string
+              max_score: number
+              symbol: string
+            }[]
+          }
       prune_batched: { Args: { _sql: string }; Returns: number }
       prune_old_data: { Args: { _aggressive?: boolean }; Returns: Json }
       purge_old_jarvis_interactions: { Args: never; Returns: undefined }
@@ -6972,6 +7043,7 @@ export type Database = {
       refresh_market_top_movers: { Args: never; Returns: undefined }
       refresh_score_distribution: { Args: { _model?: string }; Returns: number }
       run_daily_maintenance: { Args: never; Returns: Json }
+      score_history_coverage: { Args: { _model?: string }; Returns: Json }
       seed_default_indices: { Args: { _uid: string }; Returns: undefined }
       verify_market_cron_secret: { Args: { _secret: string }; Returns: boolean }
     }
