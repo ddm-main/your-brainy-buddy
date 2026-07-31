@@ -4436,7 +4436,6 @@ export type Database = {
           bb_width: number | null
           breakout_band: string | null
           breakout_freshness_days: number | null
-          breakout_state_days: number | null
           breakout_rank_pct: number | null
           breakout_score: number | null
           breakout_score_v2: number | null
@@ -4548,7 +4547,6 @@ export type Database = {
           bb_width?: number | null
           breakout_band?: string | null
           breakout_freshness_days?: number | null
-          breakout_state_days?: number | null
           breakout_rank_pct?: number | null
           breakout_score?: number | null
           breakout_score_v2?: number | null
@@ -4660,7 +4658,6 @@ export type Database = {
           bb_width?: number | null
           breakout_band?: string | null
           breakout_freshness_days?: number | null
-          breakout_state_days?: number | null
           breakout_rank_pct?: number | null
           breakout_score?: number | null
           breakout_score_v2?: number | null
