@@ -1249,7 +1249,7 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   components.regime_mult = Math.round(regimeMult * 100) / 100;
   components.fundamental_mult = Math.round(fundMult * 1000) / 1000;
   components.coverage_share = Math.round(coverShare * 100) / 100;
-  components.coverage_mult = Math.round(coverageMult * 1000) / 1000;
+  components.coverage_mult = 1; // retired — kept at 1 so stored rows stay comparable
   components.score_before_penalty = Math.round(adjusted * 10) / 10;
 
 
