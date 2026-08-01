@@ -8,6 +8,7 @@
 // the fitted weight / r2 / sample_n per component.
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
+import type { ScoreBandCuts } from "@/lib/market/scoreBands";
 
 export const SCORE_MODEL = "breakout_v4";
 // Below this many matured snapshots a band's hit rate is noise, not evidence.
@@ -70,6 +71,36 @@ export interface CalibrationRow {
 /** Per-bucket attribution rows are stored as `bucket:<name>` components. */
 export const BUCKET_PREFIX = "bucket:";
 
+
+/**
+ * Latest daily percentile band cut-offs. One row per session; the UI reads the
+ * most recent one so "STRONG" means top 2% of that day's liquid pool rather
+ * than a fixed number that drifts with market regime.
+ */
+export function useScoreBandCuts() {
+  return useQuery({
+    queryKey: ["market", "score-band-cuts", SCORE_MODEL],
+    staleTime: 10 * 60_000,
+    queryFn: async (): Promise<ScoreBandCuts | null> => {
+      const { data, error } = await (supabase as any)
+        .from("market_score_distribution")
+        .select("trade_date,strong_cut,moderate_cut,watch_cut,n")
+        .eq("model", SCORE_MODEL)
+        .order("trade_date", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      if (!data) return null;
+      return {
+        trade_date: data.trade_date,
+        strong_cut: num(data.strong_cut),
+        moderate_cut: num(data.moderate_cut),
+        watch_cut: num(data.watch_cut),
+        n: Number(data.n ?? 0),
+      };
+    },
+  });
+}
 
 /** Daily v4 score snapshots for one symbol, oldest → newest. */
 export function useScoreHistory(symbol: string | null | undefined, exchange = "NSE", bars = 60) {

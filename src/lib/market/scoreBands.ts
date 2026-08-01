@@ -5,3 +5,37 @@
 export const SCORE_BAND_STRONG = 70;   // 70+   strong / qualifies for the breakout tracker
 export const SCORE_BAND_MODERATE = 55; // 55-69 moderate
 export const SCORE_BAND_WEAK = 40;     // 40-54 weak
+
+export interface ScoreBandCuts {
+  trade_date: string;
+  strong_cut: number | null;
+  moderate_cut: number | null;
+  watch_cut: number | null;
+  n: number;
+}
+
+export type ScoreBand = "strong" | "moderate" | "watch" | "weak";
+
+/**
+ * Band for a score. When the latest daily distribution row is available the
+ * day's own percentile cut-offs (top 2 / 10 / 25%) decide the band — the same
+ * rule the scorer and market_score_history now use. The absolute 70/55/40
+ * constants remain the fallback for sessions with no distribution row yet, so
+ * a chip never goes blank.
+ */
+export function bandOf(score: number, cuts?: ScoreBandCuts | null): ScoreBand {
+  const strong = cuts?.strong_cut ?? SCORE_BAND_STRONG;
+  const moderate = cuts?.moderate_cut ?? SCORE_BAND_MODERATE;
+  const watch = cuts?.watch_cut ?? SCORE_BAND_WEAK;
+  if (score >= strong) return "strong";
+  if (score >= moderate) return "moderate";
+  if (score >= watch) return "watch";
+  return "weak";
+}
+
+export const BAND_COLOR: Record<ScoreBand, string> = {
+  strong: "var(--ok)",
+  moderate: "var(--accent)",
+  watch: "var(--warn)",
+  weak: "var(--danger)",
+};
