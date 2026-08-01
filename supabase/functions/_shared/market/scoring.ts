@@ -1276,3 +1276,39 @@ export function percentileBandCuts(scores: number[]): ScoreBandCuts {
   };
   return { strong: at(0.02), moderate: at(0.10), watch: at(0.25) };
 }
+
+// Rebuild the raw 0..1 value each bucket carried, plus the adjustments applied
+// after the buckets (penalties, regime / fundamental multipliers). Stored on
+// market_score_history.raw_buckets so re-weighting a snapshot reproduces the
+// live post-penalty score exactly instead of comparing a pre-penalty number
+// against post-penalty thresholds. Shared by the live pipeline and the replay
+// backfill: two copies drifted, and the replay wrote none at all.
+export function v4RawDetail(v4: {
+  buckets: Record<string, number>;
+  coverage: Record<string, number>;
+  components: Record<string, number>;
+  penalties: Record<string, number>;
+  rawBeforePenalty: number | null;
+  score: number | null;
+}): Record<string, unknown> {
+  const coverShare = Number(v4.components?.coverage_share ?? 0);
+  const scale = coverShare > 0 ? 1 / coverShare : 1;
+  const raw: Record<string, number> = {};
+  for (const [name, w] of Object.entries(V4_WEIGHTS)) {
+    const pts = Number(v4.buckets?.[name] ?? 0);
+    const eff = w * scale;
+    raw[name] = eff > 0 ? Math.round(clamp(pts / eff, 0, 1) * 1000) / 1000 : 0;
+  }
+  const penaltyTotal = Object.values(v4.penalties ?? {})
+    .reduce((a, b) => a + Number(b ?? 0), 0);
+  return {
+    raw,
+    penalty_total: Math.round(penaltyTotal * 10) / 10,
+    penalties: v4.penalties ?? {},
+    regime_mult: Number(v4.components?.regime_mult ?? 1),
+    fund_mult: Number(v4.components?.fundamental_mult ?? 1),
+    coverage_share: coverShare,
+    raw_before_penalty: v4.rawBeforePenalty,
+    score: v4.score,
+  };
+}

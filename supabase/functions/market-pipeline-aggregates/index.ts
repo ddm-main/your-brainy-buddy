@@ -8,7 +8,7 @@ import {
   evaluateLiquidity, swingScore, intradayScore,
   BREAKOUT_QUALIFY_SCORE, SCORE_TREND_CAP,
   breakoutFollowThroughScore, nextEpisodeStatus, scoreDistribution,
-  breakoutScoreV4, percentileBandCuts,
+  breakoutScoreV4, percentileBandCuts, v4RawDetail,
   SCORE_BAND_STRONG, SCORE_BAND_MODERATE, SCORE_BAND_WEAK,
   V4_WEIGHTS,
   type AdvancedSignals, type BreakoutStatus, type BreakoutPatterns,
@@ -17,42 +17,6 @@ import {
 import type { IndicatorSnapshot, WeeklySnapshot } from "../_shared/market/indicators.ts";
 import { yahooChartRetry } from "../_shared/market/yahooClient.ts";
 import { getServiceProvider } from "../_shared/market/provider.ts";
-
-// Rebuild the scorer's input from a market_stock_scores row (joined with stocks).
-// Invert the v4 renormalisation back to the raw 0..1 value each bucket carried,
-// and record the adjustments applied after the buckets (penalties, regime and
-// fundamental multipliers, event cap). With these stored, re-weighting a
-// snapshot under different bucket weights reproduces the live score exactly
-// instead of comparing pre-penalty numbers against post-penalty thresholds.
-function rawV4Detail(v4: {
-  buckets: Record<string, number>;
-  coverage: Record<string, number>;
-  components: Record<string, number>;
-  penalties: Record<string, number>;
-  rawBeforePenalty: number | null;
-  score: number | null;
-}): Record<string, unknown> {
-  const coverShare = Number(v4.components?.coverage_share ?? 0);
-  const scale = coverShare > 0 ? 1 / coverShare : 1;
-  const raw: Record<string, number> = {};
-  for (const [name, w] of Object.entries(V4_WEIGHTS)) {
-    const pts = Number(v4.buckets?.[name] ?? 0);
-    const eff = w * scale;
-    raw[name] = eff > 0 ? Math.round(Math.max(0, Math.min(1, pts / eff)) * 1000) / 1000 : 0;
-  }
-  const penaltyTotal = Object.values(v4.penalties ?? {})
-    .reduce((a, b) => a + Number(b ?? 0), 0);
-  return {
-    raw,
-    penalty_total: Math.round(penaltyTotal * 10) / 10,
-    penalties: v4.penalties ?? {},
-    regime_mult: Number(v4.components?.regime_mult ?? 1),
-    fund_mult: Number(v4.components?.fundamental_mult ?? 1),
-    coverage_share: coverShare,
-    raw_before_penalty: v4.rawBeforePenalty,
-    score: v4.score,
-  };
-}
 
 // v2 fix: `atrContracting` and `macdHistRising` used to be read from yesterday's
 // `score_components`, which is circular (score → components → tomorrow's score).
@@ -672,7 +636,7 @@ Deno.serve(async (req) => {
           trigger: snap.pivotLevel ?? snap.rollingHigh20 ?? null,
           v4: v4.score,
           v4Buckets: v4.buckets, v4Coverage: v4.coverage,
-          v4Raw: rawV4Detail(v4),
+          v4Raw: v4RawDetail(v4),
         });
       }));
     }
