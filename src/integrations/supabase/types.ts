@@ -7045,6 +7045,7 @@ export type Database = {
       run_daily_maintenance: { Args: never; Returns: Json }
       score_history_coverage: { Args: { _model?: string }; Returns: Json }
       seed_default_indices: { Args: { _uid: string }; Returns: undefined }
+      stamp_score_history_ranks: { Args: { _model?: string }; Returns: number }
       verify_market_cron_secret: { Args: { _secret: string }; Returns: boolean }
     }
     Enums: {
