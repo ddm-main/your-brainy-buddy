@@ -728,21 +728,24 @@ Deno.serve(async (req) => {
       staleFlagged = count ?? 0;
     }
 
-    // Persist the day's v4 distribution + percentile-anchored band cut-offs so
-    // "STRONG" means the same thing in a weak tape and a hot one.
+    // Persist the day's v4 distribution. The band cut-offs
+    // (strong/moderate/watch_cut) are NOT written here: refresh_score_distribution()
+    // in market-score-evaluate owns those columns and used to overwrite this
+    // pass's values every night with a different definition (p90/p70/p50 vs the
+    // scorer's top 2/10/25%), so two band systems fought over the same row.
     let calibration: Record<string, unknown> | null = null;
+    let dayCuts: { strong: number; moderate: number; watch: number } | null = null;
     try {
       const v4Scores = scored.filter((x) => x.liquidityOk && x.v4 != null).map((x) => x.v4 as number);
       if (v4Scores.length > 0 && latestTradeDate) {
         const dist = scoreDistribution(v4Scores);
-        const cuts = percentileBandCuts(v4Scores);
-        calibration = { ...dist, ...cuts };
+        dayCuts = percentileBandCuts(v4Scores);
+        calibration = { ...dist, ...dayCuts };
         await svc.from("market_score_distribution").upsert({
           trade_date: latestTradeDate,
           model: "breakout_v4",
           n: dist.n,
           p50: dist.p50, p70: dist.p70, p90: dist.p90, max: dist.max,
-          strong_cut: cuts.strong, moderate_cut: cuts.moderate, watch_cut: cuts.watch,
           updated_at: new Date().toISOString(),
         }, { onConflict: "trade_date,model" });
       }
