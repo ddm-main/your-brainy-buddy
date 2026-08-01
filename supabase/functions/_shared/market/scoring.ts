@@ -1228,12 +1228,13 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   if (!liquidity.ok) { penalties.illiquid = 25; penalty += 25; }
 
   const regimeMult = ctx.regime === "bullish" ? 1.05 : ctx.regime === "bearish" ? 0.85 : 1;
-  // Coverage haircut: renormalisation rescales the present buckets back to 100,
-  // so a symbol with no sentiment / patterns / fundamentals was graded on ~65
-  // points and then compared head-to-head with a fully-covered name that had to
-  // earn the hard buckets too. A thin score now reads slightly thin.
-  const coverageMult = 0.9 + 0.1 * clamp(coverShare, 0, 1);
-  const adjusted = clamp(raw * regimeMult * fundMult * coverageMult, 0, 100);
+  // Missing coverage is charged exactly once. It used to be charged twice: the
+  // missing weight was first redistributed over the present buckets (so a thin
+  // name had to earn the same 100 points from fewer factors) and THEN the score
+  // was multiplied by a 0.9-1.0 coverage haircut for the same gap. Coverage is
+  // now metadata only (`components.coverage_share`, surfaced in the explain
+  // page) so a thin score reads as thin instead of being silently discounted.
+  const adjusted = clamp(raw * regimeMult * fundMult, 0, 100);
   let total = clamp(adjusted - penalty, 0, 100);
 
   // Event blackout: results / ex-date inside two sessions makes the setup
