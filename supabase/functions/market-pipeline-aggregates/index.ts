@@ -757,13 +757,25 @@ Deno.serve(async (req) => {
     // realised 5/10/21-session returns as those sessions arrive, so band
     // performance (does 70+ actually beat 40-54?) becomes measurable and
     // Phase 4 calibration can be fitted rather than guessed.
-    const history = { written: 0, evaluated: 0 };
+    const history: {
+      written: number; evaluated: number; failed: number;
+      raw_detail: number; error: string | null; band_source: string;
+    } = { written: 0, evaluated: 0, failed: 0, raw_detail: 0, error: null, band_source: "absolute" };
     try {
       if (latestTradeDate) {
-        const bandOf = (v: number) =>
-          v >= SCORE_BAND_STRONG ? "strong"
-          : v >= SCORE_BAND_MODERATE ? "moderate"
-          : v >= SCORE_BAND_WEAK ? "watch" : "weak";
+        // Bands are relative to the day's own liquid distribution (the same
+        // top-2/10/25% definition refresh_score_distribution persists), with the
+        // absolute constants as the fallback when the pool is too thin to rank.
+        // With fixed 70/55/40 a weak tape whose best name scores 71 reported the
+        // entire universe as WEAK/WATCH.
+        const cuts = dayCuts;
+        if (cuts) history.band_source = "percentile";
+        const bandOf = (v: number) => {
+          const strong = Math.max(cuts?.strong ?? SCORE_BAND_STRONG, SCORE_BAND_MODERATE);
+          const moderate = Math.max(cuts?.moderate ?? SCORE_BAND_MODERATE, SCORE_BAND_WEAK);
+          const watch = cuts?.watch ?? SCORE_BAND_WEAK;
+          return v >= strong ? "strong" : v >= moderate ? "moderate" : v >= watch ? "watch" : "weak";
+        };
         // Percentile of the v4 score within the liquid universe, so a snapshot
         // can be read back relative to the tape it was taken in.
         const v4RankPool = scored.filter((x) => x.liquidityOk && x.v4 != null)
@@ -789,10 +801,22 @@ Deno.serve(async (req) => {
             // This pass runs with full market context (regime, sector strength).
             context_neutral: false,
           }));
+        history.raw_detail = histRows.filter((r) => r.raw_buckets != null).length;
+        // Write failures used to be swallowed (`if (!error)`), which is how
+        // raw_buckets stayed NULL on every stored row while the run reported ok.
         for (let i = 0; i < histRows.length; i += 500) {
+          const chunk = histRows.slice(i, i + 500);
           const { error } = await svc.from("market_score_history")
-            .upsert(histRows.slice(i, i + 500), { onConflict: "symbol,exchange,trade_date,model" });
-          if (!error) history.written += Math.min(500, histRows.length - i);
+            .upsert(chunk, { onConflict: "symbol,exchange,trade_date,model" });
+          if (error) {
+            history.failed += chunk.length;
+            if (!history.error) {
+              history.error = [error.message, (error as { details?: string }).details]
+                .filter(Boolean).join(" | ");
+            }
+          } else {
+            history.written += chunk.length;
+          }
         }
 
         // Forward returns, calibration and the band distribution are NOT
