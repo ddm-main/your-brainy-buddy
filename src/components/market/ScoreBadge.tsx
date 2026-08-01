@@ -1,13 +1,7 @@
 // 0–100 score chip with color ramp and component-breakdown tooltip.
 import { useState } from "react";
-import { SCORE_BAND_STRONG, SCORE_BAND_MODERATE, SCORE_BAND_WEAK } from "@/lib/market/scoreBands";
-
-function rampColor(score: number): string {
-  if (score >= SCORE_BAND_STRONG) return "var(--ok)";
-  if (score >= SCORE_BAND_MODERATE) return "var(--accent)";
-  if (score >= SCORE_BAND_WEAK) return "var(--warn)";
-  return "var(--danger)";
-}
+import { BAND_COLOR, bandOf } from "@/lib/market/scoreBands";
+import { useScoreBandCuts } from "@/lib/market/scoreHistory";
 
 export function ScoreBadge({
   score,
@@ -28,8 +22,11 @@ export function ScoreBadge({
   onClick?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  // Cached query — every badge on a table shares the one distribution row.
+  const { data: cuts } = useScoreBandCuts();
   if (score == null) return <span style={{ color: "var(--text-muted)" }}>—</span>;
-  const color = rampColor(score);
+  const band = bandOf(score, cuts);
+  const color = BAND_COLOR[band];
   return (
     <span
       style={{ position: "relative", display: "inline-block" }}
@@ -54,7 +51,7 @@ export function ScoreBadge({
         }}
         title={provisional
           ? "Provisional — computed before market context (sector/RS/regime) was applied"
-          : onClick ? "Open AI score analysis" : undefined}
+          : onClick ? `Open score breakdown — ${band.toUpperCase()}` : undefined}
       >
         {score}{provisional ? "*" : ""}
       </span>
