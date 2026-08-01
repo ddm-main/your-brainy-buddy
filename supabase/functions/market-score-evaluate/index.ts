@@ -105,6 +105,32 @@ Deno.serve(async (req) => {
     if (distErr) return errorResponse(req, `distribution: ${distErr.message}`, 500);
     steps.distribution_rows = dist ?? 0;
 
+    // Percentile bands + day-relative ranks, now that the distribution row for
+    // each session exists. Bands used to be fixed 70/55/40, which reported an
+    // entire weak session as WEAK even for its strongest names.
+    const { data: rankedRows, error: rankErr } = await svc.rpc("stamp_score_history_ranks", {
+      _model: model,
+    });
+    if (rankErr) return errorResponse(req, `rank: ${rankErr.message}`, 500);
+    steps.ranked_rows = rankedRows ?? 0;
+
+    // Self-check: a broken loop must be visible as a broken loop, not as
+    // "coverage:insufficient". Reports what the evidence layer actually holds.
+    const selfCheck: Record<string, unknown> = {};
+    {
+      const countOf = async (build: (q: any) => any) => {
+        const { count } = await build(svc.from("market_score_history")
+          .select("id", { count: "exact", head: true }).eq("model", model));
+        return count ?? 0;
+      };
+      selfCheck.rows = await countOf((q) => q);
+      selfCheck.rows_with_raw_detail = await countOf((q) => q.not("raw_buckets", "is", null));
+      selfCheck.matured_21d = await countOf((q) => q.not("fwd_rel_21d", "is", null));
+      selfCheck.live_liquid = await countOf((q) =>
+        q.eq("context_neutral", false).eq("is_liquid_tradable", true));
+    }
+    steps.self_check = selfCheck;
+
     // Report what the fit actually had to work with, so a calibration built on
     // 38 alphabetically-first symbols is visible instead of looking authoritative.
     const { data: coverage } = await svc.rpc("score_history_coverage", { _model: model });

@@ -8,51 +8,15 @@ import {
   evaluateLiquidity, swingScore, intradayScore,
   BREAKOUT_QUALIFY_SCORE, SCORE_TREND_CAP,
   breakoutFollowThroughScore, nextEpisodeStatus, scoreDistribution,
-  breakoutScoreV4, percentileBandCuts,
+  breakoutScoreV4, percentileBandCuts, v4RawDetail,
   SCORE_BAND_STRONG, SCORE_BAND_MODERATE, SCORE_BAND_WEAK,
-  V4_WEIGHTS,
+  
   type AdvancedSignals, type BreakoutStatus, type BreakoutPatterns,
   type V4Fundamentals, type V4Sentiment,
 } from "../_shared/market/scoring.ts";
 import type { IndicatorSnapshot, WeeklySnapshot } from "../_shared/market/indicators.ts";
 import { yahooChartRetry } from "../_shared/market/yahooClient.ts";
 import { getServiceProvider } from "../_shared/market/provider.ts";
-
-// Rebuild the scorer's input from a market_stock_scores row (joined with stocks).
-// Invert the v4 renormalisation back to the raw 0..1 value each bucket carried,
-// and record the adjustments applied after the buckets (penalties, regime and
-// fundamental multipliers, event cap). With these stored, re-weighting a
-// snapshot under different bucket weights reproduces the live score exactly
-// instead of comparing pre-penalty numbers against post-penalty thresholds.
-function rawV4Detail(v4: {
-  buckets: Record<string, number>;
-  coverage: Record<string, number>;
-  components: Record<string, number>;
-  penalties: Record<string, number>;
-  rawBeforePenalty: number | null;
-  score: number | null;
-}): Record<string, unknown> {
-  const coverShare = Number(v4.components?.coverage_share ?? 0);
-  const scale = coverShare > 0 ? 1 / coverShare : 1;
-  const raw: Record<string, number> = {};
-  for (const [name, w] of Object.entries(V4_WEIGHTS)) {
-    const pts = Number(v4.buckets?.[name] ?? 0);
-    const eff = w * scale;
-    raw[name] = eff > 0 ? Math.round(Math.max(0, Math.min(1, pts / eff)) * 1000) / 1000 : 0;
-  }
-  const penaltyTotal = Object.values(v4.penalties ?? {})
-    .reduce((a, b) => a + Number(b ?? 0), 0);
-  return {
-    raw,
-    penalty_total: Math.round(penaltyTotal * 10) / 10,
-    penalties: v4.penalties ?? {},
-    regime_mult: Number(v4.components?.regime_mult ?? 1),
-    fund_mult: Number(v4.components?.fundamental_mult ?? 1),
-    coverage_share: coverShare,
-    raw_before_penalty: v4.rawBeforePenalty,
-    score: v4.score,
-  };
-}
 
 // v2 fix: `atrContracting` and `macdHistRising` used to be read from yesterday's
 // `score_components`, which is circular (score → components → tomorrow's score).
@@ -672,7 +636,7 @@ Deno.serve(async (req) => {
           trigger: snap.pivotLevel ?? snap.rollingHigh20 ?? null,
           v4: v4.score,
           v4Buckets: v4.buckets, v4Coverage: v4.coverage,
-          v4Raw: rawV4Detail(v4),
+          v4Raw: v4RawDetail(v4),
         });
       }));
     }
@@ -728,21 +692,24 @@ Deno.serve(async (req) => {
       staleFlagged = count ?? 0;
     }
 
-    // Persist the day's v4 distribution + percentile-anchored band cut-offs so
-    // "STRONG" means the same thing in a weak tape and a hot one.
+    // Persist the day's v4 distribution. The band cut-offs
+    // (strong/moderate/watch_cut) are NOT written here: refresh_score_distribution()
+    // in market-score-evaluate owns those columns and used to overwrite this
+    // pass's values every night with a different definition (p90/p70/p50 vs the
+    // scorer's top 2/10/25%), so two band systems fought over the same row.
     let calibration: Record<string, unknown> | null = null;
+    let dayCuts: { strong: number; moderate: number; watch: number } | null = null;
     try {
       const v4Scores = scored.filter((x) => x.liquidityOk && x.v4 != null).map((x) => x.v4 as number);
       if (v4Scores.length > 0 && latestTradeDate) {
         const dist = scoreDistribution(v4Scores);
-        const cuts = percentileBandCuts(v4Scores);
-        calibration = { ...dist, ...cuts };
+        dayCuts = percentileBandCuts(v4Scores);
+        calibration = { ...dist, ...dayCuts };
         await svc.from("market_score_distribution").upsert({
           trade_date: latestTradeDate,
           model: "breakout_v4",
           n: dist.n,
           p50: dist.p50, p70: dist.p70, p90: dist.p90, max: dist.max,
-          strong_cut: cuts.strong, moderate_cut: cuts.moderate, watch_cut: cuts.watch,
           updated_at: new Date().toISOString(),
         }, { onConflict: "trade_date,model" });
       }
@@ -754,13 +721,25 @@ Deno.serve(async (req) => {
     // realised 5/10/21-session returns as those sessions arrive, so band
     // performance (does 70+ actually beat 40-54?) becomes measurable and
     // Phase 4 calibration can be fitted rather than guessed.
-    const history = { written: 0, evaluated: 0 };
+    const history: {
+      written: number; evaluated: number; failed: number;
+      raw_detail: number; error: string | null; band_source: string;
+    } = { written: 0, evaluated: 0, failed: 0, raw_detail: 0, error: null, band_source: "absolute" };
     try {
       if (latestTradeDate) {
-        const bandOf = (v: number) =>
-          v >= SCORE_BAND_STRONG ? "strong"
-          : v >= SCORE_BAND_MODERATE ? "moderate"
-          : v >= SCORE_BAND_WEAK ? "watch" : "weak";
+        // Bands are relative to the day's own liquid distribution (the same
+        // top-2/10/25% definition refresh_score_distribution persists), with the
+        // absolute constants as the fallback when the pool is too thin to rank.
+        // With fixed 70/55/40 a weak tape whose best name scores 71 reported the
+        // entire universe as WEAK/WATCH.
+        const cuts = dayCuts;
+        if (cuts) history.band_source = "percentile";
+        const bandOf = (v: number) => {
+          const strong = Math.max(cuts?.strong ?? SCORE_BAND_STRONG, SCORE_BAND_MODERATE);
+          const moderate = Math.max(cuts?.moderate ?? SCORE_BAND_MODERATE, SCORE_BAND_WEAK);
+          const watch = cuts?.watch ?? SCORE_BAND_WEAK;
+          return v >= strong ? "strong" : v >= moderate ? "moderate" : v >= watch ? "watch" : "weak";
+        };
         // Percentile of the v4 score within the liquid universe, so a snapshot
         // can be read back relative to the tape it was taken in.
         const v4RankPool = scored.filter((x) => x.liquidityOk && x.v4 != null)
@@ -786,10 +765,22 @@ Deno.serve(async (req) => {
             // This pass runs with full market context (regime, sector strength).
             context_neutral: false,
           }));
+        history.raw_detail = histRows.filter((r) => r.raw_buckets != null).length;
+        // Write failures used to be swallowed (`if (!error)`), which is how
+        // raw_buckets stayed NULL on every stored row while the run reported ok.
         for (let i = 0; i < histRows.length; i += 500) {
+          const chunk = histRows.slice(i, i + 500);
           const { error } = await svc.from("market_score_history")
-            .upsert(histRows.slice(i, i + 500), { onConflict: "symbol,exchange,trade_date,model" });
-          if (!error) history.written += Math.min(500, histRows.length - i);
+            .upsert(chunk, { onConflict: "symbol,exchange,trade_date,model" });
+          if (error) {
+            history.failed += chunk.length;
+            if (!history.error) {
+              history.error = [error.message, (error as { details?: string }).details]
+                .filter(Boolean).join(" | ");
+            }
+          } else {
+            history.written += chunk.length;
+          }
         }
 
         // Forward returns, calibration and the band distribution are NOT

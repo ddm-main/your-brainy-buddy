@@ -27,7 +27,7 @@ import {
   vwap as vwapSeries, supertrend, mfi as mfiSeries, percentB, detectPatterns,
 } from "../_shared/market/indicators-advanced.ts";
 import {
-  breakoutScoreV4, evaluateLiquidity,
+  breakoutScoreV4, evaluateLiquidity, v4RawDetail,
   SCORE_BAND_STRONG, SCORE_BAND_MODERATE, SCORE_BAND_WEAK,
   type AdvancedSignals, type BreakoutPatterns,
 } from "../_shared/market/scoring.ts";
@@ -187,6 +187,10 @@ Deno.serve(async (req) => {
             // `context: 0` is the honest statement that the sector / RS /
             // regime inputs were absent for this replayed session.
             coverage: { ...v4.coverage, context: 0 },
+            // Raw 0-1 bucket values + penalty detail, same shape the live
+            // pipeline writes. Without them the Calibration Lab could not
+            // replay a replayed row under alternative weights.
+            raw_buckets: v4RawDetail(v4),
             context_neutral: true,
             is_liquid_tradable: liquidity.ok,
           });
@@ -208,9 +212,19 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Replayed rows are written per symbol, so the day-relative rank and band
+    // can only be assigned once the batch is in. Without this the whole replayed
+    // history carried rank_pct = NULL.
+    let ranked: number | null = null;
+    try {
+      const { data } = await svc.rpc("stamp_score_history_ranks", { _model: "breakout_v4" });
+      ranked = typeof data === "number" ? data : null;
+    } catch { /* ranking is additive — never fail the replay */ }
+
     return jsonResponse(req, {
       ok: true,
       drained: false,
+      ranked_rows: ranked,
       symbols: work.length,
       symbols_done: symbolsDone,
       rows_written: rowsWritten,
