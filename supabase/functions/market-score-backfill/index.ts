@@ -212,9 +212,19 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Replayed rows are written per symbol, so the day-relative rank and band
+    // can only be assigned once the batch is in. Without this the whole replayed
+    // history carried rank_pct = NULL.
+    let ranked: number | null = null;
+    try {
+      const { data } = await svc.rpc("stamp_score_history_ranks", { _model: "breakout_v4" });
+      ranked = typeof data === "number" ? data : null;
+    } catch { /* ranking is additive — never fail the replay */ }
+
     return jsonResponse(req, {
       ok: true,
       drained: false,
+      ranked_rows: ranked,
       symbols: work.length,
       symbols_done: symbolsDone,
       rows_written: rowsWritten,
