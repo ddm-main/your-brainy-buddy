@@ -1,17 +1,52 @@
-// 0–100 score chip with color ramp and component-breakdown tooltip.
-import { useState } from "react";
+// 0–100 score chip with component-breakdown tooltip.
+import { useEffect, useState } from "react";
 import { BAND_COLOR, bandOf } from "@/lib/market/scoreBands";
 import { useScoreBandCuts } from "@/lib/market/scoreHistory";
+import { supabase } from "@/integrations/supabase/client";
+
+// The score_components blob is ~600 B a row. Shipping it for all 2 800
+// screener rows to serve a tooltip that opens on one row at a time was one of
+// the biggest egress items in the app, so the badge now fetches the breakdown
+// for a single symbol on first hover and caches it for the session.
+type ComponentKind = "breakout" | "prebreakout" | "swing" | "intraday";
+const componentCache = new Map<string, Record<string, number> | null>();
+
+async function loadComponents(
+  symbol: string, exchange: string, kind: ComponentKind,
+): Promise<Record<string, number> | null> {
+  const cacheKey = `${exchange}:${symbol}:${kind}`;
+  if (componentCache.has(cacheKey)) return componentCache.get(cacheKey) ?? null;
+  const column = kind === "swing" ? "swing_components"
+    : kind === "intraday" ? "intraday_components"
+    : "score_components";
+  const { data } = await (supabase as any)
+    .from("market_stock_scores")
+    .select(`v:${column}`)
+    .eq("symbol", symbol).eq("exchange", exchange)
+    .maybeSingle();
+  const blob = data?.v ?? null;
+  const out = (kind === "breakout" || kind === "prebreakout") ? (blob?.[kind] ?? null) : blob;
+  componentCache.set(cacheKey, out);
+  return out;
+}
 
 export function ScoreBadge({
   score,
   components,
+  symbol,
+  exchange,
+  kind,
   label,
   provisional,
   onClick,
 }: {
   score: number | null | undefined;
   components?: Record<string, number> | null;
+  // When `components` is not supplied, the badge lazy-loads the breakdown for
+  // this symbol on hover instead of the caller pre-fetching it for every row.
+  symbol?: string;
+  exchange?: string | null;
+  kind?: ComponentKind;
   label?: string;
   // True while only the neutral-context EOD pass has written this score —
   // sector strength / relative strength / regime are not in it yet.
@@ -22,9 +57,24 @@ export function ScoreBadge({
   onClick?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [lazy, setLazy] = useState<Record<string, number> | null>(null);
   // Cached query — every badge on a table shares the one distribution row.
   const { data: cuts } = useScoreBandCuts();
+
+  const wantsLazy = open && !components && !!symbol && !!kind;
+  useEffect(() => {
+    if (!wantsLazy) return;
+    let alive = true;
+    loadComponents(symbol!, exchange || "NSE", kind!)
+      .then((c) => { if (alive) setLazy(c); })
+      .catch(() => { /* tooltip simply stays empty */ });
+    return () => { alive = false; };
+  }, [wantsLazy, symbol, exchange, kind]);
+
+  const shown = components ?? lazy;
+
   if (score == null) return <span style={{ color: "var(--text-muted)" }}>—</span>;
+
   const band = bandOf(score, cuts);
   const color = BAND_COLOR[band];
   return (
@@ -55,7 +105,7 @@ export function ScoreBadge({
       >
         {score}{provisional ? "*" : ""}
       </span>
-      {open && (provisional || (components && Object.keys(components).length > 0)) && (
+      {open && (provisional || (shown && Object.keys(shown).length > 0) || wantsLazy) && (
         <span
           style={{
             position: "absolute",
@@ -84,7 +134,11 @@ export function ScoreBadge({
               Provisional — market context not applied yet
             </span>
           )}
-          {Object.entries(components ?? {})
+          {wantsLazy && !shown && (
+            <span style={{ display: "block", color: "var(--text-muted)" }}>loading breakdown…</span>
+          )}
+
+          {Object.entries(shown ?? {})
             .sort((a, b) => b[1] - a[1])
             .map(([k, v]) => (
               <span key={k} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "1px 0" }}>

@@ -18,8 +18,10 @@ import { DEFAULT_STUDIES, makeStudy, normalizeStudy, type IndicatorType, type St
 import { fmtNum, fmtInt, fmtPct, Return1DCell, deriveChangeAbs } from "@/components/hud/DataTable";
 import type { CorporateActionRow } from "@/lib/market/hooks";
 import { marketOpen } from "@/lib/market/hooks";
-import { useBreadth, useCandles, useCorporateActions, useDepth, useFundamentals, useMarketNews, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores, useSyncNewsAndActions } from "@/lib/market/hooks";
+import { useBreadth, useCandles, useCorporateActions, useDepth, useFundamentals, useLatestPriceSession, useMarketNews, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores, useSyncNewsAndActions } from "@/lib/market/hooks";
 import { MarketDepthLadder } from "@/components/market/MarketDepthLadder";
+import { useMarketOpen } from "@/lib/market/useMarketOpen";
+
 import { useDepthPanelVisible } from "@/lib/market/depthPanelPrefs";
 import { computeLiveScore } from "@/lib/market/liveSnapshot";
 import { readPatterns } from "@/lib/market/patternLabels";
@@ -29,6 +31,7 @@ import { getTrustedDayChange } from "@/lib/market/pnl";
 import { FullscreenShell } from "@/components/market/FullscreenShell";
 import { useNotifications } from "@/store/notificationStore";
 import { RefreshCw } from "lucide-react";
+import { currentUserId } from "@/lib/useSession";
 
 const STATE_STORE = "jarvis.analysis.state.v5";
 const LAYOUTS_STORE = "jarvis.analysis.layouts.v1";
@@ -308,12 +311,12 @@ export default function Analysis() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user || cancelled) return;
+      const uid = await currentUserId();
+      if (!uid || cancelled) return;
       const { data } = await supabase
         .from("market_user_prefs")
         .select("allow_delayed_intraday")
-        .eq("user_id", user.id).maybeSingle();
+        .eq("user_id", uid).maybeSingle();
       const v = (data as { allow_delayed_intraday?: boolean } | null)?.allow_delayed_intraday;
       if (typeof v === "boolean" && !cancelled) setAllowDelayed(v);
     })();
@@ -322,10 +325,10 @@ export default function Analysis() {
   useEffect(() => {
     try { localStorage.setItem("mkt.allowDelayedIntraday", allowDelayed ? "1" : "0"); } catch { /* quota */ }
     (async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      const uid = await currentUserId();
+      if (!uid) return;
       await supabase.from("market_user_prefs").upsert(
-        { user_id: user.id, allow_delayed_intraday: allowDelayed },
+        { user_id: uid, allow_delayed_intraday: allowDelayed },
         { onConflict: "user_id" },
       );
     })();
@@ -373,7 +376,9 @@ export default function Analysis() {
   const { data: dailyCandleData } = useCandles(sym, "1D", exchange);
   const { data: sectors = [] } = useSectorStrength();
   const depthVisible = useDepthPanelVisible();
-  const { data: depth } = useDepth(sym, exchange, depthVisible);
+  const marketOpenNow = useMarketOpen();
+  const { data: depth } = useDepth(sym, exchange, depthVisible && marketOpenNow);
+
   const { data: fundData } = useFundamentals(sym, exchange);
   const fund = fundData?.fundamentals as any | undefined;
   // market_cap is stored in rupees; the liquidity gate works in ₹ Cr.
@@ -433,20 +438,29 @@ export default function Analysis() {
   // the panels used to show a green `live` chip at 23:00 IST. When closed,
   // state the EOD session the numbers belong to instead.
   const liveIntraday = !!liveScore && sessionOpen;
-  // How many calendar days behind the scores are. A stalled recompute used to
-  // be invisible: the chip said "EOD 24 Jul" in the same neutral grey whether
-  // that was yesterday or last month.
-  const scoreAgeDays = score?.trade_date
-    ? Math.floor((Date.now() - Date.parse(`${String(score.trade_date).slice(0, 10)}T00:00:00`)) / 86_400_000)
+  // Staleness is measured against the last session that actually has prices,
+  // not the wall clock: on a Sunday, Friday's score is current, while a score
+  // dated before the newest stored bar means the scoring pass fell behind.
+  const { data: latestPriceSession } = useLatestPriceSession();
+  const scoreDate = score?.trade_date ? String(score.trade_date).slice(0, 10) : null;
+  const scoreBehindPipeline = !!scoreDate && !!latestPriceSession && scoreDate < latestPriceSession;
+  const sessionsBehind = scoreBehindPipeline && scoreDate
+    ? Math.max(1, Math.round(
+        (Date.parse(`${latestPriceSession}T00:00:00Z`) - Date.parse(`${scoreDate}T00:00:00Z`)) / 86_400_000,
+      ))
     : null;
   const vintageChip = liveIntraday
     ? <Chip tone="ok">live</Chip>
-    : score?.trade_date
+    : scoreDate
       ? (
-        <Chip tone={scoreAgeDays != null && scoreAgeDays > 1 ? "warn" : "neutral"}>
-          EOD {new Date(score.trade_date as string).toLocaleDateString([], { day: "2-digit", month: "short" })}
-          {scoreAgeDays != null && scoreAgeDays > 1 ? ` · ${scoreAgeDays}d old` : ""}
-        </Chip>
+        <span title={scoreBehindPipeline
+          ? `Scoring pipeline is behind: latest stored session is ${latestPriceSession}, this score is from ${scoreDate}.`
+          : `Latest completed EOD session (${scoreDate}).`}>
+          <Chip tone={scoreBehindPipeline ? "warn" : "neutral"}>
+            EOD {new Date(scoreDate).toLocaleDateString([], { day: "2-digit", month: "short" })}
+            {sessionsBehind != null ? ` · ${sessionsBehind}d behind` : ""}
+          </Chip>
+        </span>
       )
       : undefined;
   // When the session is closed, don't blend the last live snapshot with EOD
@@ -564,7 +578,8 @@ export default function Analysis() {
               totalStudyCount={studies.length}
               settings={settings}
               onSettings={(u) => setSettings(u)}
-              onFullscreen={() => setFs(true)}
+              fullscreen={fs}
+              onFullscreen={() => setFs((v) => !v)}
               onAlert={() => setAlertModalOpen(true)}
               alertCount={alertCount}
               onScreenshot={handleScreenshot}
@@ -774,57 +789,57 @@ export default function Analysis() {
               })()}
             </span>
           </Row>
-          <Row label="RSI (14)" mono>{fmtNum(liveView?.snapshot.rsi14 ?? score?.rsi14, 1)}</Row>
-          <Row label="MACD" mono>
-            {fmtNum(liveView?.snapshot.macd ?? score?.macd, 2)} / {fmtNum(liveView?.snapshot.macdSignal ?? score?.macd_signal, 2)}
-          </Row>
-          <Row label="ADX (14)" mono>{fmtNum(liveView?.snapshot.adx14 ?? score?.adx14, 1)}</Row>
-          <Row label="ATR %" mono>{fmtNum(liveView?.snapshot.atrPct ?? score?.atr_pct, 2)}</Row>
-          <Row label="BB Width" mono>{fmtNum(liveView?.snapshot.bbWidth ?? score?.bb_width, 3)}</Row>
-          {/* Volume/RelVol from a live snapshot is the *running* intraday bar,
-              not a completed daily figure — labelling it plain "Volume" made
-              it look like it contradicted the EOD row. */}
-          <Row label={liveIntraday ? "Rel Volume (partial)" : "Rel Volume"} mono>
-            {fmtNum(liveView?.snapshot.relVolume ?? score?.rel_volume, 2)}
-          </Row>
-          <Row label={liveIntraday ? "Volume (so far today)" : "Volume"} mono>
-            {fmtInt(liveView?.snapshot.volume ?? score?.volume)}
-          </Row>
+          <StatGrid>
+            <CompactStat label="RSI (14)" value={fmtNum(liveView?.snapshot.rsi14 ?? score?.rsi14, 1)} />
+            <CompactStat label="MACD" value={`${fmtNum(liveView?.snapshot.macd ?? score?.macd, 2)} / ${fmtNum(liveView?.snapshot.macdSignal ?? score?.macd_signal, 2)}`} />
+            <CompactStat label="ADX (14)" value={fmtNum(liveView?.snapshot.adx14 ?? score?.adx14, 1)} />
+            <CompactStat label="ATR %" value={fmtNum(liveView?.snapshot.atrPct ?? score?.atr_pct, 2)} />
+            <CompactStat label="BB Width" value={fmtNum(liveView?.snapshot.bbWidth ?? score?.bb_width, 3)} />
+            {/* Volume/RelVol from a live snapshot is the *running* intraday bar,
+                not a completed daily figure — labelling it plain "Volume" made
+                it look like it contradicted the EOD row. */}
+            <CompactStat label={liveIntraday ? "Rel Volume (partial)" : "Rel Volume"} value={fmtNum(liveView?.snapshot.relVolume ?? score?.rel_volume, 2)} />
+            <CompactStat label={liveIntraday ? "Volume (today)" : "Volume"} value={fmtInt(liveView?.snapshot.volume ?? score?.volume)} />
+          </StatGrid>
         </HudPanel>
 
         <HudPanel flow title="Range & Strength" index="A5" actions={vintageChip}>
-          <Row label="Resistance" mono>
-            {fmtNum(liveView?.snapshot.resistance ?? score?.resistance_level ?? null)}
-            {liveView?.snapshot.resistanceTouches ? (
-              <span style={{ color: "var(--text-muted)", fontSize: 10, marginLeft: 6 }}>
-                {liveView.snapshot.resistanceTouches}×{liveView.snapshot.resistanceFallback ? " • range hi" : ""}
+          <StatGrid>
+            <CompactStat label="Resistance" value={
+              <>
+                {fmtNum(liveView?.snapshot.resistance ?? score?.resistance_level ?? null)}
+                {liveView?.snapshot.resistanceTouches ? (
+                  <span style={{ color: "var(--text-muted)", fontSize: 10, marginLeft: 4 }}>
+                    {liveView.snapshot.resistanceTouches}×{liveView.snapshot.resistanceFallback ? " • hi" : ""}
+                  </span>
+                ) : null}
+              </>
+            } />
+            <CompactStat label="Support" value={
+              <>
+                {fmtNum(liveView?.snapshot.support ?? score?.support_level ?? null)}
+                {liveView?.snapshot.supportTouches ? (
+                  <span style={{ color: "var(--text-muted)", fontSize: 10, marginLeft: 4 }}>
+                    {liveView.snapshot.supportTouches}×{liveView.snapshot.supportFallback ? " • lo" : ""}
+                  </span>
+                ) : null}
+              </>
+            } />
+            <CompactStat label="52w High" value={fmtNum(liveView?.snapshot.high52w ?? score?.high_52w)} />
+            <CompactStat label="52w Low" value={fmtNum(liveView?.snapshot.low52w ?? score?.low_52w)} />
+            <CompactStat label="From 52w High" value={
+              <span style={{ color: (liveView?.snapshot.pctFrom52wHigh ?? score?.pct_from_52w_high ?? 0) > -5 ? "var(--ok)" : "var(--text)" }}>
+                {fmtPct(liveView?.snapshot.pctFrom52wHigh ?? score?.pct_from_52w_high, 2, false)}
               </span>
-            ) : null}
-          </Row>
-          <Row label="Support" mono>
-            {fmtNum(liveView?.snapshot.support ?? score?.support_level ?? null)}
-            {liveView?.snapshot.supportTouches ? (
-              <span style={{ color: "var(--text-muted)", fontSize: 10, marginLeft: 6 }}>
-                {liveView.snapshot.supportTouches}×{liveView.snapshot.supportFallback ? " • range lo" : ""}
+            } />
+            <CompactStat label="RS vs NIFTY" value={fmtNum(score?.rel_strength_nifty, 1)} />
+            <CompactStat label="Sector Rank" value={sectorRow?.strength_rank != null ? `#${sectorRow.strength_rank} of ${sectors.length}` : "—"} />
+            <CompactStat label="EMA 20/50/200" value={
+              <span style={{ fontSize: 10 }}>
+                {fmtNum(liveView?.snapshot.ema20 ?? score?.ema20, 0)} / {fmtNum(liveView?.snapshot.ema50 ?? score?.ema50, 0)} / {fmtNum(liveView?.snapshot.ema200 ?? score?.ema200, 0)}
               </span>
-            ) : null}
-          </Row>
-          <Row label="52w High" mono>{fmtNum(liveView?.snapshot.high52w ?? score?.high_52w)}</Row>
-          <Row label="52w Low" mono>{fmtNum(liveView?.snapshot.low52w ?? score?.low_52w)}</Row>
-          <Row label="From 52w High" mono>
-            <span style={{ color: (liveView?.snapshot.pctFrom52wHigh ?? score?.pct_from_52w_high ?? 0) > -5 ? "var(--ok)" : "var(--text)" }}>
-              {fmtPct(liveView?.snapshot.pctFrom52wHigh ?? score?.pct_from_52w_high, 2, false)}
-            </span>
-          </Row>
-          <Row label="RS vs NIFTY" mono>{fmtNum(score?.rel_strength_nifty, 1)}</Row>
-          <Row label="Sector Rank" mono>
-            {sectorRow?.strength_rank != null ? `#${sectorRow.strength_rank} of ${sectors.length}` : "—"}
-          </Row>
-          <Row label="EMA 20/50/200" mono>
-            <span style={{ fontSize: 10 }}>
-              {fmtNum(liveView?.snapshot.ema20 ?? score?.ema20, 0)} / {fmtNum(liveView?.snapshot.ema50 ?? score?.ema50, 0)} / {fmtNum(liveView?.snapshot.ema200 ?? score?.ema200, 0)}
-            </span>
-          </Row>
+            } />
+          </StatGrid>
         </HudPanel>
 
         </>
@@ -1030,11 +1045,17 @@ function Row({ label, children, mono }: { label: string; children: React.ReactNo
   );
 }
 
+function StatGrid({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", columnGap: 12 }}>{children}</div>
+  );
+}
+
 function CompactStat({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6, padding: "2px 0", fontSize: 11 }}>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6, padding: "3px 0", borderBottom: "1px solid var(--edge)", fontSize: 11 }}>
       <span className="hud-label" style={{ color: "var(--text-dim)" }}>{label}</span>
-      <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text)" }}>{value}</span>
+      <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text)", textAlign: "right" }}>{value}</span>
     </div>
   );
 }

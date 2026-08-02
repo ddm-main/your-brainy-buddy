@@ -15,6 +15,8 @@ import {
   LineStyle,
   PriceScaleMode,
   CrosshairMode,
+  TickMarkType,
+
 
   type IChartApi,
   type ISeriesApi,
@@ -31,6 +33,8 @@ import {
 } from "@/lib/market/chartIndicators";
 import { defByType, studyLabel, type Study } from "@/lib/market/indicatorRegistry";
 import { ChartLegend, type LegendRow } from "@/components/market/ChartLegend";
+import { useMarketOpen } from "@/lib/market/useMarketOpen";
+
 
 export type ChartType = "candles" | "bars" | "line" | "area" | "heikin_ashi" | "baseline";
 
@@ -204,7 +208,11 @@ export function CandleChart({
 }) {
 
 
+  const marketOpen = useMarketOpen();
   const ref = useRef<HTMLDivElement>(null);
+  const printedVolRef = useRef<{ key: string; value: number } | null>(null);
+
+
   const chartRef = useRef<IChartApi | null>(null);
   const [legend, setLegend] = useState<CandleDto | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
@@ -303,15 +311,23 @@ export function CandleChart({
     // fetch time). Median-gap detection is a fallback for legacy callers that
     // don't pass `intraday` — it's fragile at market open when only 1–2 bars
     // exist for the day.
-    const _nums = data.map((c) => c.time).filter((t): t is number => typeof t === "number").slice(0, 8);
-    let _medianGap = 0;
-    if (_nums.length >= 2) {
-      const gaps = _nums.slice(1).map((t, i) => t - _nums[i]).sort((a, b) => a - b);
-      _medianGap = gaps[Math.floor(gaps.length / 2)] || 0;
-    }
-    medianGapRef.current = _medianGap;
-    const isIntraday = intraday || (_medianGap > 0 ? _medianGap < 86_400 : false);
-    const isMonthly = _medianGap >= 86_400 * 27;
+    // Detect intraday: caller-supplied prop is the source of truth (known at
+    // fetch time). Median-gap detection is the fallback for legacy callers.
+    // Gaps larger than a day (overnight/weekend breaks) are excluded so an
+    // early session boundary can't push the median past 86400 and mis-flag an
+    // intraday series as daily/monthly.
+    const _nums = data.map((c) => c.time).filter((t): t is number => typeof t === "number");
+    const _allGaps = _nums.slice(1).map((t, i) => t - _nums[i]).filter((g) => g > 0);
+    const _intraGaps = _allGaps.filter((g) => g < 86_400).sort((a, b) => a - b);
+    const _dayGaps = _allGaps.filter((g) => g >= 86_400).sort((a, b) => a - b);
+    const _median = (arr: number[]) => (arr.length ? arr[Math.floor(arr.length / 2)] : 0);
+    // Intraday interval when we have same-day gaps; otherwise the daily+ step.
+    const _medianGap = _intraGaps.length >= Math.max(2, _allGaps.length * 0.5)
+      ? _median(_intraGaps)
+      : (_intraGaps.length && _dayGaps.length === 0 ? _median(_intraGaps) : _median(_dayGaps));
+    medianGapRef.current = _medianGap > 0 ? _medianGap : _median(_intraGaps);
+    const isIntraday = intraday || _intraGaps.length > _dayGaps.length;
+    const isMonthly = !isIntraday && _median(_dayGaps) >= 86_400 * 27;
     // Log-scale safety: LWC's logarithmic price mode blows up on values <= 0
     // (VIX-like series with a 0 print, or overlays). Force Normal when any
     // low is non-positive so the whole chart doesn't disappear silently.
@@ -321,38 +337,37 @@ export function CandleChart({
       // eslint-disable-next-line no-console
       console.warn("[CandleChart] log scale disabled — series contains value <= 0");
     }
-    // Track last-seen day/month across tick formatter calls so we can print
-    // the date on the first tick of a new session (industry standard: TV,
-    // Kite, Tickertape all switch label style at day boundaries).
-    let _lastDayKey = "";
-    let _lastMonthKey = "";
-    const fmtAxis = (t: any) => {
+    // The axis formatter MUST be stateless: lightweight-charts calls
+    // tickMarkFormatter repeatedly, out of order, and for candidate marks it
+    // later discards — so a "did the day change since the last call?" closure
+    // printed the same date twice (e.g. "30 Jul" appearing on two ticks) and
+    // dropped it on real session starts. Instead we use the library's
+    // tickMarkType plus a precomputed set of session-opening bar times.
+    const sessionFirstBar = new Set<number>();
+    if (isIntraday) {
+      let seenDay = "";
+      for (const c of data) {
+        if (typeof c.time !== "number") continue;
+        const k = istDayKey(new Date(c.time * 1000));
+        if (k !== seenDay) { seenDay = k; sessionFirstBar.add(c.time); }
+      }
+    }
+    const fmtAxis = (t: any, tickMarkType?: TickMarkType) => {
       if (typeof t !== "number") return String(t);
       const d = new Date(t * 1000);
-      if (isMonthly) {
-        // Monthly/weekly bars: month + year, with year prefix on Jan.
-        return istMonthYear.format(d);
-      }
+      if (isMonthly) return istMonthYear.format(d);
       if (!isIntraday) {
-        // Daily bars: show DD Mon, prefix year on first tick of a new year.
-        const monthKey = istDayKey(d).slice(0, 7);
-        const yearKey = monthKey.slice(0, 4);
-        const label = istDayMonth.format(d);
-        if (yearKey !== _lastMonthKey.slice(0, 4)) {
-          _lastMonthKey = monthKey;
-          return `${label} '${yearKey.slice(2)}`;
-        }
-        _lastMonthKey = monthKey;
-        return label;
+        // Daily bars: DD Mon, with the year appended on the first tick of a year.
+        return tickMarkType === TickMarkType.Year ? istDate.format(d) : istDayMonth.format(d);
       }
-      // Intraday: show date on the first tick of a new day, else HH:mm.
-      const dayKey = istDayKey(d);
-      if (dayKey !== _lastDayKey) {
-        _lastDayKey = dayKey;
-        return istDayMonth.format(d);
-      }
-      return istTime.format(d);
+      // Intraday: date on a session opening bar / day-or-coarser tick, else HH:mm.
+      const isDayTick =
+        tickMarkType === TickMarkType.Year ||
+        tickMarkType === TickMarkType.Month ||
+        tickMarkType === TickMarkType.DayOfMonth;
+      return isDayTick || sessionFirstBar.has(t) ? istDayMonth.format(d) : istTime.format(d);
     };
+
     const fmtCrosshair = (t: any) => {
       if (typeof t !== "number") return String(t);
       const d = new Date(t * 1000);
@@ -780,7 +795,13 @@ export function CandleChart({
     const series = priceSeriesRef.current;
     const base = liveBarRef.current;
     if (!series || !base) return;
+    // Never synthesise bars outside the session. A delayed/stale quote arriving
+    // on a holiday or after close used to roll brand-new bars stamped "now",
+    // which put a phantom (e.g. "02 Aug") label on the axis and a flat
+    // O=H=L=C / zero-volume candle in the header.
+    if (!marketOpen) return;
     if (livePrice == null && liveVolume == null) return;
+
     const close = livePrice != null && Number.isFinite(livePrice) ? livePrice : base.close;
     const nowSec = Math.floor(Date.now() / 1000);
     const gap = medianGapRef.current;
@@ -816,14 +837,22 @@ export function CandleChart({
     let nextVol = base.volume;
     if (liveVolume != null && Number.isFinite(liveVolume)) {
       if (typeof base.rawTime === "number") {
+        // Sum of volume already printed today, cached per (bar, candle set) so
+        // a fast tick stream doesn't rescan the whole series on every quote.
         const dayStart = Math.floor((base.rawTime + IST_OFFSET_SEC) / 86_400) * 86_400 - IST_OFFSET_SEC;
-        let printed = 0;
-        for (const c of candles) {
-          const t = typeof c.time === "number" ? c.time : 0;
-          if (t >= dayStart && t < base.rawTime) printed += Number(c.volume) || 0;
+        const cacheKey = `${dayStart}|${base.rawTime}|${candles.length}`;
+        let printed = printedVolRef.current?.key === cacheKey ? printedVolRef.current.value : null;
+        if (printed == null) {
+          printed = 0;
+          for (const c of candles) {
+            const t = typeof c.time === "number" ? c.time : 0;
+            if (t >= dayStart && t < base.rawTime) printed += Number(c.volume) || 0;
+          }
+          printedVolRef.current = { key: cacheKey, value: printed };
         }
         const delta = liveVolume - printed;
         nextVol = delta > 0 ? Math.max(base.volume, delta) : base.volume;
+
       } else {
         nextVol = Math.max(base.volume, liveVolume);
       }
@@ -857,7 +886,7 @@ export function CandleChart({
     // legend fell back to the EOD `candles[last]`, showing e.g. 1683.90
     // while the Quote panel showed the live 1720.30.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [livePrice, liveVolume, candles]);
+  }, [livePrice, liveVolume, candles, marketOpen]);
 
 
   // ---- legend rows (value at crosshair, else last bar) ----

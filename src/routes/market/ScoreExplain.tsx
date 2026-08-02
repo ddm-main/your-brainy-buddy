@@ -71,7 +71,7 @@ export default function ScoreExplain() {
         <div style={{ flex: 1 }} />
         <Btn size="sm" onClick={() => nav(`/market/analysis/${encodeURIComponent(sym)}`)}>Chart</Btn>
         <Btn size="sm" onClick={() => nav(`/market/score/${encodeURIComponent(sym)}`)}>History</Btn>
-        <Btn size="sm" onClick={() => nav("/market/calibration")}>Calibration</Btn>
+        <Btn size="sm" onClick={() => nav("/market/breakout")}>Calibration</Btn>
       </div>
 
       {isLoading ? (

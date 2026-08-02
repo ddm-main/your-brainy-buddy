@@ -9,6 +9,7 @@ import { useLiveDepthStore, isFreshDepth } from "./liveDepthStore";
 import type {
   ApiSettings,
   BreadthDaily,
+  CandleDto,
   CandlesResponse,
   IndexConstituent,
   IndexQuote,
@@ -50,9 +51,17 @@ export function useMarketSettings() {
   return useQuery({
     queryKey: ["market", "settings"],
     queryFn: async (): Promise<ApiSettings[]> => {
-      const { data, error } = await supabase.from("market_api_settings").select("*");
+      // EGRESS: this table carries encrypted token blobs the UI never renders;
+      // project only the status fields the ApiSettings type declares.
+      const { data, error } = await supabase
+        .from("market_api_settings")
+        .select(
+          "id,active_provider,consumer_key,base_url,ws_url,exchange,connection_status," +
+          "token_expires_at,last_sync_at,last_error,funds_last_attempt_at,funds_last_error_code," +
+          "funds_retry_after_at,ucc,greeting_name",
+        );
       if (error) throw error;
-      return (data ?? []) as ApiSettings[];
+      return (data ?? []) as unknown as ApiSettings[];
     },
   });
 }
@@ -99,7 +108,10 @@ export function useIndices() {
     queryKey: ["market", "indices"],
     queryFn: () =>
       callMarketFn<{ quotes: IndexQuote[]; breadth: BreadthDaily | null }>("market-indices"),
-    refetchInterval: liveInterval(1_000, 120_000, 15_000),
+    // The index strip is ambient context, not an execution surface — 1 s was
+    // 3 600 edge-fn calls an hour for numbers that move a few paise. 3 s.
+    refetchInterval: liveInterval(3_000, 120_000, 15_000),
+
     placeholderData: (prev: unknown) => prev as any,
     refetchIntervalInBackground: false,
   });
@@ -110,7 +122,9 @@ export function useTopMovers() {
     queryKey: ["market", "top-movers"],
     queryFn: async (): Promise<TopMoverRow[]> => {
       const { data, error } = await supabase
-        .from("market_top_movers" as any).select("*").order("rn", { ascending: true });
+        .from("market_top_movers" as any)
+        .select("symbol,exchange,sector,close,change_pct,volume,rel_volume,rsi14,breakout_score,trade_date,direction,rn")
+        .order("rn", { ascending: true });
       if (error) throw error;
       return (data ?? []) as unknown as TopMoverRow[];
     },
@@ -226,9 +240,14 @@ export function usePositions() {
     queryKey: ["market", "positions"],
     queryFn: async (): Promise<Position[]> => {
       const { data, error } = await supabase
-        .from("market_positions").select("*").order("opened_at", { ascending: false });
+        .from("market_positions")
+        .select(
+          "id,symbol,exchange,side,quantity,entry_price,stop_loss,target,opened_at,closed_at," +
+          "exit_price,pnl,trailing_stop,journal_notes,is_broker_synced,exit_source,product",
+        )
+        .order("opened_at", { ascending: false });
       if (error) throw error;
-      return (data ?? []) as Position[];
+      return (data ?? []) as unknown as Position[];
     },
     refetchInterval: liveInterval(10_000, 5 * 60_000, 30_000),
     refetchIntervalInBackground: false,
@@ -273,9 +292,14 @@ export function useHoldings() {
     queryKey: ["market", "holdings"],
     queryFn: async (): Promise<HoldingRow[]> => {
       const { data, error } = await supabase
-        .from("market_holdings").select("*").order("created_at", { ascending: false });
+        .from("market_holdings")
+        .select(
+          "id,symbol,exchange,quantity,avg_price,buy_date,investment_type,notes,source," +
+          "settled_qty,t1_qty,pledged_qty",
+        )
+        .order("created_at", { ascending: false });
       if (error) throw error;
-      return (data ?? []) as HoldingRow[];
+      return (data ?? []) as unknown as HoldingRow[];
     },
     refetchInterval: liveInterval(30_000, 5 * 60_000),
     refetchIntervalInBackground: false,
@@ -351,6 +375,19 @@ function conditionToPgrst(c: { column: string; op: string; value?: number | stri
   return `${col}.${op}.${escapePgrst(String(c.value))}`;
 }
 
+// Blob-free projection of market_stock_scores for list/board views.
+const STOCK_SCORE_LIST_COLUMNS = [
+  "id","symbol","exchange","trade_date","close","change_pct","volume","rel_volume",
+  "ema20","ema50","ema100","ema200","rsi14","macd","macd_signal","macd_hist",
+  "adx14","atr14","atr_pct","bb_width","bb_squeeze","high_52w","low_52w",
+  "pct_from_52w_high","above_ema200","higher_lows","near_resistance",
+  "resistance_level","support_level","sector","sector_strength","rel_strength_nifty",
+  "breakout_score","prebreakout_score","delivery_pct","mfi14","bb_percent_b",
+  "supertrend_dir","vwap","pe_ttm","roe","revenue_growth","breakout_score_v4",
+  "breakout_band","breakout_v4_rank_pct","score_coverage","score_unavailable_reason",
+  "bars_available","context_complete","computed_at",
+].join(",");
+
 export function useStockScores(opts: {
   groups?: ScreenerGroup[];
   orderBy?: string;
@@ -362,7 +399,13 @@ export function useStockScores(opts: {
   return useQuery({
     queryKey: ["market", "scores", JSON.stringify(groups ?? null), orderBy, desc, limit, symbol ?? null],
     queryFn: async (): Promise<StockScore[]> => {
-      let q = supabase.from("market_stock_scores").select("*");
+      // EGRESS: market_stock_scores has 109 columns (~8.5 KB of JSON a row).
+      // List views render ~20 of them, so they get a blob-free projection;
+      // single-symbol reads (Analysis / ScoreExplain) still take everything
+      // because they need the component/coverage blobs and cost one row.
+      let q = symbol
+        ? supabase.from("market_stock_scores").select("*")
+        : supabase.from("market_stock_scores").select(STOCK_SCORE_LIST_COLUMNS);
       if (symbol) q = q.eq("symbol", symbol);
       if (groups && groups.length > 0) {
         const orParts = groups
@@ -382,7 +425,7 @@ export function useStockScores(opts: {
       q = q.order(orderBy, { ascending: !desc, nullsFirst: false }).limit(limit);
       const { data, error } = await q;
       if (error) throw error;
-      return (data ?? []) as StockScore[];
+      return (data ?? []) as unknown as StockScore[];
     },
   });
 }
@@ -398,7 +441,11 @@ export function useBreadth() {
       // out rows with no advances or declines.
       const { data, error } = await supabase
         .from("market_breadth_daily" as any)
-        .select("*")
+        .select(
+          "trade_date,advances,declines,unchanged,pct_above_ema20,pct_above_ema50," +
+          "pct_above_ema200,avg_rsi,nifty_close,nifty_change_pct,regime,india_vix," +
+          "fii_net_cr,dii_net_cr,new_highs,new_lows,market_score,computed_at",
+        )
         .or("advances.gt.0,declines.gt.0")
         .order("trade_date", { ascending: false })
         .limit(1)
@@ -411,6 +458,29 @@ export function useBreadth() {
     refetchIntervalInBackground: false,
   });
 }
+
+// Latest EOD session that actually has prices stored (NSE). Used to tell
+// "the market simply hasn't traded since" apart from "the scoring pass is
+// behind" — a stale score chip should only look alarming in the second case.
+export function useLatestPriceSession() {
+  return useQuery({
+    queryKey: ["market", "latest-price-session"],
+    queryFn: async (): Promise<string | null> => {
+      const { data, error } = await supabase
+        .from("market_daily_prices" as any)
+        .select("trade_date")
+        .eq("exchange", "NSE")
+        .order("trade_date", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return ((data as any)?.trade_date as string | null) ?? null;
+    },
+    staleTime: 10 * 60_000,
+  });
+}
+
+
 
 
 export interface FiiDiiRow {
@@ -476,13 +546,24 @@ export function useSectorStrength() {
         .order("trade_date", { ascending: false }).limit(1).maybeSingle();
       if (!latest) return [];
       const { data, error } = await supabase
-        .from("market_sector_strength_daily").select("*")
+        .from("market_sector_strength_daily")
+        .select("trade_date,sector,stock_count,avg_change_pct,avg_rsi,pct_above_ema50,strength_rank")
         .eq("trade_date", latest.trade_date)
         .order("strength_rank", { ascending: true });
       if (error) throw error;
-      return (data ?? []) as SectorStrength[];
+      return (data ?? []) as unknown as SectorStrength[];
     },
   });
+}
+
+/** Merge a delta response onto the cached series (last bar is replaced, not
+ *  duplicated, because the forming bar keeps updating in place). */
+function mergeCandles(prev: CandleDto[], next: CandleDto[]): CandleDto[] {
+  if (prev.length === 0) return next;
+  if (next.length === 0) return prev;
+  const firstNew = String(next[0].time);
+  const head = prev.filter((c) => String(c.time) < firstNew);
+  return [...head, ...next];
 }
 
 export function useCandles(
@@ -496,12 +577,29 @@ export function useCandles(
   // Intraday charts open on today's session, so a shallow upstream window is
   // enough and loads far faster than 60d/max of minute bars.
   const range = opts.range ?? (/^\d+m$/.test(timeframe) ? "5d" : undefined);
+  const qc = useQueryClient();
+  const queryKey = ["market", "candles", symbol ?? "", timeframe, exchange, allowDelayed, range ?? ""];
   return useQuery({
-    queryKey: ["market", "candles", symbol ?? "", timeframe, exchange, allowDelayed, range ?? ""],
-    queryFn: () => callMarketFn<CandlesResponse>(
-      "market-candles",
-      { symbol, timeframe, exchange, allow_delayed: allowDelayed, ...(range ? { range } : {}) },
-    ),
+    queryKey,
+    // EGRESS: a full response is up to ~1 800 bars. Once we hold a series we
+    // ask only for bars from our last bar onwards and stitch them on, so the
+    // steady-state poll costs a couple of bars instead of the whole window.
+    queryFn: async (): Promise<CandlesResponse> => {
+      const cached = qc.getQueryData<CandlesResponse>(queryKey);
+      const tail = cached?.candles?.length ? cached.candles[cached.candles.length - 1].time : null;
+      const res = await callMarketFn<CandlesResponse>(
+        "market-candles",
+        {
+          symbol, timeframe, exchange, allow_delayed: allowDelayed,
+          ...(range ? { range } : {}),
+          ...(tail != null ? { since: tail } : {}),
+        },
+      );
+      if (res.partial && cached?.candles?.length) {
+        return { ...res, candles: mergeCandles(cached.candles, res.candles) };
+      }
+      return res;
+    },
     enabled: !!symbol,
     // Never blank the chart while a new symbol/timeframe loads, and keep the
     // series around long enough that revisiting a chart paints instantly.
@@ -514,12 +612,12 @@ export function useCandles(
     refetchInterval: (q) => {
       const d = q.state.data as CandlesResponse | undefined;
       const empty = !d || d.provider === "none" || d.candles.length === 0;
-      // Daily/weekly/monthly now carry a live forming bar stitched from the
-      // same broker quote the Quote panel shows, so they must poll during a
-      // session too — otherwise 1D freezes at the cached close and disagrees
-      // with the quote card (the RELAXO 409.10 vs 417.00 mismatch).
-      if (!intraday) return liveInterval(empty ? 60_000 : 5_000, false)();
-      // Analysis shows one selected symbol; keep it close to the 1s quote path.
+      // Daily/weekly/monthly carry a live forming bar stitched from the same
+      // broker quote the Quote panel shows, so they must poll during a session
+      // too — but a daily bar only moves on price, so 15 s is plenty and costs
+      // a third of the requests the old 5 s loop did.
+      if (!intraday) return liveInterval(empty ? 60_000 : 15_000, false)();
+      // Analysis shows one selected symbol; keep it close to the quote path.
       // Broad quote surfaces remain protected by their own batched hooks.
       const gap = empty ? 60_000 : d?.degraded ? 15_000 : 5_000;
       return liveInterval(gap, false)();
@@ -726,7 +824,9 @@ export function useIndexWatch() {
     queryKey: ["market", "indexwatch"],
     queryFn: async (): Promise<IndexWatchRow[]> => {
       const { data, error } = await supabase
-        .from("market_index_watch" as any).select("*").order("sort_order");
+        .from("market_index_watch" as any)
+        .select("id,user_id,symbol,name,region,nse_symbol,fno_enabled,constituents_slug,sort_order,created_at,updated_at")
+        .order("sort_order");
       if (error) throw error;
       return (data ?? []) as unknown as IndexWatchRow[];
     },

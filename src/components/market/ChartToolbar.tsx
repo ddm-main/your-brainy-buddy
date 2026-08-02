@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CandlestickChart, LineChart, AreaChart, BarChart3, Activity, Bell, LayoutGrid, Save, Search, Trash2, TrendingUp, Waves } from "lucide-react";
+import { CandlestickChart, LineChart, AreaChart, BarChart3, Activity, Bell, Camera, LayoutGrid, Maximize2, Minimize2, Save, Search, Trash2, TrendingUp, Waves } from "lucide-react";
 import { Menu, MenuItem, MenuGroup, MenuDivider } from "@/components/hud/Menu";
 import type { ChartType } from "@/components/market/CandleChart";
 import {
@@ -89,6 +89,8 @@ export interface ChartToolbarProps {
   settings?: ChartSettings;
   onSettings?: (updater: (prev: ChartSettings) => ChartSettings) => void;
   onFullscreen: () => void;
+  /** True when the chart is already expanded (flips the icon to collapse). */
+  fullscreen?: boolean;
   onAlert: () => void;
   /** Optional badge count of active alerts (rendered on the Alert button). */
   alertCount?: number;
@@ -106,7 +108,7 @@ export interface ChartToolbarProps {
 export function ChartToolbar({
   symbol, exchange = "NSE", tf, onTf, chartType, onChartType, onAddStudy, onResetStudies,
   studyCount = 0, totalStudyCount,
-  settings, onSettings, onFullscreen, onAlert, alertCount = 0, onScreenshot,
+  settings, onSettings, onFullscreen, fullscreen = false, onAlert, alertCount = 0, onScreenshot,
   onSaveLayout, onLoadLayout, onDeleteLayout, savedLayouts = [],
   intraday = false,
   range = "ALL", onRange,
@@ -246,6 +248,21 @@ export function ChartToolbar({
 
 
       <div style={{ flex: 1, minWidth: 8 }} />
+
+      {onScreenshot && (
+        <button type="button" className="mk-menu-trigger" onClick={onScreenshot} title="Copy chart snapshot">
+          <span className="mk-menu-ico"><Camera size={12} /></span>
+        </button>
+      )}
+      <button
+        type="button"
+        className="mk-menu-trigger"
+        onClick={onFullscreen}
+        aria-label={fullscreen ? "Exit fullscreen" : "Fullscreen chart"}
+        title={fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen (F) · exit with Esc"}
+      >
+        <span className="mk-menu-ico">{fullscreen ? <Minimize2 size={12} /> : <Maximize2 size={12} />}</span>
+      </button>
 
     </div>
   );

@@ -33,8 +33,10 @@ export default function TopBar() {
   const [email, setEmail] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
-    supabase.auth.getUser().then(({ data }) => {
-      if (!cancelled) setEmail(data.user?.email ?? null);
+    // EGRESS: read the email off the cached session instead of hitting
+    // /auth/v1/user on every mount.
+    supabase.auth.getSession().then(({ data }) => {
+      if (!cancelled) setEmail(data.session?.user.email ?? null);
     });
     return () => { cancelled = true; };
   }, []);
@@ -69,6 +71,9 @@ export default function TopBar() {
   useEffect(() => {
     let cancelled = false;
     const check = async () => {
+      // EGRESS: this ran every 60 s in every open tab, forever. A hidden tab
+      // has nothing to indicate, so it does not need to ask.
+      if (document.visibilityState !== "visible") return;
       try {
         const { error } = await supabase.from("banks").select("id", { head: true, count: "exact" }).limit(1);
         if (!cancelled) setLinkOk(!error);
@@ -77,8 +82,10 @@ export default function TopBar() {
       }
     };
     check();
-    const iv = setInterval(check, 60_000);
-    return () => { cancelled = true; clearInterval(iv); };
+    const iv = setInterval(check, 5 * 60_000);
+    const onVis = () => { if (document.visibilityState === "visible") check(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { cancelled = true; clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
   }, []);
 
   const aiOk = useAiStatus((s) => s.ok);

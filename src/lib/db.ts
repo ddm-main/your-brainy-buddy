@@ -216,7 +216,11 @@ export const db = {
   // ---------- Inbox ----------
   emails: {
     list: async (category?: EmailRow["category"], limit = 50) => {
-      let q = supabase.from("emails").select("*").order("received_at", { ascending: false, nullsFirst: false }).limit(limit);
+      // EGRESS: bodies are fetched on demand (gmail-message) when a mail is
+      // opened; the list only needs headers.
+      let q = supabase.from("emails")
+        .select("id,account_id,external_email_id,thread_id,subject,from_name,from_email,received_at,category,importance,requires_action,finance_related,linked_bank_id,linked_card_id,linked_project_id,ai_summary,snippet,provider,created_at")
+        .order("received_at", { ascending: false, nullsFirst: false }).limit(limit);
       if (category) q = q.eq("category", category);
       const { data, error } = await q;
       if (error) throw error;

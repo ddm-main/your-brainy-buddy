@@ -69,6 +69,34 @@ function withProvenance<T extends { candles: Array<{ time: string | number }> }>
   };
 }
 
+// EGRESS: the chart polls every few seconds during a session, and the full
+// window is up to ~1 800 one-minute bars (hundreds of KB) every single time.
+// When the client already holds a series it sends `since` = the time value of
+// its last bar; we then ship only that bar onwards (typically 1-2 bars) and
+// tag the payload `partial` so the client merges instead of replacing.
+// Bars are keyed by `time` ("YYYY-MM-DD" for daily grains, epoch seconds for
+// intraday), and both sort lexicographically/numerically in the same order.
+function trimSince<C extends { time: string | number }>(
+  candles: C[],
+  since: string | number | null,
+): { candles: C[]; partial: boolean } {
+  if (since == null || candles.length === 0) return { candles, partial: false };
+  const keep = candles.filter((c) =>
+    typeof c.time === "number" && typeof since === "number"
+      ? c.time >= since
+      : String(c.time) >= String(since));
+  // A shorter-than-requested history (symbol switch, cache reset) must never
+  // masquerade as a delta — only claim `partial` when we actually trimmed.
+  if (keep.length === candles.length) return { candles, partial: false };
+  return { candles: keep, partial: true };
+}
+
+function parseSince(raw: unknown): string | number | null {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  return null;
+}
+
 const limiter = createMarketLimiter(120, 60_000);
 
 
@@ -491,6 +519,7 @@ Deno.serve(async (req) => {
     const symbol = String(b?.symbol ?? "").toUpperCase();
     const exchange = String(b?.exchange ?? "NSE").toUpperCase();
     const timeframe = String(b?.timeframe ?? "1D");
+    const since = parseSince(b?.since);
     if (!symbol) return errorResponse(req, "symbol required");
     const svc = svcClient();
     setRouteBreakerPersistence(svc);
@@ -583,8 +612,10 @@ Deno.serve(async (req) => {
         symbols: candles.length,
         detail: reason ?? null,
       });
+      const dTrim = trimSince(candles, since);
       return jsonResponse(req, withProvenance({
-        candles, emas, timeframe, provider: providerName, reason,
+        candles: dTrim.candles, partial: dTrim.partial,
+        emas, timeframe, provider: providerName, reason,
         degraded: !isBrokerSource(providerName),
       }, session, providerName, lastBarSource));
 
@@ -823,8 +854,10 @@ Deno.serve(async (req) => {
       symbols: candles.length,
       detail: reason ?? null,
     });
+    const iTrim = trimSince(candles, since);
     return jsonResponse(req, withProvenance({
-      candles, emas: {}, timeframe, provider: providerName, degraded, reason,
+      candles: iTrim.candles, partial: iTrim.partial,
+      emas: {}, timeframe, provider: providerName, degraded, reason,
       cached_at: cachedAt, delayed_minutes: delayedMinutes, day_volume: dayVolume,
     }, session, historySource, providerName));
 

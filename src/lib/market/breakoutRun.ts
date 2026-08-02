@@ -123,7 +123,13 @@ export function useBreakoutTracker(includeClosed = false, enabled = true) {
       for (let from = 0; ; from += 1000) {
         let q = (supabase as any)
           .from("market_breakout_tracker")
-          .select("*")
+          // EGRESS: only the fields mapEpisode() reads.
+          .select(
+            "symbol,exchange,first_detected_date,entry_close,trigger_price,detected_score," +
+            "peak_close,peak_return_pct,current_close,current_return_pct,days_tracked," +
+            "last_score,rank_pct,mae_pct,peak_high,followthrough_score,score_trend,status," +
+            "below_threshold_days,sector,market_cap,last_evaluated_date,closed_at",
+          )
           .order("first_detected_date", { ascending: false })
           .order("followthrough_score", { ascending: false, nullsFirst: false })
           .range(from, from + 999);

@@ -14,6 +14,7 @@ import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { useRunSelfTest, useProviderStats24h, canonicalProviderId, SELFTEST_QUERY_KEY } from "@/lib/market/selftest";
 import { useFeedStatus, STATUS_TONE, type Status } from "@/lib/market/feedStatus";
+import { currentUserId } from "@/lib/useSession";
 import {
   ROUTED_PROVIDER_LABEL, FEED_GROUP_LABEL,
   type RoutedProvider, type FeedGroup,
@@ -42,8 +43,7 @@ export default function FeedRoutingPanel() {
 
   const save = useMutation({
     mutationFn: async ({ feedId, primary, fallback }: { feedId: string; primary: string; fallback: string }) => {
-      const { data: auth } = await supabase.auth.getUser();
-      const uid = auth.user?.id;
+      const uid = await currentUserId();
       if (!uid) throw new Error("Not signed in");
       if (primary === "auto" && fallback === "auto") {
         const { error } = await supabase.from("market_feed_prefs")

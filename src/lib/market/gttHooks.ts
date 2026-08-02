@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "./api";
-import { marketOpen } from "./hooks";
+import { liveInterval } from "./hooks";
 
 export interface GttOrder {
   id: string;
@@ -46,17 +46,25 @@ export function useGttOrders() {
   return useQuery({
     queryKey: ["market", "gtt", "list"],
     queryFn: async (): Promise<GttOrder[]> => {
+      // EGRESS: explicit projection — the row carries broker payload/audit
+      // columns the list never renders.
       const { data, error } = await supabase
         .from("market_gtt_orders")
-        .select("*")
+        .select(
+          "id,symbol,exchange,side,trigger_type,trigger_price,trigger_price_upper," +
+          "order_type,price,quantity,product,status,expires_at,triggered_at," +
+          "triggered_leg,broker_order_id,last_error,notes,created_at",
+        )
         .order("created_at", { ascending: false })
         .limit(200);
       if (error) throw error;
       return (data ?? []) as unknown as GttOrder[];
     },
     // Trigger evaluation is server-side (market-gtt-eval cron); this poll
-    // is just to reflect status flips in the UI.
-    refetchInterval: marketOpen() ? 15_000 : 5 * 60_000,
+    // is just to reflect status flips in the UI. Off-hours nothing can flip,
+    // and a hidden tab has nobody watching — both stop the poll entirely.
+    refetchInterval: liveInterval(15_000, false),
+    refetchIntervalInBackground: false,
   });
 }
 

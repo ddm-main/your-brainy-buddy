@@ -52,19 +52,31 @@ Deno.serve(async (req) => {
     const latestPriceDate = latestPrice?.trade_date as string | undefined;
     const latestScoreDate = latestScore?.trade_date as string | undefined;
     if (latestPriceDate && (!latestScoreDate || latestPriceDate > latestScoreDate)) {
-      const { data: rows, error: rescoreErr } = await svc.rpc("market_rescore_latest_from_prices", {
-        _trade_date: latestPriceDate,
-        _limit: 3000,
-      });
-      if (rescoreErr) {
-        await svc.from("market_provider_health").insert({
-          provider: "postgres",
-          endpoint: "market-pipeline-eod",
-          ok: false,
-          error: `price-table rescore failed: ${rescoreErr.message}`,
+      // Batched: the old single 3000-symbol call blew past the statement
+      // timeout (72s, "canceling statement due to statement timeout"), so the
+      // whole recovery path silently did nothing and 1.5k symbols froze on the
+      // previous session. Walk the universe in keyset batches instead.
+      let cursor: string | null = null;
+      for (let i = 0; i < 12; i++) {
+        const { data, error: rescoreErr } = await svc.rpc("market_rescore_prices_batch", {
+          _trade_date: latestPriceDate,
+          _limit: 400,
+          _after_symbol: cursor,
         });
-      } else {
-        localRescored = typeof rows === "number" ? rows : 0;
+        if (rescoreErr) {
+          await svc.from("market_provider_health").insert({
+            provider: "postgres",
+            endpoint: "market-pipeline-eod",
+            ok: false,
+            error: `price-table rescore failed: ${rescoreErr.message}`,
+          });
+          break;
+        }
+        const row = Array.isArray(data) ? data[0] : data;
+        const processed = Number(row?.processed ?? 0);
+        localRescored += processed;
+        cursor = (row?.last_symbol as string | null) ?? null;
+        if (processed === 0 || !cursor) break;
       }
     }
 
@@ -82,40 +94,62 @@ Deno.serve(async (req) => {
       .limit(CHUNK);
     if (error) return errorResponse(req, error.message, 500);
 
+    const candidates = [...(stocks ?? [])];
+    const have = new Set(candidates.map((s) => `${s.symbol}|${s.exchange}`));
+
+    const addFromStocks = async (symbols: string[], room: number) => {
+      if (room <= 0 || symbols.length === 0) return;
+      const { data: rows } = await svc.from("market_stocks")
+        .select("symbol,exchange,yahoo_symbol,sector,market_cap,last_price_sync_at,price_sync_attempts,price_sync_attempts_day")
+        .eq("is_active", true)
+        .eq("exchange", "NSE")
+        .in("symbol", symbols.slice(0, room * 3))
+        .or(`price_sync_attempts_day.neq.${today},price_sync_attempts.lt.3`);
+      for (const r of rows ?? []) {
+        if (candidates.length >= CHUNK) break;
+        const k = `${r.symbol}|${r.exchange}`;
+        if (!have.has(k)) { candidates.push(r); have.add(k); }
+      }
+    };
+
+    // ---- Score-staleness top-up ----
+    // The bhavcopy/backfill passes stamp market_stocks.last_price_sync_at, so
+    // the cursor above reports a symbol as "done today" while its
+    // market_stock_scores row is still on the previous session. Pick those up
+    // explicitly: score freshness, not price-cursor freshness, is what the app
+    // renders.
+    let scoreStaleRemaining = 0;
+    if (latestPriceDate && candidates.length < CHUNK) {
+      const { data: staleRows, count } = await svc.from("market_stock_scores")
+        .select("symbol", { count: "exact" })
+        .eq("exchange", "NSE")
+        .lt("trade_date", latestPriceDate)
+        .order("trade_date", { ascending: true })
+        .limit(CHUNK * 3);
+      scoreStaleRemaining = count ?? (staleRows?.length ?? 0);
+      await addFromStocks((staleRows ?? []).map((r) => r.symbol as string), CHUNK - candidates.length);
+    }
+
     // ---- Enrichment top-up ----
     // The cheap SQL rescore path (and the NSE bhavcopy sync) can mark a symbol
     // "priced today" without ever computing the candle-derived fields —
     // pivot level, volume dry-up, weekly confirmation, VWAP/Supertrend/MFI and
     // candle patterns. Those rows then score with whole factor buckets stuck
-    // at zero (which is why the universe topped out in the 60s and nothing
-    // reached the 70 "strong" band). If the staleness picker didn't fill the
-    // chunk, spend the remaining budget on symbols whose scores are missing
-    // that enrichment, so every name eventually gets a full-fidelity pass.
-    const candidates = [...(stocks ?? [])];
+    // at zero. If the pickers above didn't fill the chunk, spend the remaining
+    // budget on symbols missing that enrichment.
     if (candidates.length < CHUNK) {
-      const have = new Set(candidates.map((s) => `${s.symbol}|${s.exchange}`));
-      const room = CHUNK - candidates.length;
       const { data: bare } = await svc.from("market_stock_scores")
         .select("symbol,exchange")
         .eq("exchange", "NSE")
         .or("pivot_level.is.null,weekly_close.is.null")
         .order("computed_at", { ascending: true, nullsFirst: true })
-        .limit(room * 3);
-      const wanted = (bare ?? []).filter((b) => !have.has(`${b.symbol}|${b.exchange}`)).slice(0, room);
-      if (wanted.length) {
-        const { data: enrich } = await svc.from("market_stocks")
-          .select("symbol,exchange,yahoo_symbol,sector,market_cap,last_price_sync_at,price_sync_attempts,price_sync_attempts_day")
-          .eq("is_active", true)
-          .eq("exchange", "NSE")
-          .in("symbol", wanted.map((w) => w.symbol));
-        for (const e of enrich ?? []) {
-          if (!have.has(`${e.symbol}|${e.exchange}`)) { candidates.push(e); have.add(`${e.symbol}|${e.exchange}`); }
-        }
-      }
+        .limit((CHUNK - candidates.length) * 3);
+      await addFromStocks((bare ?? []).map((b) => b.symbol as string), CHUNK - candidates.length);
     }
     if (candidates.length === 0) {
-      return jsonResponse(req, { ok: true, processed: 0, drained: true });
+      return jsonResponse(req, { ok: true, processed: 0, drained: true, local_rescored: localRescored });
     }
+
 
 
     let okCount = 0;
@@ -473,16 +507,36 @@ Deno.serve(async (req) => {
     await Promise.all(workers);
 
     // One row for the whole run, attributed to the pipeline (not the broker).
+    // Schema drift (PGRST204 — a column the code writes doesn't exist in the
+    // DB) is called out explicitly: that failure mode silently no-opped the
+    // entire technicals pass for two sessions.
+    const schemaDrift = symbolErrors.some((e) => e.includes("PGRST204") || e.includes("schema cache"));
     if (symbolErrors.length > 0) {
       await svc.from("market_provider_health").insert({
         provider: "pipeline",
-        endpoint: "market-pipeline-eod",
+        endpoint: schemaDrift ? "market-pipeline-eod:schema_drift" : "market-pipeline-eod",
         ok: false,
         error: `${failCount} of ${candidates.length} symbols failed — ${symbolErrors.slice(0, 10).join(" ; ")}`.slice(0, 500),
       });
     }
 
-    return jsonResponse(req, { ok: true, processed: candidates.length, succeeded: okCount, failed: failCount, symbol_errors: symbolErrors.slice(0, 20), context_preserved: contextPreserved, local_rescored: localRescored, drained: candidates.length < CHUNK });
+    // A chunk where every symbol failed must NOT report ok/drained — that is
+    // how a broken pipeline masqueraded as a healthy one in the orchestrator.
+    if (okCount === 0 && failCount > 0) {
+      return errorResponse(
+        req,
+        `all ${failCount} symbols failed${schemaDrift ? " (schema drift: market_stock_scores is missing columns the pipeline writes)" : ""} — ${symbolErrors.slice(0, 3).join(" ; ")}`.slice(0, 500),
+        500,
+      );
+    }
+
+    return jsonResponse(req, {
+      ok: true, processed: candidates.length, succeeded: okCount, failed: failCount,
+      symbol_errors: symbolErrors.slice(0, 20), context_preserved: contextPreserved,
+      local_rescored: localRescored, score_stale_remaining: scoreStaleRemaining,
+      drained: candidates.length < CHUNK,
+    });
+
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }

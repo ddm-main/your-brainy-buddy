@@ -27,7 +27,7 @@ const Orders = lazy(() => import("@/routes/market/Orders"));
 const GTT = lazy(() => import("@/routes/market/GTT"));
 const ScoreDetail = lazy(() => import("@/routes/market/ScoreDetail"));
 const ScoreExplain = lazy(() => import("@/routes/market/ScoreExplain"));
-const Calibration = lazy(() => import("@/routes/market/Calibration"));
+
 
 
 type Sub = MarketSub;
@@ -130,7 +130,7 @@ export default function Market() {
               <Route path="analysis/:symbol" element={<Analysis />} />
               <Route path="score/:symbol/explain" element={<ScoreExplain />} />
               <Route path="score/:symbol" element={<ScoreDetail />} />
-              <Route path="calibration" element={<Calibration />} />
+              <Route path="calibration" element={<Navigate to="/market/breakout" replace />} />
               <Route path="backtesting" element={<Backtesting />} />
               <Route path="planner" element={<Planner />} />
               <Route path="ai" element={<Navigate to="/market/screener" replace />} />

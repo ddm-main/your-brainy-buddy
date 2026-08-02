@@ -4422,6 +4422,7 @@ export type Database = {
         Row: {
           above_ema200: boolean | null
           adx14: number | null
+          atr_contracting: boolean | null
           atr_pct: number | null
           atr14: number | null
           bars_available: number | null
@@ -4436,10 +4437,12 @@ export type Database = {
           bb_width: number | null
           breakout_band: string | null
           breakout_freshness_days: number | null
+          breakout_level_cleared: number | null
           breakout_rank_pct: number | null
           breakout_score: number | null
           breakout_score_v2: number | null
           breakout_score_v4: number | null
+          breakout_state: string | null
           breakout_v4_components: Json | null
           breakout_v4_coverage: Json | null
           breakout_v4_rank_pct: number | null
@@ -4471,6 +4474,7 @@ export type Database = {
           low_52w: number | null
           macd: number | null
           macd_hist: number | null
+          macd_hist_rising: boolean | null
           macd_signal: number | null
           mfi14: number | null
           near_resistance: boolean | null
@@ -4489,6 +4493,8 @@ export type Database = {
           rel_strength_nifty: number | null
           rel_volume: number | null
           rel_volume_median30: number | null
+          resistance_above: number | null
+          resistance_fallback: boolean | null
           resistance_level: number | null
           ret_21d: number | null
           ret_55d: number | null
@@ -4498,6 +4504,8 @@ export type Database = {
           roe: number | null
           rolling_high_20: number | null
           rolling_high_20_date: string | null
+          rolling_high_20_touch_quality: number | null
+          rolling_high_20_touches: number | null
           rolling_high_55: number | null
           rolling_high_55_date: string | null
           rs_percentile: number | null
@@ -4511,6 +4519,7 @@ export type Database = {
           sector_strength: number | null
           supertrend: number | null
           supertrend_dir: number | null
+          support_fallback: boolean | null
           support_level: number | null
           swing_components: Json | null
           swing_rank_pct: number | null
@@ -4524,6 +4533,7 @@ export type Database = {
           volume_bse: number | null
           volume_nse: number | null
           vwap: number | null
+          weekly_bars: number | null
           weekly_close: number | null
           weekly_ema20: number | null
           weekly_higher_lows: boolean | null
@@ -4533,6 +4543,7 @@ export type Database = {
         Insert: {
           above_ema200?: boolean | null
           adx14?: number | null
+          atr_contracting?: boolean | null
           atr_pct?: number | null
           atr14?: number | null
           bars_available?: number | null
@@ -4547,10 +4558,12 @@ export type Database = {
           bb_width?: number | null
           breakout_band?: string | null
           breakout_freshness_days?: number | null
+          breakout_level_cleared?: number | null
           breakout_rank_pct?: number | null
           breakout_score?: number | null
           breakout_score_v2?: number | null
           breakout_score_v4?: number | null
+          breakout_state?: string | null
           breakout_v4_components?: Json | null
           breakout_v4_coverage?: Json | null
           breakout_v4_rank_pct?: number | null
@@ -4582,6 +4595,7 @@ export type Database = {
           low_52w?: number | null
           macd?: number | null
           macd_hist?: number | null
+          macd_hist_rising?: boolean | null
           macd_signal?: number | null
           mfi14?: number | null
           near_resistance?: boolean | null
@@ -4600,6 +4614,8 @@ export type Database = {
           rel_strength_nifty?: number | null
           rel_volume?: number | null
           rel_volume_median30?: number | null
+          resistance_above?: number | null
+          resistance_fallback?: boolean | null
           resistance_level?: number | null
           ret_21d?: number | null
           ret_55d?: number | null
@@ -4609,6 +4625,8 @@ export type Database = {
           roe?: number | null
           rolling_high_20?: number | null
           rolling_high_20_date?: string | null
+          rolling_high_20_touch_quality?: number | null
+          rolling_high_20_touches?: number | null
           rolling_high_55?: number | null
           rolling_high_55_date?: string | null
           rs_percentile?: number | null
@@ -4622,6 +4640,7 @@ export type Database = {
           sector_strength?: number | null
           supertrend?: number | null
           supertrend_dir?: number | null
+          support_fallback?: boolean | null
           support_level?: number | null
           swing_components?: Json | null
           swing_rank_pct?: number | null
@@ -4635,6 +4654,7 @@ export type Database = {
           volume_bse?: number | null
           volume_nse?: number | null
           vwap?: number | null
+          weekly_bars?: number | null
           weekly_close?: number | null
           weekly_ema20?: number | null
           weekly_higher_lows?: boolean | null
@@ -4644,6 +4664,7 @@ export type Database = {
         Update: {
           above_ema200?: boolean | null
           adx14?: number | null
+          atr_contracting?: boolean | null
           atr_pct?: number | null
           atr14?: number | null
           bars_available?: number | null
@@ -4658,10 +4679,12 @@ export type Database = {
           bb_width?: number | null
           breakout_band?: string | null
           breakout_freshness_days?: number | null
+          breakout_level_cleared?: number | null
           breakout_rank_pct?: number | null
           breakout_score?: number | null
           breakout_score_v2?: number | null
           breakout_score_v4?: number | null
+          breakout_state?: string | null
           breakout_v4_components?: Json | null
           breakout_v4_coverage?: Json | null
           breakout_v4_rank_pct?: number | null
@@ -4693,6 +4716,7 @@ export type Database = {
           low_52w?: number | null
           macd?: number | null
           macd_hist?: number | null
+          macd_hist_rising?: boolean | null
           macd_signal?: number | null
           mfi14?: number | null
           near_resistance?: boolean | null
@@ -4711,6 +4735,8 @@ export type Database = {
           rel_strength_nifty?: number | null
           rel_volume?: number | null
           rel_volume_median30?: number | null
+          resistance_above?: number | null
+          resistance_fallback?: boolean | null
           resistance_level?: number | null
           ret_21d?: number | null
           ret_55d?: number | null
@@ -4720,6 +4746,8 @@ export type Database = {
           roe?: number | null
           rolling_high_20?: number | null
           rolling_high_20_date?: string | null
+          rolling_high_20_touch_quality?: number | null
+          rolling_high_20_touches?: number | null
           rolling_high_55?: number | null
           rolling_high_55_date?: string | null
           rs_percentile?: number | null
@@ -4733,6 +4761,7 @@ export type Database = {
           sector_strength?: number | null
           supertrend?: number | null
           supertrend_dir?: number | null
+          support_fallback?: boolean | null
           support_level?: number | null
           swing_components?: Json | null
           swing_rank_pct?: number | null
@@ -4746,6 +4775,7 @@ export type Database = {
           volume_bse?: number | null
           volume_nse?: number | null
           vwap?: number | null
+          weekly_bars?: number | null
           weekly_close?: number | null
           weekly_ema20?: number | null
           weekly_higher_lows?: boolean | null
@@ -6943,6 +6973,14 @@ export type Database = {
       market_rescore_latest_from_prices: {
         Args: { _limit?: number; _trade_date?: string }
         Returns: number
+      }
+      market_rescore_prices_batch: {
+        Args: { _after_symbol?: string; _limit?: number; _trade_date?: string }
+        Returns: {
+          last_symbol: string
+          processed: number
+          session_date: string
+        }[]
       }
       market_score_backfill_candidates: {
         Args: { _limit?: number; _min_rows?: number }

@@ -11,6 +11,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { Bell, Plus, Trash2 } from "lucide-react";
+import { currentUserId } from "@/lib/useSession";
 
 export type AlertChannel = "browser" | "email" | "telegram" | "whatsapp";
 type Alert = {
@@ -128,14 +129,14 @@ export function NewAlertModal({ symbol, exchange, onClose, onCreated }: {
     if (needsThreshold && !threshold.trim()) { push("Threshold required", "err"); return; }
     setBusy(true);
     try {
-      const { data: u } = await supabase.auth.getUser();
-      if (!u?.user) throw new Error("not signed in");
+      const uid = await currentUserId();
+      if (!uid) throw new Error("not signed in");
       // Dedupe: re-opening "new alert" and resubmitting the same condition
       // previously created duplicate rows, each independently evaluated/
       // fired by market-alerts-eval — duplicate notifications for one signal.
       const thresholdValue = needsThreshold ? Number(threshold) : null;
       let dupeQuery = supabase.from("market_alerts").select("id")
-        .eq("user_id", u.user.id).eq("symbol", symbol).eq("exchange", exchange)
+        .eq("user_id", uid).eq("symbol", symbol).eq("exchange", exchange)
         .eq("alert_type", alertType).eq("channel", channel).eq("is_active", true);
       dupeQuery = thresholdValue == null ? dupeQuery.is("threshold", null) : dupeQuery.eq("threshold", thresholdValue);
       const { data: existing } = await dupeQuery.limit(1);
@@ -145,7 +146,7 @@ export function NewAlertModal({ symbol, exchange, onClose, onCreated }: {
         return;
       }
       const { error } = await supabase.from("market_alerts").insert({
-        user_id: u.user.id,
+        user_id: uid,
         symbol, exchange,
         alert_type: alertType,
         threshold: needsThreshold ? Number(threshold) : null,

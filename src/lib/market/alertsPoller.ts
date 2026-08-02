@@ -3,6 +3,7 @@
 // SELECT/INSERT grants (no UPDATE), so "already notified" is tracked
 // client-side via localStorage rather than a server-side flag.
 import { supabase } from "@/integrations/supabase/client";
+import { nseOpenNow } from "./liveTickStore";
 
 export interface AlertEvent {
   id: string;
@@ -74,6 +75,9 @@ export function startMarketAlertsPoller(
   };
   const tick = async () => {
     if (stopped) return;
+    // EGRESS: alerts only fire on price movement, and a hidden tab can't show
+    // the toast anyway — so poll only while visible, and slowly once NSE closes.
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
     try {
       const events = await fetchNewAlertEvents();
       consecutiveFailures = 0;
@@ -88,7 +92,19 @@ export function startMarketAlertsPoller(
       }
     }
   };
-  const iv = window.setInterval(tick, 30_000);
+  let iv = window.setInterval(tick, nseOpenNow() ? 30_000 : 5 * 60_000);
+  // Re-arm the timer when the session flips so the cadence matches the market.
+  const rearm = window.setInterval(() => {
+    window.clearInterval(iv);
+    iv = window.setInterval(tick, nseOpenNow() ? 30_000 : 5 * 60_000);
+  }, 10 * 60_000);
+  const onVis = () => { if (document.visibilityState === "visible") tick(); };
+  document.addEventListener("visibilitychange", onVis);
   tick();
-  return () => { stopped = true; window.clearInterval(iv); };
+  return () => {
+    stopped = true;
+    window.clearInterval(iv);
+    window.clearInterval(rearm);
+    document.removeEventListener("visibilitychange", onVis);
+  };
 }

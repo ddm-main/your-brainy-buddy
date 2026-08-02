@@ -138,6 +138,13 @@ async function fetchIndexMemberSet(indexKey: string): Promise<Set<string>> {
 
 // Explicit projection — drops ~15 unused fundamental_* duplicates and metadata
 // columns from the wire, ~30% smaller responses than the previous `select("*")`.
+//
+// EGRESS: the two jsonb blobs this view carries (`score_components` ~616 B and
+// `data_provenance` ~609 B per row) were 30% of an 11 MB full-universe fetch
+// and are read by exactly two things: the score-badge popover (hover only) and
+// the market-cap source tooltip. `score_components` is therefore fetched
+// lazily per symbol (see ScoreBadge), and only the two provenance keys the UI
+// actually reads are projected as scalars.
 const SCREENER_COLUMNS = [
   "symbol","exchange","company_name","sector","sub_sector","industry","market_cap",
   "is_nifty500","instrument_type","trade_date","score_trade_date","close","previous_close","change_abs",
@@ -147,22 +154,39 @@ const SCREENER_COLUMNS = [
   "bb_squeeze","high_52w","low_52w","pct_from_52w_high","above_ema200",
   "higher_lows","near_resistance","resistance_level","support_level",
   "sector_strength","rel_strength_nifty","breakout_score","prebreakout_score",
-  "score_components","pe_ttm","pb","peg","eps_ttm","book_value","dividend_yield",
+  "pe_ttm","pb","peg","eps_ttm","book_value","dividend_yield",
   "roe","roce","debt_to_equity","current_ratio","quick_ratio","revenue_ttm_cr",
   "profit_ttm_cr","revenue_growth_yoy","profit_growth_yoy","eps_growth_yoy",
   "promoter_holding","fii_holding","dii_holding",
-  "ret_5d","ret_21d","ret_ytd","fno_enabled","sme","data_provenance",
+  "ret_5d","ret_21d","ret_ytd","fno_enabled","sme",
+  // The blob's real keys are `mcap` (source tag) and `mcap_as_of`.
+  "mcap_source:data_provenance->>mcap",
+  "mcap_as_of:data_provenance->>mcap_as_of",
+
 ].join(",");
 
 
-async function fetchScreenerRows(): Promise<any[]> {
+/** Server-side universe narrowing. Fetching all 2 800 rows and filtering in
+ *  the browser meant every "Nifty 50" view still paid for the whole universe. */
+function applyUniverseQuery(q: any, universeSet: Set<string> | "nifty500" | "fno" | "sme" | null): any {
+  if (universeSet === "nifty500") return q.eq("instrument_type", "EQ").eq("is_nifty500", true);
+  if (universeSet === "fno")      return q.eq("instrument_type", "EQ").eq("fno_enabled", true);
+  if (universeSet === "sme")      return q.eq("sme", true);
+  if (universeSet === null)       return q.eq("instrument_type", "EQ");
+  return q.eq("instrument_type", "EQ").in("symbol", Array.from(universeSet));
+}
+
+async function fetchScreenerRows(
+  universeSet: Set<string> | "nifty500" | "fno" | "sme" | null,
+): Promise<any[]> {
   const rows: any[] = [];
   for (let from = 0; ; from += 1000) {
-    const { data, error } = await (supabase as any)
+    const base = (supabase as any)
       .from("market_screener_rows")
       .select(SCREENER_COLUMNS)
       .eq("is_active", true)
-      .eq("exchange", "NSE")
+      .eq("exchange", "NSE");
+    const { data, error } = await applyUniverseQuery(base, universeSet)
       .order("breakout_score", { ascending: false, nullsFirst: false })
       .order("symbol", { ascending: true })
       .range(from, from + 999);
@@ -181,40 +205,30 @@ async function fetchScreenerRows(): Promise<any[]> {
 async function mergeV4Scores(rows: any[]): Promise<any[]> {
   const byKey = new Map<string, any>();
   for (const r of rows) byKey.set(`${r.exchange}:${r.symbol}`, r);
-  for (let from = 0; ; from += 1000) {
+  const symbols = rows.map((r) => r.symbol as string);
+  // Only the symbols actually on screen, and only the `buckets` sub-object of
+  // `breakout_v4_components` — the full blob is several hundred bytes a row.
+  for (let i = 0; i < symbols.length; i += 500) {
     const { data, error } = await (supabase as any)
       .from("market_stock_scores")
-      .select("symbol,exchange,breakout_score_v4,breakout_v4_components")
-      .range(from, from + 999);
+      .select("symbol,exchange,breakout_score_v4,buckets:breakout_v4_components->buckets")
+      .in("symbol", symbols.slice(i, i + 500));
     if (error) break; // v4 columns unavailable — fall back to the legacy rank
-    const chunk = data ?? [];
-    for (const r of chunk) {
+    for (const r of data ?? []) {
       const target = byKey.get(`${r.exchange}:${r.symbol}`);
       if (!target) continue;
       target.breakout_score_v4 = r.breakout_score_v4 ?? null;
-      target.breakout_v4_buckets = (r.breakout_v4_components as any)?.buckets ?? null;
+      target.breakout_v4_buckets = r.buckets ?? null;
     }
-    if (chunk.length < 1000) break;
   }
+
   const rank = (r: any) => r.breakout_score_v4 ?? r.breakout_score ?? -1;
   return rows.sort((a, b) => rank(b) - rank(a) || String(a.symbol).localeCompare(String(b.symbol)));
 }
 
-// Universe filtering is done client-side against the single "all rows" fetch —
-// this avoids a second full paginated scan of market_screener_rows just to
-// obtain the nifty500 symbol list (that flag is already on every row). For
-// the index-membership universes (nifty50 / banknifty / finnifty) the
-// filtering set still comes from market_index_members.
-function applyUniverseFilter(
-  rows: any[],
-  universeSet: Set<string> | "nifty500" | "fno" | "sme" | null,
-): any[] {
-  if (universeSet === null) return rows.filter((r) => r.instrument_type === "EQ");
-  if (universeSet === "nifty500") return rows.filter((r) => r.instrument_type === "EQ" && Boolean(r.is_nifty500));
-  if (universeSet === "fno")      return rows.filter((r) => r.instrument_type === "EQ" && Boolean(r.fno_enabled));
-  if (universeSet === "sme")      return rows.filter((r) => Boolean(r.sme));
-  return rows.filter((r) => r.instrument_type === "EQ" && universeSet.has(r.symbol));
-}
+// Universe narrowing now happens in the query (applyUniverseQuery) so a
+// "Nifty 50" view no longer pays for the whole 2 800-row universe.
+
 
 async function resolveUniverseFilter(
   universe: UniverseId,
@@ -241,7 +255,12 @@ function toScreenerRow(s: any, idxSets: { NIFTY50: Set<string>; BANKNIFTY: Set<s
     market_cap:   num(s.market_cap),
     is_nifty500:  Boolean(s.is_nifty500),
     industry:     s.industry ?? null,
-    data_provenance: s.data_provenance ?? null,
+    // Rebuilt from the two projected scalars so the UI keeps its existing
+    // shape without the ~600 B blob crossing the wire.
+    data_provenance: (s.mcap_source || s.mcap_as_of)
+      ? { market_cap_source: s.mcap_source ?? null, market_cap_as_of: s.mcap_as_of ?? null }
+      : null,
+
     in_nifty50:   idxSets.NIFTY50.has(s.symbol),
     in_banknifty: idxSets.BANKNIFTY.has(s.symbol),
     in_finnifty:  idxSets.FINNIFTY.has(s.symbol),
@@ -405,24 +424,28 @@ export function useScreenerData(universe: UniverseId, asOfDate: string | null = 
       }
 
       // Live/latest branch — existing fast path.
-      const [universeSet, allRows] = await Promise.all([
-        resolveUniverseFilter(universe),
-        fetchScreenerRows(),
-      ]);
-      const filtered = applyUniverseFilter(allRows, universeSet);
+      const universeSet = await resolveUniverseFilter(universe);
+      const filtered = await fetchScreenerRows(universeSet);
       if (filtered.length === 0) return [];
       const [idxSets, ranked] = await Promise.all([
-        fetchIndexMembershipSets(filtered.map((s) => s.symbol)),
+        fetchIndexMembershipSets(filtered.map((s: any) => s.symbol)),
         mergeV4Scores(filtered),
       ]);
       return ranked.map((s) => toScreenerRow(s, idxSets));
     },
     // A back-date run is deterministic and expensive — cache it for the session.
-    staleTime: asOfDate ? Infinity : 60_000,
-    gcTime: asOfDate ? 30 * 60_000 : undefined,
+    // The live branch is an 8 MB-class fetch: a 60 s staleTime plus refetch on
+    // focus/mount meant tabbing back into the Screener re-pulled the whole
+    // universe. The snapshot itself only refreshes every 15 min server-side,
+    // so anything shorter than that is pure egress with no new data.
+    staleTime: asOfDate ? Infinity : 15 * 60_000,
+    gcTime: asOfDate ? 30 * 60_000 : 30 * 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
     retry: false,
     enabled,
   });
+
 }
 
 

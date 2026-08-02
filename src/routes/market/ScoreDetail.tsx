@@ -80,7 +80,7 @@ export default function ScoreDetail() {
         <Chip tone={stats.strongDays > 0 ? "ok" : "warn"}>{stats.strongDays} strong days</Chip>
         <div style={{ flex: 1 }} />
         <Btn size="sm" onClick={() => nav(`/market/analysis/${encodeURIComponent(symbol)}`)}>Chart</Btn>
-        <Btn size="sm" onClick={() => nav("/market/calibration")}>Calibration lab</Btn>
+        <Btn size="sm" onClick={() => nav("/market/breakout")}>Calibration lab</Btn>
       </div>
 
       <div style={{ display: "flex", gap: 6 }}>

@@ -12,6 +12,8 @@ import type { DepthResponse } from "@/lib/market/hooks";
 import { useLiveDepth } from "@/lib/market/liveDepthStore";
 import { useLiveDepthSubscription } from "@/lib/market/useRealtimeTicks";
 import { useDepthPanelStore } from "@/lib/market/depthPanelPrefs";
+import { useMarketOpen } from "@/lib/market/useMarketOpen";
+
 
 type Level = { price: number; qty: number; orders?: number };
 
@@ -42,12 +44,18 @@ export function MarketDepthLadder({
   symbol?: string;
   exchange?: string;
 }) {
+  const marketOpen = useMarketOpen();
   const visible = useDepthPanelStore((s) => s.visible);
   const toggle = useDepthPanelStore((s) => s.toggle);
-  useLiveDepthSubscription(symbol, visible);
+  useLiveDepthSubscription(symbol, visible && marketOpen);
   const pushed = useLiveDepth(symbol ? `${exchange.toUpperCase()}:${symbol.toUpperCase()}` : null);
 
   const actions = <ToggleButton visible={visible} onClick={toggle} />;
+
+  // Depth is a market-hours-only feed — hide the panel entirely outside the
+  // session instead of showing an empty ladder.
+  if (!marketOpen) return null;
+
 
   if (!visible) {
     return (

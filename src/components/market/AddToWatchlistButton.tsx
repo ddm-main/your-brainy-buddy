@@ -7,6 +7,7 @@ import { Star } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useUi } from "@/store/uiStore";
+import { currentUserId } from "@/lib/useSession";
 
 const ACTIVE_KEY = "market.watchlist.activeId";
 
@@ -16,14 +17,14 @@ type ActiveListState = {
 };
 
 async function resolveActiveList(): Promise<{ userId: string | null; listId: string | null }> {
-  const { data: u } = await supabase.auth.getUser();
-  if (!u.user) return { userId: null, listId: null };
+  const uid = await currentUserId();
+  if (!uid) return { userId: null, listId: null };
   const stored = typeof localStorage !== "undefined" ? localStorage.getItem(ACTIVE_KEY) : null;
   const { data: lists } = await supabase.from("market_watchlists")
     .select("id").order("created_at", { ascending: true });
   const rows = (lists ?? []) as Array<{ id: string }>;
   const valid = stored && rows.some((r) => r.id === stored) ? stored : rows[0]?.id ?? null;
-  return { userId: u.user.id, listId: valid };
+  return { userId: uid, listId: valid };
 }
 
 export function AddToWatchlistButton({

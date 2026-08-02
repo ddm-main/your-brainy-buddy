@@ -12,11 +12,12 @@ import { toSafeError } from "@/lib/errors";
 import { Play, Plus, Trash2 } from "lucide-react";
 import { fmtNum, fmtPct } from "@/components/hud/DataTable";
 import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
+import { currentUserId } from "@/lib/useSession";
 
 type Strategy = { id: string; name: string; description: string | null; strategy: any; created_at: string };
 type Result = {
   id: string; strategy_id: string | null; period_years: number | null;
-  metrics: any; equity_curve: any; trades: any; ran_at: string;
+  metrics: any; ran_at: string;
 };
 
 const WINDOWS = [1, 3, 5, 10];
@@ -38,7 +39,7 @@ export default function Backtesting() {
     queryKey: ["market", "strategies"],
     queryFn: async () => {
       const { data, error } = await supabase.from("market_saved_strategies")
-        .select("*").order("created_at", { ascending: false });
+        .select("id,name,description,strategy,created_at").order("created_at", { ascending: false });
       if (error) throw error;
       return (data ?? []) as Strategy[];
     },
@@ -46,7 +47,11 @@ export default function Backtesting() {
   const { data: results = [] } = useQuery({
     queryKey: ["market", "backtests", selectedId],
     queryFn: async () => {
-      let q = supabase.from("market_backtest_results").select("*").order("ran_at", { ascending: false }).limit(20);
+      // EGRESS: `equity_curve` and `trades` are large jsonb blobs; only the
+      // newest run's curve is ever drawn, so it is fetched separately below.
+      let q = supabase.from("market_backtest_results")
+        .select("id,strategy_id,period_years,metrics,ran_at")
+        .order("ran_at", { ascending: false }).limit(20);
       if (selectedId) q = q.eq("strategy_id", selectedId);
       const { data, error } = await q;
       if (error) throw error;
@@ -56,7 +61,19 @@ export default function Backtesting() {
 
   const latest = results[0];
   const metrics = (latest?.metrics ?? {}) as Record<string, number | null | undefined>;
-  const equity = (latest?.equity_curve ?? []) as Array<{ t?: string; v?: number }>;
+
+  const { data: latestCurve } = useQuery({
+    queryKey: ["market", "backtest-curve", latest?.id],
+    enabled: !!latest?.id,
+    staleTime: Infinity,
+    queryFn: async () => {
+      const { data, error } = await supabase.from("market_backtest_results")
+        .select("equity_curve").eq("id", latest!.id).maybeSingle();
+      if (error) throw error;
+      return (data?.equity_curve ?? []) as Array<{ t?: string; v?: number }>;
+    },
+  });
+  const equity = (latestCurve ?? []) as Array<{ t?: string; v?: number }>;
 
   const run = async () => {
     if (!selectedId) { push("Pick a strategy first", "err"); return; }
@@ -206,10 +223,10 @@ function NewStrategyModal({ onClose, onCreated }: { onClose: () => void; onCreat
     }
     setBusy(true);
     try {
-      const { data: u } = await supabase.auth.getUser();
-      if (!u?.user) throw new Error("not signed in");
+      const uid = await currentUserId();
+      if (!uid) throw new Error("not signed in");
       const { error } = await supabase.from("market_saved_strategies").insert({
-        user_id: u.user.id,
+        user_id: uid,
         name: name.trim(),
         description: `${RULES.find((r) => r.v === rule)?.l} on ${symbol.toUpperCase()} · SL ${sl}% / T ${tgt}%`,
         strategy: { rule, symbol: symbol.trim().toUpperCase(), exchange: "NSE", stop_loss_pct: sl, target_pct: tgt },

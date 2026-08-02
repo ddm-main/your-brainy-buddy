@@ -8,6 +8,7 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
+import { nseOpenNow } from "./liveTickStore";
 import {
   ROUTED_FEEDS, ROUTED_PROVIDER_LABEL,
   type RoutedFeed, type RoutedProvider,
@@ -97,8 +98,17 @@ export function useFeedHeartbeats() {
       if (error) throw error;
       return Object.fromEntries(((data ?? []) as Heartbeat[]).map((h) => [h.feed_id, h]));
     },
-    refetchInterval: 30_000,
-    staleTime: 15_000,
+    // EGRESS: heartbeats only move while a feed is running; don't poll a
+    // hidden tab, and back off hard outside market hours.
+    // EGRESS: heartbeats only change when a sync runs. 30 s round-the-clock in
+    // every tab was ~2 900 reads/day per tab for a status dot; 2 min while the
+    // market is open and 10 min otherwise shows the same thing.
+    refetchInterval: () => {
+      if (document.visibilityState !== "visible") return false;
+      return nseOpenNow() ? 120_000 : 10 * 60_000;
+    },
+    refetchIntervalInBackground: false,
+    staleTime: 60_000,
   });
 }
 

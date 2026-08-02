@@ -6,6 +6,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "./api";
+import { liveInterval } from "./hooks";
 import type { ScreenerGroup } from "./types";
 
 // market_autotrade_* tables aren't in the generated Supabase types until the
@@ -88,7 +89,9 @@ export function useAutoTradeSettings() {
     queryFn: async (): Promise<AutoTradeSettings> => {
       const { data: session } = await supabase.auth.getSession();
       const userId = session.session?.user.id;
-      const { data, error } = await db.from("market_autotrade_settings").select("*").maybeSingle();
+      const { data, error } = await db.from("market_autotrade_settings")
+        .select("user_id,enabled,max_capital_per_rule,max_open_positions,daily_loss_limit,disabled_reason,disabled_at")
+        .maybeSingle();
       if (error) throw error;
       return (data as AutoTradeSettings) ?? { user_id: userId ?? "", ...DEFAULT_SETTINGS };
     },
@@ -114,7 +117,9 @@ export function useAutoTradeRules() {
   return useQuery({
     queryKey: ["market", "autotrade", "rules"],
     queryFn: async (): Promise<AutoTradeRule[]> => {
-      const { data, error } = await db.from("market_autotrade_rules").select("*").order("created_at", { ascending: false });
+      const { data, error } = await db.from("market_autotrade_rules")
+        .select("id,name,symbol,exchange,watchlist_id,entry_conditions,exit_conditions,stop_loss_pct,target_pct,trail_stop_pct,product,order_type,exit_order_type,limit_offset_pct,sizing_mode,sizing_value,is_armed,created_at")
+        .order("created_at", { ascending: false });
       if (error) throw error;
       return (data ?? []) as unknown as AutoTradeRule[];
     },
@@ -162,11 +167,15 @@ export function useAutoTradeOrders() {
     queryKey: ["market", "autotrade", "orders"],
     queryFn: async (): Promise<AutoTradeOrder[]> => {
       const { data, error } = await db.from("market_autotrade_orders")
-        .select("*").order("created_at", { ascending: false }).limit(100);
+        .select("id,rule_id,symbol,exchange,side,leg,quantity,order_type,product,requested_price,broker_order_id,status,reason,filled_price,created_at")
+        .order("created_at", { ascending: false }).limit(100);
       if (error) throw error;
       return (data ?? []) as unknown as AutoTradeOrder[];
     },
-    refetchInterval: 15_000,
+    // EGRESS: autotrade only acts while the market is open, and a hidden tab
+    // has nobody reading the table.
+    refetchInterval: liveInterval(15_000, false),
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -175,11 +184,13 @@ export function useAutoTradeLog() {
     queryKey: ["market", "autotrade", "log"],
     queryFn: async (): Promise<AutoTradeLogRow[]> => {
       const { data, error } = await db.from("market_autotrade_log")
-        .select("*").order("created_at", { ascending: false }).limit(100);
+        .select("id,rule_id,level,message,created_at")
+        .order("created_at", { ascending: false }).limit(100);
       if (error) throw error;
       return (data ?? []) as unknown as AutoTradeLogRow[];
     },
-    refetchInterval: 15_000,
+    refetchInterval: liveInterval(15_000, false),
+    refetchIntervalInBackground: false,
   });
 }
 

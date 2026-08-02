@@ -97,13 +97,26 @@ Deno.serve(async (req) => {
         error = undefined;
         try {
           if (step.fn === "market-rescore-from-prices") {
-            iterations++;
-            const { data: rows, error: rpcErr } = await svc.rpc("market_rescore_latest_from_prices", {
-              _trade_date: null,
-              _limit: 3000,
-            });
-            if (rpcErr) throw new Error(rpcErr.message);
-            lastBody = { rows: rows ?? null };
+            // Keyset-batched: one 3000-symbol call exceeded the statement
+            // timeout and aborted the whole recovery pass.
+            let cursor: string | null = null;
+            let total = 0;
+            for (let b = 0; b < 12; b++) {
+              iterations++;
+              const { data, error: rpcErr } = await svc.rpc("market_rescore_prices_batch", {
+                _trade_date: null,
+                _limit: 400,
+                _after_symbol: cursor,
+              });
+              if (rpcErr) throw new Error(rpcErr.message);
+              const row = Array.isArray(data) ? data[0] : data;
+              const processed = Number(row?.processed ?? 0);
+              total += processed;
+              cursor = (row?.last_symbol as string | null) ?? null;
+              if (processed === 0 || !cursor) break;
+            }
+            lastBody = { rows: total };
+
           } else {
             for (let i = 0; i < (step.chunked ? MAX_DRAIN_ITERATIONS : 1); i++) {
               iterations++;
@@ -177,19 +190,43 @@ Deno.serve(async (req) => {
 
 
 
+    // ---- Freshness assertion ----
+    // Every step can report "ok" while the thing users actually read — the
+    // score table — is still on an older session. Compare it to the price
+    // table and fail the run loudly when it lags.
+    const [{ data: fp }, { data: fs }] = await Promise.all([
+      svc.from("market_daily_prices").select("trade_date").eq("exchange", "NSE")
+        .order("trade_date", { ascending: false }).limit(1).maybeSingle(),
+      svc.from("market_stock_scores").select("trade_date").eq("exchange", "NSE")
+        .order("trade_date", { ascending: false }).limit(1).maybeSingle(),
+    ]);
+    const priceDate = (fp?.trade_date as string | null) ?? null;
+    const scoreDate = (fs?.trade_date as string | null) ?? null;
+    let staleScores = 0;
+    if (priceDate) {
+      const { count } = await svc.from("market_stock_scores")
+        .select("symbol", { count: "exact", head: true })
+        .eq("exchange", "NSE")
+        .lt("trade_date", priceDate);
+      staleScores = count ?? 0;
+    }
+    const freshnessOk = !!priceDate && scoreDate === priceDate && staleScores === 0;
+
     const failedSteps = summary.filter((s) => s.status === "failed");
     await svc.from("market_ingestion_runs").insert({
       source: "daily_sync_orchestrator",
       stage: "summary",
-      status: failedSteps.length === 0 ? "ok" : "partial",
+      status: failedSteps.length === 0 && freshnessOk ? "ok" : "partial",
       rows_ingested: 0,
       duration_ms: Date.now() - startedAt,
       metadata: {
         steps: summary.map((s) => ({ fn: s.fn, status: s.status, duration_ms: s.duration_ms, iterations: s.iterations, error: s.error ?? null })),
         failed_count: failedSteps.length,
+        freshness: { price_date: priceDate, score_date: scoreDate, stale_scores: staleScores, ok: freshnessOk },
       },
       finished_at: new Date().toISOString(),
     });
+
 
    } catch (e) {
      await svc.from("market_ingestion_runs").insert({

@@ -28,6 +28,9 @@ export function startReminderPoller(onFire: (r: Reminder) => void) {
   let stopped = false;
   const tick = async () => {
     if (stopped) return;
+    // EGRESS: a background tab cannot show a reminder toast, so polling from
+    // one is pure spend. It catches up the moment the tab is focused again.
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
     try {
       const due = await fetchDueReminders();
       for (const r of due) {
@@ -36,7 +39,13 @@ export function startReminderPoller(onFire: (r: Reminder) => void) {
       }
     } catch { /* silent */ }
   };
-  const iv = window.setInterval(tick, 30_000);
+  const iv = window.setInterval(tick, 60_000);
+  const onVis = () => { if (document.visibilityState === "visible") tick(); };
+  document.addEventListener("visibilitychange", onVis);
   tick();
-  return () => { stopped = true; window.clearInterval(iv); };
+  return () => {
+    stopped = true;
+    window.clearInterval(iv);
+    document.removeEventListener("visibilitychange", onVis);
+  };
 }

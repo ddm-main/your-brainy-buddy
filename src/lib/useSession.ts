@@ -40,3 +40,15 @@ export function useSession() {
 
   return { session, ready };
 }
+
+/**
+ * EGRESS: `supabase.auth.getUser()` is a network round-trip to /auth/v1/user
+ * on every call — with a dozen call sites firing on mount and on every mutation
+ * it was a measurable slice of the project's Auth egress. The session in local
+ * storage already carries a verified user id, and every write these call sites
+ * guard is enforced server-side by RLS anyway, so read it locally.
+ */
+export async function currentUserId(): Promise<string | null> {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.user.id ?? null;
+}

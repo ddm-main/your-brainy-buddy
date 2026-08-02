@@ -24,7 +24,7 @@ export const MARKET_GROUPS: MarketGroup[] = [
     key: "breakout",
     label: "Breakout",
     to: "/market/breakout",
-    match: (p) => /^\/market\/(breakout|calibration|score)/.test(p),
+    match: (p) => /^\/market\/(breakout|score)/.test(p),
   },
   {
     key: "portfolio",
@@ -48,11 +48,6 @@ export const MARKET_GROUPS: MarketGroup[] = [
 
 export type MarketSub = { to: string; label: string };
 export const MARKET_SUBS: Record<string, MarketSub[]> = {
-  breakout: [
-    { to: "/market/breakout", label: "Breakout" },
-    { to: "/market/calibration", label: "Calibration" },
-  ],
-
   portfolio: [
     { to: "/market/portfolio", label: "Overview" },
     { to: "/market/holdings", label: "Holdings" },

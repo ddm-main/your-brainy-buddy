@@ -268,6 +268,9 @@ export interface CandlesResponse {
   history_source?: "kotak_neo" | "yahoo" | "cache" | "mixed" | "none";
   /** Source of ONLY the most recent (possibly quote-seeded) bar. */
   last_bar_source?: "kotak_neo" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none";
+  /** True when the server answered a `since` request with only the tail bars —
+   *  the client must merge these onto its cached series, not replace it. */
+  partial?: boolean;
 }
 
 export interface SavedScreener {

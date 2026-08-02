@@ -253,7 +253,10 @@ export default function MarketDashboard() {
     },
   });
 
-  // Portfolio day P&L — quote the held symbols with the same 1s live cadence.
+  // Portfolio day P&L. A 1 s cadence on a background dashboard card is 3 600
+  // edge-function round-trips an hour for a number nobody watches tick by
+  // tick; 3 s while the tab is visible is indistinguishable in practice and a
+  // third of the egress. Never polls in a background tab.
   const { data: pfQuotes } = useQuery({
     queryKey: ["market", "dash-pf-quotes", (counts?.holdingRows ?? []).map((h) => h.symbol).join(",")],
     queryFn: async () => {
@@ -261,9 +264,11 @@ export default function MarketDashboard() {
       return callMarketFn<{ quotes: Quote[] }>("market-quotes", { symbols: keys });
     },
     enabled: (counts?.holdingRows.length ?? 0) > 0,
-    refetchInterval: () => (nseOpenNow() ? 1_000 : false),
+    refetchInterval: () => (nseOpenNow() ? 3_000 : false),
+    refetchIntervalInBackground: false,
     placeholderData: (prev: unknown) => prev as any,
   });
+
   const pf = useMemo(() => {
     const rows = counts?.holdingRows ?? [];
     if (rows.length === 0) return null;

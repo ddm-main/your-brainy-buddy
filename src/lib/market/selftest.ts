@@ -36,7 +36,8 @@ export function useSurfaceProbes() {
       if (error) throw error;
       return (data ?? []) as SurfaceProbe[];
     },
-    refetchInterval: 120_000,
+    refetchInterval: 300_000,
+    refetchIntervalInBackground: false,
     staleTime: 60_000,
   });
 }
@@ -62,7 +63,8 @@ export function useFeedFreshness() {
       return out;
     },
     staleTime: 60_000,
-    refetchInterval: 300_000,
+    refetchInterval: 600_000,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -159,7 +161,8 @@ export function useProviderStats24h() {
       return out;
     },
     staleTime: 120_000,
-    refetchInterval: 300_000,
+    refetchInterval: 600_000,
+    refetchIntervalInBackground: false,
   });
 }
 

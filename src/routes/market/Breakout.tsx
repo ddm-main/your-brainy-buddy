@@ -24,8 +24,9 @@ import { todayIstDateString } from "@/lib/market/liveSnapshot";
 import { quoteKey } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore, useTicksRevision } from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
-import { ChevronDown, ChevronRight, LineChart, Info, PieChart } from "lucide-react";
+import { ChevronDown, ChevronRight, LineChart, Info, PieChart, SlidersHorizontal } from "lucide-react";
 import { ScoreWeightsDialog } from "@/components/market/ScoreWeightsDialog";
+import { CalibrationDialog } from "@/components/market/CalibrationDialog";
 
 // ---- Status presentation ----
 const STATUS_META: Record<BreakoutStatus, { label: string; color: string; rule: string }> = {
@@ -114,6 +115,7 @@ function BreakoutInner() {
   const [search, setSearch] = useState("");
   const [legendOpen, setLegendOpen] = useState(false);
   const [weightsOpen, setWeightsOpen] = useState(false);
+  const [calibrationOpen, setCalibrationOpen] = useState(false);
 
   // One query for everything — all three views are derived client-side.
   const { data: episodes = [], isFetching, error } = useBreakoutTracker(true);
@@ -395,7 +397,16 @@ function BreakoutInner() {
           <PieChart size={12} style={{ marginRight: 4 }} /> Score breakdown
         </button>
 
+        <button
+          onClick={() => setCalibrationOpen(true)}
+          className="hud-btn" data-variant="ghost" data-size="sm"
+          title="Open the model calibration lab"
+        >
+          <SlidersHorizontal size={12} style={{ marginRight: 4 }} /> Calibration
+        </button>
+
         <ScoreWeightsDialog open={weightsOpen} onOpenChange={setWeightsOpen} />
+        <CalibrationDialog open={calibrationOpen} onOpenChange={setCalibrationOpen} />
 
         <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: "var(--font-hud)", fontSize: 10, color: relayAlive ? "var(--ok)" : "var(--text-muted)", letterSpacing: "0.1em", textTransform: "uppercase" }}>

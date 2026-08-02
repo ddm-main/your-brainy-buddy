@@ -9,7 +9,7 @@
 // The relay diffs it against its Kotak WS subscription set so panels like
 // "Top Breakouts" (whose symbols rotate with filters) actually get push ticks
 // instead of falling back to the ~1s REST poll.
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useSession } from "@/lib/useSession";
 import { useLiveTickStore, RELAY_STALE_MS } from "./liveTickStore";
@@ -91,8 +91,37 @@ export function useLiveDepthSubscription(symbol: string | null | undefined, enab
 
 
 
+// EGRESS: a backgrounded tab keeps paying Realtime egress for ticks nobody can
+// see. Drop the subscription after this long hidden, resubscribe on focus.
+const HIDDEN_UNSUBSCRIBE_MS = 60_000;
+
+/** True while the tab has been hidden longer than HIDDEN_UNSUBSCRIBE_MS. */
+function useHiddenTooLong(): boolean {
+  const [idle, setIdle] = useState(false);
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onChange = () => {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (document.visibilityState === "hidden") {
+        timer = setTimeout(() => setIdle(true), HIDDEN_UNSUBSCRIBE_MS);
+      } else {
+        setIdle(false);
+      }
+    };
+    onChange();
+    document.addEventListener("visibilitychange", onChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onChange);
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
+  return idle;
+}
+
 export function useRealtimeTicks() {
   const { session } = useSession();
+  const hiddenTooLong = useHiddenTooLong();
   const setConnected = useLiveTickStore((s) => s.setConnected);
   const upsertTick = useLiveTickStore((s) => s.upsertTick);
   const applyTicks = useLiveTickStore((s) => s.applyTicks);
@@ -102,7 +131,7 @@ export function useRealtimeTicks() {
   const channelRef = useRef<RealtimeChannel | null>(null);
 
   useEffect(() => {
-    if (!userId) return;
+    if (!userId || hiddenTooLong) return;
     let cancelled = false;
 
     // Shared system-feed channel: the Kotak relay broadcasts here, and every
@@ -179,7 +208,7 @@ export function useRealtimeTicks() {
       channelRef.current = null;
       supabase.removeChannel(channel);
     };
-  }, [userId, setConnected, upsertTick, applyTicks, setRelayAlive, markRelayMessage]);
+  }, [userId, hiddenTooLong, setConnected, upsertTick, applyTicks, setRelayAlive, markRelayMessage]);
 }
 
 export function useRelayAlive(): boolean {

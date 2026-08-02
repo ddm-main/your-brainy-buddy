@@ -16,6 +16,7 @@ import { mergeLiveQuotes, useLiveTickStore, useTicksRevision} from "@/lib/market
 import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
 import type { Quote } from "@/lib/market/types";
 import { OrderTicket } from "@/components/market/OrderTicket";
+import { currentUserId } from "@/lib/useSession";
 
 type SortMode = "manual" | "symbol" | "price-desc" | "price-asc" | "return-desc" | "return-asc";
 const SORT_KEY_PREFIX = "market.watchlist.sort.";
@@ -58,15 +59,15 @@ export function WatchlistPanel({
   const sortMenuRef = useRef<HTMLDivElement | null>(null);
 
   const loadLists = async () => {
-    const { data: u } = await supabase.auth.getUser();
-    if (!u.user) { setLoading(false); return; }
+    const uid = await currentUserId();
+    if (!uid) { setLoading(false); return; }
     const { data: wl, error } = await supabase.from("market_watchlists")
       .select("id,name").order("created_at", { ascending: true });
     if (error) { push(error.message, "err"); setLoading(false); return; }
     let rows = (wl ?? []) as List[];
     if (rows.length < MIN_LISTS) {
       const toCreate: Array<{ user_id: string; name: string }> = [
-        { user_id: u.user.id, name: "Default" },
+        { user_id: uid, name: "Default" },
       ];
       const { data: inserted, error: e2 } = await supabase.from("market_watchlists")
         .insert(toCreate as any).select("id,name");
@@ -146,10 +147,10 @@ export function WatchlistPanel({
     if (!activeId) return;
     setAdding(true);
     try {
-      const { data: u } = await supabase.auth.getUser();
-      if (!u.user) return;
+      const uid = await currentUserId();
+      if (!uid) return;
       const { error } = await supabase.from("market_watchlist_items").insert({
-        user_id: u.user.id, watchlist_id: activeId, symbol: opt.symbol, exchange: opt.exchange,
+        user_id: uid, watchlist_id: activeId, symbol: opt.symbol, exchange: opt.exchange,
       } as any);
       if (error) {
         push(error.code === "23505" ? `${opt.symbol} is already in this list` : error.message, "err");
@@ -172,10 +173,10 @@ export function WatchlistPanel({
   const addList = async () => {
     const name = window.prompt("Name this watchlist:", `Watchlist ${lists.length + 1}`)?.trim();
     if (!name) return;
-    const { data: u } = await supabase.auth.getUser();
-    if (!u.user) return;
+    const uid = await currentUserId();
+    if (!uid) return;
     const { data, error } = await supabase.from("market_watchlists")
-      .insert({ user_id: u.user.id, name } as any).select("id,name").single();
+      .insert({ user_id: uid, name } as any).select("id,name").single();
     if (error) { push(error.message, "err"); return; }
     setLists((ls) => [...ls, data as List]);
     setActiveId((data as List).id);

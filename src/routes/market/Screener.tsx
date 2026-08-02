@@ -13,7 +13,7 @@ import { DataTable, deriveChangeAbs, fmtInt, fmtNum, PctCell, Return1DCell } fro
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { AddToWatchlistButton } from "@/components/market/AddToWatchlistButton";
 
-import { useSavedScreeners, useScreenerMutations, useQuotes, useMarketSettings, useFavoriteFilters, useFavoriteFilterMutations } from "@/lib/market/hooks";
+import { useSavedScreeners, useScreenerMutations, useQuotes, useMarketSettings, useFavoriteFilters, useFavoriteFilterMutations, useLatestPriceSession } from "@/lib/market/hooks";
 import { useScreenerData, useScreenerSectors, useScreenerIndustries, getAsofMeta, type AsofMeta, type ScreenerRow } from "@/lib/market/screenerRun";
 import { todayIstDateString } from "@/lib/market/liveSnapshot";
 import { quoteKey } from "@/lib/market/pnl";
@@ -259,6 +259,18 @@ function ScreenerInner() {
   const staleThresholdDays = istDow === 0 ? 2 : istDow === 6 ? 1 : istDow === 1 ? 3 : 1;
   const isWeekend = istDow === 0 || istDow === 6;
   const isDataStale = !isWeekend && dataStaleDays != null && dataStaleDays > staleThresholdDays;
+
+  // Wall-clock staleness above says nothing on weekends. The pipeline-relative
+  // check does: if scores are dated before the newest session that already has
+  // stored prices, the scoring pass fell behind regardless of what day it is.
+  const { data: latestPriceSession } = useLatestPriceSession();
+  const scoresBehindPrices = !!latestTradeDate && !!latestPriceSession
+    && String(latestTradeDate) < String(latestPriceSession);
+  const scoresBehindDays = scoresBehindPrices && latestTradeDate && latestPriceSession
+    ? Math.max(1, Math.round(
+        (Date.parse(`${latestPriceSession}T00:00:00Z`) - Date.parse(`${latestTradeDate}T00:00:00Z`)) / 86_400_000,
+      ))
+    : null;
 
   // Worst-of-3 coverage summary for the compact status pill in the Results
   // header. Full breakdown still lives behind the Health modal.
@@ -768,20 +780,23 @@ function ScreenerInner() {
       },
       breakout_score: {
         header: "Breakout (v2)", accessorKey: "breakout_score", meta: { align: "right" },
-        cell: ({ row }) => <ScoreBadge score={row.original.breakout_score} components={row.original.score_components?.breakout} label="breakout components" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
+        // No `components` prop: the badge lazy-loads the breakdown for this one
+        // symbol on hover instead of the table pulling the blob for every row.
+        cell: ({ row }) => <ScoreBadge score={row.original.breakout_score} symbol={row.original.symbol} exchange={row.original.exchange} kind="breakout" label="breakout components" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
       },
       prebreakout_score: {
         header: "Pre-BO", accessorKey: "prebreakout_score", meta: { align: "right" },
-        cell: ({ row }) => <ScoreBadge score={row.original.prebreakout_score} components={row.original.score_components?.prebreakout} label="pre-breakout components" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
+        cell: ({ row }) => <ScoreBadge score={row.original.prebreakout_score} symbol={row.original.symbol} exchange={row.original.exchange} kind="prebreakout" label="pre-breakout components" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
       },
       swing_score: {
         header: "Swing", accessorKey: "swing_score", meta: { align: "right" },
-        cell: ({ row }) => <ScoreBadge score={row.original.swing_score} components={row.original.swing_components} label="swing components" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
+        cell: ({ row }) => <ScoreBadge score={row.original.swing_score} symbol={row.original.symbol} exchange={row.original.exchange} kind="swing" label="swing components" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
       },
       intraday_score: {
         header: "Intraday", accessorKey: "intraday_score", meta: { align: "right" },
-        cell: ({ row }) => <ScoreBadge score={row.original.intraday_score} components={row.original.intraday_components} label="intraday components" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
+        cell: ({ row }) => <ScoreBadge score={row.original.intraday_score} symbol={row.original.symbol} exchange={row.original.exchange} kind="intraday" label="intraday components" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
       },
+
       avg_turnover_cr: {
         header: "Turnover (₹Cr)", accessorKey: "avg_turnover_cr", meta: { align: "right" },
         cell: ({ getValue }) => fmtNum(getValue() as number | null, 1),
@@ -871,6 +886,18 @@ function ScreenerInner() {
           <AlertTriangle size={14} color="var(--danger)" style={{ flexShrink: 0 }} />
           <span style={{ fontSize: 12, color: "var(--danger)" }}>
             Data is {dataStaleDays} day{dataStaleDays === 1 ? "" : "s"} behind — EOD pipeline hasn't caught up.
+          </span>
+        </div>
+      )}
+
+      {!isDataStale && scoresBehindPrices && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
+          border: "1px solid var(--warn)", borderRadius: 2, background: "rgba(255,176,32,0.08)",
+        }}>
+          <AlertTriangle size={14} color="var(--warn)" style={{ flexShrink: 0 }} />
+          <span style={{ fontSize: 12, color: "var(--warn)" }}>
+            Scores are {scoresBehindDays}d behind stored prices (scores {String(latestTradeDate)} · prices {String(latestPriceSession)}) — the scoring pass hasn't drained.
           </span>
         </div>
       )}
@@ -1636,7 +1663,9 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
   const { data: pipeline } = useQuery({
     queryKey: ["market", "pipeline-status"],
     queryFn: async () => {
-      const { data, error } = await (supabase as any).from("market_pipeline_status").select("*").maybeSingle();
+      const { data, error } = await (supabase as any).from("market_pipeline_status")
+        .select("active_stocks,equities_total,equities_covered,equities_with_sector,mcap_nse_covered,mcap_any_covered,fundamentals_covered,fundamentals_failed,fundamentals_last_updated_at,scores_last_trade_date,scores_last_count")
+        .maybeSingle();
       if (error) throw error;
       return data as {
         active_stocks: number;
@@ -1652,8 +1681,10 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
         scores_last_count: number | null;
       } | null;
     },
-    refetchInterval: 60_000,
-    staleTime: 30_000,
+    // EGRESS: pipeline status is refreshed by cron every 15 min at best.
+    refetchInterval: () => (document.visibilityState === "visible" ? 5 * 60_000 : false),
+    refetchIntervalInBackground: false,
+    staleTime: 5 * 60_000,
   });
 
   const eodLagDays = (tradeDate: string | null | undefined): number | null => {
