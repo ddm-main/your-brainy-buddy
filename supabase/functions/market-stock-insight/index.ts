@@ -7,6 +7,7 @@
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient, SHARED_CACHE_USER_ID } from "../_shared/market/common.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 import { sanitizeAiTrade } from "../_shared/market/aiTradeValidation.ts";
+import { classifyHeadline, windowSentiment } from "../_shared/market/newsSentiment.ts";
 
 // Fast, cheap default with a stronger fallback. `openai/gpt-5.5` (the old
 // value) is NOT a valid Lovable AI Gateway model id and every call was 400ing
@@ -30,13 +31,32 @@ interface AiPayload {
   rationale: string;              // 2–4 sentences
   risks: string[];                // short bullets
   plausibility_flags?: string[];  // entry/stop_loss/target fields dropped by sanitizeAiTrade
+  // How the AI reads the mechanical breakout setup, and how much it would
+  // move the v4 score. The Analysis panel applies this on top of the stored
+  // score instead of showing the verdict as an unrelated opinion.
+  alignment?: "confirms" | "neutral" | "contradicts";
+  score_adjustment?: number | null;   // −10..+10
+  adjustment_reason?: string | null;
 }
 
 const SYSTEM = `You are JARVIS, Deepak's Indian equities trading analyst.
-Given technical + fundamental data for a single stock, output a decisive
-short-term (5–30 day) plan. Numbers must be plausible relative to the
-current close. If setup is weak, say "wait" or "avoid". Never invent
-numbers not derivable from the given context. Keep rationale under 60 words.`;
+Given technical, fundamental, news-sentiment and market-context data for a
+single stock, output a decisive short-term (5–30 day) plan. Weigh ALL of the
+supplied evidence: trend and momentum, the breakout score and its component
+buckets, volume/liquidity, chart patterns, support/resistance distance,
+valuation and balance-sheet quality, recent news sentiment, sector strength
+and the market breadth regime. Where the live price differs from the EOD
+close the technicals were computed on, reason off the live price.
+
+Also judge the mechanical breakout score: set "alignment" to confirms /
+neutral / contradicts and "score_adjustment" to an integer between -10 and
++10 saying how much the evidence the score cannot see (news, fundamentals,
+market context, pattern quality) should move it. Use 0 when you have nothing
+to add. "adjustment_reason" is one short clause.
+
+Numbers must be plausible relative to the current price. If the setup is
+weak, say "wait" or "avoid". Never invent numbers not derivable from the
+given context. Keep rationale under 60 words.`;
 
 async function callAiOnce(apiKey: string, prompt: string, model: string): Promise<AiPayload> {
   const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
@@ -50,7 +70,7 @@ async function callAiOnce(apiKey: string, prompt: string, model: string): Promis
       model,
       messages: [
         { role: "system", content: SYSTEM },
-        { role: "user", content: prompt + "\n\nRespond ONLY as JSON matching this schema: {\"verdict\":\"buy|hold|wait|avoid\",\"confidence\":number,\"entry\":number|null,\"stop_loss\":number|null,\"targets\":[number],\"holding_period_days\":number|null,\"rationale\":\"string\",\"risks\":[\"string\"]}" },
+        { role: "user", content: prompt + "\n\nRespond ONLY as JSON matching this schema: {\"verdict\":\"buy|hold|wait|avoid\",\"confidence\":number,\"entry\":number|null,\"stop_loss\":number|null,\"targets\":[number],\"holding_period_days\":number|null,\"rationale\":\"string\",\"risks\":[\"string\"],\"alignment\":\"confirms|neutral|contradicts\",\"score_adjustment\":number,\"adjustment_reason\":\"string\"}" },
       ],
       response_format: { type: "json_object" },
     }),
@@ -91,6 +111,11 @@ async function callAi(apiKey: string, prompt: string): Promise<AiPayload> {
     holding_period_days: parsed.holding_period_days ?? null,
     rationale: String(parsed.rationale ?? "").slice(0, 600),
     risks: Array.isArray(parsed.risks) ? parsed.risks.slice(0, 4).map((r) => String(r).slice(0, 160)) : [],
+    alignment: ["confirms", "neutral", "contradicts"].includes(String(parsed.alignment))
+      ? parsed.alignment : "neutral",
+    score_adjustment: Number.isFinite(Number(parsed.score_adjustment))
+      ? Math.max(-10, Math.min(10, Math.round(Number(parsed.score_adjustment)))) : 0,
+    adjustment_reason: parsed.adjustment_reason ? String(parsed.adjustment_reason).slice(0, 160) : null,
   };
 }
 
@@ -122,6 +147,10 @@ function normalizeAiPayload(p: any): AiPayload {
     rationale: String(p.rationale ?? p.reasoning ?? "").slice(0, 600),
     risks: Array.isArray(p.risks) ? p.risks.slice(0, 4).map((r: unknown) => String(r).slice(0, 160)) : [],
     plausibility_flags: Array.isArray(p.plausibility_flags) ? p.plausibility_flags.map((f: unknown) => String(f)) : undefined,
+    alignment: ["confirms", "neutral", "contradicts"].includes(String(p.alignment)) ? p.alignment : undefined,
+    score_adjustment: Number.isFinite(Number(p.score_adjustment))
+      ? Math.max(-10, Math.min(10, Math.round(Number(p.score_adjustment)))) : null,
+    adjustment_reason: p.adjustment_reason ? String(p.adjustment_reason).slice(0, 160) : null,
   };
 }
 
@@ -197,19 +226,57 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Extra evidence the verdict used to be blind to: live price, the news
+    // window with per-headline sentiment, detected patterns, the v4 bucket
+    // breakdown, and the market/sector regime.
+    const [{ data: quoteRow }, { data: newsRows }, { data: breadth }] = await Promise.all([
+      svc.from("market_quotes").select("ltp,day_change_pct,as_of")
+        .eq("symbol", symbol).eq("exchange", exchange)
+        .order("as_of", { ascending: false }).limit(1).maybeSingle(),
+      svc.from("market_news").select("headline,sentiment,published_at")
+        .eq("symbol", symbol).eq("exchange", exchange)
+        .order("published_at", { ascending: false }).limit(8),
+      svc.from("market_breadth_daily").select("regime,adv_decline_ratio,trade_date")
+        .order("trade_date", { ascending: false }).limit(1).maybeSingle(),
+    ]);
+
+    const newsItems = (newsRows ?? []).map((n) => ({
+      headline: String(n.headline ?? ""),
+      sentiment: n.sentiment != null ? Number(n.sentiment) : classifyHeadline(String(n.headline ?? "")).score,
+      published_at: (n.published_at as string | null) ?? null,
+    }));
+    const sent = windowSentiment(newsItems);
+    const newsText = newsItems.length
+      ? newsItems.map((n) => `- [${n.sentiment >= 0 ? "+" : ""}${n.sentiment.toFixed(2)}] ${n.headline}`).join("\n")
+      : "(no recent headlines)";
+
+    const patternText = [
+      score.bullish_engulfing && "bullish engulfing", score.bearish_engulfing && "bearish engulfing",
+      score.hammer && "hammer", score.shooting_star && "shooting star", score.doji && "doji",
+      score.cup_and_handle && "cup & handle", score.flag && "flag",
+      score.ascending_triangle && "ascending triangle", score.double_bottom && "double bottom",
+      score.inverse_head_shoulders && "inverse H&S", score.falling_wedge && "falling wedge",
+    ].filter(Boolean).join(", ") || "none detected";
+
     const prompt = `Symbol: ${symbol} (${exchange})
 Sector: ${score.sector ?? "unknown"}
-Data vintage: technicals are end-of-day for ${score.trade_date ?? "an unknown session"} (today is ${new Date().toISOString().slice(0, 10)}); treat the close below as that session's close, not a live price.
-Close: ${score.close}  Change%: ${score.change_pct}
-Volume: ${score.volume}  RelVol: ${score.rel_volume}
+Data vintage: technicals are end-of-day for ${score.trade_date ?? "an unknown session"} (today is ${new Date().toISOString().slice(0, 10)}).
+EOD close: ${score.close}  Change%: ${score.change_pct}
+${quoteRow?.ltp != null ? `LIVE price: ${quoteRow.ltp} (${quoteRow.day_change_pct ?? "?"}% today, as of ${quoteRow.as_of}) — anchor entry/stop/targets on this, not the EOD close.` : "Live price: unavailable."}
+Volume: ${score.volume}  RelVol: ${score.rel_volume}  Delivery%: ${score.delivery_pct ?? "n/a"}
 RSI14: ${score.rsi14}  ADX14: ${score.adx14}  ATR%: ${score.atr_pct}
 MACD: ${score.macd}/${score.macd_signal}  BB width: ${score.bb_width}  BB squeeze: ${score.bb_squeeze}
 EMA20/50/200: ${score.ema20}/${score.ema50}/${score.ema200}
 52w high/low: ${score.high_52w}/${score.low_52w}   %fromHigh: ${score.pct_from_52w_high}
 Support/Resistance: ${score.support_level}/${score.resistance_level}
 Higher lows: ${score.higher_lows}  Above 200EMA: ${score.above_ema200}  Near resistance: ${score.near_resistance}
-Breakout score: ${score.breakout_score}   Pre-breakout: ${score.prebreakout_score}
-Rel strength vs Nifty: ${score.rel_strength_nifty}
+Chart patterns: ${patternText}
+Breakout score: ${score.breakout_score}   Pre-breakout: ${score.prebreakout_score}   Band: ${score.breakout_band ?? "n/a"}
+Rel strength vs Nifty: ${score.rel_strength_nifty}   Sector strength: ${score.sector_strength ?? "n/a"}
+Market breadth regime: ${breadth?.regime ?? "unknown"}${breadth?.adv_decline_ratio != null ? ` (A/D ${breadth.adv_decline_ratio})` : ""}
+News sentiment: ${sent.avg != null ? sent.avg.toFixed(2) : "n/a"} across ${sent.count} headlines (${sent.positive} positive / ${sent.negative} negative)
+Recent headlines:
+${newsText}
 ${fundText ? `\nFundamentals${fundAsOf ? ` (as of ${String(fundAsOf).slice(0, 10)})` : ""}: ${fundText}` : "\nFundamentals: unavailable — do not assert valuation claims."}
 `;
 
@@ -218,7 +285,8 @@ ${fundText ? `\nFundamentals${fundAsOf ? ` (as of ${String(fundAsOf).slice(0, 10
     if (!apiKey) return errorResponse(req, "LOVABLE_API_KEY not configured", 500);
 
     const raw = await callAi(apiKey, prompt);
-    const closePrice = score.close != null ? Number(score.close) : null;
+    const closePrice = quoteRow?.ltp != null ? Number(quoteRow.ltp)
+      : score.close != null ? Number(score.close) : null;
     const sane = sanitizeAiTrade({ verdict: raw.verdict, entry: raw.entry, stop_loss: raw.stop_loss, targets: raw.targets }, closePrice);
     // A verdict with no entry, no stop and no targets carries nothing the user
     // can act on — the model still routinely returned 1.0 ("certain") for it,

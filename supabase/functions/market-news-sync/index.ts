@@ -10,6 +10,7 @@ import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsF
 import { fetchStockNews } from "../_shared/market/yahooClient.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
 import { lowBandwidthMode } from "../_shared/market/cron.ts";
+import { classifyHeadline } from "../_shared/market/newsSentiment.ts";
 
 
 Deno.serve(async (req) => {
@@ -69,20 +70,46 @@ Deno.serve(async (req) => {
 
     let upserted = 0;
     let fetched = 0;
+    let backfilled = 0;
+
     const errors: string[] = [];      // our fault: a write failed
     const feedErrors: string[] = [];  // upstream's fault: the news feed was down
     for (const { symbol, exchange } of symbols) {
       const { items, error: fetchErr } = await fetchStockNews(symbol, names.get(`${exchange}:${symbol}`));
       if (fetchErr) { feedErrors.push(`${exchange}:${symbol}: ${fetchErr}`); continue; }
       fetched += items.length;
+      // Rows written before headline classification existed have NULL
+      // sentiment and would render as "neutral" forever — backfill them on
+      // every sync of the symbol, independent of whether the feed answered.
+      const { data: unclassified } = await svc.from("market_news")
+        .select("id,headline")
+        .eq("symbol", symbol).eq("exchange", exchange)
+        .is("classified_at", null).limit(200);
+      if (unclassified && unclassified.length > 0) {
+        const nowIso = new Date().toISOString();
+        for (const row of unclassified) {
+          const c = classifyHeadline(row.headline as string | null);
+          await svc.from("market_news")
+            .update({ sentiment: c.score, impact: c.impact, classified_at: nowIso })
+            .eq("id", row.id);
+        }
+        backfilled += unclassified.length;
+      }
       if (items.length === 0) continue;
-      const rows = items.slice(0, 15).map((it) => ({
-        symbol, exchange,
-        headline: it.headline,
-        url: it.url,
-        source: it.source,
-        published_at: it.published_at,
-      }));
+      const classifiedAt = new Date().toISOString();
+      const rows = items.slice(0, 15).map((it) => {
+        const c = classifyHeadline(it.headline);
+        return {
+          symbol, exchange,
+          headline: it.headline,
+          url: it.url,
+          source: it.source,
+          published_at: it.published_at,
+          sentiment: c.score,
+          impact: c.impact,
+          classified_at: classifiedAt,
+        };
+      });
       const { error } = await svc.from("market_news").upsert(rows, { onConflict: "symbol,exchange,url", ignoreDuplicates: true });
       // Never report ok for a write that failed — this function used to
       // swallow the error and still return `ok: true`, which is why a broken
@@ -90,6 +117,7 @@ Deno.serve(async (req) => {
       if (error) errors.push(`${exchange}:${symbol}: ${error.message}`);
       else upserted += rows.length;
     }
+
     // A 502 here means "this function is broken". An upstream news provider
     // answering 503 is neither our failure nor actionable by the caller — it
     // used to be raised as a hard 502, which the UI surfaced as a blank
@@ -105,6 +133,7 @@ Deno.serve(async (req) => {
       symbols: symbols.length,
       fetched,
       upserted,
+      backfilled,
       synced_at: new Date().toISOString(),
       errors: errors.length ? errors : undefined,
       feed_errors: feedErrors.length ? feedErrors : undefined,

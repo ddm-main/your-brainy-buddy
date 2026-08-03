@@ -261,15 +261,17 @@ function ScreenerInner() {
   const isDataStale = !isWeekend && dataStaleDays != null && dataStaleDays > staleThresholdDays;
 
   // Wall-clock staleness above says nothing on weekends. The pipeline-relative
-  // check does: if scores are dated before the newest session that already has
-  // stored prices, the scoring pass fell behind regardless of what day it is.
-  const { data: latestPriceSession } = useLatestPriceSession();
+  // check does: if scores are dated before the newest *settled* session (a day
+  // whose bhavcopy wrote the whole market), the scoring pass fell behind.
+  const { data: sessionInfo } = useLatestPriceSession();
+  const latestPriceSession = sessionInfo?.latestComplete ?? null;
   const scoresBehindPrices = !!latestTradeDate && !!latestPriceSession
     && String(latestTradeDate) < String(latestPriceSession);
-  const scoresBehindDays = scoresBehindPrices && latestTradeDate && latestPriceSession
-    ? Math.max(1, Math.round(
-        (Date.parse(`${latestPriceSession}T00:00:00Z`) - Date.parse(`${latestTradeDate}T00:00:00Z`)) / 86_400_000,
-      ))
+  const scoresBehindSessions = scoresBehindPrices && latestTradeDate
+    ? (() => {
+        const idx = sessionInfo?.sessions.indexOf(String(latestTradeDate).slice(0, 10)) ?? -1;
+        return idx > 0 ? idx : null;
+      })()
     : null;
 
   // Worst-of-3 coverage summary for the compact status pill in the Results
@@ -897,7 +899,7 @@ function ScreenerInner() {
         }}>
           <AlertTriangle size={14} color="var(--warn)" style={{ flexShrink: 0 }} />
           <span style={{ fontSize: 12, color: "var(--warn)" }}>
-            Scores are {scoresBehindDays}d behind stored prices (scores {String(latestTradeDate)} · prices {String(latestPriceSession)}) — the scoring pass hasn't drained.
+            Scores are {scoresBehindSessions != null ? `${scoresBehindSessions} session${scoresBehindSessions === 1 ? "" : "s"} ` : ""}behind settled prices (scores {String(latestTradeDate)} · prices {String(latestPriceSession)}) — the scoring pass hasn't drained.
           </span>
         </div>
       )}

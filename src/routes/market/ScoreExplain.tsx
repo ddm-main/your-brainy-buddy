@@ -29,7 +29,7 @@ export default function ScoreExplain() {
   const nav = useNavigate();
   const sym = symbol.toUpperCase();
 
-  const { data: scores = [], isLoading } = useStockScores({ symbol: sym, limit: 1 });
+  const { data: scores = [], isLoading } = useStockScores({ symbol: sym, exchange, limit: 1 });
   const score = scores[0];
 
   const v4 = (score?.breakout_v4_components ?? null) as any;

@@ -394,10 +394,11 @@ export function useStockScores(opts: {
   desc?: boolean;
   limit?: number;
   symbol?: string;
+  exchange?: string;
 } = {}) {
-  const { groups, orderBy = "breakout_score", desc = true, limit = 200, symbol } = opts;
+  const { groups, orderBy = "breakout_score", desc = true, limit = 200, symbol, exchange } = opts;
   return useQuery({
-    queryKey: ["market", "scores", JSON.stringify(groups ?? null), orderBy, desc, limit, symbol ?? null],
+    queryKey: ["market", "scores", JSON.stringify(groups ?? null), orderBy, desc, limit, symbol ?? null, exchange ?? null],
     queryFn: async (): Promise<StockScore[]> => {
       // EGRESS: market_stock_scores has 109 columns (~8.5 KB of JSON a row).
       // List views render ~20 of them, so they get a blob-free projection;
@@ -407,6 +408,7 @@ export function useStockScores(opts: {
         ? supabase.from("market_stock_scores").select("*")
         : supabase.from("market_stock_scores").select(STOCK_SCORE_LIST_COLUMNS);
       if (symbol) q = q.eq("symbol", symbol);
+      if (exchange) q = q.eq("exchange", exchange);
       if (groups && groups.length > 0) {
         const orParts = groups
           .map((g) => {
@@ -422,7 +424,12 @@ export function useStockScores(opts: {
           q = q.or(orParts.join(","));
         }
       }
-      q = q.order(orderBy, { ascending: !desc, nullsFirst: false }).limit(limit);
+      // A single-symbol surface always needs the newest session. Ordering by
+      // breakout score can otherwise select an older, higher-scoring row when
+      // history is present, making every panel appear to have a different age.
+      q = symbol
+        ? q.order("trade_date", { ascending: false }).limit(limit)
+        : q.order(orderBy, { ascending: !desc, nullsFirst: false }).limit(limit);
       const { data, error } = await q;
       if (error) throw error;
       return (data ?? []) as unknown as StockScore[];
@@ -459,22 +466,66 @@ export function useBreadth() {
   });
 }
 
-// Latest EOD session that actually has prices stored (NSE). Used to tell
-// "the market simply hasn't traded since" apart from "the scoring pass is
+// A date only counts as a settled session once the bhavcopy pass has written
+// the whole market. Individual symbols get a daily row written ad-hoc while a
+// chart is open, so `max(trade_date)` alone reports "today" off a handful of
+// unsettled rows.
+const COMPLETE_SESSION_MIN_ROWS = 500;
+
+export interface LatestPriceSessionInfo {
+  /** Newest trade_date whose NSE row count looks like a full bhavcopy. */
+  latestComplete: string | null;
+  /** Newest complete sessions, newest first — used to count sessions behind. */
+  sessions: string[];
+  /** Newest stored date when it is only partially written (intraday writes). */
+  partialLatest: string | null;
+}
+
+async function countRowsForSession(date: string): Promise<number> {
+  const { count, error } = await supabase
+    .from("market_daily_prices" as any)
+    .select("symbol", { count: "exact", head: true })
+    .eq("exchange", "NSE")
+    .eq("trade_date", date);
+  if (error) throw error;
+  return count ?? 0;
+}
+
+async function newestSessionBefore(date: string | null): Promise<string | null> {
+  let q = supabase
+    .from("market_daily_prices" as any)
+    .select("trade_date")
+    .eq("exchange", "NSE")
+    .order("trade_date", { ascending: false })
+    .limit(1);
+  if (date) q = q.lt("trade_date", date);
+  const { data, error } = await q.maybeSingle();
+  if (error) throw error;
+  const raw = (data as any)?.trade_date as string | null | undefined;
+  return raw ? String(raw).slice(0, 10) : null;
+}
+
+// Latest settled EOD session plus the recent session ladder. Used to tell
+// "the market simply hasn't settled since" apart from "the scoring pass is
 // behind" — a stale score chip should only look alarming in the second case.
 export function useLatestPriceSession() {
   return useQuery({
-    queryKey: ["market", "latest-price-session"],
-    queryFn: async (): Promise<string | null> => {
-      const { data, error } = await supabase
-        .from("market_daily_prices" as any)
-        .select("trade_date")
-        .eq("exchange", "NSE")
-        .order("trade_date", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (error) throw error;
-      return ((data as any)?.trade_date as string | null) ?? null;
+    queryKey: ["market", "latest-price-session", "v2"],
+    queryFn: async (): Promise<LatestPriceSessionInfo> => {
+      const sessions: string[] = [];
+      let partialLatest: string | null = null;
+      let cursor: string | null = null;
+      // Walk back at most a handful of stored dates; each hop is a tiny
+      // head-count request and the whole result is cached for 10 minutes.
+      for (let hop = 0; hop < 8 && sessions.length < 6; hop++) {
+        const date: string | null = await newestSessionBefore(cursor);
+        if (!date) break;
+        cursor = date;
+        const rows = await countRowsForSession(date);
+        if (rows >= COMPLETE_SESSION_MIN_ROWS) sessions.push(date);
+        else if (sessions.length === 0 && partialLatest == null) partialLatest = date;
+      }
+      return { latestComplete: sessions[0] ?? null, sessions, partialLatest };
     },
     staleTime: 10 * 60_000,
   });
@@ -778,6 +829,11 @@ export interface StockInsight {
   risks: string[];
   // Set when sanitizeAiTrade rewrote an implausible entry/stop/target.
   plausibility_flags?: string[];
+  // How the AI reads the breakout setup, and by how much it would move the
+  // v4 score (−10..+10). Absent on payloads cached before this existed.
+  alignment?: "confirms" | "neutral" | "contradicts";
+  score_adjustment?: number | null;
+  adjustment_reason?: string | null;
 }
 export function useStockInsight(symbol: string | undefined, exchange = "NSE") {
   return useQuery({
@@ -880,11 +936,18 @@ export function useIndexConstituents(slug: string | null | undefined) {
   });
 }
 
-export interface NewsRow { id: string; headline: string; url: string | null; source: string | null; published_at: string | null }
+export interface NewsRow {
+  id: string; headline: string; url: string | null; source: string | null; published_at: string | null;
+  created_at?: string | null;
+  // Written by market-news-sync's lexicon classifier. Null on rows synced
+  // before classification existed — the UI classifies those on the fly.
+  sentiment?: number | null; impact?: string | null;
+}
 export interface CorporateActionRow {
   id: string; action_type: string; ex_date: string | null;
   ratio_from: number | null; ratio_to: number | null; amount: number | null;
   purpose: string | null;
+  updated_at?: string | null;
 }
 
 export function useMarketNews(symbol: string | undefined, exchange = "NSE") {
@@ -892,7 +955,7 @@ export function useMarketNews(symbol: string | undefined, exchange = "NSE") {
     queryKey: ["market", "news", symbol ?? "", exchange],
     queryFn: async (): Promise<NewsRow[]> => {
       const { data, error } = await supabase.from("market_news" as any)
-        .select("id,headline,url,source,published_at")
+        .select("id,headline,url,source,published_at,created_at,sentiment,impact")
         .eq("symbol", symbol).eq("exchange", exchange)
         .order("published_at", { ascending: false }).limit(10);
       if (error) throw error;
@@ -910,7 +973,7 @@ export function useCorporateActions(symbol: string | undefined, exchange = "NSE"
     queryKey: ["market", "corporate-actions", symbol ?? "", exchange],
     queryFn: async (): Promise<CorporateActionRow[]> => {
       const { data, error } = await supabase.from("corporate_actions" as any)
-        .select("id,action_type,ex_date,ratio_from,ratio_to,amount,purpose")
+        .select("id,action_type,ex_date,ratio_from,ratio_to,amount,purpose,updated_at")
         .eq("symbol", symbol).eq("exchange", exchange)
         .order("ex_date", { ascending: false }).limit(10);
       if (error) throw error;
@@ -960,6 +1023,11 @@ export function useSyncNewsAndActions() {
       if (failures.length === results.length) {
         throw failures[0].reason instanceof Error ? failures[0].reason : new Error(String(failures[0].reason));
       }
+      return {
+        checked_at: new Date().toISOString(),
+        partial: failures.length > 0,
+        errors: failures.map((failure) => failure.reason instanceof Error ? failure.reason.message : String(failure.reason)),
+      };
     },
     onSettled: (_d, _e, { symbol, exchange }) => {
       qc.invalidateQueries({ queryKey: ["market", "news", symbol, exchange] });

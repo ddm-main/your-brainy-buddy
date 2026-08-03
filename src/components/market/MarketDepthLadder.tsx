@@ -6,8 +6,8 @@
 // REST book from useDepth() when the relay isn't running. Push beats REST on
 // both latency and cost — the REST path was polling an edge function once a
 // second for a book Kotak already streams.
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { HudPanel } from "@/components/hud/HudPanel";
 import type { DepthResponse } from "@/lib/market/hooks";
 import { useLiveDepth } from "@/lib/market/liveDepthStore";
 import { useLiveDepthSubscription } from "@/lib/market/useRealtimeTicks";
@@ -17,7 +17,20 @@ import { useMarketOpen } from "@/lib/market/useMarketOpen";
 
 type Level = { price: number; qty: number; orders?: number };
 
-function ToggleButton({ visible, onClick }: { visible: boolean; onClick: () => void }) {
+// Inline container inside the Quote panel — a hairline rule and a small
+// caption instead of its own HUD panel chrome.
+function Shell({ children }: { children: ReactNode }) {
+  return (
+    <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid var(--edge)" }}>
+      <div className="hud-label" style={{ fontSize: 9, letterSpacing: ".08em", color: "var(--text-muted)", marginBottom: 6 }}>
+        Market Depth
+      </div>
+      {children}
+    </div>
+  );
+}
+
+export function DepthToggleButton({ visible, onClick }: { visible: boolean; onClick: () => void }) {
   return (
     <button
       type="button"
@@ -30,11 +43,14 @@ function ToggleButton({ visible, onClick }: { visible: boolean; onClick: () => v
         background: "transparent", color: "var(--text-dim)", cursor: "pointer",
       }}
     >
-      {visible ? "Hide" : "Show"}
+      {visible ? "Hide depth" : "Depth"}
     </button>
   );
 }
 
+// Rendered inline inside the A1 Quote panel. The Show/Hide control lives in
+// the Quote panel header (DepthToggleButton) — this component renders nothing
+// at all while hidden, so no subscription and no REST poll runs.
 export function MarketDepthLadder({
   depth,
   symbol,
@@ -46,24 +62,20 @@ export function MarketDepthLadder({
 }) {
   const marketOpen = useMarketOpen();
   const visible = useDepthPanelStore((s) => s.visible);
-  const toggle = useDepthPanelStore((s) => s.toggle);
   useLiveDepthSubscription(symbol, visible && marketOpen);
   const pushed = useLiveDepth(symbol ? `${exchange.toUpperCase()}:${symbol.toUpperCase()}` : null);
 
-  const actions = <ToggleButton visible={visible} onClick={toggle} />;
+  if (!visible) return null;
 
-  // Depth is a market-hours-only feed — hide the panel entirely outside the
-  // session instead of showing an empty ladder.
-  if (!marketOpen) return null;
-
-
-  if (!visible) {
+  // Depth is a market-hours-only feed — say so in one line instead of
+  // showing an empty ladder.
+  if (!marketOpen) {
     return (
-      <HudPanel flow title="Market Depth" index="A2" actions={actions}>
+      <Shell>
         <div className="hud-label" style={{ fontSize: 11, color: "var(--text-dim)" }}>
-          Order book hidden. Live depth feed paused.
+          Order book resumes at the next session — market is closed.
         </div>
-      </HudPanel>
+      </Shell>
     );
   }
 
@@ -77,11 +89,11 @@ export function MarketDepthLadder({
     // Panel must stay mounted while the first book loads — returning null made
     // the whole A2 slot pop in and out and reflow the grid.
     return (
-      <HudPanel flow title="Market Depth" index="A2" actions={actions}>
+      <Shell>
         <div className="hud-label" style={{ fontSize: 11, color: "var(--text-dim)" }}>
           Loading order book…
         </div>
-      </HudPanel>
+      </Shell>
     );
   }
   // Depth is a broker-only, market-hours-only feed. An empty book has several
@@ -95,7 +107,7 @@ export function MarketDepthLadder({
       : code === "not_connected" ? null
       : "Broker feed hiccup — retrying.";
     return (
-      <HudPanel flow title="Market Depth" index="A2" actions={actions}>
+      <Shell>
         <div className="hud-label" style={{ fontSize: 11, lineHeight: 1.6, color: "var(--text-dim)" }}>
           {copy ?? (
             <>
@@ -107,7 +119,7 @@ export function MarketDepthLadder({
             <div style={{ marginTop: 4, fontSize: 10, opacity: 0.6 }}>{depth.reason}</div>
           )}
         </div>
-      </HudPanel>
+      </Shell>
     );
   }
 
@@ -176,7 +188,7 @@ export function MarketDepthLadder({
   };
 
   return (
-    <HudPanel flow title="Market Depth" index="A2" actions={actions}>
+    <Shell>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
         <div>
           <div className="hud-label" style={{
@@ -244,6 +256,6 @@ export function MarketDepthLadder({
           </div>
         </div>
       </div>
-    </HudPanel>
+    </Shell>
   );
 }

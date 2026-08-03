@@ -13,7 +13,10 @@ interface DepthPanelState {
 }
 
 export const useDepthPanelStore = create<DepthPanelState>((set, get) => ({
-  visible: safeStorage.get(KEY) !== "0",
+  // Default OFF: depth is the single most expensive feed on the page (a REST
+  // poll plus a relay lease) and most sessions never look at the ladder. It
+  // only starts once the user presses Show.
+  visible: safeStorage.get(KEY) === "1",
   setVisible: (visible) => {
     safeStorage.set(KEY, visible ? "1" : "0");
     set({ visible });

@@ -20,10 +20,11 @@ import { fmtNum, fmtInt, fmtPct, Return1DCell, deriveChangeAbs } from "@/compone
 import type { CorporateActionRow } from "@/lib/market/hooks";
 import { marketOpen } from "@/lib/market/hooks";
 import { useBreadth, useCandles, useCorporateActions, useDepth, useFundamentals, useLatestPriceSession, useMarketNews, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores, useSyncNewsAndActions } from "@/lib/market/hooks";
-import { MarketDepthLadder } from "@/components/market/MarketDepthLadder";
+import { MarketDepthLadder, DepthToggleButton } from "@/components/market/MarketDepthLadder";
 import { useMarketOpen } from "@/lib/market/useMarketOpen";
 
-import { useDepthPanelVisible } from "@/lib/market/depthPanelPrefs";
+import { useDepthPanelStore } from "@/lib/market/depthPanelPrefs";
+import { classifyHeadline, windowSentiment } from "../../../supabase/functions/_shared/market/newsSentiment";
 import { computeLiveScore } from "@/lib/market/liveSnapshot";
 import { readPatterns } from "@/lib/market/patternLabels";
 import { deriveBreakoutStage, STAGE_TONE } from "@/lib/market/breakoutStage";
@@ -347,7 +348,7 @@ export default function Analysis() {
   }, [allowDelayed]);
   const { data: candleData, isLoading, error, refetch, isFetching } = useCandles(sym, tf, exchange, { allowDelayed });
 
-  const { data: scores = [] } = useStockScores({ symbol: sym, limit: 1 });
+  const { data: scores = [] } = useStockScores({ symbol: sym, exchange, limit: 1 });
   const score = scores[0];
   const { data: quotesData, dataUpdatedAt: quotesUpdatedAt } = useQuotes(sym ? [`${exchange}:${sym}`] : []);
   useEffect(() => {
@@ -387,7 +388,8 @@ export default function Analysis() {
   // intraday) — this is what the live technical recompute always uses.
   const { data: dailyCandleData } = useCandles(sym, "1D", exchange);
   const { data: sectors = [] } = useSectorStrength();
-  const depthVisible = useDepthPanelVisible();
+  const depthVisible = useDepthPanelStore((st) => st.visible);
+  const toggleDepth = useDepthPanelStore((st) => st.toggle);
   const marketOpenNow = useMarketOpen();
   const { data: depth } = useDepth(sym, exchange, depthVisible && marketOpenNow);
 
@@ -399,9 +401,12 @@ export default function Analysis() {
     () => computeLiveScore(dailyCandleData?.candles, quote, score, breadth, marketCapCr),
     [dailyCandleData, quote, score, breadth, marketCapCr],
   );
-  const { data: insightData, isLoading: insightLoading, error: insightError } = useStockInsight(sym);
+  const { data: insightData, isLoading: insightLoading, error: insightError } = useStockInsight(sym, exchange);
   const refreshInsight = useRefreshStockInsight();
   const { data: news = [], error: newsError } = useMarketNews(sym, exchange);
+  // Recency-weighted headline sentiment over the loaded window. Feeds the
+  // Breakout panel's sentiment line and the AI verdict prompt context.
+  const newsSent = useMemo(() => windowSentiment(news), [news]);
   const { data: corpActions = [] } = useCorporateActions(sym, exchange);
   const syncNews = useSyncNewsAndActions();
   const insight = insightData?.payload;
@@ -450,27 +455,33 @@ export default function Analysis() {
   // the panels used to show a green `live` chip at 23:00 IST. When closed,
   // state the EOD session the numbers belong to instead.
   const liveIntraday = !!liveScore && sessionOpen;
-  // Staleness is measured against the last session that actually has prices,
-  // not the wall clock: on a Sunday, Friday's score is current, while a score
-  // dated before the newest stored bar means the scoring pass fell behind.
-  const { data: latestPriceSession } = useLatestPriceSession();
+  // Staleness is measured against the last *settled* session — a day whose
+  // bhavcopy wrote the whole market. Ad-hoc intraday daily rows (written while
+  // a chart is open) must not count, or a normal "today's EOD pass hasn't run
+  // yet" state looks like a broken pipeline.
+  const { data: sessionInfo } = useLatestPriceSession();
+  const latestComplete = sessionInfo?.latestComplete ?? null;
   const scoreDate = score?.trade_date ? String(score.trade_date).slice(0, 10) : null;
-  const scoreBehindPipeline = !!scoreDate && !!latestPriceSession && scoreDate < latestPriceSession;
-  const sessionsBehind = scoreBehindPipeline && scoreDate
-    ? Math.max(1, Math.round(
-        (Date.parse(`${latestPriceSession}T00:00:00Z`) - Date.parse(`${scoreDate}T00:00:00Z`)) / 86_400_000,
-      ))
-    : null;
+  const scoreBehindPipeline = !!scoreDate && !!latestComplete && scoreDate < latestComplete;
+  // Count trading sessions, not calendar days: a weekend or a pending EOD pass
+  // must never inflate the number.
+  const sessionsBehind = (() => {
+    if (!scoreBehindPipeline || !scoreDate) return null;
+    const idx = sessionInfo?.sessions.indexOf(scoreDate) ?? -1;
+    return idx > 0 ? idx : null;
+  })();
   const vintageChip = liveIntraday
     ? <Chip tone="ok">live</Chip>
     : scoreDate
       ? (
         <span title={scoreBehindPipeline
-          ? `Scoring pipeline is behind: latest stored session is ${latestPriceSession}, this score is from ${scoreDate}.`
-          : `Latest completed EOD session (${scoreDate}).`}>
+          ? `Scoring pipeline is behind: latest settled session is ${latestComplete}, this score is from ${scoreDate}.`
+          : `Latest settled EOD session (${scoreDate}). Today's EOD pass runs after 18:00 IST.`}>
           <Chip tone={scoreBehindPipeline ? "warn" : "neutral"}>
             EOD {new Date(scoreDate).toLocaleDateString([], { day: "2-digit", month: "short" })}
-            {sessionsBehind != null ? ` · ${sessionsBehind}d behind` : ""}
+            {sessionsBehind != null
+              ? ` · ${sessionsBehind} session${sessionsBehind === 1 ? "" : "s"} behind`
+              : scoreBehindPipeline ? " · behind" : ""}
           </Chip>
         </span>
       )
@@ -516,10 +527,15 @@ export default function Analysis() {
     syncNews.mutate({ symbol: sym, exchange });
   }, [sym, exchange, news.length, syncNews]);
 
-  // "Last synced" for the news panel: the newest row we hold, or the
-  // timestamp the most recent manual sync reported.
-  const newsSyncedAt = (syncNews.data as { synced_at?: string } | undefined)?.synced_at
-    ?? news.map((n) => n.published_at).filter(Boolean).sort().pop()
+  // Feed freshness is an ingestion/check timestamp, never a headline's
+  // publication date. A three-day-old latest story may still have been checked
+  // seconds ago; calling the publication date "synced" made a healthy feed
+  // look stale and mixed two different clocks.
+  const newsCheckedAt = (syncNews.data as { checked_at?: string } | undefined)?.checked_at
+    ?? [...news.map((n) => n.created_at), ...corpActions.map((a) => a.updated_at)]
+      .filter((value): value is string => !!value)
+      .sort()
+      .pop()
     ?? null;
 
   // Per-symbol failures the sync reports while still returning HTTP 200 — the
@@ -555,6 +571,12 @@ export default function Analysis() {
   const dayChange = getTrustedDayChange(quote);
   const liveChartPrice = !staleLive ? (quote?.ltp ?? null) : null;
   const liveChartVolume = !staleLive ? ((quote as any)?.volume ?? null) : null;
+  const quoteAsOf = !staleLive ? quote?.as_of ?? null : null;
+  const quoteVintage = quoteAsOf
+    ? `${sessionOpen ? "LIVE" : "LAST"} · ${new Date(quoteAsOf).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}`
+    : scoreDate
+      ? `EOD · ${new Date(scoreDate).toLocaleDateString([], { day: "2-digit", month: "short" })}`
+      : null;
   const chartSource = candleData?.last_bar_source === "quote" || candleData?.last_bar_source === "quote_delayed"
     ? candleData.last_bar_source
     : candleData?.provider ?? null;
@@ -675,7 +697,8 @@ export default function Analysis() {
 
       {/* Right rail — scrolls independently */}
       <div className="mk-anl-rail">
-        <HudPanel flow title="Quote" index="A1">
+        <HudPanel flow title="Quote" index="A1"
+          actions={<DepthToggleButton visible={depthVisible} onClick={toggleDepth} />}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
             <div style={{ fontFamily: "var(--font-display)", fontSize: 22, lineHeight: 1.1, color: "var(--accent)" }}>
               {ltp != null ? `₹${fmtNum(ltp)}` : "—"}
@@ -688,13 +711,11 @@ export default function Analysis() {
               {/* Only claim "live" while the session is actually open — outside
                   hours the same recompute runs off the settled EOD close, and
                   labelling that as live made a two-day-old print look fresh. */}
-              {quote?.ltp && liveScore && sessionOpen ? (
-                <Chip tone="ok">live</Chip>
-              ) : score?.trade_date ? (
+              {quoteVintage && (
                 <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.1em" }}>
-                  EOD · {new Date(score.trade_date).toLocaleDateString([], { day: "2-digit", month: "short" })}
+                  {quoteVintage}
                 </span>
-              ) : null}
+              )}
               {quote?.stale && <Chip tone="warn">stale</Chip>}
             </div>
           </div>
@@ -707,11 +728,111 @@ export default function Analysis() {
               <CompactStat label="Prev Close" value={fmtNum(dayBar.prevClose)} />
             </div>
           )}
+
+          {/* Order book lives inside the quote now — off by default, and it
+              renders (and subscribes) only once the user presses Depth. */}
+          <MarketDepthLadder depth={depth} symbol={sym} exchange={exchange} />
         </HudPanel>
 
         <StockAlertsPanel symbol={sym} exchange={exchange} />
 
-        <MarketDepthLadder depth={depth} symbol={sym} exchange={exchange} />
+        {/* AI Verdict — cached 6h per symbol. refreshInsight is one shared
+            mutation instance; scope its pending state to the symbol
+            actually in flight so navigating to a different symbol mid-refresh
+            doesn't show a stale "analyzing…" for the wrong one. */}
+        {(() => { const refreshingThis = refreshInsight.isPending && refreshInsight.variables?.symbol === sym; return (
+        <HudPanel flow title="AI Verdict" index="A2"
+          actions={
+            <Btn size="sm" variant="ghost" disabled={!sym || refreshingThis}
+              onClick={() => sym && refreshInsight.mutate({ symbol: sym, exchange })}
+              aria-label="refresh AI verdict">
+              <RefreshCw size={11} />
+            </Btn>
+          }>
+          {insightLoading || refreshingThis ? (
+            <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)" }}>analyzing…</div>
+          ) : insightError ? (
+            <div className="hud-label" style={{ fontSize: 11, color: "var(--danger)" }}>
+              {(insightError as Error).message.includes("no coverage")
+                ? "no coverage — run pipeline"
+                : "AI unavailable — try refresh"}
+            </div>
+          ) : insight ? (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+                <Chip tone={insight.verdict === "buy" ? "ok" : insight.verdict === "avoid" ? "err" : insight.verdict === "wait" ? "warn" : "accent"}>
+                  {insight.verdict.toUpperCase()}
+                </Chip>
+                {/* Confidence is capped server-side at 95% — an equity call is
+                    never certain, and the model routinely emitted 1.0. */}
+                <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                  conf {Math.round(insight.confidence * 100)}%
+                </span>
+                {insight.alignment && (
+                  <Chip tone={insight.alignment === "confirms" ? "ok" : insight.alignment === "contradicts" ? "warn" : undefined}>
+                    {insight.alignment}
+                  </Chip>
+                )}
+                {insightData?.computed_at && (
+                  <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                    generated {new Date(insightData.computed_at).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                )}
+              </div>
+              {scoreDate && (
+                <div style={{ fontSize: 9, color: "var(--text-muted)", marginBottom: 6 }}>
+                  based on EOD technicals · {new Date(scoreDate).toLocaleDateString([], { day: "2-digit", month: "short" })}
+                  {quoteAsOf ? " · live price context included" : ""}
+                </div>
+              )}
+              {/* A 6h-cached verdict priced off a close the market has since
+                  left is worse than no verdict — say how far it has drifted. */}
+              {(() => {
+                const anchor = insight.entry ?? score?.close ?? null;
+                if (anchor == null || !ltp) return null;
+                const drift = ((ltp - anchor) / anchor) * 100;
+                if (Math.abs(drift) < 2) return null;
+                return (
+                  <div style={{ fontSize: 10, color: "var(--warn, #ffb84d)", marginBottom: 6 }}>
+                    price has moved {drift > 0 ? "+" : ""}{drift.toFixed(1)}% since this verdict — refresh before acting
+                  </div>
+                );
+              })()}
+              {insight.plausibility_flags && insight.plausibility_flags.length > 0 && (
+                <div style={{ fontSize: 10, color: "var(--warn, #ffb84d)", marginBottom: 6 }}>
+                  adjusted: {insight.plausibility_flags.join(", ")}
+                </div>
+              )}
+
+              {(insight.entry || insight.stop_loss || insight.targets.length > 0) && (
+                <div style={{ display: "flex", flexDirection: "column", fontSize: 11, marginBottom: 6 }}>
+                  {insight.entry != null && <Row label="Entry" mono>₹{fmtNum(insight.entry, 2)}</Row>}
+                  {insight.stop_loss != null && <Row label="Stop" mono>₹{fmtNum(insight.stop_loss, 2)}</Row>}
+                  {insight.targets.map((t, i) => (
+                    <Row key={i} label={`T${i + 1}`} mono>₹{fmtNum(t, 2)}</Row>
+                  ))}
+                  {insight.holding_period_days != null && (
+                    <Row label="Hold" mono>{insight.holding_period_days}d</Row>
+                  )}
+                </div>
+              )}
+              <div style={{ fontSize: 11, lineHeight: 1.5, color: "var(--text)", marginBottom: 4 }}>
+                {insight.rationale}
+              </div>
+              {insight.risks.length > 0 && (
+                <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 4 }}>
+                  <div className="hud-label" style={{ marginBottom: 2 }}>Risks</div>
+                  <ul style={{ margin: 0, paddingLeft: 14 }}>
+                    {insight.risks.map((r, i) => <li key={i}>{r}</li>)}
+                  </ul>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)" }}>press refresh</div>
+          )}
+        </HudPanel>
+        ); })()}
 
         {!score ? (
           <HudPanel flow title="Coverage" index="A3">
@@ -737,6 +858,13 @@ export default function Analysis() {
             const chipTone = stageTone === "neutral" ? undefined : stageTone;
             const band = score?.breakout_band ?? null;
             const reason = score?.score_unavailable_reason ?? null;
+            // The AI verdict is a real input to the read, not a side panel:
+            // it nudges the displayed score by up to ±10. The raw pipeline
+            // number stays visible underneath so the score explainer, the
+            // screener and this panel never silently disagree.
+            const aiAdj = insight?.score_adjustment != null && Number.isFinite(insight.score_adjustment)
+              ? Math.max(-10, Math.min(10, Number(insight.score_adjustment)))
+              : 0;
             // A score with no coverage and a genuinely weak setup must never
             // look the same — say why instead of printing a low number.
             if (breakoutScore == null) {
@@ -754,15 +882,28 @@ export default function Analysis() {
                 <Row label={liveScore && quote?.ltp && sessionOpen ? "Breakout Score (live)" : "Breakout Score (EOD)"}>
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                     <ScoreBadge
-                      score={breakoutScore}
+                      score={Math.max(0, Math.min(100, Math.round(breakoutScore + aiAdj)))}
                       components={components}
                       label="breakout components"
                       onClick={() => nav(`/market/score/${encodeURIComponent(sym)}/explain?exchange=${encodeURIComponent(exchange)}`)}
                     />
+                    {aiAdj !== 0 && (
+                      <Chip tone={aiAdj > 0 ? "ok" : "warn"}>AI {aiAdj > 0 ? "+" : ""}{aiAdj}</Chip>
+                    )}
                     {band && <Chip tone={band === "STRONG" ? "ok" : band === "WEAK" ? "warn" : "accent"}>{band}</Chip>}
                     {chipTone && <Chip tone={chipTone}>{stage.stage}</Chip>}
                   </span>
                 </Row>
+                {aiAdj !== 0 && (
+                  <div style={{ fontSize: 10, color: "var(--text-muted)", padding: "2px 0", textAlign: "right" }}>
+                    raw {Math.round(breakoutScore)} · {insight?.adjustment_reason ?? `AI verdict ${insight?.verdict ?? ""}`}
+                  </div>
+                )}
+                {newsSent.count > 0 && (
+                  <div style={{ fontSize: 10, color: "var(--text-muted)", padding: "2px 0", textAlign: "right" }}>
+                    news sentiment {newsSent.avg != null && newsSent.avg >= 0 ? "+" : ""}{newsSent.avg?.toFixed(2)} · {newsSent.positive}↑ / {newsSent.negative}↓ of {newsSent.count}
+                  </div>
+                )}
                 {/* "no snapshot" is a not-loaded-yet placeholder, not a verdict —
                     never render it as if it were analysis. */}
                 {stage.detail && stage.detail !== "no snapshot" && (
@@ -861,85 +1002,12 @@ export default function Analysis() {
         </>
         )}
 
-        {/* AI Verdict — cached 6h per symbol. refreshInsight is one shared
-            mutation instance; scope its pending state to the symbol
-            actually in flight so navigating to a different symbol mid-refresh
-            doesn't show a stale "analyzing…" for the wrong one. */}
-        {(() => { const refreshingThis = refreshInsight.isPending && refreshInsight.variables?.symbol === sym; return (
-        <HudPanel flow title="AI Verdict" index="A6"
-          actions={
-            <Btn size="sm" variant="ghost" disabled={!sym || refreshingThis}
-              onClick={() => sym && refreshInsight.mutate({ symbol: sym })}
-              aria-label="refresh AI verdict">
-              <RefreshCw size={11} />
-            </Btn>
-          }>
-          {insightLoading || refreshingThis ? (
-            <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)" }}>analyzing…</div>
-          ) : insightError ? (
-            <div className="hud-label" style={{ fontSize: 11, color: "var(--danger)" }}>
-              {(insightError as Error).message.includes("no coverage")
-                ? "no coverage — run pipeline"
-                : "AI unavailable — try refresh"}
-            </div>
-          ) : insight ? (
-            <>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
-                <Chip tone={insight.verdict === "buy" ? "ok" : insight.verdict === "avoid" ? "err" : insight.verdict === "wait" ? "warn" : "accent"}>
-                  {insight.verdict.toUpperCase()}
-                </Chip>
-                {/* Confidence is capped server-side at 95% — an equity call is
-                    never certain, and the model routinely emitted 1.0. */}
-                <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                  conf {Math.round(insight.confidence * 100)}%
-                </span>
-                {insightData?.computed_at && (
-                  <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                    · {new Date(insightData.computed_at).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
-                  </span>
-                )}
-              </div>
-              {insight.plausibility_flags && insight.plausibility_flags.length > 0 && (
-                <div style={{ fontSize: 10, color: "var(--warn, #ffb84d)", marginBottom: 6 }}>
-                  adjusted: {insight.plausibility_flags.join(", ")}
-                </div>
-              )}
-
-              {(insight.entry || insight.stop_loss || insight.targets.length > 0) && (
-                <div style={{ display: "flex", flexDirection: "column", fontSize: 11, marginBottom: 6 }}>
-                  {insight.entry != null && <Row label="Entry" mono>₹{fmtNum(insight.entry, 2)}</Row>}
-                  {insight.stop_loss != null && <Row label="Stop" mono>₹{fmtNum(insight.stop_loss, 2)}</Row>}
-                  {insight.targets.map((t, i) => (
-                    <Row key={i} label={`T${i + 1}`} mono>₹{fmtNum(t, 2)}</Row>
-                  ))}
-                  {insight.holding_period_days != null && (
-                    <Row label="Hold" mono>{insight.holding_period_days}d</Row>
-                  )}
-                </div>
-              )}
-              <div style={{ fontSize: 11, lineHeight: 1.5, color: "var(--text)", marginBottom: 4 }}>
-                {insight.rationale}
-              </div>
-              {insight.risks.length > 0 && (
-                <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 4 }}>
-                  <div className="hud-label" style={{ marginBottom: 2 }}>Risks</div>
-                  <ul style={{ margin: 0, paddingLeft: 14 }}>
-                    {insight.risks.map((r, i) => <li key={i}>{r}</li>)}
-                  </ul>
-                </div>
-              )}
-            </>
-          ) : (
-            <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)" }}>press refresh</div>
-          )}
-        </HudPanel>
-        ); })()}
 
         {/* Fundamentals — payload units are fixed by market-fundamentals:
             ratios are decimal fractions, ownership is percent. Do not add a
             second rescaling here; that is what produced "ROE 1502%". */}
         {fund && (
-          <HudPanel flow title="Fundamentals" index="A7"
+          <HudPanel flow title="Fundamentals" index="A6"
             actions={fundAsOf ? <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.08em" }}>{fundAsOf}</span> : undefined}>
             {/* Rows the source has no value for are omitted rather than
                 printed as a column of em-dashes — for most NSE mid-caps the
@@ -975,12 +1043,12 @@ export default function Analysis() {
         )}
 
         {/* News & Corporate Actions — synced on demand, not on a universe-wide cron */}
-        <HudPanel flow title="News & Corporate Actions" index="A8"
+        <HudPanel flow title="News & Corporate Actions" index="A7"
           actions={
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              {newsSyncedAt && (
+              {newsCheckedAt && (
                 <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.08em" }}>
-                  synced {new Date(newsSyncedAt).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                  checked {new Date(newsCheckedAt).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
                 </span>
               )}
               <Btn size="sm" variant="ghost" disabled={!sym || syncNews.isPending}
@@ -1015,15 +1083,29 @@ export default function Analysis() {
           ) : (
 
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {news.map((n) => (
-                <a key={n.id} href={n.url ?? undefined} target="_blank" rel="noreferrer"
-                  style={{ fontSize: 11, color: "var(--text)", textDecoration: "none", display: "block" }}>
-                  <div>{n.headline}</div>
-                  <div style={{ color: "var(--text-dim)", fontSize: 10, marginTop: 2 }}>
-                    {n.source ?? "Yahoo Finance"}{n.published_at ? ` · ${new Date(n.published_at).toLocaleDateString([], { day: "2-digit", month: "short" })}` : ""}
-                  </div>
-                </a>
-              ))}
+              {news.map((n) => {
+                // Rows synced before the classifier landed carry no stored
+                // sentiment — classify them client-side with the exact same
+                // lexicon so every headline gets a flag, not just new ones.
+                const cls = n.sentiment != null
+                  ? { score: Number(n.sentiment), impact: (n.impact as "positive" | "negative" | "neutral" | null) ?? (Number(n.sentiment) >= 0.15 ? "positive" : Number(n.sentiment) <= -0.15 ? "negative" : "neutral") }
+                  : classifyHeadline(n.headline);
+                const flagColor = cls.impact === "positive" ? "var(--ok)" : cls.impact === "negative" ? "var(--danger)" : "var(--text-muted)";
+                return (
+                  <a key={n.id} href={n.url ?? undefined} target="_blank" rel="noreferrer"
+                    style={{ fontSize: 11, color: "var(--text)", textDecoration: "none", display: "grid", gridTemplateColumns: "8px 1fr", gap: 8, alignItems: "start" }}>
+                    <span aria-label={`${cls.impact} news`}
+                      title={`${cls.impact} · sentiment ${cls.score >= 0 ? "+" : ""}${cls.score.toFixed(2)}`}
+                      style={{ width: 8, height: 8, borderRadius: "50%", background: flagColor, marginTop: 4 }} />
+                    <span>
+                      <div>{n.headline}</div>
+                      <div style={{ color: "var(--text-dim)", fontSize: 10, marginTop: 2 }}>
+                        {n.source ?? "Google News"}{n.published_at ? ` · ${new Date(n.published_at).toLocaleDateString([], { day: "2-digit", month: "short" })}` : ""}
+                      </div>
+                    </span>
+                  </a>
+                );
+              })}
             </div>
           )}
         </HudPanel>
