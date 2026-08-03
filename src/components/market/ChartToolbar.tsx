@@ -1,23 +1,32 @@
 import { useEffect, useState } from "react";
-import { CandlestickChart, LineChart, AreaChart, BarChart3, Activity, Bell, Camera, LayoutGrid, Maximize2, Minimize2, Save, Search, Trash2, TrendingUp, Waves } from "lucide-react";
+import { Activity, Bell, Camera, LayoutGrid, Maximize2, Minimize2, Save, Search, Star, Trash2 } from "lucide-react";
 import { Menu, MenuItem, MenuGroup, MenuDivider } from "@/components/hud/Menu";
+import { safeStorage } from "@/lib/safeStorage";
 import type { ChartType } from "@/components/market/CandleChart";
 import {
   OVERLAY_DEFS, OSCILLATOR_DEFS,
   type IndicatorType, type IndicatorDef,
 } from "@/lib/market/indicatorRegistry";
 
+// Favourite indicator types, persisted locally so the ★ tab survives reloads.
+const FAV_INDICATORS_KEY = "mk.chart.favIndicators";
+const ALL_TYPES = new Set<IndicatorType>([...OVERLAY_DEFS, ...OSCILLATOR_DEFS].map((d) => d.type));
+
+
 // Trimmed to the timeframes the backend actually serves without duplicates.
 // Dropped: 3m/30m (dupes of neighbours), 2h/4h (no EOD pipeline coverage for
 // Indian equities), 45m/3h (no INTRADAY map entry in market-candles — the
 // edge fn 400s on them and the chart went blank). TV mode still accepts
-// everything via tvInterval().
+// everything via tvInterval(). 1W/1M are resampled from the stored daily
+// series by market-candles.
 export const TIMEFRAMES = [
   { key: "1m", label: "1m", intraday: true },
   { key: "5m", label: "5m", intraday: true },
   { key: "15m", label: "15m", intraday: true },
   { key: "1h", label: "1h", intraday: true },
   { key: "1D", label: "1D", intraday: false },
+  { key: "1W", label: "1W", intraday: false },
+  { key: "1M", label: "1M", intraday: false },
 ] as const;
 
 // Viewport ranges for non-intraday charts. These only move the visible
@@ -32,26 +41,31 @@ export const CHART_RANGES = [
 
 export type ChartRange = typeof CHART_RANGES[number]["key"];
 
+// Approximate bars per year for each timeframe — NSE trades ~250 sessions a
+// year, ~6.25 hourly bars per session.
+const BARS_PER_YEAR: Record<string, number> = {
+  "1m": 250 * 375,
+  "5m": 250 * 75,
+  "15m": 250 * 25,
+  "1h": 250 * 6.25,
+  "1D": 250,
+  "1W": 52,
+  "1M": 12,
+};
+
 // Approximate bar counts per timeframe for a given number of years.
 export function rangeToBars(range: ChartRange, tf: string): number | null {
   const years = CHART_RANGES.find((r) => r.key === range)?.years ?? null;
   if (years == null) return null;
-  const perYear = 250;
-  return Math.round(years * perYear);
+  const perYear = BARS_PER_YEAR[tf] ?? 250;
+  return Math.max(20, Math.round(years * perYear));
 }
 
 export function isIntraday(tf: string): boolean {
   return TIMEFRAMES.find((t) => t.key === tf)?.intraday ?? false;
 }
 
-const CHART_TYPES: Array<{ key: ChartType; label: string; icon: React.ReactNode }> = [
-  { key: "candles", label: "Candles", icon: <CandlestickChart size={12} /> },
-  { key: "heikin_ashi", label: "Heikin-Ashi", icon: <Waves size={12} /> },
-  { key: "bars", label: "Bars", icon: <BarChart3 size={12} /> },
-  { key: "line", label: "Line", icon: <LineChart size={12} /> },
-  { key: "area", label: "Area", icon: <AreaChart size={12} /> },
-  { key: "baseline", label: "Baseline", icon: <TrendingUp size={12} /> },
-];
+
 
 
 export interface ChartSettings {
@@ -82,6 +96,8 @@ export interface ChartToolbarProps {
   onChartType: (v: ChartType) => void;
   onAddStudy: (type: IndicatorType) => void;
   onResetStudies?: () => void;
+  /** Clears user-dragged sub-pane heights and reapplies the auto layout. */
+  onResetPanes?: () => void;
   /** Visible studies (drawn on chart). */
   studyCount?: number;
   /** All studies including hidden — shown as "visible/total". */
@@ -109,11 +125,11 @@ export function ChartToolbar({
   symbol, exchange = "NSE", tf, onTf, chartType, onChartType, onAddStudy, onResetStudies,
   studyCount = 0, totalStudyCount,
   settings, onSettings, onFullscreen, fullscreen = false, onAlert, alertCount = 0, onScreenshot,
-  onSaveLayout, onLoadLayout, onDeleteLayout, savedLayouts = [],
+  onSaveLayout, onLoadLayout, onDeleteLayout, savedLayouts = [], onResetPanes,
   intraday = false,
   range = "ALL", onRange,
 }: ChartToolbarProps) {
-  const activeType = CHART_TYPES.find((c) => c.key === chartType) ?? CHART_TYPES[0];
+  void chartType; void onChartType; // chart type is fixed to candles
   const total = totalStudyCount ?? studyCount;
   const countLabel = total > 0 ? (studyCount === total ? `${studyCount}` : `${studyCount}/${total}`) : "";
   const s = settings ?? DEFAULT_SETTINGS;
@@ -158,22 +174,6 @@ export function ChartToolbar({
 
       <Divider />
 
-      {/* Chart type */}
-      <Menu label={activeType.label} icon={activeType.icon} width={180}>
-        {(close) => (
-          <MenuGroup title="Chart type">
-            {CHART_TYPES.map((c) => (
-              <MenuItem key={c.key} selected={chartType === c.key} onClick={() => { onChartType(c.key); close(); }}>
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                  {c.icon}{c.label}
-                </span>
-              </MenuItem>
-            ))}
-          </MenuGroup>
-        )}
-      </Menu>
-
-      <Divider />
 
       {/* Indicators */}
       <Menu
@@ -241,6 +241,17 @@ export function ChartToolbar({
                   </span>
                 </MenuItem>
               </MenuGroup>
+              {onResetPanes && (
+                <>
+                  <MenuDivider />
+                  <MenuGroup title="Panes">
+                    <MenuItem onClick={() => { onResetPanes(); close(); }}>
+                      Reset pane sizes
+                    </MenuItem>
+                  </MenuGroup>
+                </>
+              )}
+
             </>
           )}
         </Menu>
@@ -273,34 +284,67 @@ export function ChartToolbar({
 // stops feeling like an unfindable dump.
 function IndicatorPicker({ onAddStudy, intraday = false }: { onAddStudy: (type: IndicatorType) => void; intraday?: boolean }) {
   const [q, setQ] = useState("");
-  const [tab, setTab] = useState<"all" | "overlay" | "oscillator">("all");
+  const [tab, setTab] = useState<"fav" | "all" | "overlay" | "oscillator">("all");
+  const [favs, setFavs] = useState<IndicatorType[]>(() =>
+    safeStorage.getJSON<IndicatorType[]>(FAV_INDICATORS_KEY, []).filter((t) => ALL_TYPES.has(t)),
+  );
+
+  const toggleFav = (type: IndicatorType) => {
+    setFavs((prev) => {
+      const next = prev.includes(type) ? prev.filter((t) => t !== type) : [...prev, type];
+      safeStorage.setJSON(FAV_INDICATORS_KEY, next);
+      return next;
+    });
+  };
+
   const query = q.trim().toLowerCase();
   const match = (d: IndicatorDef) => !query || d.label.toLowerCase().includes(query) || d.type.toLowerCase().includes(query);
   const overlays = OVERLAY_DEFS.filter(match);
   const oscillators = OSCILLATOR_DEFS.filter(match);
-  const showOverlays = tab !== "oscillator";
-  const showOscillators = tab !== "overlay";
+  const favDefs = favs
+    .map((t) => [...OVERLAY_DEFS, ...OSCILLATOR_DEFS].find((d) => d.type === t))
+    .filter((d): d is IndicatorDef => !!d && match(d));
+  const onlyFavs = tab === "fav";
+  const showOverlays = !onlyFavs && tab !== "oscillator";
+  const showOscillators = !onlyFavs && tab !== "overlay";
 
   const Item = (d: IndicatorDef) => {
     const disabled = !!d.intradayOnly && !intraday;
+    const isFav = favs.includes(d.type);
     return (
-      <button
-        key={d.type}
-        type="button"
-        className="mk-menu-item"
-        onClick={() => { if (!disabled) onAddStudy(d.type); }}
-        disabled={disabled}
-        title={disabled ? `${d.label} is intraday-only — switch to an intraday timeframe.` : undefined}
-        style={disabled ? { opacity: 0.45, cursor: "not-allowed" } : undefined}
-      >
-        <span className="mk-ind-swatch" style={{ background: d.lines[0].defaultColor }} />
-        <span style={{ flex: 1, textAlign: "left" }}>{d.label}{disabled && <span style={{ marginLeft: 6, fontSize: 9, opacity: 0.7 }}>intraday</span>}</span>
-      </button>
+      <div key={d.type} style={{ display: "flex", alignItems: "center" }}>
+        <button
+          type="button"
+          className="mk-menu-item"
+          onClick={() => { if (!disabled) onAddStudy(d.type); }}
+          disabled={disabled}
+          title={disabled ? `${d.label} is intraday-only — switch to an intraday timeframe.` : undefined}
+          style={{ flex: 1, ...(disabled ? { opacity: 0.45, cursor: "not-allowed" } : {}) }}
+        >
+          <span className="mk-ind-swatch" style={{ background: d.lines[0].defaultColor }} />
+          <span style={{ flex: 1, textAlign: "left" }}>{d.label}{disabled && <span style={{ marginLeft: 6, fontSize: 9, opacity: 0.7 }}>intraday</span>}</span>
+        </button>
+        <button
+          type="button"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); toggleFav(d.type); }}
+          aria-label={isFav ? `Remove ${d.label} from favourites` : `Add ${d.label} to favourites`}
+          aria-pressed={isFav}
+          title={isFav ? "Remove from favourites" : "Add to favourites"}
+          style={{
+            background: "none", border: "none", cursor: "pointer", padding: "0 8px",
+            color: isFav ? "var(--accent, #ffb84d)" : "var(--text-muted)",
+            opacity: isFav ? 1 : 0.55, display: "flex", alignItems: "center",
+          }}
+        >
+          <Star size={11} fill={isFav ? "currentColor" : "none"} />
+        </button>
+      </div>
     );
   };
 
 
-  const Tab = ({ v, label, count }: { v: "all" | "overlay" | "oscillator"; label: string; count: number }) => (
+  const Tab = ({ v, label, count }: { v: "fav" | "all" | "overlay" | "oscillator"; label: string; count: number }) => (
     <button
       type="button"
       className={`mk-ind-tab ${tab === v ? "is-on" : ""}`}
@@ -310,9 +354,14 @@ function IndicatorPicker({ onAddStudy, intraday = false }: { onAddStudy: (type: 
     </button>
   );
 
+  const emptyList = onlyFavs
+    ? favDefs.length === 0
+    : ((showOverlays ? overlays.length : 0) + (showOscillators ? oscillators.length : 0)) === 0;
+
   return (
     <div className="mk-ind-picker">
       <div className="mk-ind-tabs" onMouseDown={(e) => e.stopPropagation()}>
+        <Tab v="fav" label="★" count={favs.length} />
         <Tab v="all" label="All" count={overlays.length + oscillators.length} />
         <Tab v="overlay" label="Overlays" count={overlays.length} />
         <Tab v="oscillator" label="Oscillators" count={oscillators.length} />
@@ -329,15 +378,21 @@ function IndicatorPicker({ onAddStudy, intraday = false }: { onAddStudy: (type: 
         />
       </div>
       <div className="mk-ind-list">
+        {favDefs.length > 0 && (tab === "all" || onlyFavs) && (
+          <MenuGroup title="Favourites">{favDefs.map(Item)}</MenuGroup>
+        )}
         {showOverlays && overlays.length > 0 && <MenuGroup title="Overlays">{overlays.map(Item)}</MenuGroup>}
         {showOscillators && oscillators.length > 0 && <MenuGroup title="Oscillators">{oscillators.map(Item)}</MenuGroup>}
-        {((showOverlays ? overlays.length : 0) + (showOscillators ? oscillators.length : 0)) === 0 && (
-          <div style={{ padding: "10px 12px", fontSize: 11, color: "var(--text-muted)" }}>No match</div>
+        {emptyList && (
+          <div style={{ padding: "10px 12px", fontSize: 11, color: "var(--text-muted)" }}>
+            {onlyFavs && !query ? "No favourites yet — tap the ★ next to an indicator." : "No match"}
+          </div>
         )}
       </div>
     </div>
   );
 }
+
 
 function Divider() {
   return <span aria-hidden className="mk-toolbar-divider" />;

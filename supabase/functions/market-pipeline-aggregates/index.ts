@@ -14,6 +14,9 @@ import {
   type AdvancedSignals, type BreakoutStatus, type BreakoutPatterns,
   type V4Fundamentals, type V4Sentiment,
 } from "../_shared/market/scoring.ts";
+import {
+  reconcileSameDay, resolveEntryPrice, nextScoreTrend,
+} from "../_shared/market/breakoutEpisode.ts";
 import type { IndicatorSnapshot, WeeklySnapshot } from "../_shared/market/indicators.ts";
 import { yahooChartRetry } from "../_shared/market/yahooClient.ts";
 import { getServiceProvider } from "../_shared/market/provider.ts";
@@ -183,7 +186,12 @@ Deno.serve(async (req) => {
       if ("error" in auth) return auth.error;
     }
 
-    const today = istTradeDate();
+    // Calendar day in IST. Deliberately NOT the session date: it has no
+    // weekend/holiday awareness, so writing with it stamped Saturday and
+    // Sunday rows that no ^NSEI bar can ever join. The real session date is
+    // resolved below from the newest price bar.
+    const calendarDate = istTradeDate();
+    const runStartedAt = new Date().toISOString();
 
     // Pull all scored rows, then join sector/is_active/market_cap from
     // market_stocks in-memory (no FK between the two tables, so PostgREST
@@ -231,6 +239,17 @@ Deno.serve(async (req) => {
     rows.length = 0;
     rows.push(...freshRows);
     if (rows.length === 0) return jsonResponse(req, { ok: true, note: "no rows for the latest trade date", stale_skipped: staleSkipped });
+
+    // ONE clock for the whole pass. Everything below (breadth, sector
+    // strength, snapshots, tracker episodes, telemetry) is stamped with the
+    // last session that actually printed bars, so a Saturday run re-upserts
+    // Friday's session instead of inventing a new one.
+    const today = latestTradeDate ?? calendarDate;
+    const sessionDriftDays = Math.round(
+      (Date.parse(`${calendarDate}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000,
+    );
+
+
 
     // ---- Breadth ----
     const advances = rows.filter((r) => (r.change_pct ?? 0) > 0).length;
@@ -750,7 +769,9 @@ Deno.serve(async (req) => {
           histRank.set(it.k, v4RankPool.length > 1 ? Math.round((i / (v4RankPool.length - 1)) * 1000) / 10 : 50));
 
         const histRows = scored
-          .filter((x) => x.v4 != null)
+          // A v4 row without v4 bucket detail is unusable by the calibration
+          // fit and misleading in the explain view — never stored as v4.
+          .filter((x) => x.v4 != null && x.v4Buckets != null)
           .map((x) => ({
             symbol: x.symbol, exchange: x.exchange,
             trade_date: latestTradeDate, model: "breakout_v4",
@@ -801,7 +822,7 @@ Deno.serve(async (req) => {
     // followed forward alongside the day's new breakouts. Idempotent per day:
     // re-runs on the same trade_date refresh values without double-counting
     // days_tracked or re-appending the score trend.
-    const tracking = { snapshots: 0, opened: 0, updated_ep: 0, failed: 0, closed: 0 };
+    const tracking = { snapshots: 0, opened: 0, updated_ep: 0, failed: 0, closed: 0, v4_unpaired: 0 };
     // Write failures inside the tracking block used to vanish entirely: the
     // whole phase shared one catch and the per-chunk errors were dropped, so a
     // broken column silently stopped the tracker while the run reported ok.
@@ -815,15 +836,25 @@ Deno.serve(async (req) => {
       // number the episode was never based on. Legacy is still recorded, as a
       // secondary column, for continuity of the older episodes.
       const v4Of = (x: Scored): number | null => (x.v4 == null ? null : x.v4);
+      // Runtime pairing assertion: a v4 score is only ever written next to its
+      // v4 bucket detail. A score with no buckets is a legacy/partial result
+      // and must not be stamped into v4 surfaces (that mix is what made the
+      // Breakout popover explain a number the episode was never based on).
+      const v4Paired = (x: Scored): boolean => {
+        if (x.v4 == null) return false;
+        if (x.v4Buckets == null) { tracking.v4_unpaired++; return false; }
+        return true;
+      };
       const qualifiers = scored.filter(
-        (x) => x.close != null && x.liquidityOk && (v4Of(x) ?? 0) >= BREAKOUT_QUALIFY_SCORE,
+        (x) => x.close != null && x.liquidityOk && v4Paired(x) && (v4Of(x) as number) >= BREAKOUT_QUALIFY_SCORE,
       );
       // Snapshot near-misses too (>= 60): a name that approaches the threshold
       // for days before breaking out otherwise leaves no run-up history, and
       // the calibration sample is artificially truncated at the qualify line.
       const SNAPSHOT_MIN_SCORE = 60;
       const snapshotSet = scored.filter(
-        (x) => x.close != null && x.liquidityOk && (v4Of(x) ?? 0) >= SNAPSHOT_MIN_SCORE,
+        (x) => x.close != null && x.liquidityOk && x.v4 != null && x.v4Buckets != null
+          && (v4Of(x) as number) >= SNAPSHOT_MIN_SCORE,
       );
       const scoredByKey = new Map(scored.map((x) => [`${x.symbol}|${x.exchange}`, x]));
 
@@ -836,19 +867,24 @@ Deno.serve(async (req) => {
       rankPool.forEach((it, i) => rankPct.set(
         it.k, rankPool.length > 1 ? Math.round((i / (rankPool.length - 1)) * 1000) / 10 : 50));
 
-      // Trading sessions, newest first — taken from the pipeline's own daily
-      // distribution row so "days tracked" counts sessions, not calendar days,
-      // and a skipped session leaves a visible gap in the score trend.
+      // Trading sessions, newest first — taken from the ^NSEI bars, the same
+      // calendar evaluate_score_history_forward() uses. The distribution table
+      // used to be the source, but it only has rows for sessions the pipeline
+      // itself completed, so any skipped run punched a hole in the calendar
+      // and silently mis-counted "sessions since".
       const sessions: string[] = await (async () => {
-        const { data } = await svc.from("market_score_distribution")
-          .select("trade_date").eq("model", "breakout_v4")
-          .order("trade_date", { ascending: false }).limit(120);
+        const { data } = await svc.from("market_daily_prices")
+          .select("trade_date").eq("symbol", "^NSEI").eq("exchange", "NSE")
+          .lte("trade_date", today)
+          .order("trade_date", { ascending: false }).limit(200);
         const list = (data ?? []).map((d: any) => String(d.trade_date));
         if (!list.includes(today)) list.unshift(today);
         return list;
       })();
       const sessionIdx = new Map(sessions.map((d, i) => [d, i]));
       // Sessions strictly between `from` and today (0 when consecutive).
+      // Returns null when either end is outside the known calendar — callers
+      // must decide, and the reopen cooldown now fails closed on null.
       const sessionsSince = (from: string | null): number | null => {
         if (!from) return null;
         const a = sessionIdx.get(from);
@@ -856,6 +892,7 @@ Deno.serve(async (req) => {
         if (a == null || b == null) return null;
         return Math.max(0, a - b);
       };
+
 
       // 1. Snapshot today's qualifiers (per-symbol daily score history).
       const snapRows = snapshotSet.map((x) => ({
@@ -916,26 +953,17 @@ Deno.serve(async (req) => {
         const key = `${e.symbol}|${e.exchange}`;
         const now = scoredByKey.get(key);
         if (!now || now.close == null) continue; // no data today — leave untouched
-        const nowScore = v4Of(now) ?? now.breakout;
-        const alreadyToday = e.last_evaluated_date === today;
-        // Entry price correction: an episode opened earlier *today* may have
-        // been stamped from a partial intraday close. While it is still the
-        // same session the entry is provisional, so re-read it — every return,
-        // MAE and follow-through number downstream is measured off this price,
-        // and a stale intraday entry poisons all of them for the episode's
-        // whole life. From the next session onward entry is immutable history.
-        const openedToday = e.first_detected_date === today;
-        const entry = openedToday ? now.close : (Number(e.entry_close) || now.close);
-        const prevDays = alreadyToday ? Math.max(0, (e.days_tracked ?? 1) - 1) : (e.days_tracked ?? 1);
-
-        // A re-run on the same session must not count as another session. The
-        // stored counter already includes today's increment, so reverse it
-        // before ticking again — without this an intraday re-run marched the
-        // counter up until the episode cooled on its own re-runs (observed
-        // live: below_threshold_days = 5 on a 2-session-old episode).
-        const storedBelow = e.below_threshold_days ?? 0;
-        const countedTodayBelow = alreadyToday && (Number(e.last_score) || 0) < BREAKOUT_QUALIFY_SCORE;
-        const prevBelow = countedTodayBelow ? Math.max(0, storedBelow - 1) : storedBelow;
+        // The tracker is a v4 machine. Ticking an episode with the legacy
+        // score when v4 is unavailable silently mixes two models inside one
+        // episode's history; freezing the episode for the session is honest.
+        if (now.v4 == null || now.v4Buckets == null) { tracking.v4_unpaired++; continue; }
+        const nowScore = now.v4 as number;
+        // Same-session reconciliation lives in _shared/market/breakoutEpisode.ts
+        // (unit-tested) — running this pass twice for one session must leave
+        // exactly the same counters as running it once.
+        const { alreadyToday, openedToday, prevDays, prevBelow } =
+          reconcileSameDay(e, today, BREAKOUT_QUALIFY_SCORE);
+        const entry = resolveEntryPrice(e, now.close, openedToday);
 
         const tick = nextEpisodeStatus({
           status: e.status as BreakoutStatus,
@@ -949,13 +977,20 @@ Deno.serve(async (req) => {
         // implies it traded back to entry when it never did.
         const prevPeak = e.peak_close == null ? null : Number(e.peak_close);
         const peakClose = prevPeak == null ? now.close : Math.max(prevPeak, now.close);
+        // On a data-gap day the intraday extremes are unknown. Falling back to
+        // the close understated MAE and overstated nothing — it reported a
+        // measurement that was never taken. Unknown stays null.
         const prevPeakHigh = e.peak_high == null ? null : Number(e.peak_high);
-        const todayHigh = bar?.high ?? now.close;
-        const peakHigh = Math.max(prevPeakHigh ?? todayHigh, todayHigh, peakClose);
+        const highCandidates = [prevPeakHigh, bar?.high ?? null, peakClose]
+          .filter((v): v is number => v != null);
+        const peakHigh = highCandidates.length ? Math.max(...highCandidates) : null;
         const prevTrough = e.trough_low == null ? null : Number(e.trough_low);
-        const todayLow = bar?.low ?? now.close;
-        const troughLow = Math.min(prevTrough ?? todayLow, todayLow);
-        const maePct = entry > 0 ? ((troughLow - entry) / entry) * 100 : 0;
+        const lowCandidates = [prevTrough, bar?.low ?? null]
+          .filter((v): v is number => v != null);
+        const troughLow = lowCandidates.length ? Math.min(...lowCandidates) : null;
+        const maePct = troughLow != null && entry > 0
+          ? ((troughLow - entry) / entry) * 100
+          : null;
         const peakRet = entry > 0 ? ((peakClose - entry) / entry) * 100 : 0;
         // Sessions, not rows: a re-run on the same day must not advance it, and
         // a skipped session must not compress the timeline.
@@ -963,17 +998,10 @@ Deno.serve(async (req) => {
         const daysTracked = elapsed != null
           ? elapsed + 1
           : (alreadyToday ? (e.days_tracked ?? 1) : (e.days_tracked ?? 1) + 1);
-        const baseTrend: number[] = Array.isArray(e.score_trend) ? e.score_trend : [];
-        // Missed sessions become explicit nulls so the sparkline shows a gap
-        // instead of silently stitching two distant sessions together.
+        const baseTrend: (number | null)[] = Array.isArray(e.score_trend) ? e.score_trend : [];
         const gap = alreadyToday ? 0 : Math.max(0, (sessionsSince(e.last_evaluated_date) ?? 1) - 1);
-        // On a same-day re-run the trend must be corrected in place, not left
-        // alone: skipping the append froze the last point at the earlier
-        // intraday score while last_score moved on.
-        const scoreTrend = alreadyToday
-          ? (baseTrend.length ? [...baseTrend.slice(0, -1), nowScore] : [nowScore])
-          : [...baseTrend, ...Array(Math.min(gap, SCORE_TREND_CAP)).fill(null), nowScore]
-              .slice(-SCORE_TREND_CAP);
+        const scoreTrend = nextScoreTrend(baseTrend, nowScore, alreadyToday, gap, SCORE_TREND_CAP);
+
         // Heals rows already inflated by the re-run bug: you cannot have been
         // below the threshold on more sessions than you have been tracked.
         const belowDays = Math.min(tick.belowThresholdDays, daysTracked);
@@ -993,9 +1021,9 @@ Deno.serve(async (req) => {
           last_score_legacy: now.breakout,
           rank_pct: rankPct.get(key) ?? null,
           peak_close: peakClose, peak_return_pct: Math.round(peakRet * 100) / 100,
-          peak_high: Math.round(peakHigh * 100) / 100,
-          trough_low: Math.round(troughLow * 100) / 100,
-          mae_pct: Math.round(maePct * 100) / 100,
+          peak_high: peakHigh == null ? null : Math.round(peakHigh * 100) / 100,
+          trough_low: troughLow == null ? null : Math.round(troughLow * 100) / 100,
+          mae_pct: maePct == null ? null : Math.round(maePct * 100) / 100,
           sessions_elapsed: elapsed,
           current_close: now.close, current_return_pct: Math.round(tick.returnPct * 100) / 100,
           days_tracked: daysTracked, last_score: nowScore,
@@ -1026,18 +1054,24 @@ Deno.serve(async (req) => {
       const REOPEN_COOLDOWN_SESSIONS = 3;
       const blockedUntilSession = new Map<string, number>();
       {
-        const since = sessions[Math.min(sessions.length - 1, 10)] ?? today;
+        // Look back a fixed number of *sessions*, and only as far as the
+        // calendar actually reaches.
+        const since = sessions[Math.min(sessions.length - 1, REOPEN_COOLDOWN_SESSIONS * 3)] ?? today;
         const { data } = await svc.from("market_breakout_tracker")
           .select("symbol,exchange,last_evaluated_date,status")
           .in("status", ["failed", "closed"])
           .gte("last_evaluated_date", since);
         for (const d of data ?? []) {
           const gapSessions = sessionsSince(String(d.last_evaluated_date));
-          if (gapSessions != null && gapSessions < REOPEN_COOLDOWN_SESSIONS) {
-            blockedUntilSession.set(`${d.symbol}|${d.exchange}`, gapSessions);
+          // Fail CLOSED on an unknown gap. Previously a null (a terminal
+          // episode dated outside the session calendar) fell through the
+          // guard and allowed exactly the immediate reopen it exists to block.
+          if (gapSessions == null || gapSessions < REOPEN_COOLDOWN_SESSIONS) {
+            blockedUntilSession.set(`${d.symbol}|${d.exchange}`, gapSessions ?? -1);
           }
         }
       }
+
       const newEps = qualifiers
         .filter((x) => {
           const k = `${x.symbol}|${x.exchange}`;
@@ -1090,27 +1124,40 @@ Deno.serve(async (req) => {
 
     }
 
-    // ---- Threshold calibration telemetry ----
-    // Record where today's universe actually sits versus the fixed 70/55/40
-    // bands, so the bands can be judged against the live distribution instead
-    // of assumed. Never allowed to fail the run.
+    // ---- Threshold telemetry ----
+    // Where the universe sits versus the fixed 70/55/40 bands. This is a
+    // distribution, not a calibration: it used to be written into
+    // market_scoring_calibration under a `breakout_v2:<date>` model_version,
+    // where nothing joined it and it polluted the table the Calibration Lab
+    // reads. The durable copy lives in market_score_distribution.
     const dist = scoreDistribution(scored.filter((x) => x.liquidityOk).map((x) => x.breakout));
+
+    // Staleness telemetry: the Bug-1 class of failure (writing a session date
+    // that no price bar backs) must be visible in the status payload instead
+    // of found by inspection.
+    const freshness: Record<string, unknown> = {
+      calendar_date: calendarDate,
+      session_date: today,
+      session_drift_days: sessionDriftDays,
+    };
     try {
-      const calRows = [
-        ["breakout_p50", dist.p50], ["breakout_p70", dist.p70], ["breakout_p90", dist.p90],
-        ["breakout_max", dist.max],
-        ["breakout_pct_above_strong", dist.pct_at_or_above_strong],
-        ["breakout_pct_above_moderate", dist.pct_at_or_above_moderate],
-      ].filter(([, v]) => v != null).map(([component, weight]) => ({
-        model_version: `breakout_v2:${today}`,
-        component: component as string,
-        weight: Number(weight),
-        sample_n: dist.n,
-      }));
-      if (calRows.length) await svc.from("market_scoring_calibration").insert(calRows);
+      const [{ data: cal }, { data: hist }, { data: snap }] = await Promise.all([
+        svc.from("market_scoring_calibration").select("computed_at,kind,component")
+          .order("computed_at", { ascending: false }).limit(1).maybeSingle() as any,
+        svc.from("market_score_history").select("evaluated_at")
+          .not("evaluated_at", "is", null)
+          .order("evaluated_at", { ascending: false }).limit(1).maybeSingle() as any,
+        svc.from("market_breakout_snapshots").select("trade_date")
+          .order("trade_date", { ascending: false }).limit(1).maybeSingle() as any,
+      ]);
+      freshness.calibration_last_fit_at = cal?.computed_at ?? null;
+      freshness.calibration_state = cal?.component === "not_fitted" ? "not_fitted" : (cal ? "fitted" : "none");
+      freshness.history_last_evaluated_at = hist?.evaluated_at ?? null;
+      freshness.snapshot_last_date = snap?.trade_date ?? null;
+      freshness.snapshot_drift_ok = snap?.trade_date == null || snap.trade_date <= today;
     } catch { /* telemetry only */ }
 
-    return jsonResponse(req, {
+    const payload = {
       ok: true,
       trade_date: today,
       stocks: rows.length,
@@ -1129,7 +1176,21 @@ Deno.serve(async (req) => {
       stale_flagged: staleFlagged,
       v4_calibration: calibration,
       score_history: history,
-    });
+      freshness,
+    };
+
+    // One row per pass, so "what ran when, and what did it write" is history
+    // rather than guesswork. Never allowed to fail the run.
+    await svc.from("detection_runs").insert({
+      kind: "market-pipeline-aggregates",
+      started_at: runStartedAt,
+      finished_at: new Date().toISOString(),
+      ok: trackingErrors.length === 0,
+      error: trackingErrors.length ? trackingErrors.join(" | ").slice(0, 500) : null,
+      stats: payload as unknown as Record<string, unknown>,
+    }).then(() => {}, () => {});
+
+    return jsonResponse(req, payload);
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }

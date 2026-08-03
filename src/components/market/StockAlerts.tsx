@@ -10,7 +10,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { Bell, Plus, Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { currentUserId } from "@/lib/useSession";
 
 export type AlertChannel = "browser" | "email" | "telegram" | "whatsapp";
@@ -48,7 +48,7 @@ export function StockAlertsPanel({ symbol, exchange }: { symbol: string; exchang
   const [creating, setCreating] = useState(false);
   const key = alertsKey(symbol, exchange);
 
-  const { data: alerts = [], isLoading } = useQuery({
+  const { data: alerts = [] } = useQuery({
     queryKey: key,
     queryFn: async () => {
       const { data, error } = await supabase.from("market_alerts")
@@ -80,32 +80,26 @@ export function StockAlertsPanel({ symbol, exchange }: { symbol: string; exchang
     } catch (e) { push(toSafeError(e, "delete failed").message, "err"); }
   };
 
+  if (alerts.length === 0) return null;
+
   return (
     <HudPanel flow title="Alerts" index="A9"
       actions={<Btn size="sm" variant="primary" onClick={() => setCreating(true)}><Plus size={11} style={{ marginRight: 4 }} /> new</Btn>}>
-      {isLoading ? (
-        <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)" }}>loading…</div>
-      ) : alerts.length === 0 ? (
-        <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
-          <Bell size={12} /> no alerts on {symbol} yet
-        </div>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {alerts.map((a) => (
-            <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px solid var(--edge)", fontSize: 12 }}>
-              <span>
-                {ALERT_TYPES.find((t) => t.v === a.alert_type)?.l ?? a.alert_type}
-                {a.threshold != null && <span style={{ marginLeft: 6, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>@ {a.threshold}</span>}
-              </span>
-              <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <Chip tone={a.is_active ? "ok" : "neutral"}>{a.is_active ? "active" : "paused"}</Chip>
-                <Btn size="sm" onClick={() => toggle(a)}>{a.is_active ? "pause" : "resume"}</Btn>
-                <Btn size="sm" onClick={() => remove(a)}><Trash2 size={11} /></Btn>
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        {alerts.map((a) => (
+          <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px solid var(--edge)", fontSize: 12 }}>
+            <span>
+              {ALERT_TYPES.find((t) => t.v === a.alert_type)?.l ?? a.alert_type}
+              {a.threshold != null && <span style={{ marginLeft: 6, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>@ {a.threshold}</span>}
+            </span>
+            <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <Chip tone={a.is_active ? "ok" : "neutral"}>{a.is_active ? "active" : "paused"}</Chip>
+              <Btn size="sm" onClick={() => toggle(a)}>{a.is_active ? "pause" : "resume"}</Btn>
+              <Btn size="sm" onClick={() => remove(a)}><Trash2 size={11} /></Btn>
+            </span>
+          </div>
+        ))}
+      </div>
       {creating && (
         <NewAlertModal symbol={symbol} exchange={exchange} onClose={() => setCreating(false)}
           onCreated={() => { qc.invalidateQueries({ queryKey: key }); setCreating(false); }} />

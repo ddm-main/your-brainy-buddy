@@ -86,12 +86,36 @@ Deno.serve(async (req) => {
 
     const svc = svcClient();
 
+    // Bounded drain: once the candidate set is exhausted the cron kept
+    // re-running the (expensive) candidate scan every 15 minutes forever.
+    // After 3 consecutive empty passes, back off for 6 hours.
+    const EMPTY_STREAK_LIMIT = 3;
+    const BACKOFF_HOURS = 6;
+    {
+      const { data: recent } = await svc.from("detection_runs")
+        .select("ok,stats,created_at").eq("kind", "market-score-backfill")
+        .order("created_at", { ascending: false }).limit(EMPTY_STREAK_LIMIT);
+      const runs = (recent ?? []) as { stats?: { drained?: boolean }; created_at: string }[];
+      const allDrained = runs.length >= EMPTY_STREAK_LIMIT && runs.every((r) => r.stats?.drained === true);
+      const lastAt = runs[0] ? Date.parse(runs[0].created_at) : 0;
+      if (allDrained && Date.now() - lastAt < BACKOFF_HOURS * 3600_000) {
+        return jsonResponse(req, { ok: true, skipped: "drained_backoff", until_hours: BACKOFF_HOURS });
+      }
+    }
+
+    const logRun = (stats: Record<string, unknown>, ok = true, error: string | null = null) =>
+      svc.from("detection_runs").insert({
+        kind: "market-score-backfill", finished_at: new Date().toISOString(),
+        ok, error, stats,
+      }).then(() => {}, () => {});
+
     const { data: candidates, error: candErr } = await svc.rpc("market_score_backfill_candidates", {
       _limit: symbolLimit, _min_rows: minRows,
     });
     if (candErr) return errorResponse(req, candErr.message, 500);
     const work = (candidates ?? []) as Candidate[];
     if (work.length === 0) {
+      await logRun({ drained: true, symbols: 0, rows_written: 0 });
       return jsonResponse(req, { ok: true, drained: true, symbols: 0, rows_written: 0 });
     }
 
@@ -221,7 +245,7 @@ Deno.serve(async (req) => {
       ranked = typeof data === "number" ? data : null;
     } catch { /* ranking is additive — never fail the replay */ }
 
-    return jsonResponse(req, {
+    const result = {
       ok: true,
       drained: false,
       ranked_rows: ranked,
@@ -230,7 +254,9 @@ Deno.serve(async (req) => {
       rows_written: rowsWritten,
       unscoreable_sessions: unscoreable,
       failures,
-    });
+    };
+    await logRun(result, failures.length === 0, failures[0] ?? null);
+    return jsonResponse(req, result);
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }

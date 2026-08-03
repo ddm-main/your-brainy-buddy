@@ -11,6 +11,8 @@ import { KOTAK_CANDLES_ROUTE } from "../_shared/market/kotakClient.ts";
 import { routeOpenForMs, hydrateRouteBreakers, setRouteBreakerPersistence } from "../_shared/market/routeBreaker.ts";
 import { isTradingHoliday } from "../_shared/market/cron.ts";
 import { recordFeedHeartbeat } from "../_shared/market/heartbeat.ts";
+import { decumulateBars, classifyVolumeSeries, looksCumulative } from "../_shared/market/volume.ts";
+
 
 // Small in-isolate cache so we don't hit market_holidays on every request.
 const holidayCache = new Map<string, { ts: number; isHoliday: boolean }>();
@@ -288,35 +290,13 @@ function sessionBucketFor(epochSec: number, timeframe: string): number {
 
 // Some feeds (broker quote snapshots in particular) report the RUNNING DAY
 // TOTAL volume on every bar rather than the volume traded inside that bar.
-// Rendered as-is that produces the classic "staircase" volume pane. Detect a
-// per-session non-decreasing volume series and convert it back to per-bar
-// deltas. A genuine per-bar series is essentially never monotonic for 3+ bars.
+// Rendered as-is that produces the classic "staircase" volume pane, and every
+// 1m -> 5m/15m aggregation multiplies the error. Detection + repair lives in
+// _shared/market/volume.ts and is tolerant of snapshot resets mid-session.
 function decumulate<T extends { time: number; volume: number }>(bars: T[]): T[] {
-  if (bars.length < 3) return bars;
-  const sorted = [...bars].sort((a, b) => a.time - b.time);
-  const bySession = new Map<number, T[]>();
-  for (const b of sorted) {
-    const day = sessionOpenSecFor(b.time);
-    const list = bySession.get(day);
-    if (list) list.push(b); else bySession.set(day, [b]);
-  }
-  const out: T[] = [];
-  for (const list of bySession.values()) {
-    const vols = list.map((b) => Number(b.volume) || 0);
-    const monotonic = list.length >= 3 && vols.every((v, i) => i === 0 || v >= vols[i - 1]) &&
-      vols[vols.length - 1] > vols[0];
-    if (!monotonic) { out.push(...list); continue; }
-    const deltas: number[] = [];
-    for (let i = 1; i < vols.length; i++) deltas.push(Math.max(0, vols[i] - vols[i - 1]));
-    // The first recorded bar carries everything traded before recording began;
-    // charting it raw would leave one absurd spike. Cap it at the typical bar.
-    const sortedDeltas = [...deltas].sort((a, b) => a - b);
-    const median = sortedDeltas[Math.floor(sortedDeltas.length / 2)] ?? 0;
-    out.push({ ...list[0], volume: Math.min(vols[0], median) });
-    for (let i = 1; i < list.length; i++) out.push({ ...list[i], volume: deltas[i - 1] });
-  }
-  return out.sort((a, b) => a.time - b.time);
+  return decumulateBars(bars).bars;
 }
+
 
 async function loadKotakTickBars(
   svc: ReturnType<typeof svcClient>,
@@ -332,14 +312,30 @@ async function loadKotakTickBars(
     .order("ts", { ascending: true })
     .limit(500);
 
-  const oneMinute = decumulate(((data ?? []) as Array<Record<string, unknown>>)
+  // Volume authority: one source per session. Rows written by the broker feed
+  // win; a Yahoo row for the same minute is on a different scale and must never
+  // contribute to the same bucket.
+  const rows = ((data ?? []) as Array<Record<string, unknown>>)
     .filter((r) => String(r.source ?? "").startsWith("kotak"))
     .map((r) => ({
       time: Math.floor(new Date(String(r.ts)).getTime() / 1000),
       open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close),
       volume: Number(r.volume ?? 0),
+      cum: r.cum_volume != null ? Number(r.cum_volume) : null,
     }))
-    .filter((c) => Number.isFinite(c.time) && Number.isFinite(c.close) && c.close > 0));
+    .filter((c) => Number.isFinite(c.time) && Number.isFinite(c.close) && c.close > 0);
+
+  // Where the writer stored the snapshot's running total in `cum_volume`,
+  // de-cumulating that column is lossless — prefer it over guessing from
+  // `volume`. Only when every row has it and it really is a running total.
+  const allCum = rows.length > 3 && rows.every((r) => r.cum != null && r.cum > 0);
+  const useCum = allCum && classifyVolumeSeries(rows.map((r) => r.cum as number)).cumulative;
+  const oneMinute = decumulate(rows.map((r) => ({
+    time: r.time, open: r.open, high: r.high, low: r.low, close: r.close,
+    volume: useCum ? (r.cum as number) : r.volume,
+  })));
+
+
 
   if (timeframe === "1m") return oneMinute;
   const byBucket = new Map<number, OutCandle>();
@@ -686,15 +682,22 @@ Deno.serve(async (req) => {
         // already coalesced the health-log entry for this outage; do NOT
         // re-log here — we were writing thousands of duplicate rows/day.
         const { data: cached } = await svc.from("market_intraday_prices")
-          .select("ts,open,high,low,close,volume,fetched_at")
+          .select("ts,open,high,low,close,volume,cum_volume,source,fetched_at")
           .eq("symbol", symbol).eq("exchange", exchange).eq("timeframe", timeframe)
           .order("ts", { ascending: false }).limit(500);
         if (cached && cached.length > 0) {
-          raw = decumulate(cached.reverse().map((r: Record<string, unknown>) => ({
+          const asc = cached.reverse() as Array<Record<string, unknown>>;
+          // One volume authority per read: broker rows if we have any, else the
+          // delayed vendor rows. Mixing the two puts two different scales in
+          // the same series.
+          const brokerRows = asc.filter((r) => String(r.source ?? "").startsWith("kotak"));
+          const chosen = brokerRows.length >= 4 ? brokerRows : asc;
+          raw = decumulate(chosen.map((r: Record<string, unknown>) => ({
             time: Math.floor(new Date(String(r.ts)).getTime() / 1000),
             open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close),
-            volume: Number(r.volume ?? 0),
+            volume: r.cum_volume != null ? Number(r.cum_volume) : Number(r.volume ?? 0),
           })));
+
           providerName = "cache";
           cachedAt = String((cached[cached.length - 1] as Record<string, unknown>).fetched_at ?? "");
           reason = reason ?? "broker_503_cache";
@@ -748,6 +751,20 @@ Deno.serve(async (req) => {
       } catch { /* provider history still renders */ }
     }
 
+    // Final volume sanity pass over whatever series we ended up with. Any feed
+    // can hand back day-cumulative volume (broker quote snapshots always do);
+    // repairing here means every consumer downstream — buckets, OBV, volume
+    // profile, relative volume — sees honest per-bar quantities.
+    if (raw.length > 3) {
+      const repaired = decumulateBars(raw);
+      if (repaired.repairedSessions > 0) {
+        raw = repaired.bars;
+        reason = reason ?? "volume_decumulated";
+      }
+    }
+
+
+
 
     // Persist successful Kotak reads into the intraday cache so we can serve
     // them back during the next broker outage.  Also persist quote-seeded and
@@ -768,9 +785,12 @@ Deno.serve(async (req) => {
         symbol, exchange, timeframe,
         ts: new Date(Math.floor((c.time * 1000) / bucketMs) * bucketMs).toISOString(),
         open: c.open, high: c.high, low: c.low, close: c.close,
+        // Always per-bar; the running day total lives in `cum_volume` only.
         volume: c.volume ?? 0,
+        cum_volume: null,
         source: persistSource, fetched_at: new Date().toISOString(),
       }));
+
 
       svc.from("market_intraday_prices")
         .upsert(rows, { onConflict: "symbol,exchange,timeframe,ts" })
@@ -847,12 +867,16 @@ Deno.serve(async (req) => {
     // Intraday candle liveness — recorded per actual serving provider so the
     // Feed Routing page can distinguish "Kotak served it" from "Kotak was
     // down and Yahoo covered", instead of guessing from a cache table.
+    // Self-check: if the series STILL looks day-cumulative after the repair
+    // pass, the writer upstream is broken. Report the feed as unhealthy so it
+    // reads as broken instead of silently drawing a staircase.
+    const stillCumulative = looksCumulative(candles);
     recordFeedHeartbeat(svc, {
       feedId: timeframe.toLowerCase() === "1d" ? "candles_daily" : "candles_intraday",
       provider: providerName,
-      ok: candles.length > 0,
+      ok: candles.length > 0 && !stillCumulative,
       symbols: candles.length,
-      detail: reason ?? null,
+      detail: stillCumulative ? `cumulative_volume_detected:${reason ?? providerName}` : (reason ?? null),
     });
     const iTrim = trimSince(candles, since);
     return jsonResponse(req, withProvenance({

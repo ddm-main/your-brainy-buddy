@@ -11,7 +11,8 @@ import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { ScoreHistoryPanel } from "@/components/market/ScoreHistoryPanel";
-import { ChartToolbar, DEFAULT_SETTINGS, isIntraday, type ChartSettings } from "@/components/market/ChartToolbar";
+import { ChartToolbar, CHART_RANGES, DEFAULT_SETTINGS, isIntraday, rangeToBars, type ChartRange, type ChartSettings } from "@/components/market/ChartToolbar";
+import { safeStorage } from "@/lib/safeStorage";
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
 import { NewAlertModal, StockAlertsPanel } from "@/components/market/StockAlerts";
 import { DEFAULT_STUDIES, makeStudy, normalizeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
@@ -34,6 +35,7 @@ import { RefreshCw } from "lucide-react";
 import { currentUserId } from "@/lib/useSession";
 
 const STATE_STORE = "jarvis.analysis.state.v5";
+const RANGE_STORE = "jarvis.analysis.range.v1";
 const LAYOUTS_STORE = "jarvis.analysis.layouts.v1";
 // Per-symbol chart-type preference. Timeframe is intentionally not restored:
 // every newly opened symbol must start at the requested 5-minute view.
@@ -158,8 +160,18 @@ export default function Analysis() {
   const setTf = useCallback((value: string) => {
     setTimeframeState({ symbol, value });
   }, [symbol]);
-  const [chartType, setChartType] = useState<ChartType>(perSymbolInitial?.chartType ?? initial.chartType);
+  // Chart type is fixed to candles — the style dropdown was removed, and any
+  // persisted heikin_ashi/line/area state is coerced back on load.
+  const chartType: ChartType = "candles";
+  const setChartType = (_v: ChartType) => { /* fixed to candles */ };
   const [fs, setFs] = useState(false);
+  const [range, setRange] = useState<ChartRange>(() => {
+    const v = safeStorage.get(RANGE_STORE);
+    return (CHART_RANGES.some((r) => r.key === v) ? v : "1Y") as ChartRange;
+  });
+  useEffect(() => { safeStorage.set(RANGE_STORE, range); }, [range]);
+  // Bumping this clears user-dragged sub-pane heights inside the chart.
+  const [paneResetToken, setPaneResetToken] = useState(0);
   const [studies, setStudies] = useState<Study[]>(initial.studies);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [settings, setSettings] = useState<ChartSettings>(initial.settings);
@@ -235,16 +247,16 @@ export default function Analysis() {
 
   // Keyboard shortcuts (TradingView-style):
   //   F        toggle fullscreen
-  //   1..5     select timeframe (1m,5m,15m,1h,1D)
+  //   1..7     select timeframe (1m,5m,15m,1h,1D,1W,1M)
   //   ,  .     cycle timeframe left / right
   useEffect(() => {
-    const TF_KEYS = ["1m","5m","15m","1h","1D"];
+    const TF_KEYS = ["1m","5m","15m","1h","1D","1W","1M"];
     const onKey = (e: KeyboardEvent) => {
       const el = document.activeElement as HTMLElement | null;
       if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === "f" || e.key === "F") { if (!fs) setFs(true); return; }
-      if (/^[1-5]$/.test(e.key)) { setTf(TF_KEYS[Number(e.key) - 1]); return; }
+      if (/^[1-7]$/.test(e.key)) { setTf(TF_KEYS[Number(e.key) - 1]); return; }
       if (e.key === "," || e.key === ".") {
         const i = TF_KEYS.indexOf(tf);
         if (i < 0) return;
@@ -588,6 +600,9 @@ export default function Analysis() {
               onDeleteLayout={deleteLayout}
               savedLayouts={savedLayouts}
               intraday={isIntraday(tf)}
+              range={range}
+              onRange={setRange}
+              onResetPanes={() => setPaneResetToken((v) => v + 1)}
             />
             <div ref={chartWrapRef} style={{ flex: 1, minHeight: 0, position: "relative", display: "flex", flexDirection: "column" }}>
               {/* Chart surface — own stacking context so overlays inside it
@@ -642,7 +657,8 @@ export default function Analysis() {
                   onEditStudy={setEditingId}
                   onRemoveStudy={removeStudy}
                   source={chartSource}
-                  visibleBars={isIntraday(tf) ? todayBarCount(candleData.candles) : null}
+                  visibleBars={isIntraday(tf) ? todayBarCount(candleData.candles) : rangeToBars(range, tf)}
+                  paneResetToken={paneResetToken}
                   viewportKey={`${exchange}:${sym}:${tf}`}
                 />
 

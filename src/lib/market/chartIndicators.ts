@@ -396,17 +396,133 @@ export function roc(candles: CandleDto[], period = 12): Num[] {
 }
 
 // On-Balance Volume.
-export function obv(candles: CandleDto[]): Num[] {
+export function obv(candles: CandleDto[], resetDaily = false): Num[] {
   const out: Num[] = new Array(candles.length).fill(null);
   if (candles.length === 0) return out;
   let acc = 0;
   out[0] = 0;
+  let day = resetDaily ? istDayKey(candles[0].time) : "";
   for (let i = 1; i < candles.length; i++) {
-    if (candles[i].close > candles[i - 1].close) acc += candles[i].volume;
-    else if (candles[i].close < candles[i - 1].close) acc -= candles[i].volume;
+    if (resetDaily) {
+      const k = istDayKey(candles[i].time);
+      if (k !== day) { day = k; acc = 0; out[i] = 0; continue; }
+    }
+    const vol = Number(candles[i].volume) || 0;
+    if (candles[i].close > candles[i - 1].close) acc += vol;
+    else if (candles[i].close < candles[i - 1].close) acc -= vol;
     out[i] = acc;
   }
   return out;
+}
+
+/** IST calendar-day key for a candle time (epoch seconds or ISO string). */
+function istDayKey(t: string | number): string {
+  const ms = typeof t === "number" ? t * 1000 : Date.parse(t);
+  if (!Number.isFinite(ms)) return String(t);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(new Date(ms));
+}
+
+/** Simple moving average over an arbitrary (possibly null-padded) series. */
+export function smaOf(values: Num[], period: number): Num[] {
+  const out: Num[] = new Array(values.length).fill(null);
+  if (period < 1) return out;
+  let sum = 0;
+  let count = 0;
+  const window: number[] = [];
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (v == null) { window.length = 0; sum = 0; count = 0; continue; }
+    window.push(v); sum += v; count++;
+    if (count > period) { sum -= window[window.length - period - 1]; count = period; }
+    if (count === period) out[i] = sum / period;
+  }
+  return out;
+}
+
+/** OBV plus its optional smoothing line (maPeriod <= 1 disables the MA). */
+export function obvWithMa(candles: CandleDto[], maPeriod = 20, resetDaily = false): { obv: Num[]; ma: Num[] } {
+  const line = obv(candles, resetDaily);
+  return { obv: line, ma: maPeriod > 1 ? smaOf(line, Math.round(maPeriod)) : new Array(candles.length).fill(null) };
+}
+
+export interface VolumeProfileRow {
+  priceLo: number;
+  priceHi: number;
+  upVol: number;
+  downVol: number;
+  total: number;
+}
+
+export interface VolumeProfileResult {
+  rows: VolumeProfileRow[];
+  maxTotal: number;
+  poc: number | null;
+  vah: number | null;
+  val: number | null;
+  upVol: number;
+  downVol: number;
+}
+
+/**
+ * Volume profile over the supplied candles: volume of each bar is dropped into
+ * the price row containing its typical price and classified as buying
+ * (close >= previous close) or selling, matching the volume pane's colouring.
+ */
+export function volumeProfile(
+  candles: CandleDto[],
+  opts?: { rows?: number; valueAreaPct?: number },
+): VolumeProfileResult {
+  const rowCount = Math.max(4, Math.min(200, Math.round(opts?.rows ?? 24)));
+  const vaPct = Math.max(10, Math.min(100, opts?.valueAreaPct ?? 70)) / 100;
+  const empty: VolumeProfileResult = { rows: [], maxTotal: 0, poc: null, vah: null, val: null, upVol: 0, downVol: 0 };
+  if (!candles.length) return empty;
+  let lo = Infinity, hi = -Infinity;
+  for (const c of candles) { if (c.low < lo) lo = c.low; if (c.high > hi) hi = c.high; }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return empty;
+  if (hi === lo) { hi = lo + Math.max(0.01, Math.abs(lo) * 0.001); }
+  const step = (hi - lo) / rowCount;
+  const rows: VolumeProfileRow[] = Array.from({ length: rowCount }, (_, i) => ({
+    priceLo: lo + step * i, priceHi: lo + step * (i + 1), upVol: 0, downVol: 0, total: 0,
+  }));
+  let upVol = 0, downVol = 0;
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const vol = Number(c.volume) || 0;
+    if (vol <= 0) continue;
+    const prevClose = i > 0 ? candles[i - 1].close : c.open;
+    const buying = c.close >= prevClose;
+    const tp = (c.high + c.low + c.close) / 3;
+    let idx = Math.floor((tp - lo) / step);
+    if (idx < 0) idx = 0;
+    if (idx >= rowCount) idx = rowCount - 1;
+    if (buying) { rows[idx].upVol += vol; upVol += vol; }
+    else { rows[idx].downVol += vol; downVol += vol; }
+    rows[idx].total += vol;
+  }
+  let maxTotal = 0, pocIdx = -1;
+  rows.forEach((r, i) => { if (r.total > maxTotal) { maxTotal = r.total; pocIdx = i; } });
+  if (pocIdx < 0) return { ...empty, rows };
+  // Value area: expand out from the POC, always taking the richer neighbour.
+  const grand = rows.reduce((s, r) => s + r.total, 0);
+  const target = grand * vaPct;
+  let acc = rows[pocIdx].total;
+  let lower = pocIdx, upper = pocIdx;
+  while (acc < target && (lower > 0 || upper < rowCount - 1)) {
+    const below = lower > 0 ? rows[lower - 1].total : -1;
+    const above = upper < rowCount - 1 ? rows[upper + 1].total : -1;
+    if (above >= below) { upper++; acc += rows[upper].total; }
+    else { lower--; acc += rows[lower].total; }
+  }
+  const mid = (r: VolumeProfileRow) => (r.priceLo + r.priceHi) / 2;
+  return {
+    rows, maxTotal,
+    poc: mid(rows[pocIdx]),
+    vah: rows[upper].priceHi,
+    val: rows[lower].priceLo,
+    upVol, downVol,
+  };
 }
 
 // Money Flow Index.

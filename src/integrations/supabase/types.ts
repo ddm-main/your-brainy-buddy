@@ -342,7 +342,7 @@ export type Database = {
           ok: boolean | null
           started_at: string
           stats: Json
-          user_id: string
+          user_id: string | null
         }
         Insert: {
           created_at?: string
@@ -353,7 +353,7 @@ export type Database = {
           ok?: boolean | null
           started_at?: string
           stats?: Json
-          user_id?: string
+          user_id?: string | null
         }
         Update: {
           created_at?: string
@@ -364,7 +364,7 @@ export type Database = {
           ok?: boolean | null
           started_at?: string
           stats?: Json
-          user_id?: string
+          user_id?: string | null
         }
         Relationships: []
       }
@@ -3892,27 +3892,39 @@ export type Database = {
       }
       market_scoring_calibration: {
         Row: {
+          as_of_date: string | null
           component: string
           computed_at: string
           id: string
+          kind: string
+          meta: Json | null
+          model: string | null
           model_version: string
           r2: number | null
           sample_n: number | null
           weight: number
         }
         Insert: {
+          as_of_date?: string | null
           component: string
           computed_at?: string
           id?: string
+          kind?: string
+          meta?: Json | null
+          model?: string | null
           model_version: string
           r2?: number | null
           sample_n?: number | null
           weight: number
         }
         Update: {
+          as_of_date?: string | null
           component?: string
           computed_at?: string
           id?: string
+          kind?: string
+          meta?: Json | null
+          model?: string | null
           model_version?: string
           r2?: number | null
           sample_n?: number | null
@@ -6906,10 +6918,18 @@ export type Database = {
         Args: { _limit?: number }
         Returns: number
       }
-      fit_score_calibration: {
-        Args: { _min_n?: number; _model?: string }
-        Returns: number
-      }
+      fit_score_calibration:
+        | { Args: { _min_n?: number; _model?: string }; Returns: number }
+        | {
+            Args: {
+              _min_n?: number
+              _min_sessions?: number
+              _min_symbols?: number
+              _min_symbols_neutral?: number
+              _model?: string
+            }
+            Returns: number
+          }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
@@ -6982,16 +7002,27 @@ export type Database = {
           session_date: string
         }[]
       }
-      market_score_backfill_candidates: {
-        Args: { _limit?: number; _min_rows?: number }
-        Returns: {
-          bars: number
-          exchange: string
-          market_cap: number
-          sector: string
-          symbol: string
-        }[]
-      }
+      market_score_backfill_candidates:
+        | {
+            Args: { _limit?: number; _min_rows?: number }
+            Returns: {
+              bars: number
+              exchange: string
+              market_cap: number
+              sector: string
+              symbol: string
+            }[]
+          }
+        | {
+            Args: { _limit?: number; _min_bars?: number; _min_rows?: number }
+            Returns: {
+              bars: number
+              exchange: string
+              market_cap: number
+              sector: string
+              symbol: string
+            }[]
+          }
       market_score_cohort:
         | {
             Args: { _days?: number; _model?: string; _threshold?: number }
@@ -7080,6 +7111,13 @@ export type Database = {
       refresh_market_screener_snapshot: { Args: never; Returns: number }
       refresh_market_top_movers: { Args: never; Returns: undefined }
       refresh_score_distribution: { Args: { _model?: string }; Returns: number }
+      repair_intraday_volume: {
+        Args: { p_days?: number }
+        Returns: {
+          rows_rewritten: number
+          sessions_repaired: number
+        }[]
+      }
       run_daily_maintenance: { Args: never; Returns: Json }
       score_history_coverage: { Args: { _model?: string }; Returns: Json }
       seed_default_indices: { Args: { _uid: string }; Returns: undefined }

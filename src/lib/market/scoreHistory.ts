@@ -186,25 +186,52 @@ export function useScoreBandStats(population: "fit" | "all" = "fit") {
   });
 }
 
+/** Diagnostic row explaining the state of the fit (never a fitted weight). */
+export interface CalibrationDiagnostic {
+  component: string;
+  computed_at: string;
+  meta: Record<string, unknown> | null;
+}
+
+export interface CalibrationResult {
+  /** Fitted bucket / model rows only. */
+  rows: CalibrationRow[];
+  /** Present when the last fit refused to run, with the reason. */
+  notFitted: CalibrationDiagnostic | null;
+  /** Coverage of the population the fit actually used. */
+  coverage: CalibrationDiagnostic | null;
+}
+
 /** Fitted calibration for the current model version. */
 export function useScoreCalibration() {
   return useQuery({
     queryKey: ["market", "score-calibration", SCORE_MODEL],
     staleTime: 10 * 60_000,
-    queryFn: async (): Promise<CalibrationRow[]> => {
+    queryFn: async (): Promise<CalibrationResult> => {
       const { data, error } = await (supabase as any)
         .from("market_scoring_calibration")
-        .select("component,weight,r2,sample_n,computed_at")
+        .select("component,weight,r2,sample_n,computed_at,kind,meta")
         .eq("model_version", SCORE_MODEL)
         .order("weight", { ascending: false });
       if (error) throw error;
-      return (data ?? []).map((r: any): CalibrationRow => ({
-        component: r.component,
-        weight: Number(r.weight),
-        r2: num(r.r2),
-        sample_n: r.sample_n == null ? null : Number(r.sample_n),
-        computed_at: r.computed_at,
-      }));
+      const all = (data ?? []) as any[];
+      const diag = (name: string): CalibrationDiagnostic | null => {
+        const r = all.find((x) => x.kind === "diagnostic" && x.component === name);
+        return r ? { component: r.component, computed_at: r.computed_at, meta: r.meta ?? null } : null;
+      };
+      return {
+        // Diagnostics used to be stored as components with the count in the
+        // weight column, so the table showed "coverage:symbols — weight 19".
+        rows: all.filter((r) => r.kind !== "diagnostic").map((r): CalibrationRow => ({
+          component: r.component,
+          weight: Number(r.weight),
+          r2: num(r.r2),
+          sample_n: r.sample_n == null ? null : Number(r.sample_n),
+          computed_at: r.computed_at,
+        })),
+        notFitted: diag("not_fitted"),
+        coverage: diag("coverage"),
+      };
     },
   });
 }

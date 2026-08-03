@@ -27,13 +27,15 @@ import {
 import type { CandleDto } from "@/lib/market/types";
 import {
   ad, adx, ao, atr, bollingerV, cci, chaikinOsc, cmf, demaV, donchian, emaV, envelopesV,
-  hmaV, ichimoku, keltner, macd, mfi, mom, obv, psar, roc, rsi, smaV, sourceValues,
+  hmaV, ichimoku, keltner, macd, mfi, mom, obvWithMa, psar, roc, rsi, smaV, sourceValues,
   stochastic, stochRsi, stddevV, supertrend, temaV, trix, uo, vortex, vwap, vwma, williamsR,
   wmaV, aroon, type Num,
 } from "@/lib/market/chartIndicators";
 import { defByType, studyLabel, type Study } from "@/lib/market/indicatorRegistry";
+import { VolumeProfilePrimitive } from "@/components/market/volumeProfilePrimitive";
 import { ChartLegend, type LegendRow } from "@/components/market/ChartLegend";
 import { useMarketOpen } from "@/lib/market/useMarketOpen";
+import { safeStorage } from "@/lib/safeStorage";
 
 
 export type ChartType = "candles" | "bars" | "line" | "area" | "heikin_ashi" | "baseline";
@@ -76,6 +78,8 @@ type Computed =
   | { g: "psar"; sar: Num[]; dir: Array<1 | -1 | null> }
   | { g: "ichimoku"; tenkan: Num[]; kijun: Num[]; spanA: Num[]; spanB: Num[]; base: number }
   | { g: "volume" }
+  | { g: "obv"; line: Num[]; ma: Num[] }
+  | { g: "vprofile"; rows: number; valueAreaPct: number; widthPct: number; rightSide: boolean }
   | { g: "single"; line: Num[]; guides?: number[]; hist?: boolean }
   | { g: "macd"; macd: Num[]; signal: Num[]; hist: Num[] }
   | { g: "dual"; a: Num[]; b: Num[]; guides?: number[] }
@@ -90,6 +94,8 @@ function computeStudy(candles: CandleDto[], s: Study): Computed {
     const n = Number(v);
     if (!Number.isFinite(n)) { p[k] = 1; continue; }
     if (k === "mult" || k === "step" || k === "max" || k === "pct") p[k] = Math.max(0.001, n);
+    // Flags/percentages may legitimately be 0 — don't floor them up to 1.
+    else if (k === "resetDaily" || k === "side") p[k] = n >= 0.5 ? 1 : 0;
     else p[k] = Math.max(1, Math.floor(n));
   }
   const src = () => sourceValues(candles, s.source ?? "close");
@@ -128,7 +134,17 @@ function computeStudy(candles: CandleDto[], s: Study): Computed {
     case "aroon": { const a = aroon(candles, p.period); return { g: "dual", a: a.up, b: a.down, guides: [50] }; }
     case "vortex": { const v = vortex(candles, p.period); return { g: "dual", a: v.plus, b: v.minus }; }
     case "stddev": return { g: "single", line: stddevV(src(), p.period) };
-    case "obv": return { g: "single", line: obv(candles) };
+    case "obv": {
+      const r = obvWithMa(candles, p.maPeriod ?? 20, p.resetDaily === 1);
+      return { g: "obv", line: r.obv, ma: r.ma };
+    }
+    case "volumeProfile": return {
+      g: "vprofile",
+      rows: p.rows ?? 24,
+      valueAreaPct: p.valueArea ?? 70,
+      widthPct: p.widthPct ?? 25,
+      rightSide: p.side !== 0,
+    };
     case "mfi": return { g: "single", line: mfi(candles, p.period), guides: [80, 20] };
     case "ao": return { g: "single", line: ao(candles, p.fast, p.slow), guides: [0], hist: true };
     default: return { g: "single", line: new Array(candles.length).fill(null) };
@@ -144,6 +160,7 @@ function primaryOf(c: Computed): Num[] | null {
     case "psar": return c.sar;
     case "ichimoku": return c.tenkan;
     case "single": return c.line;
+    case "obv": return c.line;
     case "macd": return c.macd;
     case "dual": return c.a;
     case "adx": return c.adx;
@@ -177,6 +194,7 @@ export function CandleChart({
   source,
   visibleBars = null,
   viewportKey,
+  paneResetToken = 0,
 }: {
   candles: CandleDto[];
   priceLines?: Array<{ price: number; label: string; color: string }>;
@@ -205,6 +223,8 @@ export function CandleChart({
   /** Identity of the opened chart. A new identity discards any zoom/range
    * captured from the previous symbol or timeframe. */
   viewportKey?: string;
+  /** Bump to clear user-dragged sub-pane heights and re-apply the auto split. */
+  paneResetToken?: number;
 }) {
 
 
@@ -229,6 +249,16 @@ export function CandleChart({
   // intraday charts roll to a fresh bar instead of stretching one monster bar.
   const medianGapRef = useRef<number>(0);
   const [liveBar, setLiveBar] = useState<CandleDto | null>(null);
+  // Volume Profile readout for the legend (visible-range POC + buy/sell split).
+  const [vpStats, setVpStats] = useState<{ poc: number | null; upVol: number; downVol: number } | null>(null);
+  // Lets the live tick extend OBV's last point without rebuilding the chart.
+  const obvLiveRef = useRef<{ series: ISeriesApi<any>; accBefore: number; prevClose: number } | null>(null);
+  // Sub-pane heights the user dragged, keyed by the pane set signature so a
+  // data refresh (which rebuilds the chart) replays them instead of resetting.
+  const paneHeightsRef = useRef<{ sig: string; heights: number[] } | null>(null);
+  const paneSigRef = useRef<string>("");
+  const paneStoreKey = `mk.chart.panes.${viewportKey ?? "default"}`;
+  const paneStoreKeyRef = useRef(paneStoreKey);
   const s = settings ?? { grid: true, logScale: false, priceLine: true, sessionBreaks: false, magnet: false };
   // Deconstructed so effect dep can be primitive and stable across parent
   // renders when the settings object identity changes but values don't.
@@ -238,36 +268,22 @@ export function CandleChart({
 
   // Memoize per-study compute keyed by (candles reference, study JSON) so
   // toggling one study's param doesn't recompute every other study.
-  const studyCache = useRef<WeakMap<CandleDto[], Map<string, Computed>>>(new WeakMap());
-  const computed = useMemo(() => {
-    let bucket = studyCache.current.get(candles);
-    if (!bucket) { bucket = new Map(); studyCache.current.set(candles, bucket); }
-    return studies.map((st) => {
-      const key = `${st.type}|${st.source ?? "close"}|${JSON.stringify(st.params)}`;
-      let data = bucket!.get(key);
-      if (!data) { data = computeStudy(candles, st); bucket!.set(key, data); }
-      return { study: st, data };
-    });
-  }, [candles, studies]);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    // lightweight-charts silently renders nothing when times are out of order
-    // or duplicated. Normalise every time to a numeric epoch (seconds) before
-    // sorting/deduping so ISO ↔ number mismatches from refresh races don't
-    // slip through.
-    const _epoch = (t: string | number): number => {
+  // lightweight-charts silently renders nothing when times are out of order or
+  // duplicated. Normalise every time to a numeric epoch (seconds) before
+  // sorting/deduping so ISO ↔ number mismatches from refresh races don't slip
+  // through — and so indicators and bars share one index space.
+  const cleanCandles = useMemo(() => {
+    const epoch = (t: string | number): number => {
       if (typeof t === "number") return t;
       const parsed = Date.parse(t);
       return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
     };
-    const _sorted = [...candles].sort((a, b) => _epoch(a.time) - _epoch(b.time));
-    const _seen = new Set<number>();
-    const cleaned = _sorted.filter((c) => {
-      const k = _epoch(c.time);
-      if (_seen.has(k)) return false;
-      _seen.add(k);
+    const sorted = [...candles].sort((a, b) => epoch(a.time) - epoch(b.time));
+    const seen = new Set<number>();
+    const cleaned = sorted.filter((c) => {
+      const k = epoch(c.time);
+      if (seen.has(k)) return false;
+      seen.add(k);
       return true;
     });
     // Surface upstream cache bugs — silently dropping duplicates hides them.
@@ -275,7 +291,43 @@ export function CandleChart({
       // eslint-disable-next-line no-console
       console.warn(`[CandleChart] dropped ${candles.length - cleaned.length} duplicate/out-of-order bars`);
     }
-    const data = cleaned;
+    return cleaned.length === candles.length ? candles : cleaned;
+  }, [candles]);
+
+  const studyCache = useRef<WeakMap<CandleDto[], Map<string, Computed>>>(new WeakMap());
+  const computed = useMemo(() => {
+    let bucket = studyCache.current.get(cleanCandles);
+    if (!bucket) { bucket = new Map(); studyCache.current.set(cleanCandles, bucket); }
+    return studies.map((st) => {
+      const key = `${st.type}|${st.source ?? "close"}|${JSON.stringify(st.params)}`;
+      let data = bucket!.get(key);
+      if (!data) { data = computeStudy(cleanCandles, st); bucket!.set(key, data); }
+      return { study: st, data };
+    });
+  }, [cleanCandles, studies]);
+
+
+  // Restore persisted pane heights when the opened chart identity changes,
+  // and drop them when the parent asks for a reset.
+  useEffect(() => {
+    paneStoreKeyRef.current = paneStoreKey;
+    paneHeightsRef.current = safeStorage.getJSON<{ sig: string; heights: number[] } | null>(paneStoreKey, null);
+  }, [paneStoreKey]);
+
+  useEffect(() => {
+    if (!paneResetToken) return;
+    paneHeightsRef.current = null;
+    safeStorage.remove(paneStoreKeyRef.current);
+  }, [paneResetToken]);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    // Studies are computed over the SAME cleaned/sorted series the chart draws
+    // (see `cleanCandles`) — plotting is positional, so using the raw prop here
+    // shifted every indicator by one bar whenever a duplicate was dropped.
+    const data = cleanCandles;
+
 
     // NSE session is 09:15–15:30 IST. Lightweight-charts defaults to UTC, so
     // without an IST formatter the market opens at "03:45" on every chart.
@@ -520,6 +572,7 @@ export function CandleChart({
     // ---- overlays (visible, price pane) ----
     // Collected so multiple Supertrend studies don't leak plugins on cleanup.
     const markersPlugins: ISeriesMarkersPluginApi<any>[] = [];
+    const primitives: VolumeProfilePrimitive[] = [];
 
     for (const { study, data: c } of computed) {
       if (!study.visible) continue;
@@ -587,6 +640,20 @@ export function CandleChart({
             markersPlugins.push(createSeriesMarkers(priceSeries, markers as any));
           }
         } catch { /* markers optional */ }
+      } else if (c.g === "vprofile") {
+        // Visible-range volume profile, painted in the price pane. Rows are
+        // split into buying vs selling volume so the balance at each price
+        // level is readable directly off the chart.
+        const vp = new VolumeProfilePrimitive(
+          data,
+          {
+            rows: c.rows, valueAreaPct: c.valueAreaPct, widthPct: c.widthPct, rightSide: c.rightSide,
+            upColor: col[0] ?? tk.up, downColor: col[1] ?? tk.down, pocColor: col[2] ?? tk.neutral,
+          },
+          (res) => setVpStats({ poc: res.poc, upVol: res.upVol, downVol: res.downVol }),
+        );
+        (priceSeries as any).attachPrimitive(vp);
+        primitives.push(vp);
       } else if (c.g === "psar") {
         // Colour each dot by the algorithm's trend direction (industry
         // standard) — green in uptrends, red in downtrends.
@@ -714,6 +781,16 @@ export function CandleChart({
           const s = paneLine(c.line, col[0], pane, w);
           (c.guides ?? []).forEach((g) => guide(s, g));
         }
+      } else if (c.g === "obv") {
+        const line = paneLine(c.line, col[0], pane, w);
+        if (c.ma.some((v) => v != null)) paneLine(c.ma, col[1] ?? tk.neutral, pane, 1);
+        guide(line, 0);
+        const lastIdx = c.line.length - 1;
+        obvLiveRef.current = {
+          series: line,
+          accBefore: (c.line[lastIdx - 1] as number) ?? 0,
+          prevClose: data[lastIdx - 1]?.close ?? data[lastIdx]?.close ?? 0,
+        };
       } else if (c.g === "macd") {
         const h = chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, pane);
         h.setData(data.flatMap((cc, i) => (c.hist[i] != null ? [{ time: toTime(cc.time), value: c.hist[i] as number, color: (c.hist[i] as number) >= 0 ? tk.upFill : tk.downFill }] : [])));
@@ -731,17 +808,38 @@ export function CandleChart({
       }
       pane++;
     }
-    // Sub-pane sizing: split up to 55% of the chart height across all
-    // oscillator/volume panes (min 90px each, cap 180) so the price pane
-    // never collapses when the user stacks 3+ oscillators.
+    // Sub-pane sizing. The auto split (up to 55% of chart height, min 90px,
+    // cap 180) is only applied when the pane SET changes — otherwise a data
+    // poll would rebuild the chart and stomp whatever height the user just
+    // dragged. Dragged heights are captured on teardown and replayed here.
     const panes = chart.panes();
     const subCount = Math.max(0, panes.length - 1);
+    const paneSig = [
+      showVolume && hasAnyVolume ? "volume" : "",
+      ...computed.filter(({ study }) => study.visible && defByType(study.type).group === "oscillator").map(({ study }) => study.id),
+    ].filter(Boolean).join("|");
+    paneSigRef.current = paneSig;
     if (subCount > 0) {
       const chartH = fill ? (el.clientHeight || height) : height;
-      const budget = Math.max(180, Math.floor(chartH * 0.55));
-      const per = Math.max(90, Math.min(180, Math.floor(budget / subCount)));
-      for (let i = 1; i < panes.length; i++) panes[i].setHeight(per);
+      const saved = paneHeightsRef.current;
+      const usable =
+        saved && saved.sig === paneSig && saved.heights.length === subCount &&
+        saved.heights.every((h) => h >= 40) &&
+        saved.heights.reduce((a, b) => a + b, 0) <= chartH * 0.85
+          ? saved.heights
+          : null;
+      if (usable) {
+        for (let i = 1; i < panes.length; i++) panes[i].setHeight(usable[i - 1]);
+      } else {
+        const budget = Math.max(180, Math.floor(chartH * 0.55));
+        const per = Math.max(90, Math.min(180, Math.floor(budget / subCount)));
+        for (let i = 1; i < panes.length; i++) panes[i].setHeight(per);
+        paneHeightsRef.current = { sig: paneSig, heights: new Array(subCount).fill(per) };
+      }
+    } else {
+      paneHeightsRef.current = null;
     }
+
 
     // ---- crosshair legend ----
     const byTime = new Map(data.map((c) => [timeKey(c.time), c]));
@@ -780,14 +878,28 @@ export function CandleChart({
     return () => {
       const r = chart.timeScale().getVisibleLogicalRange();
       if (r) rangeRef.current = { from: r.from as number, to: r.to as number };
+      // Capture any height the user dragged so the next rebuild replays it.
+      try {
+        const ps = chart.panes();
+        if (ps.length > 1) {
+          const heights = ps.slice(1).map((pn) => pn.getHeight());
+          if (heights.every((h) => h > 0)) {
+            const snap = { sig: paneSigRef.current, heights };
+            paneHeightsRef.current = snap;
+            safeStorage.setJSON(paneStoreKeyRef.current, snap);
+          }
+        }
+      } catch { /* noop */ }
       ro.disconnect();
       try { markersPlugins.forEach((p) => p.detach()); } catch { /* noop */ }
+      try { primitives.forEach((vp) => (priceSeries as any).detachPrimitive?.(vp)); } catch { /* noop */ }
+      obvLiveRef.current = null;
       chart.remove();
       chartRef.current = null;
       priceSeriesRef.current = null;
       volumeSeriesRef.current = null;
     };
-  }, [candles, computed, priceLines, height, fill, chartType, intraday, sGrid, sLog, sPriceLine, sSessionBreaks, sMagnet, visibleBars, viewportKey]);
+  }, [cleanCandles, computed, priceLines, height, fill, chartType, intraday, sGrid, sLog, sPriceLine, sSessionBreaks, sMagnet, visibleBars, viewportKey, paneResetToken]);
 
 
   // ---- live tick: move/extend the rightmost bar without rebuilding the chart ----
@@ -819,6 +931,13 @@ export function CandleChart({
         close, volume: 0,
       };
       liveBarRef.current = fresh;
+      if (obvLiveRef.current) {
+        obvLiveRef.current = {
+          series: obvLiveRef.current.series,
+          accBefore: obvLiveRef.current.accBefore + (base.close > obvLiveRef.current.prevClose ? base.volume : base.close < obvLiveRef.current.prevClose ? -base.volume : 0),
+          prevClose: base.close,
+        };
+      }
       try {
         if (chartType === "line" || chartType === "area" || chartType === "baseline") {
           series.update({ time: fresh.seriesTime, value: close });
@@ -877,6 +996,15 @@ export function CandleChart({
         } as any);
       } catch { /* noop */ }
     }
+    // OBV must track the forming bar too — otherwise it freezes at the last
+    // completed bar while price/volume keep moving during the session.
+    const obvLive = obvLiveRef.current;
+    if (obvLive) {
+      const dir = updated.close > obvLive.prevClose ? 1 : updated.close < obvLive.prevClose ? -1 : 0;
+      try {
+        obvLive.series.update({ time: updated.seriesTime, value: obvLive.accBefore + dir * updated.volume } as any);
+      } catch { /* noop */ }
+    }
     setLiveBar({ time: updated.rawTime, open: updated.open, high: updated.high, low: updated.low, close: updated.close, volume: updated.volume });
     // Depend on `candles` too: after the main chart-build effect (line ~667)
     // rebuilds the series on a candle refetch, `priceSeriesRef` is a fresh
@@ -891,7 +1019,7 @@ export function CandleChart({
 
   // ---- legend rows (value at crosshair, else last bar) ----
   const legendRows: LegendRow[] = useMemo(() => {
-    const idx = hoverIdx ?? candles.length - 1;
+    const idx = hoverIdx ?? cleanCandles.length - 1;
     const compact = (n: number) => Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(n);
     const BOUNDED_100 = new Set(["rsi", "stochRsi", "mfi", "aroon", "stoch", "williamsR", "uo"]);
     const COMPACT_TYPES = new Set(["obv", "ad", "volume"]);
@@ -901,9 +1029,25 @@ export function CandleChart({
       if (study.type === "vwap" && !intraday) continue;
       const prim = primaryOf(c);
       const v = prim && idx >= 0 && idx < prim.length ? prim[idx] : null;
+      if (c.g === "vprofile") {
+        const up = vpStats?.upVol ?? 0;
+        const dn = vpStats?.downVol ?? 0;
+        const tot = up + dn;
+        const buyPct = tot > 0 ? (up / tot) * 100 : null;
+        rows.push({
+          id: study.id,
+          label: "Volume Profile",
+          color: study.colors[0],
+          value: vpStats?.poc != null
+            ? `POC ${vpStats.poc.toFixed(2)} · buy ${buyPct != null ? buyPct.toFixed(0) : "—"}% / sell ${buyPct != null ? (100 - buyPct).toFixed(0) : "—"}%`
+            : "—",
+          visible: study.visible,
+        });
+        continue;
+      }
       const isVol = c.g === "volume";
-      const latestLive = liveBar && idx === candles.length - 1 ? liveBar : null;
-      const rawVol = isVol && idx >= 0 ? (latestLive ?? candles[idx])?.volume ?? null : null;
+      const latestLive = liveBar && idx === cleanCandles.length - 1 ? liveBar : null;
+      const rawVol = isVol && idx >= 0 ? (latestLive ?? cleanCandles[idx])?.volume ?? null : null;
       const val: string = isVol
         ? (rawVol != null ? compact(rawVol) : "—")
         : v == null
@@ -928,18 +1072,18 @@ export function CandleChart({
       });
     }
     return rows;
-  }, [computed, hoverIdx, candles.length, candles, intraday, liveBar]);
+  }, [computed, hoverIdx, cleanCandles, intraday, liveBar, vpStats]);
 
-  const last = liveBar ?? candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
-  const hoveringLatest = hoverIdx === candles.length - 1;
+  const last = liveBar ?? cleanCandles[cleanCandles.length - 1];
+  const prev = cleanCandles[cleanCandles.length - 2];
+  const hoveringLatest = hoverIdx === cleanCandles.length - 1;
   const l = hoveringLatest && liveBar ? liveBar : legend ?? last;
   // Δ vs previous bar (crosshair-aware): when hovering, compare to the bar
   // just before the hovered one; otherwise compare last bar to the one prior.
   // This is the only "change" we show in the legend — the old same-bar
   // (close-open)/open readout showed +0.00% on a fresh live bar and
   // contradicted the Quote panel's prev-close-anchored change.
-  const refPrev = hoverIdx != null && hoverIdx > 0 ? candles[hoverIdx - 1] : prev;
+  const refPrev = hoverIdx != null && hoverIdx > 0 ? cleanCandles[hoverIdx - 1] : prev;
   const deltaVsPrev = l && refPrev ? l.close - refPrev.close : null;
   const deltaPctVsPrev = l && refPrev && refPrev.close ? ((l.close - refPrev.close) / refPrev.close) * 100 : null;
   const chg = deltaPctVsPrev;

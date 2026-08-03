@@ -284,3 +284,77 @@ describe("baseMetrics windowing", () => {
     expect(upTo.durationDays ?? 0).toBeGreaterThan(through.durationDays ?? 0);
   });
 });
+
+// ---- volume analysis: OBV + Volume Profile ----
+import { obv, obvWithMa, volumeProfile } from "@/lib/market/chartIndicators";
+
+const mkVolCandles = (rows: Array<[number, number]>, startSec = 1_722_000_000, stepSec = 300) =>
+  rows.map(([close, volume], i) => ({
+    time: startSec + i * stepSec,
+    open: close, high: close, low: close, close, volume,
+  })) as any[];
+
+describe("OBV", () => {
+  it("adds volume on up closes, subtracts on down closes, holds on flat", () => {
+    const c = mkVolCandles([[100, 10], [101, 5], [100, 4], [100, 7], [102, 3]]);
+    expect(obv(c)).toEqual([0, 5, 1, 1, 4]);
+  });
+
+  it("treats missing volume as zero instead of NaN", () => {
+    const c = mkVolCandles([[100, 10], [101, 5]]);
+    (c[1] as any).volume = undefined;
+    expect(obv(c)).toEqual([0, 0]);
+  });
+
+  it("restarts each IST session when resetDaily is on", () => {
+    // 03:45Z = 09:15 IST. Two bars on day 1, two on day 2.
+    const d1 = Date.UTC(2026, 6, 30, 3, 45) / 1000;
+    const d2 = Date.UTC(2026, 6, 31, 3, 45) / 1000;
+    const c = [
+      { time: d1, open: 100, high: 100, low: 100, close: 100, volume: 10 },
+      { time: d1 + 300, open: 101, high: 101, low: 101, close: 101, volume: 5 },
+      { time: d2, open: 102, high: 102, low: 102, close: 102, volume: 8 },
+      { time: d2 + 300, open: 103, high: 103, low: 103, close: 103, volume: 6 },
+    ] as any[];
+    expect(obv(c, true)).toEqual([0, 5, 0, 6]);
+    expect(obv(c, false)).toEqual([0, 5, 13, 19]);
+  });
+
+  it("smooths with a moving average and disables it at maPeriod <= 1", () => {
+    const c = mkVolCandles([[100, 10], [101, 5], [102, 5], [103, 5]]);
+    const { obv: line, ma } = obvWithMa(c, 2);
+    expect(line).toEqual([0, 5, 10, 15]);
+    expect(ma).toEqual([null, 2.5, 7.5, 12.5]);
+    expect(obvWithMa(c, 1).ma.every((v) => v == null)).toBe(true);
+  });
+});
+
+describe("volume profile", () => {
+  it("splits each row into buying and selling volume and finds the POC", () => {
+    const c = mkVolCandles([[100, 10], [101, 40], [100, 30], [101, 20]]);
+    const p = volumeProfile(c, { rows: 2, valueAreaPct: 70 });
+    expect(p.upVol + p.downVol).toBe(100);
+    // Bars 2 and 4 close up (buying), bars 1 (vs open, flat -> buying) and 3 down.
+    expect(p.downVol).toBe(30);
+    expect(p.upVol).toBe(70);
+    expect(p.maxTotal).toBeGreaterThan(0);
+    expect(p.poc).not.toBeNull();
+    const total = p.rows.reduce((s, r) => s + r.total, 0);
+    expect(total).toBe(100);
+  });
+
+  it("keeps the value area inside the profile range and around the POC", () => {
+    const c = mkVolCandles(Array.from({ length: 50 }, (_, i) => [100 + (i % 10), 10 + (i % 5)] as [number, number]));
+    const p = volumeProfile(c, { rows: 10, valueAreaPct: 70 });
+    expect(p.val).not.toBeNull();
+    expect(p.vah).not.toBeNull();
+    expect(p.val as number).toBeLessThanOrEqual(p.poc as number);
+    expect(p.vah as number).toBeGreaterThanOrEqual(p.poc as number);
+  });
+
+  it("returns an empty profile for no candles", () => {
+    const p = volumeProfile([], {});
+    expect(p.rows).toEqual([]);
+    expect(p.poc).toBeNull();
+  });
+});

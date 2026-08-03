@@ -103,21 +103,31 @@ export default function Calibration() {
   const { data: cohort = [], isLoading: cohortLoading } = useScoreCohort(days, threshold);
   const { data: members = [] } = useScoreCohortSymbols(days, threshold, 200);
   const { data: bands = [] } = useScoreBandStats(population);
-  const { data: calibration = [] } = useScoreCalibration();
+  const { data: calibrationData } = useScoreCalibration();
   const { data: runs = [] } = useOptimizerRuns(5);
   const optimize = useRunOptimizer();
 
+  const calibration = calibrationData?.rows ?? [];
   const totalQualified = cohort.reduce((s, d) => s + d.n_qualified, 0);
   const daysWithNone = cohort.filter((d) => d.n_qualified === 0).length;
   const fitLine = calibration.find((c) => c.component === "score_vs_fwd_rel_21d")
     ?? calibration.find((c) => c.component === "score_vs_fwd_ret_21d") ?? null;
   const bucketFits = calibration.filter((c) => c.component.startsWith(BUCKET_PREFIX));
-  // The fit records which population it could actually use — a replayed
-  // (neutral-context) fit is weaker evidence and must say so.
-  const popRow = calibration.find((c) => c.component.startsWith("population:")) ?? null;
-  // The fit refuses to run on a thin sample and records why — surface that
-  // reason instead of a bare "not fitted yet".
-  const insufficient = calibration.find((c) => c.component.startsWith("coverage:insufficient")) ?? null;
+  // Coverage + "not fitted, and why" are diagnostics now, not fake components.
+  const coverageMeta = (calibrationData?.coverage?.meta ?? null) as Record<string, unknown> | null;
+  const popRow = coverageMeta
+    ? { component: `population:${String(coverageMeta.population ?? "unknown")}` }
+    : null;
+  const notFitted = calibrationData?.notFitted ?? null;
+  const notFittedMeta = (notFitted?.meta ?? null) as Record<string, unknown> | null;
+  const insufficient = notFitted
+    ? {
+        component: `not fitted — ${String(notFittedMeta?.reason ?? "insufficient coverage")}`
+          + ` (rows ${String(notFittedMeta?.rows ?? "?")}/${String(notFittedMeta?.min_rows ?? "?")},`
+          + ` symbols ${String(notFittedMeta?.symbols ?? "?")},`
+          + ` sessions ${String(notFittedMeta?.sessions ?? "?")}/${String(notFittedMeta?.min_sessions ?? "?")})`,
+      }
+    : null;
 
 
   const run = () => {
@@ -139,16 +149,12 @@ export default function Calibration() {
             <Chip>n {fitLine.sample_n ?? "—"}</Chip>
           </>
         ) : <Chip tone="warn">not fitted yet</Chip>}
-        {insufficient && (
-          <Chip tone="warn">
-            insufficient evidence — {insufficient.component.slice("coverage:insufficient ".length)} ·{" "}
-            {insufficient.sample_n} matured rows (need ≥ 60 symbols and ≥ 20 sessions)
-          </Chip>
-        )}
+        {insufficient && <Chip tone="warn">{insufficient.component}</Chip>}
 
         {popRow && (
           <Chip tone={popRow.component.endsWith("full_context") ? "ok" : "warn"}>
-            fitted on {popRow.component.slice("population:".length).replace(/_/g, " ")} · {popRow.sample_n} rows
+            fitted on {popRow.component.slice("population:".length).replace(/_/g, " ")} ·{" "}
+            {String(coverageMeta?.rows ?? "—")} rows · {String(coverageMeta?.symbols ?? "—")} symbols
           </Chip>
         )}
         {fitLine && (fitLine.weight ?? 0) < 0 && (

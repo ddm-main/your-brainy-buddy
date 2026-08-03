@@ -279,7 +279,11 @@ class Supervisor {
       high: b.high,
       low: b.low,
       close: b.close,
+      // `volume` is ALWAYS per-bar. The snapshot's running day total goes to
+      // `cum_volume` so a reader can recompute the delta instead of guessing.
       volume: Math.max(0, Math.round(b.volume || 0)),
+      cum_volume: b.cumVolume != null ? Math.max(0, Math.round(b.cumVolume)) : null,
+
       source: "kotak_tick",
       fetched_at: nowIso,
     }));
@@ -318,13 +322,15 @@ class Supervisor {
       addVol = lastQty;
     }
     if (!prev) {
-      this.minuteBars.set(key, { symbol, minute, open: ltp, high: ltp, low: ltp, close: ltp, volume: addVol });
+      this.minuteBars.set(key, { symbol, minute, open: ltp, high: ltp, low: ltp, close: ltp, volume: addVol, cumVolume: cumulative });
       return;
     }
     prev.high = Math.max(prev.high, ltp);
     prev.low = Math.min(prev.low, ltp);
     prev.close = ltp;
     prev.volume += addVol;
+    if (cumulative != null && cumulative >= 0) prev.cumVolume = cumulative;
+
   }
 
   async connectLoop() {

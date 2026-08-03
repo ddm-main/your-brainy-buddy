@@ -11,7 +11,7 @@ import { CandleChart, type ChartType } from "@/components/market/CandleChart";
 import { ChartToolbar, DEFAULT_SETTINGS, isIntraday, type ChartSettings } from "@/components/market/ChartToolbar";
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
 import { NewAlertModal, StockAlertsPanel } from "@/components/market/StockAlerts";
-import { DEFAULT_STUDIES, makeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
+import { DEFAULT_STUDIES, makeStudy, normalizeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
 import { FullscreenShell } from "@/components/market/FullscreenShell";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { useCandles, useIndexConstituents, useIndexWatch, useIndices, useOptionChain, useQuotes } from "@/lib/market/hooks";
@@ -68,8 +68,13 @@ export default function IndexDetail() {
       const raw = JSON.parse(localStorage.getItem(stateKey) ?? "{}");
       return {
         tf: typeof raw.tf === "string" ? raw.tf : dflt.tf,
-        chartType: raw.chartType === "line" || raw.chartType === "area" || raw.chartType === "candles" ? raw.chartType : dflt.chartType,
-        studies: Array.isArray(raw.studies) ? raw.studies : dflt.studies,
+        // Chart style dropdown was removed — candles only.
+        chartType: "candles",
+        // Normalize so studies whose indicator type no longer exists are
+        // dropped instead of throwing in defByType at render time.
+        studies: Array.isArray(raw.studies)
+          ? (raw.studies.map((st: Study) => normalizeStudy(st)).filter((st: Study | null): st is Study => !!st) as Study[])
+          : dflt.studies,
         settings: raw.settings ? { ...DEFAULT_SETTINGS, ...raw.settings } : dflt.settings,
       };
     } catch { return dflt; }
@@ -78,7 +83,8 @@ export default function IndexDetail() {
 
   const [tab, setTab] = useState<Tab>("chart");
   const [tf, setTf] = useState(initial.tf);
-  const [chartType, setChartType] = useState<ChartType>(initial.chartType);
+  const chartType: ChartType = "candles";
+  const setChartType = (_v: ChartType) => { /* fixed to candles */ };
   const [fs, setFs] = useState(false);
   const [studies, setStudies] = useState<Study[]>(initial.studies);
   const [editingId, setEditingId] = useState<string | null>(null);
