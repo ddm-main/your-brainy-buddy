@@ -59,6 +59,74 @@ export interface BreakoutPatterns {
   doubleBottom?: boolean;
   inverseHeadShoulders?: boolean;
   fallingWedge?: boolean;
+  // Bearish structures (pattern-series.ts). Optional — omitted by legacy
+  // callers, in which case they contribute nothing.
+  doubleTop?: boolean;
+  headShoulders?: boolean;
+  risingWedge?: boolean;
+  descendingTriangle?: boolean;
+  // Extended structures + confirmations (pattern-structure.ts). All optional:
+  // legacy callers omit them and score byte-identically.
+  tripleBottom?: boolean;
+  tripleTop?: boolean;
+  roundedBottom?: boolean;
+  roundedTop?: boolean;
+  inverseCupAndHandle?: boolean;
+  bullPennant?: boolean;
+  bearFlag?: boolean;
+  bearPennant?: boolean;
+  ascendingChannel?: boolean;
+  descendingChannel?: boolean;
+  breakawayGap?: boolean;
+  exhaustionGap?: boolean;
+  volumeBreakout?: boolean;
+  volumeClimax?: boolean;
+  accumulation?: boolean;
+  distribution?: boolean;
+  wyckoffSpring?: boolean;
+  wyckoffUpthrust?: boolean;
+  goldenCross?: boolean;
+  deathCross?: boolean;
+  supportBounce?: boolean;
+  resistanceRejection?: boolean;
+  bosUp?: boolean;
+  bosDown?: boolean;
+  chochUp?: boolean;
+  chochDown?: boolean;
+}
+
+/** Map a `pattern_flags` JSON map (snake_case keys) onto scorer inputs. */
+export function patternsFromFlags(f: Record<string, boolean> | null | undefined, prefix = ""): BreakoutPatterns {
+  const g = (k: string) => f?.[`${prefix}${k}`] === true;
+  return {
+    bullishEngulfing: g("bullish_engulfing"), bearishEngulfing: g("bearish_engulfing"),
+    hammer: g("hammer"), shootingStar: g("shooting_star"), doji: g("doji"),
+    cupAndHandle: g("cup_and_handle"), cupAndHandleTriggered: g("cup_and_handle_triggered"),
+    flag: g("flag"), ascendingTriangle: g("ascending_triangle"), doubleBottom: g("double_bottom"),
+    inverseHeadShoulders: g("inverse_head_shoulders"), fallingWedge: g("falling_wedge"),
+    doubleTop: g("double_top"), headShoulders: g("head_shoulders"), risingWedge: g("rising_wedge"),
+    descendingTriangle: g("descending_triangle"),
+    tripleBottom: g("triple_bottom"), tripleTop: g("triple_top"),
+    roundedBottom: g("rounded_bottom"), roundedTop: g("rounded_top"),
+    inverseCupAndHandle: g("inverse_cup_and_handle"),
+    bullPennant: g("bull_pennant"), bearFlag: g("bear_flag"), bearPennant: g("bear_pennant"),
+    ascendingChannel: g("ascending_channel"), descendingChannel: g("descending_channel"),
+    breakawayGap: g("breakaway_gap"), exhaustionGap: g("exhaustion_gap"),
+    volumeBreakout: g("volume_breakout"), volumeClimax: g("volume_climax"),
+    accumulation: g("accumulation"), distribution: g("distribution"),
+    wyckoffSpring: g("wyckoff_spring"), wyckoffUpthrust: g("wyckoff_upthrust"),
+    goldenCross: g("golden_cross"), deathCross: g("death_cross"),
+    supportBounce: g("support_bounce"), resistanceRejection: g("resistance_rejection"),
+    bosUp: g("bos_up"), bosDown: g("bos_down"), chochUp: g("choch_up"), chochDown: g("choch_down"),
+  };
+}
+
+/** True when any bullish structure is set — used for multi-timeframe agreement. */
+export function hasBullStructure(p: BreakoutPatterns | null | undefined): boolean {
+  if (!p) return false;
+  return !!(p.cupAndHandle || p.cupAndHandleTriggered || p.ascendingTriangle || p.flag ||
+    p.doubleBottom || p.inverseHeadShoulders || p.fallingWedge ||
+    p.tripleBottom || p.roundedBottom || p.bullPennant || p.ascendingChannel);
 }
 
 // Context-aware pattern read used by breakoutScore. Returns two numbers so
@@ -86,9 +154,45 @@ export function breakoutPatternBonus(
   if (p.doubleBottom) { bonus += 2; labels.push("double bottom"); }
   if (p.inverseHeadShoulders) { bonus += 2; labels.push("inv. head & shoulders"); }
   if (p.fallingWedge) { bonus += 1; labels.push("falling wedge"); }
+  // Extended bullish structures.
+  if (p.tripleBottom) { bonus += 2; labels.push("triple bottom"); }
+  if (p.roundedBottom) { bonus += 1.5; labels.push("rounded bottom"); }
+  if (p.bullPennant) { bonus += higherLows ? 2 : 1; labels.push("bull pennant"); }
+  if (p.ascendingChannel) { bonus += 1; labels.push("ascending channel"); }
+  if (p.breakawayGap) { bonus += 1.5; labels.push("breakaway gap"); }
+  if (p.supportBounce) { bonus += atSupport ? 1.5 : 0.5; labels.push("support bounce"); }
+  if (p.goldenCross) { bonus += 1.5; labels.push("golden cross"); }
+  if (p.wyckoffSpring) { bonus += 1.5; labels.push("wyckoff spring"); }
   // Bearish patterns: full penalty at resistance, half elsewhere.
   if (p.bearishEngulfing) { penalty += nearR ? 3 : 1.5; labels.push("bearish engulfing"); }
   if (p.shootingStar) { penalty += nearR ? 3 : 1.5; labels.push("shooting star"); }
+  // Bearish structures: distribution tops outweigh single-bar reversals.
+  if (p.headShoulders) { penalty += 3; labels.push("head & shoulders"); }
+  if (p.doubleTop) { penalty += 2.5; labels.push("double top"); }
+  if (p.descendingTriangle) { penalty += 2; labels.push("descending triangle"); }
+  if (p.risingWedge) { penalty += 2; labels.push("rising wedge"); }
+  // Extended bearish structures / distribution reads.
+  if (p.tripleTop) { penalty += 2.5; labels.push("triple top"); }
+  if (p.roundedTop) { penalty += 1.5; labels.push("rounded top"); }
+  if (p.inverseCupAndHandle) { penalty += 2; labels.push("inverse cup & handle"); }
+  if (p.bearFlag) { penalty += 1.5; labels.push("bear flag"); }
+  if (p.bearPennant) { penalty += 1.5; labels.push("bear pennant"); }
+  if (p.descendingChannel) { penalty += 1; labels.push("descending channel"); }
+  if (p.distribution) { penalty += 1.5; labels.push("distribution"); }
+  if (p.wyckoffUpthrust) { penalty += 1.5; labels.push("wyckoff upthrust"); }
+  if (p.deathCross) { penalty += 1.5; labels.push("death cross"); }
+  if (p.exhaustionGap) { penalty += 1; labels.push("exhaustion gap"); }
+  if (p.resistanceRejection) { penalty += nearR ? 1.5 : 0.5; labels.push("resistance rejection"); }
+  // Confirmation multipliers — market structure and volume do not add weight of
+  // their own, they amplify or damp whatever structure is already there.
+  const confirmUp = (p.bosUp ? 1 : 0) + (p.chochUp ? 1 : 0) + (p.volumeBreakout ? 1 : 0) + (p.accumulation ? 1 : 0);
+  const confirmDown = (p.bosDown ? 1 : 0) + (p.chochDown ? 1 : 0) + (p.volumeClimax ? 1 : 0) + (p.distribution ? 1 : 0);
+  if (bonus > 0 && confirmUp > 0) {
+    bonus *= 1 + Math.min(0.3, 0.1 * confirmUp);
+    labels.push("structure confirmed");
+  }
+  if (bonus > 0 && confirmDown > 0) bonus *= 1 - Math.min(0.3, 0.1 * confirmDown);
+  if (penalty > 0 && confirmDown > 0) penalty *= 1 + Math.min(0.3, 0.1 * confirmDown);
   // Cap the pattern bucket so a stock with every bull pattern set doesn't
   // outweigh trigger + volume.
   bonus = clamp(bonus, 0, 8);
@@ -805,6 +909,10 @@ export interface V4Input {
   s: IndicatorSnapshot;
   ctx: MarketContext;
   patterns?: BreakoutPatterns;
+  // Same detector run on weekly candles. When a daily structure is confirmed
+  // by the weekly chart the pattern bucket gets a multi-timeframe kicker;
+  // when the weekly is topping, the bearish penalty is amplified.
+  patternsWeekly?: BreakoutPatterns | null;
   weekly?: WeeklySnapshot | null;
   adv?: AdvancedSignals;
   fundamentals?: V4Fundamentals | null;
@@ -1088,7 +1196,23 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   ]);
 
   // ---- 6. Chart patterns --------------------------------------------------
-  const pat = breakoutPatternBonus(patterns, s.nearResistance, atSupport, s.higherLows);
+  const patRaw = breakoutPatternBonus(patterns ?? undefined, s.nearResistance, atSupport, s.higherLows);
+  // ---- Multi-timeframe agreement -----------------------------------------
+  // A daily structure that the weekly chart also shows is a materially better
+  // setup than a daily-only read; a bullish daily under a weekly top is worse.
+  const wk = input.patternsWeekly ?? null;
+  const wkBull = hasBullStructure(wk);
+  const wkBear = !!(wk && (wk.headShoulders || wk.doubleTop || wk.risingWedge || wk.descendingTriangle ||
+    wk.tripleTop || wk.roundedTop || wk.inverseCupAndHandle || wk.bearFlag || wk.bearPennant ||
+    wk.descendingChannel || wk.distribution));
+  const dailyBull = hasBullStructure(patterns);
+  const mtfBonus = dailyBull && wkBull ? 2 : 0;
+  const mtfPenalty = dailyBull && wkBear ? 1.5 : (wkBear ? 1 : 0);
+  const pat = {
+    bonus: clamp(patRaw.bonus + mtfBonus, 0, 10),
+    penalty: clamp(patRaw.penalty + mtfPenalty, 0, 6),
+    labels: mtfBonus > 0 ? [...patRaw.labels, "weekly agreement"] : patRaw.labels,
+  };
   // Coverage tracks whether the detector had enough history to have an opinion.
   // Claiming full coverage for an all-false flag set scored "we looked, nothing
   // there" identically to "we never looked" — and an UNKNOWN bar count used to

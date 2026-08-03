@@ -7,10 +7,11 @@
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { istTradeDate, requireCronSecret } from "../_shared/market/cron.ts";
 import { computeSnapshot, computeWeeklySnapshot } from "../_shared/market/indicators.ts";
-import { vwap as vwapSeries, supertrend, mfi as mfiSeries, percentB, detectPatterns } from "../_shared/market/indicators-advanced.ts";
+import { vwap as vwapSeries, supertrend, mfi as mfiSeries, percentB } from "../_shared/market/indicators-advanced.ts";
+import { detectPatternsExtended, weeklyPatternFlags } from "../_shared/market/pattern-series.ts";
 import {
   breakoutScore, preBreakoutScore, evaluateLiquidity, swingScore, intradayScore,
-  breakoutScoreV4, type AdvancedSignals,
+  breakoutScoreV4, patternsFromFlags, type AdvancedSignals,
 } from "../_shared/market/scoring.ts";
 import { getServiceProvider } from "../_shared/market/provider.ts";
 
@@ -236,87 +237,17 @@ Deno.serve(async (req) => {
           const supertrendDir = (st.dir.at(-1) ?? null) as 1 | -1 | null;
           const mfi14 = mfiSeries(candles).at(-1) ?? null;
           const bbPercentB = percentB(snap.close, snap.bbUpper, snap.bbLower);
-          const patternFlags = detectPatterns(candles);
+          // Bullish + bearish structures on the daily bars, plus the weekly
+          // read namespaced as w_* so the aggregates pass can score
+          // multi-timeframe agreement without refetching candles.
+          const patternFlags = { ...detectPatternsExtended(candles), ...weeklyPatternFlags(candles) };
           const adv: AdvancedSignals = {
             vwapRel: vwapLast != null && vwapLast !== 0 ? (snap.close - vwapLast) / vwapLast : null,
             supertrendDir,
             mfi14,
             percentB: bbPercentB,
-            patterns: {
-              bullishEngulfing: patternFlags.bullish_engulfing,
-              bearishEngulfing: patternFlags.bearish_engulfing,
-              hammer: patternFlags.hammer,
-              shootingStar: patternFlags.shooting_star,
-              doji: patternFlags.doji,
-              cupAndHandle: patternFlags.cup_and_handle,
-              flag: patternFlags.flag,
-              ascendingTriangle: patternFlags.ascending_triangle,
-            },
-          };
-
-          // Liquidity gate — market_cap here is market_stocks' plain column
-          // (cheap, same-table), a cruder estimate than the screener view's
-          // multi-source fallback (consensus/shares-outstanding/fundamentals)
-          // but good enough for a pass/fail gate, not for display.
-          const avgTurnoverCr = snap.volAvg20 != null ? (snap.volAvg20 * snap.close) / 1e7 : null;
-          const liquidity = evaluateLiquidity({
-            close: snap.close,
-            marketCapCr: stock.market_cap != null ? Number(stock.market_cap) : null,
-            avgTurnoverCr,
-          });
-
-          // Preliminary scores with neutral market context (finalized by aggregates)
-          const ctx = { sectorStrength: null, regime: null, relStrengthNifty: null, deliveryPct: null };
-          // Feed the tightened detectPatterns output into breakoutScore so
-          // the pattern component, context-aware bonuses, and bearish-at-R
-          // penalty land in the persisted score components.
-          const bs = breakoutScore(snap, ctx, {
-            bullishEngulfing: patternFlags.bullish_engulfing,
-            bearishEngulfing: patternFlags.bearish_engulfing,
-            hammer: patternFlags.hammer,
-            shootingStar: patternFlags.shooting_star,
-            doji: patternFlags.doji,
-            cupAndHandle: patternFlags.cup_and_handle,
-            cupAndHandleTriggered: patternFlags.cup_and_handle_triggered,
-            flag: patternFlags.flag,
-            ascendingTriangle: patternFlags.ascending_triangle,
-            doubleBottom: patternFlags.double_bottom,
-            inverseHeadShoulders: patternFlags.inverse_head_shoulders,
-            fallingWedge: patternFlags.falling_wedge,
-          });
-          const ps = preBreakoutScore(snap, ctx);
-
-          // v3 — swing/intraday. This EOD pass has only the day's already-closed
-          // candle, so intraday_score here is "how strong was TODAY's now-closed
-          // session on an intraday-momentum basis" (real gap, full-day relVolume)
-          // — a persisted baseline. The genuinely live, time-of-day-normalized
-          // version is computed client-side during market hours (liveSnapshot.ts),
-          // never persisted.
-          const prevCandle = candles[candles.length - 2];
-          const gapPct = prevCandle?.close ? ((candles[candles.length - 1].open - prevCandle.close) / prevCandle.close) * 100 : null;
-          const sw = swingScore({ s: snap, ctx, weekly, adv, liquidity });
-          const is = intradayScore({ s: snap, ctx, adv, liquidity, relVolumeSoFar: null, gapPct });
-
-          // Preliminary v4 — neutral context, so the sector/RS/breadth bucket
-          // is simply *absent* and its weight is redistributed rather than
-          // scored as zero. The aggregates pass recomputes it with real context.
-          const v4 = breakoutScoreV4({
-            s: snap,
-            ctx,
-            patterns: {
-              bullishEngulfing: patternFlags.bullish_engulfing,
-              bearishEngulfing: patternFlags.bearish_engulfing,
-              hammer: patternFlags.hammer,
-              shootingStar: patternFlags.shooting_star,
-              doji: patternFlags.doji,
-              cupAndHandle: patternFlags.cup_and_handle,
-              cupAndHandleTriggered: patternFlags.cup_and_handle_triggered,
-              flag: patternFlags.flag,
-              ascendingTriangle: patternFlags.ascending_triangle,
-              doubleBottom: patternFlags.double_bottom,
-              inverseHeadShoulders: patternFlags.inverse_head_shoulders,
-              fallingWedge: patternFlags.falling_wedge,
-            },
+            patterns: patternsFromFlags(patternFlags as unknown as Record<string, boolean>),
+            patternsWeekly: patternsFromFlags(patternFlags as unknown as Record<string, boolean>, "w_"),
             weekly,
             adv,
             liquidity,

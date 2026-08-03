@@ -171,6 +171,31 @@ function patternsFromRow(r: any): BreakoutPatterns | undefined {
     doubleBottom: !!p.double_bottom,
     inverseHeadShoulders: !!p.inverse_head_shoulders,
     fallingWedge: !!p.falling_wedge,
+    doubleTop: !!p.double_top,
+    headShoulders: !!p.head_shoulders,
+    risingWedge: !!p.rising_wedge,
+    descendingTriangle: !!p.descending_triangle,
+  };
+}
+
+// Weekly (higher-timeframe) structures, stored by the EOD pass under w_*.
+function weeklyPatternsFromRow(r: any): BreakoutPatterns | undefined {
+  const p = r.pattern_flags;
+  if (!p || typeof p !== "object") return undefined;
+  const has = Object.keys(p).some((k) => k.startsWith("w_"));
+  if (!has) return undefined;
+  return {
+    cupAndHandle: !!p.w_cup_and_handle,
+    cupAndHandleTriggered: !!p.w_cup_and_handle_triggered,
+    flag: !!p.w_flag,
+    ascendingTriangle: !!p.w_ascending_triangle,
+    doubleBottom: !!p.w_double_bottom,
+    inverseHeadShoulders: !!p.w_inverse_head_shoulders,
+    fallingWedge: !!p.w_falling_wedge,
+    doubleTop: !!p.w_double_top,
+    headShoulders: !!p.w_head_shoulders,
+    risingWedge: !!p.w_rising_wedge,
+    descendingTriangle: !!p.w_descending_triangle,
   };
 }
 
@@ -591,6 +616,7 @@ Deno.serve(async (req) => {
           s: snap,
           ctx,
           patterns: pats,
+          patternsWeekly: weeklyPatternsFromRow(r),
           weekly,
           adv,
           liquidity,

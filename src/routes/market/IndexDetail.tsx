@@ -8,6 +8,8 @@ import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
 import { DataTable, deriveChangeAbs, fmtInt, fmtNum, Return1DCell } from "@/components/hud/DataTable";
 import type { ColumnDef } from "@tanstack/react-table";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
+import { PatternPanel } from "@/components/market/PatternPanel";
+import { PatternDetailDialog, type PatternSelection } from "@/components/market/PatternDetailDialog";
 import { ChartToolbar, DEFAULT_SETTINGS, isIntraday, type ChartSettings } from "@/components/market/ChartToolbar";
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
 import { NewAlertModal, StockAlertsPanel } from "@/components/market/StockAlerts";
@@ -98,6 +100,25 @@ export default function IndexDetail() {
   const removeStudy = useCallback((id: string) => setStudies((s) => s.filter((x) => x.id !== id)), []);
   const updateStudy = useCallback((u: Study) => setStudies((s) => s.map((x) => (x.id === u.id ? u : x))), []);
   const editing = studies.find((s) => s.id === editingId) ?? null;
+  const [patternFocus, setPatternFocus] = useState<{ startIndex: number; endIndex: number; token: number } | null>(null);
+  const [chartPatternSel, setChartPatternSel] = useState<PatternSelection | null>(null);
+  const patternsOnChart = useMemo(
+    () => studies.some((s) => (s.type === "candlePatterns" || s.type === "chartPatterns") && s.visible),
+    [studies],
+  );
+  const togglePatternsOnChart = useCallback((on: boolean) => {
+    setStudies((s) => {
+      const rest = s.filter((x) => x.type !== "candlePatterns" && x.type !== "chartPatterns");
+      if (!on) return rest;
+      const candle = makeStudy("candlePatterns");
+      const shapes = makeStudy("chartPatterns");
+      return [
+        ...rest,
+        { ...candle, params: { ...candle.params, showBull: 1, showBear: 1, showNeutral: 1, maxMarks: 400 } },
+        { ...shapes, params: { ...shapes.params, showBull: 1, showBear: 1, showNeutral: 1, maxShapes: 24 } },
+      ];
+    });
+  }, []);
 
   // Persist on every change so a refresh restores the exact chart state.
   useEffect(() => {
@@ -263,6 +284,8 @@ export default function IndexDetail() {
                     onEditStudy={setEditingId}
                     onRemoveStudy={removeStudy}
                     source={candlesData?.provider ?? null}
+                    focusRange={patternFocus}
+                    onPatternPick={setChartPatternSel}
                   />
                 )}
               </div>
@@ -287,6 +310,13 @@ export default function IndexDetail() {
           </HudPanel>
 
           <StockAlertsPanel symbol={symbol} exchange="NSE" />
+
+          <PatternPanel candles={candles as never} tf={tf} index="A3"
+            chartOn={patternsOnChart} onToggleChart={togglePatternsOnChart}
+            onFocus={(startIndex, endIndex) => setPatternFocus({ startIndex, endIndex, token: Date.now() })} />
+          <PatternDetailDialog selection={chartPatternSel} candles={candles as never} timeframe={tf}
+            onClose={() => setChartPatternSel(null)}
+            onFocus={(startIndex, endIndex) => { setPatternFocus({ startIndex, endIndex, token: Date.now() }); setChartPatternSel(null); }} />
 
           <HudPanel flow title="Indicators (Daily)" index="A4">
             {candlesLoading ? <div className="hud-label">loading…</div> : !stats ? <EmptyState>not enough history</EmptyState> : (

@@ -12,7 +12,9 @@ export type IndicatorType =
   | "bb" | "envelopes" | "vwap" | "keltner" | "donchian" | "supertrend" | "psar" | "ichimoku"
   | "rsi" | "macd" | "stoch" | "stochRsi" | "adx" | "atr" | "cci" | "williamsR" | "roc"
   | "obv" | "mfi" | "ao" | "mom" | "trix" | "uo" | "cmf" | "ad" | "aroon" | "vortex"
-  | "stddev" | "chaikinOsc" | "volume" | "volumeProfile";
+  | "stddev" | "chaikinOsc" | "volume" | "volumeProfile"
+  | "candlePatterns" | "chartPatterns";
+
 
 export interface Study {
   id: string;
@@ -79,7 +81,13 @@ export const INDICATOR_DEFS: IndicatorDef[] = [
   // Visible-range volume profile: each row splits into buying / selling volume.
   // side: 1 = right edge, 0 = left edge.
   { type: "volumeProfile", label: "Volume Profile", group: "overlay", params: [P("rows", "Rows", 4, 200), P("valueArea", "Value area %", 10, 100), P("widthPct", "Width %", 5, 60), P("side", "Right side (0/1)", 0, 1)], lines: [{ label: "Buying volume", defaultColor: UP }, { label: "Selling volume", defaultColor: DN }, { label: "POC", defaultColor: AM }], defaultParams: { rows: 24, valueArea: 70, widthPct: 25, side: 1 }, defaultWidth: 1 },
+  // Pattern recognition — works on ANY timeframe (all tolerances are
+  // ATR-scaled / bar-count based, never absolute rupees or calendar days).
+  // showBull/showBear are 0/1 toggles; minStrength hides the weakest reads.
+  { type: "candlePatterns", label: "Candlestick Patterns", group: "overlay", params: [P("showBull", "Bullish (0/1)", 0, 1), P("showBear", "Bearish (0/1)", 0, 1), P("showNeutral", "Neutral (0/1)", 0, 1), P("maxMarks", "Max markers", 20, 1000)], lines: [{ label: "Bullish", defaultColor: UP }, { label: "Bearish", defaultColor: DN }, { label: "Neutral", defaultColor: AM }], defaultParams: { showBull: 1, showBear: 1, showNeutral: 0, maxMarks: 250 }, defaultWidth: 1 },
+  { type: "chartPatterns", label: "Chart Patterns", group: "overlay", params: [P("showBull", "Bullish (0/1)", 0, 1), P("showBear", "Bearish (0/1)", 0, 1), P("showNeutral", "Neutral (0/1)", 0, 1), P("maxShapes", "Max shapes", 1, 60)], lines: [{ label: "Bullish structure", defaultColor: UP }, { label: "Bearish structure", defaultColor: DN }, { label: "Neutral structure", defaultColor: AM }], defaultParams: { showBull: 1, showBear: 1, showNeutral: 1, maxShapes: 12 }, defaultWidth: 1 },
   // ---- oscillators ----
+
   { type: "rsi", label: "RSI", group: "oscillator", params: [P("period", "Length")], lines: [{ label: "RSI", defaultColor: LI }], defaultParams: { period: 14 }, defaultWidth: 1 },
   { type: "macd", label: "MACD", group: "oscillator", params: [P("fast", "Fast"), P("slow", "Slow"), P("signal", "Signal")], lines: [{ label: "MACD", defaultColor: TE }, { label: "Signal", defaultColor: AM }, { label: "Hist", defaultColor: GR }], defaultParams: { fast: 12, slow: 26, signal: 9 }, defaultWidth: 1 },
   { type: "stochRsi", label: "Stochastic RSI", group: "oscillator", params: [P("rsiPeriod", "RSI"), P("stochPeriod", "Stoch"), P("k", "%K"), P("d", "%D")], lines: [{ label: "%K", defaultColor: LI }, { label: "%D", defaultColor: AM }], defaultParams: { rsiPeriod: 14, stochPeriod: 14, k: 3, d: 3 }, defaultWidth: 1 },

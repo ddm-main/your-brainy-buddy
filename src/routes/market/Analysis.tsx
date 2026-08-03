@@ -19,6 +19,8 @@ import { DEFAULT_STUDIES, makeStudy, normalizeStudy, type IndicatorType, type St
 import { fmtNum, fmtInt, fmtPct, Return1DCell, deriveChangeAbs } from "@/components/hud/DataTable";
 import type { CorporateActionRow } from "@/lib/market/hooks";
 import { marketOpen } from "@/lib/market/hooks";
+import { PatternPanel } from "@/components/market/PatternPanel";
+import { PatternDetailDialog, type PatternSelection } from "@/components/market/PatternDetailDialog";
 import { useBreadth, useCandles, useCorporateActions, useDepth, useFundamentals, useLatestPriceSession, useMarketNews, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores, useSyncNewsAndActions } from "@/lib/market/hooks";
 import { MarketDepthLadder, DepthToggleButton } from "@/components/market/MarketDepthLadder";
 import { useMarketOpen } from "@/lib/market/useMarketOpen";
@@ -173,6 +175,7 @@ export default function Analysis() {
   useEffect(() => { safeStorage.set(RANGE_STORE, range); }, [range]);
   // Bumping this clears user-dragged sub-pane heights inside the chart.
   const [paneResetToken, setPaneResetToken] = useState(0);
+  const [patternFocus, setPatternFocus] = useState<{ startIndex: number; endIndex: number; token: number } | null>(null);
   const [studies, setStudies] = useState<Study[]>(initial.studies);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [settings, setSettings] = useState<ChartSettings>(initial.settings);
@@ -189,6 +192,27 @@ export default function Analysis() {
     setStudies(DEFAULT_STUDIES);
   }, []);
   const editing = studies.find((s) => s.id === editingId) ?? null;
+  // Pattern studies drawn on the chart — the panel's "show on chart" toggle.
+  const patternsOnChart = useMemo(
+    () => studies.some((s) => (s.type === "candlePatterns" || s.type === "chartPatterns") && s.visible),
+    [studies],
+  );
+  const togglePatternsOnChart = useCallback((on: boolean) => {
+    setStudies((s) => {
+      const rest = s.filter((x) => x.type !== "candlePatterns" && x.type !== "chartPatterns");
+      if (!on) return rest;
+      // Params mirror the panel exactly (all tones, generous caps) so the
+      // count in the panel always equals what the chart draws.
+      const candle = makeStudy("candlePatterns");
+      const shapes = makeStudy("chartPatterns");
+      return [
+        ...rest,
+        { ...candle, params: { ...candle.params, showBull: 1, showBear: 1, showNeutral: 1, maxMarks: 400 } },
+        { ...shapes, params: { ...shapes.params, showBull: 1, showBear: 1, showNeutral: 1, maxShapes: 24 } },
+      ];
+    });
+  }, []);
+  const [chartPatternSel, setChartPatternSel] = useState<PatternSelection | null>(null);
   const visibleStudyCount = useMemo(() => studies.filter((s) => s.visible).length, [studies]);
 
   const [savedLayouts, setSavedLayouts] = useState<string[]>(() => {
@@ -681,6 +705,8 @@ export default function Analysis() {
                   source={chartSource}
                   visibleBars={isIntraday(tf) ? todayBarCount(candleData.candles) : rangeToBars(range, tf)}
                   paneResetToken={paneResetToken}
+                  focusRange={patternFocus}
+                  onPatternPick={setChartPatternSel}
                   viewportKey={`${exchange}:${sym}:${tf}`}
                 />
 
@@ -918,7 +944,33 @@ export default function Analysis() {
         </HudPanel>
 
 
-        <HudPanel flow title="Indicators (Daily)" index="A4" actions={vintageChip}>
+        <PatternPanel candles={candleData?.candles as never} tf={tf} index="A4"
+          chartOn={patternsOnChart} onToggleChart={togglePatternsOnChart}
+          actions={(() => {
+            // Patterns are scanned off the CHART series, so the freshness chip
+            // must report the chart timeframe and its last bar — not the EOD
+            // snapshot date the other panels use.
+            const last = candleData?.candles?.[candleData.candles.length - 1];
+            if (!last) return null;
+            const d = new Date(typeof last.time === "number" ? last.time * 1000 : String(last.time));
+            const when = Number.isNaN(d.getTime())
+              ? String(last.time)
+              : d.toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+            return <Chip tone="neutral">{tf} · {when}</Chip>;
+          })()}
+          onFocus={(startIndex: number, endIndex: number) => setPatternFocus({ startIndex, endIndex, token: Date.now() })} />
+
+        {candleData?.candles && (
+          <PatternDetailDialog
+            selection={chartPatternSel}
+            candles={candleData.candles as never}
+            timeframe={tf}
+            onClose={() => setChartPatternSel(null)}
+            onFocus={(startIndex, endIndex) => { setPatternFocus({ startIndex, endIndex, token: Date.now() }); setChartPatternSel(null); }}
+          />
+        )}
+
+        <HudPanel flow title="Indicators (Daily)" index="A5" actions={vintageChip}>
           <Row label="Setups">
             <span style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>
               {(liveView?.snapshot.bbSqueeze ?? score?.bb_squeeze) && <Chip tone="accent">BB squeeze</Chip>}
@@ -960,7 +1012,7 @@ export default function Analysis() {
           </StatGrid>
         </HudPanel>
 
-        <HudPanel flow title="Range & Strength" index="A5" actions={vintageChip}>
+        <HudPanel flow title="Range & Strength" index="A6" actions={vintageChip}>
           <StatGrid>
             <CompactStat label="Resistance" value={
               <>
@@ -1007,7 +1059,7 @@ export default function Analysis() {
             ratios are decimal fractions, ownership is percent. Do not add a
             second rescaling here; that is what produced "ROE 1502%". */}
         {fund && (
-          <HudPanel flow title="Fundamentals" index="A6"
+          <HudPanel flow title="Fundamentals" index="A7"
             actions={fundAsOf ? <span style={{ fontSize: 9, color: "var(--text-muted)", letterSpacing: "0.08em" }}>{fundAsOf}</span> : undefined}>
             {/* Rows the source has no value for are omitted rather than
                 printed as a column of em-dashes — for most NSE mid-caps the
@@ -1043,7 +1095,7 @@ export default function Analysis() {
         )}
 
         {/* News & Corporate Actions — synced on demand, not on a universe-wide cron */}
-        <HudPanel flow title="News & Corporate Actions" index="A7"
+        <HudPanel flow title="News & Corporate Actions" index="A8"
           actions={
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
               {newsCheckedAt && (

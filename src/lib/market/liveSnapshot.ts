@@ -6,8 +6,9 @@
 // applied to the single symbol currently open in Analysis — not the whole
 // universe.
 import { computeSnapshot, computeWeeklySnapshot, type Candle, type IndicatorSnapshot } from "../../../supabase/functions/_shared/market/indicators";
-import { detectPatterns, mfi, percentB, supertrend, type PatternFlags } from "../../../supabase/functions/_shared/market/indicators-advanced";
-import { breakoutScoreV4, evaluateLiquidity, type AdvancedSignals, type BreakoutPatterns, type MarketContext } from "../../../supabase/functions/_shared/market/scoring";
+import { mfi, percentB, supertrend, type PatternFlags } from "../../../supabase/functions/_shared/market/indicators-advanced";
+import { detectPatternsExtended, detectPatternsAt, toWeeklyCandles } from "../../../supabase/functions/_shared/market/pattern-series";
+import { breakoutScoreV4, evaluateLiquidity, patternsFromFlags, type AdvancedSignals, type BreakoutPatterns, type MarketContext } from "../../../supabase/functions/_shared/market/scoring";
 import { vwap } from "../../../supabase/functions/_shared/market/indicators-advanced";
 import { marketOpen } from "./hooks";
 import type { BreadthDaily, CandleDto, Quote, StockScore } from "./types";
@@ -105,21 +106,9 @@ export function computeLiveScore(
     relStrengthNifty: eodScore?.rel_strength_nifty ?? null,
     deliveryPct: eodScore?.delivery_pct ?? null,
   };
-  const patterns = detectPatterns(candles);
-  const bp: BreakoutPatterns = {
-    bullishEngulfing: patterns.bullish_engulfing,
-    bearishEngulfing: patterns.bearish_engulfing,
-    hammer: patterns.hammer,
-    shootingStar: patterns.shooting_star,
-    doji: patterns.doji,
-    cupAndHandle: patterns.cup_and_handle,
-    cupAndHandleTriggered: patterns.cup_and_handle_triggered,
-    flag: patterns.flag,
-    ascendingTriangle: patterns.ascending_triangle,
-    doubleBottom: patterns.double_bottom,
-    inverseHeadShoulders: patterns.inverse_head_shoulders,
-    fallingWedge: patterns.falling_wedge,
-  };
+  const patterns = detectPatternsExtended(candles);
+  const weeklyPatterns = detectPatternsAt(toWeeklyCandles(candles), toWeeklyCandles(candles).length - 1);
+  const bp: BreakoutPatterns = patternsFromFlags(patterns as unknown as Record<string, boolean>);
   const st = supertrend(candles);
   const mfiSeries = mfi(candles, 14);
   const vwapSeries = vwap(candles);
@@ -153,6 +142,7 @@ export function computeLiveScore(
     s: snapshot,
     ctx,
     patterns: bp,
+    patternsWeekly: patternsFromFlags(weeklyPatterns as unknown as Record<string, boolean>),
     weekly: computeWeeklySnapshot(candles),
     adv,
     barsAvailable: candles.length,

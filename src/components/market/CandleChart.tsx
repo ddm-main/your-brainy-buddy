@@ -33,6 +33,9 @@ import {
 } from "@/lib/market/chartIndicators";
 import { defByType, studyLabel, type Study } from "@/lib/market/indicatorRegistry";
 import { VolumeProfilePrimitive } from "@/components/market/volumeProfilePrimitive";
+import {
+  detectPatternSeries, type CandleMark, type ChartShape,
+} from "../../../supabase/functions/_shared/market/pattern-series";
 import { ChartLegend, type LegendRow } from "@/components/market/ChartLegend";
 import { useMarketOpen } from "@/lib/market/useMarketOpen";
 import { safeStorage } from "@/lib/safeStorage";
@@ -66,6 +69,21 @@ const TOKENS_FALLBACK = { up: "#6bffb0", down: "#ff5f6d" };
 const UP = TOKENS_FALLBACK.up;
 const DOWN = TOKENS_FALLBACK.down;
 
+/** Fade a chart colour (hex or rgb/rgba) so secondary geometry reads as secondary. */
+function withAlpha(color: string, alpha: number): string {
+  const hex = /^#([0-9a-f]{6})$/i.exec(color.trim());
+  if (hex) {
+    const n = parseInt(hex[1], 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+  }
+  const rgb = /^rgba?\(([^)]+)\)$/i.exec(color.trim());
+  if (rgb) {
+    const [r, g, b] = rgb[1].split(",").map((v) => v.trim());
+    return `rgba(${r},${g},${b},${alpha})`;
+  }
+  return color;
+}
+
 // ---- per-study compute (pure) ----
 // IST offset in seconds — used to find the start of the current trading day
 // when splitting a day-cumulative volume across intraday bars.
@@ -78,12 +96,23 @@ type Computed =
   | { g: "psar"; sar: Num[]; dir: Array<1 | -1 | null> }
   | { g: "ichimoku"; tenkan: Num[]; kijun: Num[]; spanA: Num[]; spanB: Num[]; base: number }
   | { g: "volume" }
+  | { g: "patterns"; marks: CandleMark[] }
+  | { g: "shapes"; shapes: ChartShape[] }
   | { g: "obv"; line: Num[]; ma: Num[] }
   | { g: "vprofile"; rows: number; valueAreaPct: number; widthPct: number; rightSide: boolean }
   | { g: "single"; line: Num[]; guides?: number[]; hist?: boolean }
   | { g: "macd"; macd: Num[]; signal: Num[]; hist: Num[] }
   | { g: "dual"; a: Num[]; b: Num[]; guides?: number[] }
   | { g: "adx"; adx: Num[]; plusDi: Num[]; minusDi: Num[]; guides?: number[] };
+
+// The pattern engine is shared with the edge functions and expects numeric
+// epoch times; only bar geometry is actually read, so the index is enough of
+// a monotonic clock here.
+function toPatternCandles(candles: CandleDto[]) {
+  return candles.map((c, i) => ({
+    time: i, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume ?? 0,
+  }));
+}
 
 function computeStudy(candles: CandleDto[], s: Study): Computed {
   // Clamp any user param to a safe integer (period-like) so a bad -5 doesn't
@@ -95,7 +124,7 @@ function computeStudy(candles: CandleDto[], s: Study): Computed {
     if (!Number.isFinite(n)) { p[k] = 1; continue; }
     if (k === "mult" || k === "step" || k === "max" || k === "pct") p[k] = Math.max(0.001, n);
     // Flags/percentages may legitimately be 0 — don't floor them up to 1.
-    else if (k === "resetDaily" || k === "side") p[k] = n >= 0.5 ? 1 : 0;
+    else if (k === "resetDaily" || k === "side" || k === "showBull" || k === "showBear" || k === "showNeutral") p[k] = n >= 0.5 ? 1 : 0;
     else p[k] = Math.max(1, Math.floor(n));
   }
   const src = () => sourceValues(candles, s.source ?? "close");
@@ -116,6 +145,25 @@ function computeStudy(candles: CandleDto[], s: Study): Computed {
     case "psar": { const r = psar(candles, p.step, p.max); return { g: "psar", sar: r.sar, dir: r.dir }; }
     case "ichimoku": return { g: "ichimoku", ...ichimoku(candles, p.conv, p.base, p.spanB), base: p.base };
     case "volume": return { g: "volume" };
+    // Pattern studies run the same detection engine the backend scores with,
+    // just evaluated at every bar instead of only the last one.
+    case "candlePatterns": {
+      const { marks } = detectPatternSeries(toPatternCandles(candles), { minBars: candles.length + 1 });
+      const keep = marks.filter((m) =>
+        (m.tone === "bullish" && p.showBull === 1) ||
+        (m.tone === "bearish" && p.showBear === 1) ||
+        (m.tone === "neutral" && p.showNeutral === 1));
+      const cap = Math.max(20, p.maxMarks ?? 250);
+      return { g: "patterns", marks: keep.length > cap ? keep.slice(-cap) : keep };
+    }
+    case "chartPatterns": {
+      const { shapes } = detectPatternSeries(toPatternCandles(candles), { maxShapes: Math.max(1, p.maxShapes ?? 12) });
+      const keep = shapes.filter((sh) =>
+        (sh.tone === "bullish" && p.showBull === 1) ||
+        (sh.tone === "bearish" && p.showBear === 1) ||
+        (sh.tone === "neutral" && p.showNeutral === 1));
+      return { g: "shapes", shapes: keep };
+    }
     case "rsi": return { g: "single", line: rsi(candles, p.period), guides: [70, 30] };
     case "macd": { const m = macd(candles, p.fast, p.slow, p.signal); return { g: "macd", macd: m.macd, signal: m.signal, hist: m.hist }; }
     case "stoch": { const st = stochastic(candles, p.k, p.d, p.smooth); return { g: "dual", a: st.k, b: st.d, guides: [80, 20] }; }
@@ -195,6 +243,8 @@ export function CandleChart({
   visibleBars = null,
   viewportKey,
   paneResetToken = 0,
+  focusRange = null,
+  onPatternPick,
 }: {
   candles: CandleDto[];
   priceLines?: Array<{ price: number; label: string; color: string }>;
@@ -225,6 +275,9 @@ export function CandleChart({
   viewportKey?: string;
   /** Bump to clear user-dragged sub-pane heights and re-apply the auto split. */
   paneResetToken?: number;
+  focusRange?: { startIndex: number; endIndex: number; token: number } | null;
+  /** Fired when a pattern marker on the chart is clicked. */
+  onPatternPick?: (sel: { kind: "candle"; result: CandleMark } | { kind: "shape"; result: ChartShape }) => void;
 }) {
 
 
@@ -259,10 +312,24 @@ export function CandleChart({
   const paneSigRef = useRef<string>("");
   const paneStoreKey = `mk.chart.panes.${viewportKey ?? "default"}`;
   const paneStoreKeyRef = useRef(paneStoreKey);
+  // Everything the pattern studies drew this render, so a chart click can be
+  // resolved back to the exact detection that produced the marker.
+  const patternHitsRef = useRef<{ marks: CandleMark[]; shapes: ChartShape[] }>({ marks: [], shapes: [] });
+  const onPatternPickRef = useRef(onPatternPick);
+  onPatternPickRef.current = onPatternPick;
   const s = settings ?? { grid: true, logScale: false, priceLine: true, sessionBreaks: false, magnet: false };
   // Deconstructed so effect dep can be primitive and stable across parent
   // renders when the settings object identity changes but values don't.
   const { grid: sGrid, logScale: sLog, priceLine: sPriceLine, sessionBreaks: sSessionBreaks, magnet: sMagnet } = s;
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !focusRange) return;
+    const span = Math.max(3, focusRange.endIndex - focusRange.startIndex + 1);
+    const pad = Math.max(2, Math.ceil(span * 0.15));
+    chart.timeScale().setVisibleLogicalRange({ from: focusRange.startIndex - pad, to: focusRange.endIndex + pad });
+    rangeRef.current = { from: focusRange.startIndex - pad, to: focusRange.endIndex + pad };
+  }, [focusRange]);
 
 
 
@@ -573,6 +640,7 @@ export function CandleChart({
     // Collected so multiple Supertrend studies don't leak plugins on cleanup.
     const markersPlugins: ISeriesMarkersPluginApi<any>[] = [];
     const primitives: VolumeProfilePrimitive[] = [];
+    patternHitsRef.current = { marks: [], shapes: [] };
 
     for (const { study, data: c } of computed) {
       if (!study.visible) continue;
@@ -718,6 +786,77 @@ export function CandleChart({
         };
         projectSpan(c.spanA, col[2]);
         projectSpan(c.spanB, col[3]);
+      } else if (c.g === "patterns") {
+        // One marker per detected candlestick pattern, tinted by tone and
+        // labelled with the readable pattern name. When markers get dense the
+        // label falls back to the short code so the axis stays legible.
+        const bull = col[0] ?? UP, bear = col[1] ?? DOWN, neut = col[2] ?? "#ffb84d";
+        const drawn = c.marks.filter((m) => m.index >= 0 && m.index < data.length);
+        patternHitsRef.current.marks = drawn;
+        const dense = drawn.length > 45;
+        const markers = drawn
+          .map((m) => ({
+            time: toTime(data[m.index].time),
+            position: m.tone === "bearish" ? "aboveBar" : "belowBar",
+            color: m.tone === "bullish" ? bull : m.tone === "bearish" ? bear : neut,
+            shape: m.tone === "bearish" ? "arrowDown" : m.tone === "bullish" ? "arrowUp" : "circle",
+            text: dense ? m.short : m.label,
+          }));
+        if (markers.length) {
+          try { markersPlugins.push(createSeriesMarkers(priceSeries, markers as any)); } catch { /* noop */ }
+        }
+      } else if (c.g === "shapes") {
+        // Each structure draws its real geometry: the upper and lower bounds
+        // it was measured from, the breakout / neckline level, a trigger
+        // arrow where it fired, and a dashed invalidation bound. Shapes with
+        // no level still draw (previously they were silently skipped).
+        const bull = col[0] ?? UP, bear = col[1] ?? DOWN, neutral = col[2] ?? "#ffb84d";
+        const shapeMarkers: Array<Record<string, unknown>> = [];
+        patternHitsRef.current.shapes = c.shapes;
+        for (const sh of c.shapes) {
+          const a = Math.max(0, Math.min(sh.startIndex, data.length - 1));
+          const b = Math.max(0, Math.min(sh.endIndex, data.length - 1));
+          if (b <= a) continue;
+          const color = sh.tone === "bearish" ? bear : sh.tone === "neutral" ? neutral : bull;
+          const seg = (value: number, style: LineStyle, width: number, dim = false) => {
+            const line = chart.addSeries(LineSeries, {
+              color: dim ? withAlpha(color, 0.5) : color,
+              lineWidth: lw(width), lineStyle: style,
+              priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+            });
+            line.setData([
+              { time: toTime(data[a].time), value },
+              { time: toTime(data[b].time), value },
+            ] as any);
+          };
+          // Bounds box — the range every touch/tolerance test was measured on.
+          if (sh.upper != null) seg(sh.upper, LineStyle.Dotted, 1, sh.level !== sh.upper);
+          if (sh.lower != null) seg(sh.lower, LineStyle.Dotted, 1, sh.level !== sh.lower);
+          // Breakout / neckline level — solid once triggered.
+          if (sh.level != null) seg(sh.level, sh.triggered ? LineStyle.Solid : LineStyle.Dashed, Math.max(1, w));
+          // Invalidation: the opposite bound of the level.
+          const invalid = sh.tone === "bearish" ? sh.upper : sh.lower;
+          if (invalid != null && invalid !== sh.level) seg(invalid, LineStyle.LargeDashed, 1, true);
+          shapeMarkers.push({
+            time: toTime(data[b].time),
+            position: sh.tone === "bearish" ? "aboveBar" : "belowBar",
+            color,
+            shape: sh.tone === "bearish" ? "arrowDown" : "arrowUp",
+            text: `${sh.label} · ${sh.status} ${sh.confidence}%`,
+          });
+          if (sh.triggerIndex != null && sh.triggerIndex >= 0 && sh.triggerIndex < data.length) {
+            shapeMarkers.push({
+              time: toTime(data[sh.triggerIndex].time),
+              position: sh.tone === "bearish" ? "aboveBar" : "belowBar",
+              color,
+              shape: sh.tone === "bearish" ? "arrowDown" : "arrowUp",
+              text: "trigger",
+            });
+          }
+        }
+        if (shapeMarkers.length) {
+          try { markersPlugins.push(createSeriesMarkers(priceSeries, shapeMarkers as any)); } catch { /* noop */ }
+        }
       }
 
       // volume handled below in its own pane so it gets a proper K/M axis
@@ -849,6 +988,20 @@ export function CandleChart({
       const key = timeKey(param.time);
       setLegend(byTime.get(key) ?? null);
       setHoverIdx(idxByTime.get(key) ?? null);
+    });
+
+    // ---- click a pattern marker → open its explanation ----
+    chart.subscribeClick((param) => {
+      const pick = onPatternPickRef.current;
+      if (!pick || !param.time) return;
+      const idx = idxByTime.get(timeKey(param.time));
+      if (idx == null) return;
+      const { marks, shapes } = patternHitsRef.current;
+      const mark = marks.find((m) => m.index === idx);
+      if (mark) { pick({ kind: "candle", result: mark }); return; }
+      const shape = shapes.find((s) => s.endIndex === idx || s.triggerIndex === idx)
+        ?? shapes.find((s) => idx >= s.startIndex && idx <= s.endIndex);
+      if (shape) pick({ kind: "shape", result: shape });
     });
 
     // preserve view across param edits; fit only on a new candle set
