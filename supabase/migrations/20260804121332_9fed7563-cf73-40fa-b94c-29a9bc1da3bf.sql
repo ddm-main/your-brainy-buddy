@@ -1,0 +1,1 @@
+SELECT public.market_cron_call_body('market-live-sweep', jsonb_build_object('force', true));

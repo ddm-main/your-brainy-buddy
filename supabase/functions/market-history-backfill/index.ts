@@ -12,6 +12,7 @@ import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from
 import { requireCronSecret } from "../_shared/market/cron.ts";
 import { getServiceProvider } from "../_shared/market/provider.ts";
 import { isDailyGrain, grainReason } from "../_shared/market/candleGuard.ts";
+import { getSettlement, isPersistableDate } from "../_shared/market/settlement.ts";
 import { lowBandwidthMode } from "../_shared/market/cron.ts";
 
 
@@ -99,6 +100,8 @@ Deno.serve(async (req) => {
 
 
     const { provider } = await getServiceProvider(svc);
+    // Today's bar is only persistable once the NSE bhavcopy has settled it.
+    const settlement = await getSettlement(svc);
 
     // Retention guard — the nightly janitor deletes history past these windows,
     // so writing deeper than them just burns disk and gets pruned tonight.
@@ -160,7 +163,7 @@ Deno.serve(async (req) => {
             low: c.low,
             close: c.close,
             volume: c.volume,
-          })).filter((r) => r.trade_date >= minDate);
+          })).filter((r) => r.trade_date >= minDate && isPersistableDate(r.trade_date, settlement));
           if (rows.length === 0) throw new Error("no candles inside retention window");
 
           for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {

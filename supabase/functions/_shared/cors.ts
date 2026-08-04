@@ -1,4 +1,14 @@
 // Reflect-if-allowed CORS. Replaces the SDK's blanket `*`.
+//
+// This module is imported by nearly every edge function, which makes it the one
+// place where the server-side egress meter can be installed for all of them.
+// Without it, only the market functions (via _shared/market/common.ts) were
+// metered, so cron/finance/gmail PostgREST traffic never showed up in the quota
+// panel — which is how a 5.98 GB cycle looked like 244 MB.
+import { installServerEgressMeter } from "./market/serverEgress.ts";
+
+installServerEgressMeter();
+
 const ALLOWED_ORIGINS = new Set<string>([
   "http://localhost:8080",
   "http://localhost:5173",

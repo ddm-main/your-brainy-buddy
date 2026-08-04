@@ -6,6 +6,7 @@
 // Cron hits this every 5 min in the evening window; it no-ops once drained.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { istTradeDate, requireCronSecret } from "../_shared/market/cron.ts";
+import { getSettlement, settledBars } from "../_shared/market/settlement.ts";
 import { computeSnapshot, computeWeeklySnapshot } from "../_shared/market/indicators.ts";
 import { vwap as vwapSeries, supertrend, mfi as mfiSeries, percentB } from "../_shared/market/indicators-advanced.ts";
 import { detectPatternsExtended, weeklyPatternFlags } from "../_shared/market/pattern-series.ts";
@@ -37,6 +38,9 @@ Deno.serve(async (req) => {
 
     const today = istTradeDate();
     const cutoff = `${today}T00:00:00Z`; // one pass per IST day
+    // Settlement state for this run: today's bars are only persistable once the
+    // NSE bhavcopy for today has landed with broad coverage.
+    const settlement = await getSettlement(svc);
 
     // Cheap recovery path: if daily prices have already landed (NSE bhavcopy,
     // backfill, or another provider run) but scores are behind, rebuild scores
@@ -193,7 +197,11 @@ Deno.serve(async (req) => {
         if (!stock) break;
         let success = false;
         try {
-          const candles = await provider.getOHLCV(stock.symbol, stock.exchange ?? "NSE", "2y", "1d");
+          const rawCandles = await provider.getOHLCV(stock.symbol, stock.exchange ?? "NSE", "2y", "1d");
+          // Never let today's forming (or not-yet-reconciled) bar into the
+          // daily/score tables — that is what produced half-universe partial
+          // sessions carrying mid-morning prices.
+          const candles = settledBars(rawCandles, settlement);
           if (candles.length < 30) throw new Error("insufficient candles");
 
           const snap = computeSnapshot(candles);
@@ -248,11 +256,29 @@ Deno.serve(async (req) => {
             percentB: bbPercentB,
             patterns: patternsFromFlags(patternFlags as unknown as Record<string, boolean>),
             patternsWeekly: patternsFromFlags(patternFlags as unknown as Record<string, boolean>, "w_"),
-            weekly,
-            adv,
-            liquidity,
+          };
+
+          // Neutral market context: sector strength / regime / relative strength
+          // are owned by market-pipeline-aggregates, which rewrites these rows
+          // with real context and flips context_complete true.
+          const ctx = { sectorStrength: null, regime: null, relStrengthNifty: null, deliveryPct: null };
+
+          const avgTurnoverCr = snap.volAvg20 != null ? (snap.volAvg20 * snap.close) / 1e7 : null;
+          const liquidity = evaluateLiquidity({
+            close: snap.close,
+            marketCapCr: stock.market_cap != null ? Number(stock.market_cap) : null,
             avgTurnoverCr,
           });
+
+          const patterns = adv.patterns;
+          const bs = breakoutScore(snap, ctx, patterns);
+          const ps = preBreakoutScore(snap, ctx);
+          const sw = swingScore({ s: snap, ctx, weekly, adv, liquidity });
+          const is = intradayScore({ s: snap, ctx, adv, liquidity });
+          const v4 = breakoutScoreV4({
+            s: snap, ctx, patterns, weekly, adv, liquidity, avgTurnoverCr,
+          });
+
 
           const prior = existingScore.get(`${stock.symbol}|${stock.exchange}`);
           const keepContext = !!prior?.context_complete && prior.trade_date === nseTradeDate;

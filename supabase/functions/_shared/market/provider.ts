@@ -235,7 +235,7 @@ const ALL_SETTINGS_COLS = Array.from(new Set(
   (KOTAK_SETTINGS_COLS + "," + SHOONYA_SETTINGS_COLS + ",active_provider").split(","),
 )).join(",");
 const settingsCache = new Map<string, { rows: SettingsRow[]; expiresAt: number }>();
-const SETTINGS_TTL_MS = 10_000;
+const SETTINGS_TTL_MS = 60_000;
 
 async function getSettingsRows(svc: SupabaseClient, userId: string): Promise<SettingsRow[]> {
   const cached = settingsCache.get(userId);
@@ -264,8 +264,16 @@ async function getFreshSettingsRow(
   return data as KotakSettings;
 }
 
-let tokenMapCache: { map: Map<string, TokenEntry>; expiresAt: number } | null = null;
-const TOKEN_MAP_TTL_MS = 60_000;
+// Per-symbol token cache. The old implementation paged the WHOLE tokened
+// universe (~2.7k rows, ~280 KB) with a 60 s TTL; because edge isolates recycle
+// constantly that read fired on nearly every quote/candle call — 209 MB of
+// PostgREST egress in a single day, i.e. the entire monthly free-plan cap on its
+// own. We now resolve only the symbols a request actually asks for and cache
+// each entry for 30 minutes (market_stocks only changes on the scrip sync).
+const tokenCache = new Map<string, { entry: TokenEntry | null; expiresAt: number }>();
+const TOKEN_TTL_MS = 30 * 60_000;
+const TOKEN_MISS_TTL_MS = 5 * 60_000;
+
 
 // "EXCHANGE:SYMBOL" -> instrument token, cached whole (market_stocks is a
 // shared reference table that only changes via the weekly scrip sync).
@@ -300,64 +308,92 @@ export function isLiveOnlyNseIndex(symbol: string, exchange = "NSE"): boolean {
 
 
 
-async function getTokenMap(svc: SupabaseClient): Promise<Map<string, TokenEntry>> {
-  if (tokenMapCache && tokenMapCache.expiresAt > Date.now()) return tokenMapCache.map;
-  // PostgREST caps an unbounded select at 1000 rows. The universe is ~2.7k
-  // tokened instruments, so the un-paged read silently dropped ~two thirds of
-  // the book — every dropped symbol resolved "no Kotak token" and was served
-  // by Yahoo instead. Page explicitly until the table is drained.
-  const PAGE = 1000;
-  const data: any[] = [];
-  let partial = false;
-  for (let from = 0; from < 20_000; from += PAGE) {
-    const { data: page, error } = await withPgRetry<any>(() => Promise.resolve(svc
+function entryFromRow(r: any): TokenEntry {
+  const isIdx = String(r.instrument_type ?? "").toUpperCase() === "INDEX"
+    || String(r.symbol ?? "").startsWith("^");
+  const defaultSeg = isIdx
+    ? (r.exchange === "BSE" ? "bse_indices" : "nse_indices")
+    : (r.exchange === "BSE" ? "bse_cm" : "nse_cm");
+  return { token: String(r.token), segment: r.kotak_segment || defaultSeg };
+}
+
+/** Every scrip-master name an index may be listed under, including the canonical one. */
+function aliasMembers(exchange: string, symbol: string): string[] {
+  const canonical = keyFor(exchange, symbol);
+  for (const [key, aliases] of Object.entries(INDEX_ALIASES)) {
+    const [ex, sym] = key.split(":") as [string, string];
+    const members = [sym, ...aliases];
+    if (key === canonical || members.some((m) => keyFor(ex, m) === canonical)) {
+      return members;
+    }
+  }
+  return [symbol];
+}
+
+/**
+ * Resolve instrument tokens for the requested symbols only.
+ * Returns a map keyed the same way the old whole-book map was, so callers are
+ * unchanged — but a quote batch of 50 symbols now costs a few KB instead of the
+ * full ~280 KB book, and repeat calls inside 30 minutes cost nothing.
+ */
+async function getTokenMap(
+  svc: SupabaseClient,
+  reqs: Array<{ exchange: string; symbol: string }>,
+): Promise<Map<string, TokenEntry>> {
+  const map = new Map<string, TokenEntry>();
+  const now = Date.now();
+
+  // Expand each request to its alias group and drop what the cache already knows.
+  const wanted = new Map<string, { exchange: string; members: string[] }>();
+  for (const r of reqs) {
+    const exchange = String(r.exchange || "NSE").toUpperCase();
+    const key = keyFor(exchange, r.symbol);
+    if (map.has(key)) continue;
+    const cached = tokenCache.get(key);
+    if (cached && cached.expiresAt > now) {
+      if (cached.entry) map.set(key, cached.entry);
+      continue;
+    }
+    wanted.set(key, { exchange, members: aliasMembers(exchange, String(r.symbol)) });
+  }
+  if (wanted.size === 0) return map;
+
+  // One read per chunk of names, columns projected — no paging of the universe.
+  const names = Array.from(new Set(Array.from(wanted.values()).flatMap((w) => w.members)));
+  const rows: any[] = [];
+  const CHUNK = 200;
+  let failed = false;
+  for (let i = 0; i < names.length; i += CHUNK) {
+    const { data, error } = await withPgRetry<any>(() => Promise.resolve(svc
       .from("market_stocks").select("symbol,exchange,token,kotak_segment,instrument_type")
       .in("exchange", ["NSE", "BSE"]).not("token", "is", null)
-      .order("symbol", { ascending: true })
-      .range(from, from + PAGE - 1) as any));
-    if (error) { console.error("[market] token map page failed:", error.message); partial = true; break; }
-    data.push(...(page ?? []));
-    if (!page || page.length < PAGE) break;
+      .in("symbol", names.slice(i, i + CHUNK)) as any));
+    if (error) { console.error("[market] token lookup failed:", error.message); failed = true; break; }
+    rows.push(...(data ?? []));
   }
 
-  const map = new Map<string, TokenEntry>();
+  const byKey = new Map<string, TokenEntry>();
+  for (const r of rows) byKey.set(keyFor(String(r.exchange), String(r.symbol)), entryFromRow(r));
 
-  for (const r of data ?? []) {
-    const isIdx = String(r.instrument_type ?? "").toUpperCase() === "INDEX"
-      || String(r.symbol ?? "").startsWith("^");
-    const defaultSeg = isIdx
-      ? (r.exchange === "BSE" ? "bse_indices" : "nse_indices")
-      : (r.exchange === "BSE" ? "bse_cm" : "nse_cm");
-    map.set(keyFor(String(r.exchange), String(r.symbol)), { token: String(r.token), segment: r.kotak_segment || defaultSeg });
-  }
-  // Index alias resolution is GROUP-wise, not canonical-first: the scrip
-  // master may carry the instrument under any member of the group ("NIFTY 50",
-  // "NIFTY", "^NSEI"). Resolving only from the canonical key meant a master
-  // that lists "NIFTY 50" left ^NSEI tokenless, so every index quote silently
-  // fell through to Yahoo. Take whichever member exists and map it to all.
-  for (const [canonical, aliases] of Object.entries(INDEX_ALIASES)) {
-    const [exchange, symbol] = canonical.split(":") as [string, string];
-    const members = [symbol, ...aliases];
-    let entry = members.map((m) => map.get(keyFor(exchange, m))).find(Boolean);
-    // Last resort: NSE's well-known index tokens. Kotak's nse_indices segment
-    // uses the same token numbers, so a master missing the index row does not
-    // have to cost us the feed.
+  for (const [key, w] of wanted) {
+    // Group-wise index resolution: the master may carry the instrument under any
+    // alias ("NIFTY 50", "NIFTY", "^NSEI"), so take whichever member exists.
+    let entry = w.members.map((m) => byKey.get(keyFor(w.exchange, m))).find(Boolean) ?? null;
     if (!entry) {
-      const known = KNOWN_INDEX_TOKENS[canonical];
-      if (known) entry = { token: known, segment: exchange === "BSE" ? "bse_indices" : "nse_indices" };
+      const known = KNOWN_INDEX_TOKENS[keyFor(w.exchange, w.members[0])];
+      if (known) entry = { token: known, segment: w.exchange === "BSE" ? "bse_indices" : "nse_indices" };
     }
-    if (!entry) continue;
-    for (const m of members) {
-      if (!map.has(keyFor(exchange, m))) map.set(keyFor(exchange, m), entry);
+    if (entry) map.set(key, entry);
+    // A failed read must not be cached as a miss — one blip would demote the
+    // symbol to Yahoo for the whole TTL.
+    if (!failed || entry) {
+      tokenCache.set(key, { entry, expiresAt: Date.now() + (entry ? TOKEN_TTL_MS : TOKEN_MISS_TTL_MS) });
     }
   }
-
-  // A partial read (transient DB error mid-paging) must not be cached for the
-  // full TTL — otherwise one blip demotes most symbols to Yahoo for an hour.
-  tokenMapCache = { map, expiresAt: Date.now() + (partial ? 30_000 : TOKEN_MAP_TTL_MS) };
 
   return map;
 }
+
 
 // Aggregate N consecutive base bars into one — used server-side when a UI TF
 // (2h/4h/3m) isn't a Kotak-native interval. Preserves OHLC semantics and
@@ -708,7 +744,7 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
         } catch (e) { console.error("[market] index chain failed:", e); }
       }
 
-      const tokenBySymbol = await getTokenMap(svc);
+      const tokenBySymbol = await getTokenMap(svc, parsed);
       const tokenEntryFor = (p: { exchange: string; symbol: string }) => tokenBySymbol.get(keyFor(p.exchange, p.symbol));
       const withToken = parsed.filter((p) => tokenEntryFor(p));
       const without = parsed.filter((p) => !tokenEntryFor(p));
@@ -824,7 +860,11 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       // its trading alias ("NIFTY", "BANKNIFTY", "INDIA VIX"), which is why
       // index candles permanently logged "no token" and fell to Yahoo even
       // though Kotak carries the instrument under its canonical row.
-      const tokenBySymbolForCandles = await getTokenMap(svc);
+      const tokenBySymbolForCandles = await getTokenMap(svc, [
+        { exchange, symbol },
+        { exchange: exchange === "BSE" ? "NSE" : "BSE", symbol },
+      ]);
+
       const entry = tokenBySymbolForCandles.get(keyFor(exchange, symbol))
         ?? tokenBySymbolForCandles.get(keyFor(exchange === "BSE" ? "NSE" : "BSE", symbol));
       const isIndex = symbol.startsWith("^") || /^(NIFTY|BANKNIFTY|FINNIFTY|SENSEX|INDIA VIX)/i.test(symbol);
@@ -1266,31 +1306,67 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
 // natively (TPSeries intraday, EODChartData daily), so charts don't need
 // Yahoo except for coverage gaps and grains Noren has no endpoint for.
 
-let shoonyaTokenCache: { map: Map<string, string>; expiresAt: number } | null = null;
-const SHOONYA_TOKEN_TTL_MS = 60_000;
+// EGRESS: this used to page the entire symbol master (~40 k rows) every 60 s,
+// which was the single largest source of Supabase egress. It is now a per-symbol
+// cache with the same TTLs as the Kotak token map, so a quote batch costs a few
+// KB and repeat calls inside the TTL cost nothing.
+const shoonyaTokenCache = new Map<string, { token: string | null; expiresAt: number }>();
 
-async function getShoonyaTokenMap(svc: SupabaseClient): Promise<Map<string, string>> {
-  if (shoonyaTokenCache && shoonyaTokenCache.expiresAt > Date.now()) return shoonyaTokenCache.map;
-  const PAGE = 1000;
+async function getShoonyaTokens(
+  svc: SupabaseClient,
+  reqs: Array<{ exchange: string; symbol: string }>,
+): Promise<Map<string, string>> {
   const map = new Map<string, string>();
-  for (let from = 0; from < 40_000; from += PAGE) {
+  const now = Date.now();
+  const missing = new Map<string, { exchange: string; symbol: string }>();
+
+  for (const r of reqs) {
+    const exchange = String(r.exchange || "NSE").toUpperCase();
+    const symbol = String(r.symbol || "").toUpperCase();
+    if (!symbol) continue;
+    const key = keyFor(exchange, symbol);
+    if (map.has(key) || missing.has(key)) continue;
+    const cached = shoonyaTokenCache.get(key);
+    if (cached && cached.expiresAt > now) {
+      if (cached.token) map.set(key, cached.token);
+      continue;
+    }
+    missing.set(key, { exchange, symbol });
+  }
+  if (missing.size === 0) return map;
+
+  const names = Array.from(new Set(Array.from(missing.values()).map((m) => m.symbol)));
+  const rows: any[] = [];
+  const CHUNK = 200;
+  let failed = false;
+  for (let i = 0; i < names.length; i += CHUNK) {
     const { data, error } = await withPgRetry<any>(() => Promise.resolve(svc
       .from("market_stocks").select("symbol,exchange,shoonya_token")
       .in("exchange", ["NSE", "BSE"]).not("shoonya_token", "is", null)
-      .range(from, from + PAGE - 1)));
-    if (error) break;
-    const page = (data ?? []) as any[];
-    for (const r of page) map.set(keyFor(r.exchange, r.symbol), String(r.shoonya_token));
-    if (page.length < PAGE) break;
+      .in("symbol", names.slice(i, i + CHUNK)) as any));
+    if (error) { console.error("[market] shoonya token lookup failed:", error.message); failed = true; break; }
+    rows.push(...((data ?? []) as any[]));
   }
-  // Don't cache an empty map for a full minute — the master sync may simply
-  // not have run yet, and a stale empty map would pin every symbol to Yahoo.
-  shoonyaTokenCache = { map, expiresAt: Date.now() + (map.size ? SHOONYA_TOKEN_TTL_MS : 5_000) };
+
+  const byKey = new Map<string, string>();
+  for (const r of rows) {
+    byKey.set(keyFor(String(r.exchange), String(r.symbol).toUpperCase()), String(r.shoonya_token));
+  }
+
+  for (const key of missing.keys()) {
+    const token = byKey.get(key) ?? null;
+    if (token) map.set(key, token);
+    // A failed read must never be cached as a miss — one blip would pin the
+    // symbol to Yahoo for the whole TTL.
+    if (!failed || token) {
+      shoonyaTokenCache.set(key, { token, expiresAt: Date.now() + (token ? TOKEN_TTL_MS : TOKEN_MISS_TTL_MS) });
+    }
+  }
   return map;
 }
 
 export function invalidateShoonyaTokenMap(): void {
-  shoonyaTokenCache = null;
+  shoonyaTokenCache.clear();
 }
 
 const SHOONYA_QUOTE_CONCURRENCY = 8;
@@ -1319,7 +1395,7 @@ export function shoonyaProvider(svc: SupabaseClient, s: ShoonyaSettings): Market
       const allowFallback = opts?.allowFallback !== false;
       const t0 = Date.now();
       const parsed = keys.map((k) => ({ key: k, ...parseKey(k) }));
-      const tokens = await getShoonyaTokenMap(svc);
+      const tokens = await getShoonyaTokens(svc, parsed);
       const withToken = parsed.filter((p) => tokens.get(keyFor(p.exchange, p.symbol)));
       const without = parsed.filter((p) => !tokens.get(keyFor(p.exchange, p.symbol)));
 
@@ -1392,7 +1468,7 @@ export function shoonyaProvider(svc: SupabaseClient, s: ShoonyaSettings): Market
         if (meta) { meta.source = "yahoo"; meta.reason = "grain_unsupported"; }
         return yahoo.getOHLCV(symbol, exchange, range, interval, meta);
       }
-      const tokens = await getShoonyaTokenMap(svc);
+      const tokens = await getShoonyaTokens(svc, [{ exchange, symbol }]);
       const token = tokens.get(keyFor(exchange, symbol));
       if (!daily && !token) {
         if (meta) { meta.source = "yahoo"; meta.reason = "no_token"; }
@@ -1426,7 +1502,7 @@ export function shoonyaProvider(svc: SupabaseClient, s: ShoonyaSettings): Market
     },
 
     async getDepth(symbol, exchange): Promise<DepthLadder> {
-      const tokens = await getShoonyaTokenMap(svc);
+      const tokens = await getShoonyaTokens(svc, [{ exchange, symbol }]);
       const token = tokens.get(keyFor(exchange, symbol));
       if (!token) {
         return { bids: [], asks: [], ltp: null, source: "unavailable", reason_code: "no_token",

@@ -242,6 +242,92 @@ export function latestTradeDateOf(
   return latest;
 }
 
+/** Share of the EQ universe that carries a given trade_date. */
+export function sessionCoverage(
+  rows: Array<{ trade_date?: string | null; instrument_type?: string | null }>,
+  tradeDate: string | null,
+): { covered: number; total: number; ratio: number } {
+  if (!tradeDate) return { covered: 0, total: 0, ratio: 0 };
+  let covered = 0;
+  let total = 0;
+  for (const r of rows) {
+    if (r.instrument_type !== "EQ") continue;
+    total++;
+    if (r.trade_date && String(r.trade_date).slice(0, 10) === tradeDate) covered++;
+  }
+  return { covered, total, ratio: total > 0 ? covered / total : 0 };
+}
+
+/** A newest date that only covers part of the universe is a *forming* session,
+ *  not a settled one: the EOD pipeline is chunked, so mid-run it has stamped
+ *  today's date onto whichever slice it processed. Using it as the reference
+ *  session silently deletes every symbol it hasn't reached yet (that is how an
+ *  ET-equivalent 10-stock screen collapsed to 1 result). Resolve the reference
+ *  session as the newest date whose coverage clears `minCoverage`. */
+export const MIN_SESSION_COVERAGE = 0.9;
+
+export interface ReferenceSession {
+  /** Date the exact-session filters should be evaluated against. */
+  tradeDate: string | null;
+  /** Newest date present in the data, settled or not. */
+  newestTradeDate: string | null;
+  /** True when the newest date was rejected as incomplete. */
+  newestIsForming: boolean;
+  /** Coverage of the chosen reference session. */
+  coverage: { covered: number; total: number; ratio: number };
+  /** Coverage of the newest (possibly forming) date. */
+  newestCoverage: { covered: number; total: number; ratio: number };
+}
+
+export function resolveReferenceSession(
+  rows: Array<{ trade_date?: string | null; instrument_type?: string | null }>,
+  opts?: { minCoverage?: number; settledOnly?: boolean; todayIst?: string },
+): ReferenceSession {
+  const minCoverage = opts?.minCoverage ?? MIN_SESSION_COVERAGE;
+  const today = opts?.settledOnly
+    ? (opts.todayIst ?? new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10))
+    : null;
+  const counts = new Map<string, number>();
+  let total = 0;
+  for (const r of rows) {
+    if (r.instrument_type !== "EQ") continue;
+    total++;
+    if (!r.trade_date) continue;
+    const d = String(r.trade_date).slice(0, 10);
+    if (today && d >= today) continue;
+    counts.set(d, (counts.get(d) ?? 0) + 1);
+  }
+  const dates = [...counts.keys()].sort((a, b) => (a < b ? 1 : -1));
+  const newestTradeDate = dates[0] ?? null;
+  const mk = (d: string | null) => ({
+    covered: d ? (counts.get(d) ?? 0) : 0,
+    total,
+    ratio: d && total > 0 ? (counts.get(d) ?? 0) / total : 0,
+  });
+  const newestCoverage = mk(newestTradeDate);
+  let chosen: string | null = null;
+  for (const d of dates) {
+    if ((counts.get(d) ?? 0) / Math.max(1, total) >= minCoverage) { chosen = d; break; }
+  }
+  // Nothing clears the bar — a split-session day: the chunked pipeline stamped
+  // part of the universe with the newest date while the rest still holds the
+  // previous close. The newest date's rows are the untrustworthy ones (they can
+  // be mid-session prints), so step back one session rather than filtering
+  // against a half-written, possibly-forming date.
+  if (!chosen) chosen = dates[1] ?? dates[0] ?? null;
+  const tradeDate = chosen;
+
+
+  return {
+    tradeDate,
+    newestTradeDate,
+    newestIsForming: newestTradeDate != null && tradeDate !== newestTradeDate,
+    coverage: mk(tradeDate),
+    newestCoverage,
+  };
+}
+
+
 /** Filters whose value can be answered by a live quote — these are evaluated
  *  against the same live quote the results table renders, so the number you
  *  filter on and the number you see can never disagree. */

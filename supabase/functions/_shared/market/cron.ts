@@ -66,14 +66,24 @@ export function istTradeDate(d = new Date()): string {
 // exchange holiday. Client-side polling-cadence checks (marketOpen() in
 // src/lib/market/hooks.ts) stay calendar-only: worst case there is a few
 // wasted polls on a holiday, not a wrong trade or a wrong alert.
+// Memoised per isolate: both answers are effectively constant for the life of
+// an invocation, and re-reading them per call added pure egress for no signal.
+const holidayMemo = new Map<string, boolean>();
+let lowBwMemo: { value: boolean; expiresAt: number } | null = null;
+
 export async function isTradingHoliday(
   svc: { from: (t: string) => any },
   dateStr: string,
   exchange = "NSE",
 ): Promise<boolean> {
+  const key = `${exchange}:${dateStr}`;
+  const hit = holidayMemo.get(key);
+  if (hit !== undefined) return hit;
   const { data } = await svc.from("market_holidays")
     .select("id").eq("holiday_date", dateStr).eq("exchange", exchange).maybeSingle();
-  return !!data;
+  const out = !!data;
+  holidayMemo.set(key, out);
+  return out;
 }
 
 // Free-plan bandwidth brake. The nightly governor flips
@@ -83,7 +93,11 @@ export async function isTradingHoliday(
 export async function lowBandwidthMode(
   svc: { from: (t: string) => any },
 ): Promise<boolean> {
+  if (lowBwMemo && lowBwMemo.expiresAt > Date.now()) return lowBwMemo.value;
   const { data } = await svc.from("system_quota_state")
     .select("low_bandwidth").limit(1).maybeSingle();
-  return data?.low_bandwidth === true;
+  const value = data?.low_bandwidth === true;
+  lowBwMemo = { value, expiresAt: Date.now() + 60_000 };
+  return value;
 }
+

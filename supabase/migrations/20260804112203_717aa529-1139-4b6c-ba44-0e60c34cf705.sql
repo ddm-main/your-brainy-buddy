@@ -1,0 +1,1 @@
+ALTER VIEW public.market_screener_rows SET (security_invoker = on);

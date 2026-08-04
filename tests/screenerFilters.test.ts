@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { filterMatches, excludedByMissingData, coverageOf, latestTradeDateOf, filterMatchesLive, type ActiveFilter } from "../src/lib/market/screenerCatalog";
+import { filterMatches, excludedByMissingData, coverageOf, latestTradeDateOf, resolveReferenceSession, filterMatchesLive, type ActiveFilter } from "../src/lib/market/screenerCatalog";
 import { colsFromActiveFilters } from "../src/lib/market/screenerColumnModel";
 
 // A row with a full EOD triple (ltp/change_pct/volume via trade_date) but no
@@ -306,5 +306,38 @@ describe("filterMatchesLive — broker-only live values", () => {
     expect(filterMatchesLive(row, { id: "vol_gt_avg30", bool: true } as ActiveFilter, live)).toBe(false);
     expect(filterMatchesLive(row, { id: "vol_gt_avg30", bool: true } as ActiveFilter,
       { ...live, provider: "kotak" })).toBe(true);
+  });
+});
+
+// ── Reference session resolution (partial/forming sessions) ────────────────
+describe("resolveReferenceSession", () => {
+  const eq = (trade_date: string | null) => ({ trade_date, instrument_type: "EQ" });
+
+  it("rejects a newest date that only covers part of the universe", () => {
+    const rows = [
+      ...Array.from({ length: 1500 }, () => eq("2026-08-04")),
+      ...Array.from({ length: 1300 }, () => eq("2026-08-03")),
+    ];
+    const r = resolveReferenceSession(rows, { todayIst: "2026-08-05" });
+    expect(r.newestTradeDate).toBe("2026-08-04");
+    expect(r.newestIsForming).toBe(true);
+    expect(r.tradeDate).toBe("2026-08-03");
+  });
+
+  it("accepts the newest date once coverage is broad", () => {
+    const rows = [
+      ...Array.from({ length: 2800 }, () => eq("2026-08-04")),
+      ...Array.from({ length: 20 }, () => eq("2026-08-03")),
+    ];
+    const r = resolveReferenceSession(rows, { todayIst: "2026-08-05" });
+    expect(r.tradeDate).toBe("2026-08-04");
+    expect(r.newestIsForming).toBe(false);
+  });
+
+  it("never uses today's date when settledOnly is set", () => {
+    const rows = Array.from({ length: 2800 }, () => eq("2026-08-04"))
+      .concat(Array.from({ length: 2800 }, () => eq("2026-08-03")));
+    const r = resolveReferenceSession(rows, { settledOnly: true, todayIst: "2026-08-04" });
+    expect(r.tradeDate).toBe("2026-08-03");
   });
 });

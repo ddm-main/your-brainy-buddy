@@ -20,6 +20,28 @@ function isIsoDate(s: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(s);
 }
 
+// PostgREST errors are plain objects, not Errors — throwing them raw made the
+// catch below serialize "[object Object]" to the client with no diagnostics.
+function pgFail(label: string, error: unknown): Error {
+  const e = error as { message?: string; code?: string; details?: string } | null;
+  const parts = [e?.message, e?.code ? `(code ${e.code})` : null, e?.details].filter(Boolean);
+  console.error(`${label} failed:`, JSON.stringify(error));
+  return new Error(`${label}: ${parts.join(" ") || String(error)}`);
+}
+
+// Only the columns this function actually reads. `select("*")` on a 100-column
+// view for the whole universe is a large scan/payload and was prone to timing
+// out (which surfaced as the opaque 500).
+const SNAP_COLS = [
+  "symbol", "company_name", "sector", "sub_sector", "industry", "instrument_type",
+  "market_cap", "is_nifty500", "fno_enabled", "sme",
+  "pe_ttm", "pb", "peg", "eps_ttm", "book_value", "dividend_yield", "roe", "roce",
+  "debt_to_equity", "current_ratio", "quick_ratio", "revenue_ttm_cr", "profit_ttm_cr",
+  "revenue_growth_yoy", "profit_growth_yoy", "eps_growth_yoy",
+  "promoter_holding", "fii_holding", "dii_holding",
+].join(",");
+
+
 async function fetchUniverseSymbols(svc: any, universe: Universe): Promise<string[]> {
   // Latest-snapshot rows (active NSE equities) — this is the population.
   const rows: any[] = [];
@@ -29,7 +51,7 @@ async function fetchUniverseSymbols(svc: any, universe: Universe): Promise<strin
       .select("symbol,is_nifty500,fno_enabled,sme,instrument_type")
       .eq("is_active", true).eq("exchange", "NSE")
       .range(from, from + 999);
-    if (error) throw error;
+    if (error) throw pgFail("load universe", error);
     const chunk = data ?? [];
     rows.push(...chunk);
     if (chunk.length < 1000) break;
@@ -49,10 +71,10 @@ async function fetchSnapshots(svc: any, symbols: string[]): Promise<Map<string, 
     const slice = symbols.slice(i, i + 500);
     const { data, error } = await svc
       .from("market_screener_rows")
-      .select("*")
+      .select(SNAP_COLS)
       .eq("exchange", "NSE")
       .in("symbol", slice);
-    if (error) throw error;
+    if (error) throw pgFail("load snapshots", error);
     (data ?? []).forEach((r: any) => out.set(r.symbol, r));
   }
   return out;
@@ -114,7 +136,7 @@ async function fetchDailyPrices(svc: any, symbols: string[], asOf: string, bars 
       const { data, error } = await svc.rpc("market_asof_candles", {
         _as_of: asOf, _symbols: slice, _bars: bars,
       });
-      if (error) throw error;
+      if (error) throw pgFail("load as-of candles", error);
       for (const row of (data ?? []) as { symbol: string; candles: any[][] }[]) {
         const list: Candle[] = [];
         for (const t of row.candles ?? []) {
@@ -369,7 +391,12 @@ Deno.serve(async (req) => {
       rows,
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    console.error("market-screener-asof failed:", e);
+    const msg = e instanceof Error
+      ? e.message
+      : (typeof e === "object" && e !== null
+        ? ((e as { message?: string }).message ?? JSON.stringify(e))
+        : String(e));
     return errorResponse(req, msg, 500);
   }
 });

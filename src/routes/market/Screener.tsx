@@ -35,6 +35,7 @@ import {
   coverageOf,
   canonicalFilterId,
   latestTradeDateOf,
+  resolveReferenceSession,
   isEquityRow,
   isOpenEndedMax,
   isOpenEndedMin,
@@ -247,12 +248,22 @@ function ScreenerInner() {
 
   // During market hours the EOD pipeline can already have stamped a partial
   // set of rows with today's date. Gating on that partial date silences every
-  // symbol not yet re-synced, so intraday we gate on the last *settled*
-  // session instead.
-  const latestTradeDate = useMemo(
-    () => latestTradeDateOf(rows, { settledOnly: nseOpenNow, todayIst: todayIstDateString() }),
+  // symbol not yet re-synced, so we gate on the last session that actually
+  // covers the universe (coverage >= MIN_SESSION_COVERAGE), and intraday we
+  // additionally refuse today's date outright.
+  const refSession = useMemo(
+    () => resolveReferenceSession(rows, { settledOnly: nseOpenNow, todayIst: todayIstDateString() }),
     [rows, nseOpenNow],
   );
+  const latestTradeDate = refSession.tradeDate;
+  // Symbols that carry no row for the reference session — the exact-session
+  // filters (ltp / 1D return / volume) can't judge them, so they are excluded
+  // and we say so instead of silently shrinking the result count.
+  const excludedNoSession = useMemo(() => {
+    if (!latestTradeDate) return 0;
+    return Math.max(0, refSession.coverage.total - refSession.coverage.covered);
+  }, [latestTradeDate, refSession]);
+
 
   // Relative freshness (above) can't catch a pipeline that's stale across a
   // large chunk of the universe at once — those rows aren't outliers
@@ -710,7 +721,12 @@ function ScreenerInner() {
       symbol: {
         header: "Stock", accessorKey: "symbol",
         cell: ({ row }) => {
-          const stale = latestTradeDate != null && row.original.trade_date != null && row.original.trade_date !== latestTradeDate;
+          // Only rows BEHIND the reference session are stale. A row dated
+          // after it (today's forming/unsettled bar) is newer, not stale —
+          // flagging those painted the whole table red every afternoon.
+          const stale = latestTradeDate != null && row.original.trade_date != null
+            && String(row.original.trade_date) < String(latestTradeDate);
+
           const name = row.original.company_name;
           return (
             <span style={{ display: "inline-flex", flexDirection: "column", lineHeight: 1.2 }}>
@@ -953,6 +969,24 @@ function ScreenerInner() {
           </span>
         </div>
       )}
+
+      {excludedNoSession > 0 && (
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
+          border: "1px solid var(--warn)", borderRadius: 2, background: "rgba(255,176,32,0.08)",
+        }}>
+          <AlertTriangle size={14} color="var(--warn)" style={{ flexShrink: 0 }} />
+          <span style={{ fontSize: 12, color: "var(--warn)" }}>
+            {excludedNoSession.toLocaleString()} stock{excludedNoSession === 1 ? "" : "s"} excluded from
+            price / 1D-return / volume filters — no {String(latestTradeDate)} session stored yet
+            {refSession.newestIsForming && refSession.newestTradeDate
+              ? ` (${String(refSession.newestTradeDate)} is still forming: ${refSession.newestCoverage.covered.toLocaleString()} of ${refSession.newestCoverage.total.toLocaleString()} symbols)`
+              : ""}. The post-close snapshot fills the rest of the universe shortly after 15:40 IST; the bhavcopy pass reconciles it at 18:45 IST.
+          </span>
+
+        </div>
+      )}
+
 
 
 

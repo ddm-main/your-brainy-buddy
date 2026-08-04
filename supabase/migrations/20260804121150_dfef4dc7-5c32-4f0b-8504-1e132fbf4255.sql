@@ -1,0 +1,1 @@
+GRANT EXECUTE ON FUNCTION public.market_cron_call_body(text, jsonb) TO authenticated;

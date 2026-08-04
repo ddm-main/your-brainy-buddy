@@ -10,6 +10,8 @@ import { loadArchivedBars } from "../_shared/market/archive.ts";
 import { KOTAK_CANDLES_ROUTE } from "../_shared/market/kotakClient.ts";
 import { routeOpenForMs, hydrateRouteBreakers, setRouteBreakerPersistence } from "../_shared/market/routeBreaker.ts";
 import { isTradingHoliday } from "../_shared/market/cron.ts";
+import { getSettlement, isPersistableDate } from "../_shared/market/settlement.ts";
+
 import { recordFeedHeartbeat } from "../_shared/market/heartbeat.ts";
 import { decumulateBars, classifyVolumeSeries, looksCumulative } from "../_shared/market/volume.ts";
 
@@ -475,8 +477,13 @@ async function loadDaily(
       // Today's session is still forming while the market is open: persisting
       // it rewrites the same row on every chart poll, so leave it to the EOD
       // pipeline and serve it live from the quote route instead.
-      const todayIso = new Date().toISOString().slice(0, 10);
-      const settled = upserts.filter((u) => u.trade_date < todayIso || !nseSessionOpen());
+      // A bar dated today is only durable once the session is settled
+      // (bhavcopy landed with broad coverage) — "market closed" is not enough:
+      // between 15:30 and the bhavcopy the close is still provisional and a
+      // chart poll must not stamp it into daily history for a single symbol.
+      const settlement = await getSettlement(svc);
+      const settled = upserts.filter((u) => isPersistableDate(u.trade_date, settlement));
+
       const persistable = archiveCutoff ? settled.filter((u) => u.trade_date > archiveCutoff) : settled;
       for (let i = 0; i < persistable.length; i += 500) {
         await svc.from("market_daily_prices")
