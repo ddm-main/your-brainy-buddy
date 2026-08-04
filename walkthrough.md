@@ -1,5 +1,13 @@
 # JARVIS Market Portfolio Walkthrough
 
+## Market data freshness repair
+
+- The official NSE bhavcopy is now promoted into `market_daily_prices` before universe scoring, so the full settled market no longer depends on thousands of per-symbol provider calls.
+- Daily orchestration now runs price promotion and batched rescoring before the detailed technical and aggregate passes.
+- A run is healthy only when staging, daily-price, and score coverage reconcile for the same session; one intraday row can no longer mark a session complete.
+- Analysis shows a compact pipeline-updating warning when the official close has landed but the selected symbol's technical score has not caught up.
+- Settled-session detection uses the authoritative NSE bhavcopy with a full-market floor rather than ad-hoc daily rows.
+
 ## Portfolio audit changes
 
 - Funds now uses a shared Kotak refresh path with cached fallback and retry cooldowns, so repeated Overview/Holdings/Positions refreshes do not hammer Kotak after 429/5xx responses.

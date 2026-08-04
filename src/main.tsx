@@ -4,7 +4,14 @@ import { BrowserRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import ErrorBoundary from "@/components/hud/ErrorBoundary";
+import { installEgressMeter } from "@/lib/egressMeter";
 import "./styles.css";
+
+// Measures the bytes of every Supabase response this tab receives and reports
+// a per-route aggregate once a minute. It is the project's only source of
+// truth for egress (Supabase no longer exposes it via the Management API).
+installEgressMeter();
+
 
 const queryClient = new QueryClient({
   defaultOptions: {

@@ -125,3 +125,31 @@ Nothing is broken. 401 symbols of gzipped OHLCV weigh 3.2 MB; the whole 2547
 symbol universe projects to roughly **20-30 MB**. Daily bars compress ~15:1.
 The 1 GB bucket will never be the constraint — it is doing its job, which is
 keeping ~200 MB of cold rows *out of Postgres*.
+
+## Egress pass 3 (2026-08-04) — 4 GB self-imposed budget
+The 5 GB cycle cap is the hard line; we now run against a **4 GB budget**, and
+past 80% of it `apply_egress_governor()` sets `low_bandwidth`, which already
+short-circuits the non-essential syncs. Egress is not readable from Postgres —
+`supabase-usage-sync` (cron `5 2,14 * * *`) pulls it from the Supabase
+Management API with `SB_MANAGEMENT_TOKEN` and writes `egress_bytes`, the cycle
+window and the per-type split into `system_quota_state`; the Storage & Quota
+panel and the navbar chip read it from `quota_report()`.
+
+### Cadence after this pass
+| Job | Was | Now |
+|---|---|---|
+| market-score-backfill-drain | `*/15 3-14 * * 1-5` | `10 19,22 * * 1-5` |
+| market-screener-snapshot-refresh | `*/30` market hours | `0 4-11 * * 1-5` |
+| market-selftest-fast | `*/30 3-10` | `15 3-10 * * 1-5` |
+| market-selftest-hourly | `5 */6 * * *` | unscheduled |
+| supabase-usage-sync | — | `5 2,14 * * *` |
+
+### Byte cuts
+- `market-pipeline-aggregates`: explicit projection + server-side `trade_date`
+  filter instead of paging all 123 columns of every session (~25 MB → ~2 MB/run).
+- `statements` list reads drop `extracted_text` (full PDF text); only
+  `statements.get` still takes it.
+- Explicit column lists for `market_pipeline_status`, `market_api_settings`,
+  `market_saved_screeners`.
+- Dev-only `src/lib/egressMeter.ts`: logs any response over 256 KB and
+  `__egress()` prints per-read totals, so a regression shows up while building.

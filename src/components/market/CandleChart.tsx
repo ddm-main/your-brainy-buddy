@@ -36,6 +36,7 @@ import { VolumeProfilePrimitive } from "@/components/market/volumeProfilePrimiti
 import {
   detectPatternSeries, type CandleMark, type ChartShape,
 } from "../../../supabase/functions/_shared/market/pattern-series";
+import { detailFromParam, tierAllows, tierOf } from "@/lib/market/patternLabels";
 import { ChartLegend, type LegendRow } from "@/components/market/ChartLegend";
 import { useMarketOpen } from "@/lib/market/useMarketOpen";
 import { safeStorage } from "@/lib/safeStorage";
@@ -148,22 +149,27 @@ function computeStudy(candles: CandleDto[], s: Study): Computed {
     // Pattern studies run the same detection engine the backend scores with,
     // just evaluated at every bar instead of only the last one.
     case "candlePatterns": {
+      const detail = detailFromParam(p.detail);
       const { marks } = detectPatternSeries(toPatternCandles(candles), { minBars: candles.length + 1 });
       const keep = marks.filter((m) =>
-        (m.tone === "bullish" && p.showBull === 1) ||
-        (m.tone === "bearish" && p.showBear === 1) ||
-        (m.tone === "neutral" && p.showNeutral === 1));
-      const cap = Math.max(20, p.maxMarks ?? 250);
+        tierAllows(m.key, detail) && (
+          (m.tone === "bullish" && p.showBull === 1) ||
+          (m.tone === "bearish" && p.showBear === 1) ||
+          (m.tone === "neutral" && p.showNeutral === 1)));
+      const cap = Math.max(5, p.maxMarks ?? 40);
       return { g: "patterns", marks: keep.length > cap ? keep.slice(-cap) : keep };
     }
     case "chartPatterns": {
-      const { shapes } = detectPatternSeries(toPatternCandles(candles), { maxShapes: Math.max(1, p.maxShapes ?? 12) });
+      const detail = detailFromParam(p.detail);
+      const { shapes } = detectPatternSeries(toPatternCandles(candles), { maxShapes: Math.max(1, p.maxShapes ?? 6) });
       const keep = shapes.filter((sh) =>
-        (sh.tone === "bullish" && p.showBull === 1) ||
-        (sh.tone === "bearish" && p.showBear === 1) ||
-        (sh.tone === "neutral" && p.showNeutral === 1));
+        tierAllows(sh.key, detail) && (
+          (sh.tone === "bullish" && p.showBull === 1) ||
+          (sh.tone === "bearish" && p.showBear === 1) ||
+          (sh.tone === "neutral" && p.showNeutral === 1)));
       return { g: "shapes", shapes: keep };
     }
+
     case "rsi": return { g: "single", line: rsi(candles, p.period), guides: [70, 30] };
     case "macd": { const m = macd(candles, p.fast, p.slow, p.signal); return { g: "macd", macd: m.macd, signal: m.signal, hist: m.hist }; }
     case "stoch": { const st = stochastic(candles, p.k, p.d, p.smooth); return { g: "dual", a: st.k, b: st.d, guides: [80, 20] }; }
@@ -639,6 +645,17 @@ export function CandleChart({
     // ---- overlays (visible, price pane) ----
     // Collected so multiple Supertrend studies don't leak plugins on cleanup.
     const markersPlugins: ISeriesMarkersPluginApi<any>[] = [];
+    // Shared label budget for candle marks *and* structure chips, so the two
+    // studies can never stack text on the same bars. `claimLabel` also guards
+    // the right margin: labels near the last bar get clipped by the price
+    // scale, so they degrade to an unlabelled marker.
+    const labelClaims: number[] = [];
+    const claimLabel = (index: number, minGap: number, barCount: number) => {
+      if (index > barCount - 3 || index < 3) return false;
+      if (labelClaims.some((x) => Math.abs(x - index) < minGap)) return false;
+      labelClaims.push(index);
+      return true;
+    };
     const primitives: VolumeProfilePrimitive[] = [];
     patternHitsRef.current = { marks: [], shapes: [] };
 
@@ -787,24 +804,40 @@ export function CandleChart({
         projectSpan(c.spanA, col[2]);
         projectSpan(c.spanB, col[3]);
       } else if (c.g === "patterns") {
-        // One marker per detected candlestick pattern, tinted by tone and
-        // labelled with the readable pattern name. When markers get dense the
-        // label falls back to the short code so the axis stays legible.
+        // Legibility first: only `key`-tier reads earn a text label, and never
+        // two labels within `minGap` bars of each other — everything else draws
+        // as a small unlabelled dot that is still clickable/hoverable. This is
+        // what stops the chart turning into a wall of overlapping codes.
         const bull = col[0] ?? UP, bear = col[1] ?? DOWN, neut = col[2] ?? "#ffb84d";
-        const drawn = c.marks.filter((m) => m.index >= 0 && m.index < data.length);
+        const drawn = c.marks
+          .filter((m) => m.index >= 0 && m.index < data.length)
+          .slice()
+          .sort((a, b) => a.index - b.index);
         patternHitsRef.current.marks = drawn;
-        const dense = drawn.length > 45;
-        const markers = drawn
-          .map((m) => ({
+        const minGap = Math.max(4, Math.ceil(data.length / 25));
+        // Claim labels strongest-first so the label lands on the best read in
+        // a cluster rather than whichever bar came first.
+        const labelled = new Set<CandleMark>();
+        for (const m of drawn.slice().sort((a, b) =>
+          (tierOf(b.key) === "key" ? 1 : 0) - (tierOf(a.key) === "key" ? 1 : 0) || b.confidence - a.confidence)) {
+          if (tierOf(m.key) !== "key") continue;
+          if (claimLabel(m.index, minGap, data.length)) labelled.add(m);
+        }
+        const markers = drawn.map((m) => {
+          const above = m.tone === "bearish";
+          const label = labelled.has(m);
+          return {
             time: toTime(data[m.index].time),
-            position: m.tone === "bearish" ? "aboveBar" : "belowBar",
-            color: m.tone === "bullish" ? bull : m.tone === "bearish" ? bear : neut,
-            shape: m.tone === "bearish" ? "arrowDown" : m.tone === "bullish" ? "arrowUp" : "circle",
-            text: dense ? m.short : m.label,
-          }));
+            position: above ? "aboveBar" : "belowBar",
+            color: m.tone === "bullish" ? bull : above ? bear : neut,
+            shape: label ? (above ? "arrowDown" : "arrowUp") : "circle",
+            text: label ? m.label : "",
+          };
+        });
         if (markers.length) {
           try { markersPlugins.push(createSeriesMarkers(priceSeries, markers as any)); } catch { /* noop */ }
         }
+
       } else if (c.g === "shapes") {
         // Each structure draws its real geometry: the upper and lower bounds
         // it was measured from, the breakout / neckline level, a trigger
@@ -813,14 +846,31 @@ export function CandleChart({
         const bull = col[0] ?? UP, bear = col[1] ?? DOWN, neutral = col[2] ?? "#ffb84d";
         const shapeMarkers: Array<Record<string, unknown>> = [];
         patternHitsRef.current.shapes = c.shapes;
+        // At most 3 structure chips, strongest first, sharing the candle label
+        // budget so text never collides. Everything else keeps its geometry.
+        const shapeMinGap = Math.max(6, Math.ceil(data.length / 12));
+        const chipped = new Set<ChartShape>();
+        const bestByKey = new Map<string, ChartShape>();
         for (const sh of c.shapes) {
+          const prev = bestByKey.get(sh.key);
+          if (!prev || sh.confidence > prev.confidence || (sh.confidence === prev.confidence && sh.endIndex > prev.endIndex)) {
+            bestByKey.set(sh.key, sh);
+          }
+        }
+        for (const sh of [...bestByKey.values()].sort((a, b) => b.confidence - a.confidence)) {
+          if (chipped.size >= 3) break;
+          const b = Math.max(0, Math.min(sh.endIndex, data.length - 1));
+          if (claimLabel(b, shapeMinGap, data.length)) chipped.add(sh);
+        }
+        for (const sh of c.shapes) {
+
           const a = Math.max(0, Math.min(sh.startIndex, data.length - 1));
           const b = Math.max(0, Math.min(sh.endIndex, data.length - 1));
           if (b <= a) continue;
           const color = sh.tone === "bearish" ? bear : sh.tone === "neutral" ? neutral : bull;
           const seg = (value: number, style: LineStyle, width: number, dim = false) => {
             const line = chart.addSeries(LineSeries, {
-              color: dim ? withAlpha(color, 0.5) : color,
+              color: dim || !sh.triggered ? withAlpha(color, sh.triggered ? 0.5 : 0.32) : color,
               lineWidth: lw(width), lineStyle: style,
               priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
             });
@@ -842,15 +892,18 @@ export function CandleChart({
             position: sh.tone === "bearish" ? "aboveBar" : "belowBar",
             color,
             shape: sh.tone === "bearish" ? "arrowDown" : "arrowUp",
-            text: `${sh.label} · ${sh.status} ${sh.confidence}%`,
+            text: chipped.has(sh) ? `${sh.label} · ${sh.status} ${sh.confidence}%` : "",
           });
+
+          // The trigger bar gets a marker, never a bare "trigger" label — the
+          // structure chip already names the pattern.
           if (sh.triggerIndex != null && sh.triggerIndex >= 0 && sh.triggerIndex < data.length) {
             shapeMarkers.push({
               time: toTime(data[sh.triggerIndex].time),
               position: sh.tone === "bearish" ? "aboveBar" : "belowBar",
               color,
               shape: sh.tone === "bearish" ? "arrowDown" : "arrowUp",
-              text: "trigger",
+              text: "",
             });
           }
         }

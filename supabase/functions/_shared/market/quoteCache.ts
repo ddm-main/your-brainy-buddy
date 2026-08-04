@@ -16,9 +16,10 @@ import type { MarketProvider, QuoteRow } from "./provider.ts";
 
 // Sub-poll-interval by design: the UI polls quotes/indices at 1 s, so a
 // 1.5 s TTL guaranteed every other poll was served a cached (visibly frozen)
-// price. 800 ms keeps upstream coalescing intact while letting each 1 s poll
-// return a genuinely fresh print.
-const LIVE_TTL_MS = 500;
+// price. 250 ms keeps upstream coalescing intact (N panels/users on the same
+// symbol still cost one broker call) while letting each 1 s poll return a
+// genuinely fresh print.
+const LIVE_TTL_MS = 250;
 const CLOSED_TTL_MS = 15_000;
 
 const cache = new Map<string, { row: QuoteRow; expiresAt: number }>();

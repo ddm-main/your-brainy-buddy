@@ -7,6 +7,7 @@
 import { preflight, jsonResponse, errorResponse, requireUserId, corsFor, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
 import { runSelfTest, pruneProbeHistory } from "../_shared/market/selftest.ts";
+import { syncEgressUsage, egressSyncStale } from "../_shared/market/egress.ts";
 
 /** NSE cash session, Mon–Fri 09:15–15:30 IST. Must match the client helper in
  *  src/lib/market/feedStatus.ts — the old 15:45 close made the UI and the cron
@@ -61,17 +62,28 @@ Deno.serve(async (req) => {
   const svc = svcClient();
   const body = await req.json().catch(() => ({} as Record<string, unknown>));
   const scheduled = String(body?.source ?? "") === "cron" || req.headers.get("x-cron-secret") !== null;
+  const action = String(body?.action ?? "");
 
   let userId: string | null = null;
   if (scheduled) {
     const denied = await requireCronSecret(req);
     if (denied) return denied;
     userId = await ownerUserId(svc);
-    if (!userId) return jsonResponse(req, { ok: true, skipped: "no provider account configured" });
+    if (!userId && action !== "usage-egress") {
+      return jsonResponse(req, { ok: true, skipped: "no provider account configured" });
+    }
   } else {
     const auth = await requireUserId(req);
     if ("error" in auth) return new Response("unauthorized", { status: 401, headers: corsFor(req) });
     userId = auth.userId;
+  }
+
+  // Egress figure: the Management API is the only source. It rides along here
+  // because the project has no free edge-function slots left for a dedicated
+  // one. `action: "usage-egress"` is the panel's manual refresh.
+  if (action === "usage-egress") {
+    const result = await syncEgressUsage(svc);
+    return jsonResponse(req, result);
   }
 
   try {
@@ -94,11 +106,15 @@ Deno.serve(async (req) => {
     const skipKeyed = cadence === "session";
 
 
-    const report = await runSelfTest(svc, userId, { skipKeyed });
+    const report = await runSelfTest(svc, userId!, { skipKeyed });
     // Keep the status tables bounded — one prune per hourly (off-session) tick.
     let pruned = 0;
     if (scheduled && !open) pruned = await pruneProbeHistory(svc);
-    return jsonResponse(req, { ok: true, cadence, session_open: open, holiday, pruned, ...report });
+    // Refresh the egress figure at most every 6 h on the scheduled path, so the
+    // quota panel and the governor stay current without a dedicated cron job.
+    let egress: unknown = null;
+    if (scheduled && await egressSyncStale(svc, 6)) egress = await syncEgressUsage(svc);
+    return jsonResponse(req, { ok: true, cadence, session_open: open, holiday, pruned, egress, ...report });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }

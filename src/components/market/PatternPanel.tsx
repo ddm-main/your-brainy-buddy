@@ -5,7 +5,7 @@
 import { useMemo, useState } from "react";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { detectPatternSeries, type CandleMark, type ChartShape } from "../../../supabase/functions/_shared/market/pattern-series";
-import { REGISTRY_BY_KEY } from "@/lib/market/patternLabels";
+import { REGISTRY_BY_KEY, tierAllows, type PatternDetail } from "@/lib/market/patternLabels";
 import { PatternDetailDialog, type PatternSelection } from "@/components/market/PatternDetailDialog";
 
 type Candle = { time: number; open: number; high: number; low: number; close: number; volume: number };
@@ -40,10 +40,13 @@ export function PatternPanel({
   onFocus?: (startIndex: number, endIndex: number) => void;
   /** Whether the pattern studies are currently drawn on the chart. */
   chartOn?: boolean;
-  onToggleChart?: (on: boolean) => void;
+  onToggleChart?: (on: boolean, detail: PatternDetail) => void;
 }) {
   const [tab, setTab] = useState<"candles" | "structures">("candles");
   const [window, setWindow] = useState(20);
+  // Significance filter — `key` by default so the panel shows the reads that
+  // matter instead of every statistical twitch.
+  const [detail, setDetail] = useState<PatternDetail>("key");
   const [selection, setSelection] = useState<PatternSelection | null>(null);
 
   const { marks, shapes } = useMemo<{ marks: CandleMark[]; shapes: ChartShape[] }>(
@@ -53,18 +56,23 @@ export function PatternPanel({
 
   const last = (candles?.length ?? 0) - 1;
   const recentMarks = useMemo(
-    () => marks.filter((m) => last - m.index < window).sort((a, b) => b.index - a.index),
-    [marks, last, window],
+    () => marks
+      .filter((m) => last - m.index < window && tierAllows(m.key, detail))
+      .sort((a, b) => b.index - a.index),
+    [marks, last, window, detail],
   );
   const activeShapes = useMemo(
-    () => shapes.filter((s) => last - s.endIndex < Math.max(window, 10)).sort((a, b) => b.endIndex - a.endIndex),
-    [shapes, last, window],
+    () => shapes
+      .filter((s) => last - s.endIndex < Math.max(window, 10) && tierAllows(s.key, detail))
+      .sort((a, b) => b.endIndex - a.endIndex),
+    [shapes, last, window, detail],
   );
 
   const bull = recentMarks.filter((m) => m.tone === "bullish").length;
   const bear = recentMarks.filter((m) => m.tone === "bearish").length;
   const bias = bull === bear ? "balanced" : bull > bear ? "bullish" : "bearish";
   const biasTone: Tone = bull === bear ? "neutral" : bull > bear ? "bullish" : "bearish";
+
 
   return (
     <HudPanel flow title="Candles & Patterns" index={index} actions={actions}>
@@ -76,8 +84,8 @@ export function PatternPanel({
             <span className="hud-label">{tf} · last {window} bars</span>
             <Chip tone={biasTone}>{bias} {bull}↑/{bear}↓</Chip>
             {onToggleChart && (
-              <button type="button" onClick={() => onToggleChart(!chartOn)}
-                title={chartOn ? "Remove pattern drawings from the chart" : "Draw every detected pattern on the chart"}
+              <button type="button" onClick={() => onToggleChart(!chartOn, detail)}
+                title={chartOn ? "Remove pattern drawings from the chart" : "Draw the patterns listed here on the chart"}
                 style={{
                   fontSize: 10, padding: "1px 6px", background: "transparent", cursor: "pointer",
                   border: `1px solid ${chartOn ? "var(--accent)" : "var(--edge)"}`,
@@ -87,7 +95,20 @@ export function PatternPanel({
                 {chartOn ? "on chart ✓" : "show on chart"}
               </button>
             )}
-            <span style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+            <span style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
+              {([["key", "KEY"], ["context", "+CTX"], ["all", "ALL"]] as const).map(([d, lbl]) => (
+                <button key={d} type="button"
+                  title={d === "key" ? "Only decisive reversal / structure reads"
+                    : d === "context" ? "Key reads plus supporting context"
+                    : "Everything the engine detects, noise included"}
+                  onClick={() => { setDetail(d); if (chartOn) onToggleChart?.(true, d); }}
+                  style={{
+                    fontSize: 9, padding: "1px 5px", background: "transparent", cursor: "pointer",
+                    border: `1px solid ${d === detail ? "var(--accent)" : "var(--edge)"}`,
+                    color: d === detail ? "var(--accent)" : "var(--text-dim)", letterSpacing: "0.06em",
+                  }}>{lbl}</button>
+              ))}
+              <span style={{ width: 6 }} />
               {[10, 20, 50].map((w) => (
                 <button key={w} type="button" onClick={() => setWindow(w)}
                   style={{
@@ -97,6 +118,7 @@ export function PatternPanel({
                   }}>{w}</button>
               ))}
             </span>
+
           </div>
 
           <div style={{ display: "flex", gap: 4, marginBottom: 6 }}>

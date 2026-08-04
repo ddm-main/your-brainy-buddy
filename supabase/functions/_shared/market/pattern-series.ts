@@ -28,6 +28,12 @@ export interface CandleMark {
   endIndex: number;
   confidence: number;
   formula: string;
+  /** Measured numbers behind the read — the same shape shapes use. */
+  evidence?: Record<string, number>;
+  /** Price that voids the read (pattern low for bullish, high for bearish). */
+  invalidateLevel?: number | null;
+  invalidateText?: string;
+  confirmText?: string;
 }
 
 export interface ChartShape {
@@ -210,8 +216,61 @@ export function candleMarksAt(candles: Candle[], i: number, atr: number | null):
   }
 
   out.push(...extraCandleMarksAt(candles, i, atr));
-  return out;
+  return out.map((m) => enrichCandleMark(candles, atr, m));
 }
+
+/**
+ * Attach the measured numbers behind a candlestick read plus its concrete
+ * invalidation level, so the UI can *show* the rule instead of narrating it.
+ * Detection thresholds are untouched — this only annotates.
+ */
+export function enrichCandleMark(candles: Candle[], atr: number | null, m: CandleMark): CandleMark {
+  const i = m.index;
+  const c = candles[i];
+  if (!c) return m;
+  const p = i >= 1 ? candles[i - 1] : null;
+  const range = Math.max(1e-9, c.high - c.low);
+  const body = Math.abs(c.close - c.open);
+  const upperWick = c.high - Math.max(c.open, c.close);
+  const lowerWick = Math.min(c.open, c.close) - c.low;
+  const a = atr && atr > 0 ? atr : range;
+  const win = candles.slice(m.startIndex, m.endIndex + 1);
+  const winHigh = Math.max(...win.map((x) => x.high));
+  const winLow = Math.min(...win.map((x) => x.low));
+  const prevBody = p ? Math.abs(p.close - p.open) : 0;
+  const priorVols = candles.slice(Math.max(0, i - 20), i).map((x) => x.volume).filter((v) => v > 0);
+  const avgVol = priorVols.length ? priorVols.reduce((s, v) => s + v, 0) / priorVols.length : 0;
+
+  const evidence: Record<string, number> = {
+    bars: m.endIndex - m.startIndex + 1,
+    range,
+    body,
+    body_pct_of_range: (body / range) * 100,
+    upper_wick_pct: (upperWick / range) * 100,
+    lower_wick_pct: (lowerWick / range) * 100,
+    close_pos_in_range_pct: ((c.close - c.low) / range) * 100,
+    range_vs_atr: range / a,
+    atr,
+  } as Record<string, number>;
+  if (!Number.isFinite(evidence.atr)) delete evidence.atr;
+  if (prevBody > 0) evidence.body_vs_prev_body = body / prevBody;
+  if (p) evidence.gap_pct = ((c.open - p.close) / Math.max(1e-9, p.close)) * 100;
+  if (avgVol > 0) evidence.rel_volume = c.volume / avgVol;
+
+  const bullish = m.tone === "bullish";
+  const bearish = m.tone === "bearish";
+  const invalidateLevel = bullish ? winLow : bearish ? winHigh : null;
+  const invalidateText = invalidateLevel == null
+    ? `Neutral read — a close outside ${winLow.toFixed(2)}–${winHigh.toFixed(2)} resolves it.`
+    : `${bullish ? "Close below" : "Close above"} ${invalidateLevel.toFixed(2)} (pattern ${bullish ? "low" : "high"}) voids the read.`;
+  const confirmText = invalidateLevel == null
+    ? "A later close outside the pattern range confirms direction."
+    : `${bullish ? "Close above" : "Close below"} ${(bullish ? winHigh : winLow).toFixed(2)} (pattern ${bullish ? "high" : "low"}) on the next bar confirms it.`;
+
+  const measured = `Measured: body ${body.toFixed(2)} = ${(body / range * 100).toFixed(0)}% of range ${range.toFixed(2)}; upper wick ${(upperWick / range * 100).toFixed(0)}%, lower wick ${(lowerWick / range * 100).toFixed(0)}%; range ${(range / a).toFixed(2)}× ATR${prevBody > 0 ? `; body ${(body / prevBody).toFixed(2)}× prior body` : ""}${avgVol > 0 ? `; volume ${(c.volume / avgVol).toFixed(2)}× 20-bar avg` : ""}.`;
+  return { ...m, evidence, invalidateLevel, invalidateText, confirmText, formula: `${m.formula} ${measured}` };
+}
+
 
 // ------------------------------------------------------ bearish structures
 export function detectBearPatterns(candles: Candle[]): BearPatternFlags {

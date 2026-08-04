@@ -12,6 +12,11 @@ type QuotaReport = {
   db_limit_bytes?: number | string;
   storage_bytes?: number | string;
   storage_limit_bytes?: number | string;
+  egress_bytes?: number | string;
+  egress_budget_bytes?: number | string;
+  mau?: number | string;
+  mau_limit?: number | string;
+  quota?: { egress_synced_at?: string | null } | null;
 };
 
 function pct(used: number, limit: number) {
@@ -41,14 +46,21 @@ export default function QuotaStatusChip() {
   const loading = !data;
   const db = pct(Number(data?.db_bytes ?? 0), Number(data?.db_limit_bytes ?? 500 * 1024 * 1024));
   const store = pct(Number(data?.storage_bytes ?? 0), Number(data?.storage_limit_bytes ?? 1024 ** 3));
-  const worst = Math.max(db, store);
+  const mau = pct(Number(data?.mau ?? 0), Number(data?.mau_limit ?? 50_000));
+  // Egress only counts once the roll-up has written a real figure.
+  const egressSynced = !!data?.quota?.egress_synced_at;
+  const egress = egressSynced
+    ? pct(Number(data?.egress_bytes ?? 0), Number(data?.egress_budget_bytes ?? 4 * 1024 ** 3))
+    : 0;
+  const worst = Math.max(db, store, mau, egress);
 
   const color = loading
     ? "var(--text-muted)"
     : worst >= 80 ? "var(--danger)" : worst >= 65 ? "var(--warn, #f5a524)" : "var(--ok, #38d39f)";
   const title = loading
     ? "Free-plan quota — loading"
-    : `Free-plan quota — DB ${db}% · Storage ${store}%`;
+    : `Free-plan quota — Disk ${db}% · Storage ${store}% · MAU ${mau}%${egressSynced ? ` · Egress ${egress}% of budget` : ""}`;
+
 
   return (
     <button

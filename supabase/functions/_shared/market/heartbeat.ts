@@ -9,7 +9,10 @@
 // doesn't turn into a 1 Hz database write.
 import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.58.0";
 
-const MIN_WRITE_INTERVAL_MS = 20_000;
+// Steady-state liveness only needs minute granularity; the quote route is
+// polled every few seconds by every open panel, so a tighter window turned
+// telemetry into a continuous write stream.
+const MIN_WRITE_INTERVAL_MS = 60_000;
 const lastWrite = new Map<string, number>();
 
 export type HeartbeatInput = {

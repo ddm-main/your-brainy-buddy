@@ -9,6 +9,7 @@ import { DataTable, deriveChangeAbs, fmtInt, fmtNum, Return1DCell } from "@/comp
 import type { ColumnDef } from "@tanstack/react-table";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
 import { PatternPanel } from "@/components/market/PatternPanel";
+import { detailToParam, type PatternDetail } from "@/lib/market/patternLabels";
 import { PatternDetailDialog, type PatternSelection } from "@/components/market/PatternDetailDialog";
 import { ChartToolbar, DEFAULT_SETTINGS, isIntraday, type ChartSettings } from "@/components/market/ChartToolbar";
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
@@ -106,19 +107,21 @@ export default function IndexDetail() {
     () => studies.some((s) => (s.type === "candlePatterns" || s.type === "chartPatterns") && s.visible),
     [studies],
   );
-  const togglePatternsOnChart = useCallback((on: boolean) => {
+  const togglePatternsOnChart = useCallback((on: boolean, detail: PatternDetail = "key") => {
     setStudies((s) => {
       const rest = s.filter((x) => x.type !== "candlePatterns" && x.type !== "chartPatterns");
       if (!on) return rest;
       const candle = makeStudy("candlePatterns");
       const shapes = makeStudy("chartPatterns");
+      const lvl = detailToParam(detail);
       return [
         ...rest,
-        { ...candle, params: { ...candle.params, showBull: 1, showBear: 1, showNeutral: 1, maxMarks: 400 } },
-        { ...shapes, params: { ...shapes.params, showBull: 1, showBear: 1, showNeutral: 1, maxShapes: 24 } },
+        { ...candle, params: { ...candle.params, detail: lvl, showBull: 1, showBear: 1, showNeutral: 1, maxMarks: 60 } },
+        { ...shapes, params: { ...shapes.params, detail: lvl, showBull: 1, showBear: 1, showNeutral: 1, maxShapes: 8 } },
       ];
     });
   }, []);
+
 
   // Persist on every change so a refresh restores the exact chart state.
   useEffect(() => {

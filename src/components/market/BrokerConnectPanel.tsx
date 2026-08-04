@@ -119,7 +119,10 @@ export default function BrokerConnectPanel() {
   const [shAuthUrl, setShAuthUrl] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const { data, error } = await supabase.from("market_api_settings").select("*").eq("active_provider", "kotak_neo").maybeSingle();
+    const { data, error } = await supabase.from("market_api_settings")
+      .select("id,active_provider,consumer_key,connection_status,token_expires_at,last_error,ucc,greeting_name,totp_secret_enc,mobile_number_enc,mpin_enc")
+      .eq("active_provider", "kotak_neo").maybeSingle();
+
     if (error) { push(error.message, "err"); return; }
     const k = data as Settings | null;
     setKotak(k);

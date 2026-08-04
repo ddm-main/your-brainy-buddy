@@ -30,6 +30,8 @@ import {
   FILTER_BY_ID,
   UNIVERSES,
   filterMatches,
+  filterMatchesLive,
+  LIVE_FILTER_IDS,
   coverageOf,
   canonicalFilterId,
   latestTradeDateOf,
@@ -45,6 +47,7 @@ import { AlertTriangle, Check, Database, Download, Plus, RotateCcw, Save, Search
 import ErrorBoundary from "@/components/hud/ErrorBoundary";
 
 import { safeStorage } from "@/lib/safeStorage";
+import { useScreenerLiveQuotes, LIVE_QUOTE_CAP } from "@/lib/market/screenerLive";
 
 // ---- Columns ----
 interface ColSpec { id: string; label: string; align?: "right" | "left"; default?: boolean }
@@ -236,7 +239,20 @@ function ScreenerInner() {
   // "synced" while its numbers are for some earlier day, not today. Tech-scoped
   // filters (1D Return, Volume, Breakout, …) only trust rows on the freshest
   // trade_date actually present, everything else is treated as N/A.
-  const latestTradeDate = useMemo(() => latestTradeDateOf(rows), [rows]);
+  // NSE cash session in IST (09:15–15:30, Mon–Fri).
+  const nowIst = new Date(Date.now() + 5.5 * 3600_000);
+  const istMin = nowIst.getUTCHours() * 60 + nowIst.getUTCMinutes();
+  const istDay = nowIst.getUTCDay();
+  const nseOpenNow = istDay >= 1 && istDay <= 5 && istMin >= 555 && istMin < 930;
+
+  // During market hours the EOD pipeline can already have stamped a partial
+  // set of rows with today's date. Gating on that partial date silences every
+  // symbol not yet re-synced, so intraday we gate on the last *settled*
+  // session instead.
+  const latestTradeDate = useMemo(
+    () => latestTradeDateOf(rows, { settledOnly: nseOpenNow, todayIst: todayIstDateString() }),
+    [rows, nseOpenNow],
+  );
 
   // Relative freshness (above) can't catch a pipeline that's stale across a
   // large chunk of the universe at once — those rows aren't outliers
@@ -309,14 +325,41 @@ function ScreenerInner() {
   // symbols one trading-day behind (Yahoo skipped a session) and made the
   // result count differ from Tickertape. The scoped applicability check now
   // owns freshness; this pass just runs the active filters.
-  const filtered = useMemo(() => {
+  // Live mode: Price / 1D Return / Volume filters are evaluated against the
+  // same live quote the table renders (see screenerLive.ts). EOD mode keeps
+  // settled-session parity with Tickertape-style screeners.
+  const [liveMode, setLiveMode] = useState<boolean>(() => safeStorage.get("screener.liveMode") === "1");
+  useEffect(() => { safeStorage.set("screener.liveMode", liveMode ? "1" : "0"); }, [liveMode]);
+
+  const liveActive = useMemo(
+    () => active.filter((af) => LIVE_FILTER_IDS.has(canonicalFilterId(af.id))),
+    [active],
+  );
+  const eodActive = useMemo(
+    () => (liveMode ? active.filter((af) => !LIVE_FILTER_IDS.has(canonicalFilterId(af.id))) : active),
+    [active, liveMode],
+  );
+
+  // Pass 1 — narrow the universe on structural / settled fields.
+  const eodFiltered = useMemo(() => {
     let out: ScreenerRow[] = rows;
     if (hideIlliquid) out = out.filter((r) => r.is_liquid_tradable !== false);
-    for (const af of active) {
+    for (const af of eodActive) {
       out = out.filter((r) => filterMatches(r as any, af, latestTradeDate));
     }
     return out;
-  }, [rows, active, latestTradeDate, hideIlliquid]);
+  }, [rows, eodActive, latestTradeDate, hideIlliquid]);
+
+  const screenerLive = useScreenerLiveQuotes(eodFiltered, liveMode);
+
+  // Pass 2 — live predicates against the batch-quoted candidates.
+  const filtered = useMemo(() => {
+    if (!liveMode || liveActive.length === 0) return eodFiltered;
+    return eodFiltered.filter((r) => {
+      const live = screenerLive.byKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
+      return liveActive.every((af) => filterMatchesLive(r as any, af, live));
+    });
+  }, [eodFiltered, liveMode, liveActive, screenerLive.byKey]);
 
 
   useEffect(() => { setPage(0); }, [active, universe, pageSize]);
@@ -604,7 +647,9 @@ function ScreenerInner() {
     [paged],
   );
   const visibleKeys = useMemo(() => (visibleKeysJoined ? visibleKeysJoined.split(",") : []), [visibleKeysJoined]);
-  const { data: liveQuotes } = useQuotes(visibleKeys, { intervalMs: 1_000 });
+  // No interval override: useQuotes polls 1 s focused / 15 s blurred and stops
+  // off-hours. Sub-second movement arrives on the WS push tick, which is free.
+  const { data: liveQuotes } = useQuotes(visibleKeys);
   const _ticksRev_pushTicks = useTicksRevision();
   const pushTicks = useLiveTickStore.getState().ticks;
   void _ticksRev_pushTicks; // re-render on any tick flush; read fresh map above
@@ -612,6 +657,11 @@ function ScreenerInner() {
   useEffect(() => { subscribeSymbolsForTicks(visibleKeys); }, [visibleKeysJoined]);
   const liveByKey = useMemo(() => {
     const m = new Map<string, { ltp: number | null; change_pct: number | null; provider: string | null }>();
+    // Base layer: the candidate-wide live map the live filter pass used, so a
+    // filtered row always displays the value it was filtered on.
+    for (const [k, v] of screenerLive.byKey) {
+      m.set(k, { ltp: v.ltp, change_pct: v.change_pct, provider: v.provider ?? null });
+    }
     for (const q of liveQuotes?.quotes ?? []) {
       m.set(quoteKey(q.exchange, q.symbol), {
         ltp: q.ltp ?? null,
@@ -625,23 +675,22 @@ function ScreenerInner() {
       m.set(key, { ltp: tick.ltp, change_pct: tick.change_pct, provider: "kotak" });
     }
     return m;
-  }, [liveQuotes, pushTicks]);
+  }, [liveQuotes, pushTicks, screenerLive.byKey]);
   const anyPush = useMemo(() => visibleKeys.some((k) => isFreshTick(pushTicks[k])), [visibleKeys, pushTicks]);
-  const quoteProvider = (liveQuotes as any)?.provider as
-    | "kotak" | "yahoo" | "mixed" | "cache" | "none" | undefined;
-  // "push" > "kotak" (REST) > "mixed" > "yahoo/cache/closed"
-  const nowIst = new Date(Date.now() + 5.5 * 3600_000);
-  const istMin = nowIst.getUTCHours() * 60 + nowIst.getUTCMinutes();
-  const istDay = nowIst.getUTCDay();
-  const nseOpenNow = istDay >= 1 && istDay <= 5 && istMin >= 555 && istMin < 930;
-  const liveState = useMemo<"push" | "kotak" | "mixed" | "yahoo" | "cache" | "closed" | "idle">(() => {
+  const quoteProvider = (liveQuotes as any)?.provider as "kotak" | "none" | undefined;
+  // The quote route is broker-only now: it returns Kotak prices or nothing at
+  // all (never a delayed Yahoo tick or yesterday's close dressed up as live).
+  // So the only states left are push / REST-kotak / broker-offline / closed.
+  const brokerAvailable = (liveQuotes as any)?.broker_available !== false;
+  // "push" > "kotak" (REST) > "offline" (session gone) > "closed"/"idle"
+  const liveState = useMemo<"push" | "kotak" | "offline" | "closed" | "idle">(() => {
     if (visibleKeys.length === 0) return "idle";
     if (anyPush || relayAlive) return "push";
     if (quoteProvider === "kotak") return "kotak";
-    if (quoteProvider === "mixed") return "mixed";
-    if (quoteProvider === "cache") return nseOpenNow ? "cache" : "closed";
-    return nseOpenNow ? "yahoo" : "closed";
-  }, [visibleKeys.length, anyPush, relayAlive, quoteProvider, nseOpenNow]);
+    if (!nseOpenNow) return "closed";
+    return brokerAvailable ? "idle" : "offline";
+  }, [visibleKeys.length, anyPush, relayAlive, quoteProvider, brokerAvailable, nseOpenNow]);
+
 
   // Provider guardrail — the user's OWN Kotak session (account-bound actions
   // like trading from the screener). Price freshness is a separate concern
@@ -704,7 +753,7 @@ function ScreenerInner() {
           // Only overlay when the live value actually came from Kotak (push
           // tick or Kotak REST). Yahoo/cache values would silently disagree
           // with the EOD row the filter matched on, so we stay on EOD.
-          if (live && live.provider === "kotak" && live.ltp != null) return live.ltp;
+          if (live && (liveMode || live.provider === "kotak") && live.ltp != null) return live.ltp;
           return r.ltp;
         },
         cell: ({ getValue }) => fmtNum(getValue() as number | null),
@@ -713,16 +762,17 @@ function ScreenerInner() {
         header: "1D Return", id: "liveChangePct", meta: { align: "right" },
         accessorFn: (r) => {
           const live = liveByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
-          if (live && live.provider === "kotak" && live.change_pct != null) return live.change_pct;
+          if (live && (liveMode || live.provider === "kotak") && live.change_pct != null) return live.change_pct;
           return r.change_pct;
         },
         cell: ({ row }) => {
           const r = row.original;
           const live = liveByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
-          const livePct = live && live.provider === "kotak" && live.change_pct != null ? live.change_pct : null;
+          const ok = !!live && (liveMode || live.provider === "kotak");
+          const livePct = ok && live!.change_pct != null ? live!.change_pct : null;
           const pct = livePct ?? r.change_pct ?? null;
-          const abs = live && live.provider === "kotak" && live.ltp != null && live.change_pct != null
-            ? deriveChangeAbs(live.ltp, live.change_pct)
+          const abs = ok && live!.ltp != null && live!.change_pct != null
+            ? deriveChangeAbs(live!.ltp!, live!.change_pct!)
             : (r.change_abs ?? null);
           return <Return1DCell abs={abs} pct={pct} />;
         },
@@ -826,7 +876,7 @@ function ScreenerInner() {
       },
     };
     return effectiveCols.map((id) => all[id]).filter(Boolean);
-  }, [effectiveCols, latestTradeDate, liveByKey, nav]);
+  }, [effectiveCols, latestTradeDate, liveByKey, liveMode, nav]);
 
   const columnsWithActions = useMemo<ColumnDef<ScreenerRow, any>[]>(() => {
     return [
@@ -951,19 +1001,17 @@ function ScreenerInner() {
             actions={
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                 {(() => {
-                  const disc = kotakDisconnected && (liveState === "yahoo" || liveState === "cache" || liveState === "mixed" || liveState === "idle");
+                  // Broker-only quotes: when Kotak can't answer there is no
+                  // delayed substitute to label, so the chip becomes a
+                  // reconnect affordance instead of a "delayed" badge.
+                  const disc = liveState === "offline" || (kotakDisconnected && liveState === "idle");
                   const label = disc
                     ? "kotak disconnected · reconnect"
                     : liveState === "push"   ? "push · kotak"
                     : liveState === "kotak"  ? "live · kotak"
-                    : liveState === "mixed"  ? "live · mixed"
-                    : liveState === "yahoo"  ? "delayed · yahoo"
-                    : liveState === "cache"  ? "cached"
                     : liveState === "closed" ? "closed" : "idle";
                   const tone = disc ? "var(--danger, #ff6a6a)"
                     : liveState === "push" || liveState === "kotak" ? "var(--ok, #4ade80)"
-                    : liveState === "mixed" ? "var(--warn, #d29a2b)"
-                    : liveState === "yahoo" || liveState === "cache" ? "var(--danger, #ff6a6a)"
                     : "var(--text-muted)";
                   const Cmp: any = disc ? "button" : "span";
                   return (
@@ -1002,8 +1050,37 @@ function ScreenerInner() {
                         : healthSummary.tone === "warn" ? "var(--warn, #d29a2b)"
                         : "var(--danger, #ff6a6a)",
                     }} />
-                    EOD {healthSummary.eod ?? "—"} · same-session values
+                    {liveMode ? "LIVE · quote-matched values" : `EOD ${healthSummary.eod ?? "—"} · same-session values`}
                   </button>
+                )}
+                <button type="button" onClick={() => setLiveMode((v) => !v)}
+                  title={liveMode
+                    ? `Live mode: Price, 1D Return and Volume filters run on live quotes (up to ${LIVE_QUOTE_CAP} candidates) — the value filtered is the value shown. Click for settled EOD parity.`
+                    : "EOD mode: filters run on the last settled session (Tickertape parity). Click to filter on live intraday values instead."}
+                  aria-label="Toggle live filtering"
+                  aria-pressed={liveMode}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 6,
+                    padding: "3px 8px", border: "1px solid var(--edge)",
+                    background: liveMode ? "var(--accent-dim, rgba(255,184,77,0.12))" : "transparent",
+                    color: liveMode ? "var(--accent)" : "var(--text-muted)",
+                    cursor: "pointer",
+                    fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
+                    borderRadius: 2,
+                  }}>
+                  {liveMode ? "Filters · live" : "Filters · EOD"}
+                </button>
+                {liveMode && screenerLive.truncated && (
+                  <span title={`Only the first ${screenerLive.quoted} of ${screenerLive.candidates} candidates were live-quoted — add more filters to narrow the set.`}
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: 6,
+                      padding: "3px 8px", border: "1px solid var(--edge)",
+                      color: "var(--warn, #d29a2b)",
+                      fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
+                      borderRadius: 2,
+                    }}>
+                    <AlertTriangle size={11} /> live {screenerLive.quoted} of {screenerLive.candidates}
+                  </span>
                 )}
                 <button type="button" onClick={() => setHideIlliquid((v) => !v)}
                   title={hideIlliquid

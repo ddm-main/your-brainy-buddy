@@ -20,6 +20,7 @@ import { fmtNum, fmtInt, fmtPct, Return1DCell, deriveChangeAbs } from "@/compone
 import type { CorporateActionRow } from "@/lib/market/hooks";
 import { marketOpen } from "@/lib/market/hooks";
 import { PatternPanel } from "@/components/market/PatternPanel";
+import { detailToParam, type PatternDetail } from "@/lib/market/patternLabels";
 import { PatternDetailDialog, type PatternSelection } from "@/components/market/PatternDetailDialog";
 import { useBreadth, useCandles, useCorporateActions, useDepth, useFundamentals, useLatestPriceSession, useMarketNews, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores, useSyncNewsAndActions } from "@/lib/market/hooks";
 import { MarketDepthLadder, DepthToggleButton } from "@/components/market/MarketDepthLadder";
@@ -36,6 +37,7 @@ import { FullscreenShell } from "@/components/market/FullscreenShell";
 import { useNotifications } from "@/store/notificationStore";
 import { RefreshCw } from "lucide-react";
 import { currentUserId } from "@/lib/useSession";
+import { classifyFreshness, isDateOnly, shortDate, shortTime } from "@/lib/market/freshness";
 
 const STATE_STORE = "jarvis.analysis.state.v5";
 const RANGE_STORE = "jarvis.analysis.range.v1";
@@ -197,21 +199,23 @@ export default function Analysis() {
     () => studies.some((s) => (s.type === "candlePatterns" || s.type === "chartPatterns") && s.visible),
     [studies],
   );
-  const togglePatternsOnChart = useCallback((on: boolean) => {
+  const togglePatternsOnChart = useCallback((on: boolean, detail: PatternDetail = "key") => {
     setStudies((s) => {
       const rest = s.filter((x) => x.type !== "candlePatterns" && x.type !== "chartPatterns");
       if (!on) return rest;
-      // Params mirror the panel exactly (all tones, generous caps) so the
-      // count in the panel always equals what the chart draws.
+      // Params mirror the panel exactly (same tones, same significance tier)
+      // so what the panel lists is what the chart draws.
       const candle = makeStudy("candlePatterns");
       const shapes = makeStudy("chartPatterns");
+      const lvl = detailToParam(detail);
       return [
         ...rest,
-        { ...candle, params: { ...candle.params, showBull: 1, showBear: 1, showNeutral: 1, maxMarks: 400 } },
-        { ...shapes, params: { ...shapes.params, showBull: 1, showBear: 1, showNeutral: 1, maxShapes: 24 } },
+        { ...candle, params: { ...candle.params, detail: lvl, showBull: 1, showBear: 1, showNeutral: 1, maxMarks: 60 } },
+        { ...shapes, params: { ...shapes.params, detail: lvl, showBull: 1, showBear: 1, showNeutral: 1, maxShapes: 8 } },
       ];
     });
   }, []);
+
   const [chartPatternSel, setChartPatternSel] = useState<PatternSelection | null>(null);
   const visibleStudyCount = useMemo(() => studies.filter((s) => s.visible).length, [studies]);
 
@@ -370,7 +374,7 @@ export default function Analysis() {
       );
     })();
   }, [allowDelayed]);
-  const { data: candleData, isLoading, error, refetch, isFetching } = useCandles(sym, tf, exchange, { allowDelayed });
+  const { data: candleData, isLoading, error, refetch, isFetching, backfilling } = useCandles(sym, tf, exchange, { allowDelayed });
 
   const { data: scores = [] } = useStockScores({ symbol: sym, exchange, limit: 1 });
   const score = scores[0];
@@ -486,30 +490,21 @@ export default function Analysis() {
   const { data: sessionInfo } = useLatestPriceSession();
   const latestComplete = sessionInfo?.latestComplete ?? null;
   const scoreDate = score?.trade_date ? String(score.trade_date).slice(0, 10) : null;
-  const scoreBehindPipeline = !!scoreDate && !!latestComplete && scoreDate < latestComplete;
-  // Count trading sessions, not calendar days: a weekend or a pending EOD pass
-  // must never inflate the number.
-  const sessionsBehind = (() => {
-    if (!scoreBehindPipeline || !scoreDate) return null;
-    const idx = sessionInfo?.sessions.indexOf(scoreDate) ?? -1;
-    return idx > 0 ? idx : null;
-  })();
-  const vintageChip = liveIntraday
-    ? <Chip tone="ok">live</Chip>
-    : scoreDate
-      ? (
-        <span title={scoreBehindPipeline
-          ? `Scoring pipeline is behind: latest settled session is ${latestComplete}, this score is from ${scoreDate}.`
-          : `Latest settled EOD session (${scoreDate}). Today's EOD pass runs after 18:00 IST.`}>
-          <Chip tone={scoreBehindPipeline ? "warn" : "neutral"}>
-            EOD {new Date(scoreDate).toLocaleDateString([], { day: "2-digit", month: "short" })}
-            {sessionsBehind != null
-              ? ` · ${sessionsBehind} session${sessionsBehind === 1 ? "" : "s"} behind`
-              : scoreBehindPipeline ? " · behind" : ""}
-          </Chip>
-        </span>
-      )
-      : undefined;
+  // Single freshness verdict shared by A2/A3/A5/A6 — dates only surface when
+  // the row is genuinely not current.
+  const scoreFresh = classifyFreshness({
+    dataDate: scoreDate,
+    latestComplete,
+    sessions: sessionInfo?.sessions ?? [],
+    live: liveIntraday,
+  });
+  const vintageChip = scoreFresh.label
+    ? (
+      <span title={scoreFresh.title}>
+        <Chip tone={scoreFresh.tone}>{scoreFresh.label}</Chip>
+      </span>
+    )
+    : undefined;
   // When the session is closed, don't blend the last live snapshot with EOD
   // rows — read everything from the EOD score so one panel can't disagree
   // with another about which bar it is describing.
@@ -596,11 +591,17 @@ export default function Analysis() {
   const liveChartPrice = !staleLive ? (quote?.ltp ?? null) : null;
   const liveChartVolume = !staleLive ? ((quote as any)?.volume ?? null) : null;
   const quoteAsOf = !staleLive ? quote?.as_of ?? null : null;
-  const quoteVintage = quoteAsOf
-    ? `${sessionOpen ? "LIVE" : "LAST"} · ${new Date(quoteAsOf).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}`
-    : scoreDate
-      ? `EOD · ${new Date(scoreDate).toLocaleDateString([], { day: "2-digit", month: "short" })}`
-      : null;
+  // A1 provenance: a live tick shows the clock, a settled close says so without
+  // a date, and only a genuinely old quote is stamped with one. Date-only
+  // `as_of` values carry no clock, so never print a fabricated 05:30.
+  const quoteVintage = (() => {
+    if (quoteAsOf && sessionOpen && !isDateOnly(quoteAsOf)) return `LIVE · ${shortTime(quoteAsOf)}`;
+    const asOfDate = quoteAsOf ? String(quoteAsOf).slice(0, 10) : null;
+    const f = classifyFreshness({ dataDate: asOfDate ?? scoreDate, latestComplete, sessions: sessionInfo?.sessions ?? [] });
+    if (f.state === "settled") return "LAST CLOSE";
+    const d = asOfDate ?? scoreDate;
+    return d ? `LAST CLOSE · ${shortDate(d)}` : null;
+  })();
   const chartSource = candleData?.last_bar_source === "quote" || candleData?.last_bar_source === "quote_delayed"
     ? candleData.last_bar_source
     : candleData?.provider ?? null;
@@ -654,6 +655,18 @@ export default function Analysis() {
               {/* Chart surface — own stacking context so overlays inside it
                   (OHLC line, study legend) start below the ribbon. */}
               <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+              {/* History coverage: live prices are never stored, so a symbol
+                  opened for the first time may have shallow daily history.
+                  useCandles triggers a per-symbol backfill; say so. */}
+              {backfilling && (
+                <div className="hud-label" title="deepening stored daily history for this symbol"
+                  style={{
+                    position: "absolute", top: 8, right: 8, zIndex: 5,
+                    padding: "2px 8px", fontSize: 9, letterSpacing: "0.18em",
+                    color: "var(--accent)", border: "1px solid var(--accent)",
+                    background: "var(--panel-bg, rgba(0,0,0,0.6))",
+                  }}>backfilling history…</div>
+              )}
               {error ? (
 
                 <EmptyState hint={String((error as Error).message ?? "")}>chart unavailable</EmptyState>
@@ -761,6 +774,20 @@ export default function Analysis() {
         </HudPanel>
 
         <StockAlertsPanel symbol={sym} exchange={exchange} />
+
+        {(scoreFresh.state === "updating" || scoreFresh.state === "stale") && (
+          <div className="hud-panel" role="status" style={{ borderColor: "var(--warn)", padding: "8px 10px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+            <div style={{ minWidth: 0 }}>
+              <div className="hud-label" style={{ color: "var(--warn)", marginBottom: 2 }}>
+                {scoreFresh.state === "updating" ? "PIPELINE UPDATING" : "PIPELINE BEHIND"}
+              </div>
+              <div style={{ fontSize: 10, color: "var(--text-dim)" }}>
+                Settled close {shortDate(latestComplete)}; technicals still {scoreDate ? shortDate(scoreDate) : "pending"}.
+              </div>
+            </div>
+            <Btn size="sm" variant="ghost" onClick={() => nav("/market/settings")}>Status</Btn>
+          </div>
+        )}
 
         {/* AI Verdict — cached 6h per symbol. refreshInsight is one shared
             mutation instance; scope its pending state to the symbol
@@ -984,12 +1011,18 @@ export default function Analysis() {
               )}
             </span>
           </Row>
-          <Row label="Chart Patterns">
+          <Row label="Chart Patterns (daily flags)">
             <span style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end", maxWidth: "70%" }}>
               {(() => {
-                const patterns = readPatterns((liveView?.patterns ?? score?.pattern_flags) as Record<string, boolean> | undefined);
+                const flags = (liveView?.patterns ?? score?.pattern_flags) as Record<string, boolean> | undefined;
+                const patterns = readPatterns(flags);
+                // A4 scans the chart's timeframe live; this row is the stored
+                // daily read. A bare "none detected" read as a contradiction
+                // of A4 — name which set is empty instead.
                 return patterns.length === 0 ? (
-                  <span style={{ color: "var(--text-muted)", fontSize: 11 }}>none detected</span>
+                  <span style={{ color: "var(--text-muted)", fontSize: 11 }}>
+                    {flags ? "none on the daily read — see A4 for this timeframe" : "not scored yet"}
+                  </span>
                 ) : patterns.map((p) => (
                   <span key={p.key} title={p.blurb} style={{ display: "inline-flex" }}>
                     <Chip tone={p.tone}>{p.label}</Chip>

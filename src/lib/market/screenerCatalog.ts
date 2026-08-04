@@ -98,6 +98,9 @@ export interface FilterDef {
   nullMeansZero?: boolean;
   /** Optional raw field to compare while keeping a rounded display field visible. */
   valueKey?: string;
+  /** Answerable from a live quote — evaluated live when the screener is in Live mode. */
+  live?: boolean;
+
 }
 
 export const CATEGORIES: Array<{ id: FilterCategory; label: string; desc: string }> = [
@@ -127,8 +130,8 @@ export const FILTERS: FilterDef[] = [
   { id: "market_cap",         label: "Market Cap",        category: "basics",     kind: "number", unit: "Cr", min: 0, max: 2_500_000, step: 500, scope: "all" },
   { id: "sector",             label: "Sector",            category: "basics",     kind: "enum", scope: "eq" },
   { id: "industry",           label: "Industry",          category: "basics",     kind: "enum", scope: "eq" },
-  { id: "ltp",                label: "Price",             category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "tech" },
-  { id: "volume",             label: "Volume (shares)",   category: "basics",     kind: "number", min: 0, max: 100_000_000, step: 100_000, scope: "tech" },
+  { id: "ltp",                label: "Price",             category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "tech", live: true },
+  { id: "volume",             label: "Volume (shares)",   category: "basics",     kind: "number", min: 0, max: 100_000_000, step: 100_000, scope: "tech", live: true },
   { id: "pct_from_52w_high",  label: "% from 52w High",   category: "basics",     kind: "number", unit: "%", min: -100, max: 20, step: 1, scope: "tech" },
 
   // Valuation — most require positive earnings to be meaningful.
@@ -175,9 +178,9 @@ export const FILTERS: FilterDef[] = [
   { id: "above_ema_200",      label: "Above 200 EMA",     category: "technicals", kind: "boolean", scope: "tech" },
 
   // Momentum & Volume
-  { id: "change_pct",         label: "1D Return %",       category: "momentum",   kind: "number", unit: "%", min: -20, max: 20, step: 0.1, scope: "tech", valueKey: "change_pct_raw" },
+  { id: "change_pct",         label: "1D Return %",       category: "momentum",   kind: "number", unit: "%", min: -20, max: 20, step: 0.1, scope: "tech", valueKey: "change_pct_raw", live: true },
   { id: "rel_volume",         label: "Rel Volume",        category: "momentum",   kind: "number", unit: "x", min: 0, max: 20, step: 0.1, scope: "tech" },
-  { id: "vol_gt_avg30",       label: "Volume > 30D Avg Volume", category: "momentum", kind: "boolean", scope: "tech" },
+  { id: "vol_gt_avg30",       label: "Volume > 30D Avg Volume", category: "momentum", kind: "boolean", scope: "tech", live: true },
   { id: "rel_strength_nifty", label: "RS vs NIFTY",       category: "momentum",   kind: "number", unit: "%", min: -50, max: 50, step: 1, scope: "tech" },
   { id: "sector_strength",    label: "Sector Strength",   category: "momentum",   kind: "number", min: 0, max: 1, step: 0.05, scope: "tech" },
   { id: "ret_5d",             label: "5D Return",         category: "momentum",   kind: "number", unit: "%", min: -50, max: 50, step: 0.5, scope: "tech" },
@@ -216,14 +219,87 @@ export function canonicalFilterId(id: string): string {
 // The freshest trade_date across the equity subset — an ETF/debt row will never
 // have an EOD score of its own, so including them can drag `latest` backwards
 // on partial-sync days. Restrict to instrument_type == "EQ".
-export function latestTradeDateOf(rows: Array<{ trade_date?: string | null; instrument_type?: string | null }>): string | null {
+//
+// `settledOnly`: the EOD pipeline can run *during* market hours and stamp
+// today's partial candle with today's trade_date. Treating that partial date as
+// the reference session turns the exact-session gate into a filter that
+// silences every symbol not yet re-synced today. When `settledOnly` is set,
+// today's IST date is not eligible as the reference session.
+export function latestTradeDateOf(
+  rows: Array<{ trade_date?: string | null; instrument_type?: string | null }>,
+  opts?: { settledOnly?: boolean; todayIst?: string },
+): string | null {
+  const today = opts?.settledOnly
+    ? (opts.todayIst ?? new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10))
+    : null;
   let latest: string | null = null;
   for (const r of rows) {
     if (r.instrument_type !== "EQ") continue;
-    if (r.trade_date && (!latest || r.trade_date > latest)) latest = r.trade_date;
+    if (!r.trade_date) continue;
+    if (today && String(r.trade_date).slice(0, 10) >= today) continue;
+    if (!latest || r.trade_date > latest) latest = r.trade_date;
   }
   return latest;
 }
+
+/** Filters whose value can be answered by a live quote — these are evaluated
+ *  against the same live quote the results table renders, so the number you
+ *  filter on and the number you see can never disagree. */
+export const LIVE_FILTER_IDS = new Set(["ltp", "change_pct", "volume", "vol_gt_avg30"]);
+
+export interface LiveQuoteValue {
+  ltp: number | null;
+  change_pct: number | null;
+  volume?: number | null;
+  provider?: string | null;
+}
+
+/** Live-mode counterpart of filterMatches for the four live-capable filters.
+ *  Returns false when the live value needed is absent — falling back to the
+ *  settled value is exactly the display/filter drift this fixes. */
+export function filterMatchesLive(
+  row: Record<string, any>,
+  af: ActiveFilter,
+  liveInput: LiveQuoteValue | undefined,
+): boolean {
+  const filterId = canonicalFilterId(af.id);
+  const def = FILTER_BY_ID[filterId];
+  if (!def || !LIVE_FILTER_IDS.has(filterId)) return true;
+
+  // Broker-only: a live filter may only be satisfied by a Kotak Neo value.
+  // Anything else (a delayed vendor print, a stored close) is treated as
+  // "no live value" so a stale number can never pass a live screen.
+  const live = liveInput && (liveInput.provider == null
+    || liveInput.provider === "kotak"
+    || liveInput.provider === "kotak_neo")
+    ? liveInput
+    : undefined;
+
+
+  if (filterId === "vol_gt_avg30") {
+    if (af.bool === undefined) return true;
+    const v = live?.volume;
+    const avg = row.vol_avg30 == null ? null : Number(row.vol_avg30);
+    if (v == null || !Number.isFinite(Number(v)) || avg == null || !Number.isFinite(avg) || avg <= 0) return false;
+    return (Number(v) > avg) === af.bool;
+  }
+
+  const rawMin = af.min === undefined || af.min === "" || Number.isNaN(Number(af.min)) ? null : Number(af.min);
+  const rawMax = af.max === undefined || af.max === "" || Number.isNaN(Number(af.max)) ? null : Number(af.max);
+  const minNum = isOpenEndedMin(def, rawMin) ? null : rawMin;
+  const maxNum = isOpenEndedMax(def, rawMax) ? null : rawMax;
+  if (minNum === null && maxNum === null) return true;
+
+  const v = filterId === "ltp" ? live?.ltp
+    : filterId === "change_pct" ? live?.change_pct
+    : live?.volume;
+  if (v == null || !Number.isFinite(Number(v))) return false;
+  const n = Number(v);
+  if (minNum !== null && n < minNum) return false;
+  if (maxNum !== null && n > maxNum) return false;
+  return true;
+}
+
 
 
 export const FILTER_BY_ID: Record<string, FilterDef> = Object.fromEntries(FILTERS.map((f) => [f.id, f]));

@@ -2,8 +2,9 @@
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../cors.ts";
 import { requireUserId } from "../auth.ts";
+import { installServerEgressMeter, flushServerEgress } from "./serverEgress.ts";
 
-export { corsFor, preflight, requireUserId };
+export { corsFor, preflight, requireUserId, flushServerEgress };
 
 // Sentinel user_id for rows in per-user tables that are actually shared caches
 // (e.g. Yahoo fundamentals, nightly AI recommendations). Not a real user;
@@ -13,12 +14,16 @@ export { corsFor, preflight, requireUserId };
 export const SHARED_CACHE_USER_ID = "00000000-0000-0000-0000-000000000000";
 
 export function svcClient(): SupabaseClient {
+  // Count what the server itself pulls out of PostgREST — cron + edge traffic
+  // is billed identically to browser traffic and used to be unmeasured.
+  installServerEgressMeter();
   return createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     { auth: { persistSession: false } },
   );
 }
+
 
 export function jsonResponse(req: Request, body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {

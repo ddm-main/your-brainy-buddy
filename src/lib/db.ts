@@ -16,6 +16,22 @@ import { toSafeError } from "@/lib/errors";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const supabase: any = _supabase as any;
 
+// EGRESS: `statements` carries `extracted_text` — the full PDF text, by far the
+// largest column in the table. List views never render it (only `statements.get`
+// needs it), so list reads take everything except that blob.
+const STATEMENT_LIST_COLS = [
+  "id", "statement_type", "financial_account_id", "credit_card_id", "loan_id",
+  "period_start", "period_end", "statement_date", "source_email_id", "file_path",
+  "parse_status", "transactions_found", "reconciliation_status", "created_at",
+  "updated_at", "user_id", "source", "confidence", "parse_error", "content_sha256",
+  "total_due", "parser_source", "parse_confidence", "linked_bank_id",
+  "closing_balance", "parse_reason", "parser_confidence", "due_date", "min_due",
+  "ai_summary", "skeleton_id", "payment_status", "paid_on", "paid_amount",
+  "learn_attempts", "last_learn_at", "credit_limit", "bank_slug",
+  "manual_override", "manual_override_at", "manual_fields",
+].join(",");
+
+
 // Table row types are loosely typed here because the generated `Database`
 // schema for this project doesn't include the JARVIS tables yet. Runtime
 // behaviour is unchanged; callers still get object shapes returned by Supabase.
@@ -735,7 +751,7 @@ export const db = {
   statements: {
     list: async (limit = 200) => {
       const { data, error } = await supabase.from("statements")
-        .select("*, credit_cards!statements_credit_card_id_fkey(card_name, masked_number, banks(name)), financial_accounts(nickname, banks(name)), loans(lender_name), banks:linked_bank_id(name), emails:source_email_id(from_name, from_email, subject, received_at)")
+        .select(`${STATEMENT_LIST_COLS}, credit_cards!statements_credit_card_id_fkey(card_name, masked_number, banks(name)), financial_accounts(nickname, banks(name)), loans(lender_name), banks:linked_bank_id(name), emails:source_email_id(from_name, from_email, subject, received_at)`)
         .order("statement_date", { ascending: false, nullsFirst: false })
         .order("created_at", { ascending: false })
         .limit(limit);
@@ -751,7 +767,7 @@ export const db = {
     },
     latestByCard: async () => {
       const { data, error } = await supabase.from("statements")
-        .select("*").eq("statement_type", "card").not("credit_card_id", "is", null)
+        .select(STATEMENT_LIST_COLS).eq("statement_type", "card").not("credit_card_id", "is", null)
         .order("statement_date", { ascending: false, nullsFirst: false });
       if (error) throw error;
       const latest = new Map<string, any>();
@@ -760,6 +776,7 @@ export const db = {
       }
       return latest;
     },
+
     remove: async (id: string) => {
       const { error } = await supabase.from("statements").delete().eq("id", id);
       if (error) throw error;

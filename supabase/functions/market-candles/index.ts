@@ -472,7 +472,12 @@ async function loadDaily(
       }));
       // Never write back bars that already live in cold storage — that would
       // silently re-inflate market_daily_prices past the free-plan budget.
-      const persistable = archiveCutoff ? upserts.filter((u) => u.trade_date > archiveCutoff) : upserts;
+      // Today's session is still forming while the market is open: persisting
+      // it rewrites the same row on every chart poll, so leave it to the EOD
+      // pipeline and serve it live from the quote route instead.
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const settled = upserts.filter((u) => u.trade_date < todayIso || !nseSessionOpen());
+      const persistable = archiveCutoff ? settled.filter((u) => u.trade_date > archiveCutoff) : settled;
       for (let i = 0; i < persistable.length; i += 500) {
         await svc.from("market_daily_prices")
           .upsert(persistable.slice(i, i + 500), { onConflict: "symbol,exchange,trade_date" });
@@ -770,6 +775,13 @@ Deno.serve(async (req) => {
     // them back during the next broker outage.  Also persist quote-seeded and
     // delayed Yahoo bars (with a distinct source label) so a chart that opened
     // during an outage keeps showing something on the *next* cold-start too.
+    //
+    // WRITE POLICY (egress/disk): the broker is the source of truth intraday,
+    // so a chart poll must NOT rewrite the same 200 bars every few seconds.
+    // We write only (a) the first fill for a symbol/timeframe with no stored
+    // bars, or (b) CLOSED buckets newer than the newest stored bar. The
+    // forming bucket is never persisted — it is re-derived from the quote
+    // route on the next read.
     if (raw.length > 0 && (isBrokerSource(providerName) || providerName === "yahoo" || providerName === "quote" || providerName === "quote_delayed")) {
       const tail = raw.slice(-200);
       const persistSource =
@@ -781,7 +793,8 @@ Deno.serve(async (req) => {
       // used to be written at wall-clock time (…:16:16), permanently polluting
       // the bucket grid and colliding with nothing on the next upsert.
       const bucketMs = timeframeMinutes(timeframe) * 60_000;
-      const rows = tail.map((c) => ({
+      const nowMs = Date.now();
+      const allRows = tail.map((c) => ({
         symbol, exchange, timeframe,
         ts: new Date(Math.floor((c.time * 1000) / bucketMs) * bucketMs).toISOString(),
         open: c.open, high: c.high, low: c.low, close: c.close,
@@ -790,12 +803,27 @@ Deno.serve(async (req) => {
         cum_volume: null,
         source: persistSource, fetched_at: new Date().toISOString(),
       }));
+      // Only buckets whose window has fully elapsed are settled.
+      const closedRows = allRows.filter((r) => new Date(r.ts).getTime() + bucketMs <= nowMs);
 
+      if (closedRows.length > 0) {
+        const { data: newest } = await svc.from("market_intraday_prices")
+          .select("ts")
+          .eq("symbol", symbol).eq("exchange", exchange).eq("timeframe", timeframe)
+          .order("ts", { ascending: false }).limit(1).maybeSingle();
+        const newestTs = (newest as { ts?: string } | null)?.ts;
+        const rows = newestTs
+          ? closedRows.filter((r) => r.ts > newestTs)   // only the new tail
+          : closedRows;                                  // first fill for this series
 
-      svc.from("market_intraday_prices")
-        .upsert(rows, { onConflict: "symbol,exchange,timeframe,ts" })
-        .then(() => {}, () => {});
+        if (rows.length > 0) {
+          svc.from("market_intraday_prices")
+            .upsert(rows, { onConflict: "symbol,exchange,timeframe,ts" })
+            .then(() => {}, () => {});
+        }
+      }
     }
+
 
     // ---- Live forming bar -------------------------------------------------
     // Kotak has no candles API (structural, not an outage), so intraday

@@ -4455,6 +4455,7 @@ export type Database = {
           breakout_score_v2: number | null
           breakout_score_v4: number | null
           breakout_state: string | null
+          breakout_state_days: number | null
           breakout_v4_components: Json | null
           breakout_v4_coverage: Json | null
           breakout_v4_rank_pct: number | null
@@ -4469,6 +4470,8 @@ export type Database = {
           depth_imbalance: number | null
           dist_from_pivot_atr: number | null
           dist_to_resistance_atr: number | null
+          ema_cross_20_50_days: number | null
+          ema_cross_50_200_days: number | null
           ema100: number | null
           ema20: number | null
           ema200: number | null
@@ -4541,6 +4544,7 @@ export type Database = {
           vol_avg20: number | null
           vol_avg30: number | null
           vol_dryup_ratio: number | null
+          vol_dryup_ratio_base: number | null
           volume: number | null
           volume_bse: number | null
           volume_nse: number | null
@@ -4576,6 +4580,7 @@ export type Database = {
           breakout_score_v2?: number | null
           breakout_score_v4?: number | null
           breakout_state?: string | null
+          breakout_state_days?: number | null
           breakout_v4_components?: Json | null
           breakout_v4_coverage?: Json | null
           breakout_v4_rank_pct?: number | null
@@ -4590,6 +4595,8 @@ export type Database = {
           depth_imbalance?: number | null
           dist_from_pivot_atr?: number | null
           dist_to_resistance_atr?: number | null
+          ema_cross_20_50_days?: number | null
+          ema_cross_50_200_days?: number | null
           ema100?: number | null
           ema20?: number | null
           ema200?: number | null
@@ -4662,6 +4669,7 @@ export type Database = {
           vol_avg20?: number | null
           vol_avg30?: number | null
           vol_dryup_ratio?: number | null
+          vol_dryup_ratio_base?: number | null
           volume?: number | null
           volume_bse?: number | null
           volume_nse?: number | null
@@ -4697,6 +4705,7 @@ export type Database = {
           breakout_score_v2?: number | null
           breakout_score_v4?: number | null
           breakout_state?: string | null
+          breakout_state_days?: number | null
           breakout_v4_components?: Json | null
           breakout_v4_coverage?: Json | null
           breakout_v4_rank_pct?: number | null
@@ -4711,6 +4720,8 @@ export type Database = {
           depth_imbalance?: number | null
           dist_from_pivot_atr?: number | null
           dist_to_resistance_atr?: number | null
+          ema_cross_20_50_days?: number | null
+          ema_cross_50_200_days?: number | null
           ema100?: number | null
           ema20?: number | null
           ema200?: number | null
@@ -4783,6 +4794,7 @@ export type Database = {
           vol_avg20?: number | null
           vol_avg30?: number | null
           vol_dryup_ratio?: number | null
+          vol_dryup_ratio_base?: number | null
           volume?: number | null
           volume_bse?: number | null
           volume_nse?: number | null
@@ -5944,6 +5956,36 @@ export type Database = {
           },
         ]
       }
+      system_egress_daily: {
+        Row: {
+          bytes: number
+          day: string
+          id: string
+          requests: number
+          route: string
+          source: string
+          updated_at: string
+        }
+        Insert: {
+          bytes?: number
+          day?: string
+          id?: string
+          requests?: number
+          route?: string
+          source: string
+          updated_at?: string
+        }
+        Update: {
+          bytes?: number
+          day?: string
+          id?: string
+          requests?: number
+          route?: string
+          source?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       system_maintenance_log: {
         Row: {
           duration_ms: number | null
@@ -5978,7 +6020,17 @@ export type Database = {
         Row: {
           checked_at: string
           db_bytes: number
+          db_reported_bytes: number | null
+          egress_breakdown: Json
+          egress_budget_bytes: number
           egress_bytes: number
+          egress_cycle_day: number
+          egress_limit_bytes: number
+          egress_reported_at: string | null
+          egress_reported_bytes: number | null
+          egress_synced_at: string | null
+          egress_window_end: string | null
+          egress_window_start: string | null
           id: boolean
           last_level: string
           low_bandwidth: boolean
@@ -5988,7 +6040,17 @@ export type Database = {
         Insert: {
           checked_at?: string
           db_bytes?: number
+          db_reported_bytes?: number | null
+          egress_breakdown?: Json
+          egress_budget_bytes?: number
           egress_bytes?: number
+          egress_cycle_day?: number
+          egress_limit_bytes?: number
+          egress_reported_at?: string | null
+          egress_reported_bytes?: number | null
+          egress_synced_at?: string | null
+          egress_window_end?: string | null
+          egress_window_start?: string | null
           id?: boolean
           last_level?: string
           low_bandwidth?: boolean
@@ -5998,7 +6060,17 @@ export type Database = {
         Update: {
           checked_at?: string
           db_bytes?: number
+          db_reported_bytes?: number | null
+          egress_breakdown?: Json
+          egress_budget_bytes?: number
           egress_bytes?: number
+          egress_cycle_day?: number
+          egress_limit_bytes?: number
+          egress_reported_at?: string | null
+          egress_reported_bytes?: number | null
+          egress_synced_at?: string | null
+          egress_window_end?: string | null
+          egress_window_start?: string | null
           id?: boolean
           last_level?: string
           low_bandwidth?: boolean
@@ -6900,6 +6972,7 @@ export type Database = {
       }
     }
     Functions: {
+      apply_egress_governor: { Args: never; Returns: Json }
       archive_coverage: { Args: never; Returns: Json }
       claim_market_fundamentals_sync: {
         Args: { _limit?: number }
@@ -6914,6 +6987,7 @@ export type Database = {
         }[]
       }
       db_size_report: { Args: never; Returns: Json }
+      egress_cycle_rollup: { Args: never; Returns: Json }
       evaluate_score_history_forward: {
         Args: { _limit?: number }
         Returns: number
@@ -7103,11 +7177,23 @@ export type Database = {
               symbol: string
             }[]
           }
+      promote_market_eod_session: {
+        Args: { _trade_date?: string }
+        Returns: {
+          eligible_rows: number
+          promoted_rows: number
+          remaining_gap: number
+          session_date: string
+          skipped_rows: number
+          source_rows: number
+        }[]
+      }
       prune_batched: { Args: { _sql: string }; Returns: number }
       prune_old_data: { Args: { _aggressive?: boolean }; Returns: Json }
       purge_old_jarvis_interactions: { Args: never; Returns: undefined }
       purge_old_ticker_trace: { Args: never; Returns: undefined }
       quota_report: { Args: never; Returns: Json }
+      record_egress: { Args: { _rows: Json; _source: string }; Returns: number }
       refresh_market_screener_snapshot: { Args: never; Returns: number }
       refresh_market_top_movers: { Args: never; Returns: undefined }
       refresh_score_distribution: { Args: { _model?: string }; Returns: number }
@@ -7121,6 +7207,10 @@ export type Database = {
       run_daily_maintenance: { Args: never; Returns: Json }
       score_history_coverage: { Args: { _model?: string }; Returns: Json }
       seed_default_indices: { Args: { _uid: string }; Returns: undefined }
+      set_quota_reported: {
+        Args: { _db_bytes?: number; _egress_bytes?: number }
+        Returns: Json
+      }
       stamp_score_history_ranks: { Args: { _model?: string }; Returns: number }
       verify_market_cron_secret: { Args: { _secret: string }; Returns: boolean }
     }

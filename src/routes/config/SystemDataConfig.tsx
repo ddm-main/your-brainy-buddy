@@ -55,7 +55,10 @@ export default function SystemDataConfig() {
   const { data: pipeline, isLoading } = useQuery({
     queryKey: ["market", "pipeline-status"],
     queryFn: async () => {
-      const { data, error } = await (supabase as any).from("market_pipeline_status").select("*").maybeSingle();
+      const { data, error } = await (supabase as any).from("market_pipeline_status")
+        .select("active_stocks,fundamentals_covered,fundamentals_failed,fundamentals_last_updated_at,scores_last_trade_date,scores_last_count,token_covered,token_coverage_pct")
+        .maybeSingle();
+
       if (error) throw error;
       return data as Pipeline;
     },

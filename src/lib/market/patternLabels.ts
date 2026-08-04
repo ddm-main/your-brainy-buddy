@@ -216,3 +216,66 @@ export function isBearish(p: PatternLabel): boolean {
 /** Key → metadata, for tooltips on per-bar marks and chart structures. */
 export const REGISTRY_BY_KEY: Record<string, PatternLabel> =
   Object.fromEntries(REGISTRY.map((p) => [p.key, p]));
+
+// ------------------------------------------------------------- significance
+// Pattern detectors fire constantly on intraday data. Drawing every hit makes
+// the chart unreadable (labels stacked on nearly every candle), so each key is
+// graded: `key` = decisive reversal/continuation reads worth a label,
+// `context` = supporting reads worth a dot, `noise` = statistical filler
+// (inside bars, NR4/NR7, gaps, swing labels) that is never drawn by default.
+export type PatternTier = "key" | "context" | "noise";
+export type PatternDetail = "key" | "context" | "all";
+
+// `key` is deliberately small: a read only qualifies if it is a standalone,
+// tradeable reversal / continuation signal. Anything that merely *describes*
+// the bar (wick shapes without follow-through, inside bars, gaps, swing
+// labels) is context or noise, no matter how often it fires.
+const KEY_TIER = new Set<string>([
+  // candlestick reversals that actually matter
+  "bullish_engulfing", "bearish_engulfing", "hammer", "shooting_star",
+  "hanging_man", "morning_star", "evening_star",
+  "three_white_soldiers", "three_black_crows",
+  "piercing_line", "dark_cloud", "three_outside_up", "three_outside_down",
+  // major structures
+  "cup_and_handle_triggered", "cup_and_handle", "inverse_cup_and_handle",
+  "head_shoulders", "inverse_head_shoulders", "double_top", "double_bottom",
+  "triple_top", "triple_bottom", "ascending_triangle", "descending_triangle",
+  "symmetrical_triangle", "rising_wedge", "falling_wedge",
+  "flag", "bear_flag", "rectangle", "rounded_top", "rounded_bottom",
+  "wyckoff_accumulation", "wyckoff_distribution",
+  "golden_cross", "death_cross", "trendline_break",
+  "bos_up", "bos_down", "choch_up", "choch_down",
+]);
+
+const NOISE_TIER = new Set<string>([
+  "doji", "dragonfly_doji", "gravestone_doji", "spinning_top",
+  "inside_bar", "outside_bar", "nr4", "nr7",
+  "marubozu_bull", "marubozu_bear", "bullish_harami", "bearish_harami",
+  "inverted_hammer", "tweezer_top", "tweezer_bottom", "gap_up", "gap_down",
+  "higher_high", "higher_low", "lower_high", "lower_low",
+  "fvg_up", "fvg_down", "order_block_bull", "order_block_bear",
+  "tasuki_gap_bull", "tasuki_gap_bear",
+]);
+
+export function tierOf(key: string): PatternTier {
+  if (KEY_TIER.has(key)) return "key";
+  if (NOISE_TIER.has(key)) return "noise";
+  return "context";
+}
+
+/** Whether a pattern key survives the chosen detail level. */
+export function tierAllows(key: string, detail: PatternDetail): boolean {
+  const t = tierOf(key);
+  if (detail === "all") return true;
+  if (detail === "context") return t !== "noise";
+  return t === "key";
+}
+
+/** Numeric detail param used by the chart studies (1 = key … 3 = all). */
+export const DETAIL_LEVELS: PatternDetail[] = ["key", "context", "all"];
+export function detailFromParam(n: number | undefined): PatternDetail {
+  return DETAIL_LEVELS[Math.min(2, Math.max(0, Math.round((n ?? 1) - 1)))] ?? "key";
+}
+export function detailToParam(d: PatternDetail): number {
+  return DETAIL_LEVELS.indexOf(d) + 1;
+}

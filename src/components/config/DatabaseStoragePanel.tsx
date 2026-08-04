@@ -8,23 +8,38 @@ import { Btn, Chip } from "@/components/hud/HudControls";
 import { supabase } from "@/integrations/supabase/client";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { Trash2, Archive } from "lucide-react";
+import { Trash2, Archive, RefreshCw } from "lucide-react";
 
 const SAFE_PCT = 80;
 
 type QuotaReport = {
   db_bytes: number;
+  db_own_bytes?: number;
+  db_reported_bytes?: number | null;
   db_limit_bytes: number;
   storage_bytes: number;
   storage_limit_bytes: number;
+  mau?: number;
+  mau_limit?: number;
+  cycle_start?: string;
+  egress_bytes?: number | string;
+  egress_reported_bytes?: number | string | null;
+  egress_budget_bytes?: number | string;
+  egress_limit_bytes?: number | string;
+  egress_sources?: { source: string; route: string; bytes: number | string; requests: number | string }[];
   tables: { name: string; bytes: number }[];
   quota: {
     egress_bytes?: number;
+    egress_breakdown?: Record<string, number | string> | null;
+    egress_window_start?: string | null;
+    egress_window_end?: string | null;
+    egress_synced_at?: string | null;
     low_bandwidth?: boolean;
     last_level?: string;
     checked_at?: string;
   } | null;
 };
+
 
 type Coverage = {
   archived: number;
@@ -43,14 +58,18 @@ function human(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function count(n: number): string {
+  return n.toLocaleString();
+}
+
 function toneFor(pct: number): "ok" | "warn" | "err" {
   if (pct >= SAFE_PCT) return "err";
   if (pct >= SAFE_PCT - 15) return "warn";
   return "ok";
 }
 
-function QuotaBar({ label, used, limit, suffix }: {
-  label: string; used: number; limit: number; suffix?: string;
+function QuotaBar({ label, used, limit, suffix, format = human }: {
+  label: string; used: number; limit: number; suffix?: string; format?: (n: number) => string;
 }) {
   const pct = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
   const tone = toneFor(pct);
@@ -60,7 +79,7 @@ function QuotaBar({ label, used, limit, suffix }: {
         <span className="hud-label" style={{ color: "var(--text-muted)" }}>{label}</span>
         {suffix ? <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{suffix}</span> : null}
         <span style={{ marginLeft: "auto", fontFamily: "var(--font-hud)", color: "var(--text)" }}>
-          {human(used)} / {human(limit)}
+          {format(used)} / {format(limit)}
         </span>
         <Chip tone={tone}>{pct}%</Chip>
       </div>
@@ -79,7 +98,7 @@ function QuotaBar({ label, used, limit, suffix }: {
 export default function DatabaseStoragePanel() {
   const push = useUi((s) => s.push);
   const qc = useQueryClient();
-  const [busy, setBusy] = useState<null | "clean" | "archive">(null);
+  const [busy, setBusy] = useState<null | "clean" | "archive" | "egress">(null);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -137,15 +156,74 @@ export default function DatabaseStoragePanel() {
     }
   };
 
+  // Egress is measured by the app itself (src/lib/egressMeter.ts) and rolled
+  // up here on demand, in addition to the scheduled roll-up. `invoke` hides
+  // the response body behind a generic "Failed to send a request" error, so
+  // read the real message out of the error context when there is one.
+  const syncEgress = async () => {
+    if (busy) return;
+    setBusy("egress");
+    try {
+      // The egress sync rides on `market-selftest` — this project has no free
+      // edge-function slots left for a dedicated function.
+      const { data, error } = await supabase.functions.invoke("market-selftest", {
+        body: { action: "usage-egress" },
+      });
+      if (error) {
+        const ctx = (error as any)?.context;
+        let detail = "";
+        if (ctx instanceof Response) {
+          const text = await ctx.text().catch(() => "");
+          try { detail = JSON.parse(text)?.error ?? text; } catch { detail = text; }
+          if (ctx.status === 404) detail = "the market-selftest function is not deployed";
+        }
+
+        throw new Error(detail ? `Egress sync failed: ${detail}` : (error as Error).message);
+      }
+      if ((data as any)?.ok === false) throw new Error((data as any).error ?? "usage sync failed");
+      push("Egress figure refreshed", "ok");
+      await qc.invalidateQueries({ queryKey: ["system"] });
+    } catch (e) {
+      push(toSafeError(e, "Egress sync failed").message, "err");
+    } finally {
+      if (mounted.current) setBusy(null);
+    }
+  };
+
+
   const dbBytes = report?.db_bytes != null ? Number(report.db_bytes) : 0;
+  const dbReported = report?.db_reported_bytes != null ? Number(report.db_reported_bytes) : null;
   const dbLimit = report?.db_limit_bytes != null ? Number(report.db_limit_bytes) : 500 * 1024 * 1024;
   const storeBytes = report?.storage_bytes != null ? Number(report.storage_bytes) : 0;
   const storeLimit = report?.storage_limit_bytes != null ? Number(report.storage_limit_bytes) : 1024 ** 3;
+  const mau = Number(report?.mau ?? 0);
+  const mauLimit = Number(report?.mau_limit ?? 50_000);
   const dbPct = dbLimit > 0 ? Math.round((dbBytes / dbLimit) * 100) : 0;
   const storePct = storeLimit > 0 ? Math.round((storeBytes / storeLimit) * 100) : 0;
-  const worst = Math.max(dbPct, storePct);
+
+  // Egress: measured client-side, rolled up per billing cycle. Percentages are
+  // against our self-imposed 4 GB budget, not the 5 GB hard cap.
+  const egressBytes = Number(report?.egress_bytes ?? 0);
+  const egressReported = report?.egress_reported_bytes != null ? Number(report.egress_reported_bytes) : null;
+  const egressBudget = Number(report?.egress_budget_bytes ?? 4 * 1024 ** 3);
+  const egressCap = Number(report?.egress_limit_bytes ?? 5 * 1024 ** 3);
+  const egressSyncedAt = report?.quota?.egress_synced_at ?? null;
+  const egressPct = egressBudget > 0 ? Math.round((egressBytes / egressBudget) * 100) : 0;
+  const egressSplit = Object.entries(report?.quota?.egress_breakdown ?? {})
+    .map(([k, v]) => [k, Number(v)] as const)
+    .filter(([, v]) => v > 0)
+    .sort((a, b) => b[1] - a[1]);
+  const egressSources = (report?.egress_sources ?? [])
+    .map((s) => ({ ...s, bytes: Number(s.bytes), requests: Number(s.requests) }))
+    .slice(0, 6);
+  const cycle = report?.quota?.egress_window_start && report?.quota?.egress_window_end
+    ? `${report.quota.egress_window_start} → ${report.quota.egress_window_end}`
+    : null;
+
+  const worst = Math.max(dbPct, storePct, egressSyncedAt ? egressPct : 0);
   const tables = (report?.tables ?? []).slice(0, 6);
   const biggest = tables[0]?.bytes ?? 1;
+
 
   const archivePct = coverage?.universe ? Math.min(100, Math.round((coverage.archived / coverage.universe) * 100)) : 0;
   const fullyArchived = !!coverage && coverage.universe > 0 && coverage.archived >= coverage.universe;
@@ -180,7 +258,11 @@ export default function DatabaseStoragePanel() {
       bodyClass="overflow-visible"
       actions={
         <span style={{ display: "flex", gap: 6 }}>
+          <Btn size="sm" onClick={syncEgress} disabled={busy !== null}>
+            <RefreshCw size={11} style={{ marginRight: 4 }} />{busy === "egress" ? "syncing…" : "Egress"}
+          </Btn>
           <Btn size="sm" onClick={archiveNow} disabled={busy !== null}>
+
             <Archive size={11} style={{ marginRight: 4 }} />{busy === "archive" ? "archiving…" : "Archive"}
           </Btn>
           <Btn size="sm" onClick={runNow} disabled={busy !== null}>
@@ -189,13 +271,55 @@ export default function DatabaseStoragePanel() {
         </span>
       }
     >
-      <QuotaBar label="Database" used={dbBytes} limit={dbLimit} />
+      <QuotaBar
+        label="Disk size"
+        used={dbBytes}
+        limit={dbLimit}
+        suffix={dbReported != null ? `Supabase reports ${human(dbReported)}` : "all databases on the instance"}
+      />
       <QuotaBar
         label="File storage"
         used={storeBytes}
         limit={storeLimit}
         suffix={coverage ? `${coverage.archived_bars.toLocaleString()} bars archived` : undefined}
       />
+      <QuotaBar label="Monthly active users" used={mau} limit={mauLimit} format={count} suffix="signed in this cycle" />
+
+      {egressSyncedAt ? (
+        <>
+          <QuotaBar
+            label="Egress"
+            used={egressBytes}
+            limit={egressBudget}
+            suffix={`measured · budget of ${human(egressBudget)} · cap ${human(egressCap)}${cycle ? ` · ${cycle}` : ""}`}
+          />
+          <div style={{ marginTop: -2, marginBottom: 6, display: "flex", gap: 8, flexWrap: "wrap", fontSize: 10, color: "var(--text-muted)" }}>
+            {egressSplit.length
+              ? egressSplit.map(([k, v]) => <span key={k}>{k} {human(v)}</span>)
+              : <span>no per-type split reported</span>}
+            {egressReported != null ? <span>Supabase reports {human(egressReported)}</span> : null}
+            <span style={{ marginLeft: "auto" }}>synced {new Date(egressSyncedAt).toLocaleString()}</span>
+          </div>
+          {egressSources.length ? (
+            <div style={{ marginBottom: 8, display: "flex", flexDirection: "column", gap: 1 }}>
+              {egressSources.map((s) => (
+                <div key={`${s.source}/${s.route}`} style={rowStyle}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {s.source} · {s.route || "—"} · {s.requests.toLocaleString()} req
+                  </span>
+                  <span style={{ fontFamily: "var(--font-hud)", color: "var(--text)" }}>{human(s.bytes)}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </>
+      ) : (
+        <div style={{ marginBottom: 6, fontSize: 10, color: "var(--text-muted)" }}>
+          <span className="hud-label" style={{ color: "var(--text-muted)" }}>Egress</span>{" "}
+          not rolled up yet — the app measures its own egress as you browse; press Egress to total it up.
+        </div>
+      )}
+
 
       {coverage ? (
         <div style={{ marginTop: 2, marginBottom: 6 }}>

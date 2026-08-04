@@ -21,6 +21,31 @@ import type { IndicatorSnapshot, WeeklySnapshot } from "../_shared/market/indica
 import { yahooChartRetry } from "../_shared/market/yahooClient.ts";
 import { getServiceProvider } from "../_shared/market/provider.ts";
 
+// EGRESS: every column the aggregate pass below actually reads off a score row.
+// `market_stock_scores` has 123 columns (~8.5 KB of JSON a row); this list is
+// ~55 and drops the jsonb blobs the pass never touches (`score_components`,
+// `data_provenance`, coverage maps), cutting a full pass from ~25 MB to ~2 MB.
+const SCORE_AGG_COLUMNS = [
+  "symbol", "exchange", "trade_date", "sector", "close", "change_pct", "volume",
+  "high_52w", "low_52w", "pct_from_52w_high", "bars_available",
+  "ema20", "ema50", "ema100", "ema200", "above_ema200",
+  "ema_cross_20_50_days", "ema_cross_50_200_days",
+  "rsi14", "adx14", "atr14", "atr_pct", "atr_contracting", "mfi14",
+  "macd", "macd_signal", "macd_hist", "macd_hist_rising",
+  "bb_upper", "bb_lower", "bb_width", "bb_percent_b", "bb_squeeze",
+  "supertrend_dir", "obv_slope_20", "vwap", "delivery_pct",
+  "vol_avg20", "vol_avg30", "rel_volume", "rel_volume_median30",
+  "vol_dryup_ratio", "vol_dryup_ratio_base",
+  "ret_5d", "ret_21d", "ret_55d", "rs_percentile",
+  "rolling_high_20", "rolling_high_20_touches", "rolling_high_20_touch_quality", "rolling_high_55",
+  "pivot_level", "pivot_touches", "pivot_touch_quality", "close_in_range_pct",
+  "base_depth_pct", "base_duration_days", "base_tightness", "higher_lows", "near_resistance",
+  "resistance_level", "resistance_above", "resistance_fallback", "support_level", "support_fallback",
+  "breakout_state", "breakout_state_days", "breakout_freshness_days", "breakout_level_cleared",
+  "pattern_flags", "raw_buckets",
+  "weekly_bars", "weekly_close", "weekly_ema20", "weekly_rsi14", "weekly_trend_up", "weekly_higher_lows",
+].join(",");
+
 // v2 fix: `atrContracting` and `macdHistRising` used to be read from yesterday's
 // `score_components`, which is circular (score → components → tomorrow's score).
 // v4 fix: they were then *proxied* here (`bb_width < 0.06`, `macd_hist > 0`),
@@ -221,10 +246,20 @@ Deno.serve(async (req) => {
     // Pull all scored rows, then join sector/is_active/market_cap from
     // market_stocks in-memory (no FK between the two tables, so PostgREST
     // embeds fail).
+    //
+    // EGRESS: this pass used to page `market_stock_scores` with `select("*")` —
+    // 123 columns, ~2 990 rows, a 25 MB table — for *every* session in the
+    // table, then throw away the stale ones in memory. Edge-function reads go
+    // out through the public PostgREST URL, so each run billed ~25-30 MB of
+    // egress and a busy pipeline day alone accounted for hundreds of MB. Now:
+    // an explicit projection of only the columns read below, and a
+    // server-side `trade_date` filter so only the latest session crosses the
+    // wire (~2 MB a run).
     const stockMeta = new Map<string, { sector: string | null; is_active: boolean; market_cap: number | null }>();
     for (let from = 0; ; from += 1000) {
       const { data, error } = await svc.from("market_stocks")
         .select("symbol,exchange,sector,is_active,market_cap")
+        .eq("is_active", true)
         .range(from, from + 999);
       if (error) return errorResponse(req, error.message, 500);
       for (const d of data ?? []) {
@@ -233,11 +268,28 @@ Deno.serve(async (req) => {
       if (!data || data.length < 1000) break;
     }
 
+    // Only the latest session may feed breadth/sector/RS aggregates and the
+    // breakout tracker. Symbols whose EOD sync failed keep an older
+    // trade_date; including them would mix stale closes into today's numbers
+    // and open tracker episodes dated today with a stale entry price. Resolve
+    // that date with a one-row read instead of downloading every session.
+    const { data: newest, error: newestErr } = await svc.from("market_stock_scores")
+      .select("trade_date").not("trade_date", "is", null)
+      .order("trade_date", { ascending: false }).limit(1).maybeSingle();
+    if (newestErr) return errorResponse(req, newestErr.message, 500);
+    const latestTradeDate: string | null = (newest?.trade_date as string | undefined) ?? null;
+    if (!latestTradeDate) return jsonResponse(req, { ok: true, note: "no trade data yet — run market-pipeline-eod first" });
+
+    const { count: staleCount } = await svc.from("market_stock_scores")
+      .select("symbol", { count: "exact", head: true })
+      .not("trade_date", "is", null).neq("trade_date", latestTradeDate);
+    const staleSkipped = staleCount ?? 0;
+
     const rows: any[] = [];
     for (let from = 0; ; from += 1000) {
       const { data, error } = await svc.from("market_stock_scores")
-        .select("*")
-        .not("trade_date", "is", null)
+        .select(SCORE_AGG_COLUMNS)
+        .eq("trade_date", latestTradeDate)
         .range(from, from + 999);
       if (error) return errorResponse(req, error.message, 500);
       for (const d of data ?? []) {
@@ -247,22 +299,6 @@ Deno.serve(async (req) => {
       }
       if (!data || data.length < 1000) break;
     }
-    if (rows.length === 0) return jsonResponse(req, { ok: true, note: "no trade data yet — run market-pipeline-eod first" });
-
-    // Only the latest session may feed breadth/sector/RS aggregates and the
-    // breakout tracker. Symbols whose EOD sync failed keep an older
-    // trade_date; including them would mix stale closes into today's numbers
-    // and open tracker episodes dated today with a stale entry price.
-    let latestTradeDate: string | null = null;
-    for (const r of rows) {
-      const td = typeof r.trade_date === "string" ? r.trade_date : null;
-      if (td && (latestTradeDate == null || td > latestTradeDate)) latestTradeDate = td;
-    }
-    const totalRows = rows.length;
-    const freshRows = latestTradeDate ? rows.filter((r) => r.trade_date === latestTradeDate) : rows;
-    const staleSkipped = totalRows - freshRows.length;
-    rows.length = 0;
-    rows.push(...freshRows);
     if (rows.length === 0) return jsonResponse(req, { ok: true, note: "no rows for the latest trade date", stale_skipped: staleSkipped });
 
     // ONE clock for the whole pass. Everything below (breadth, sector
@@ -769,7 +805,8 @@ Deno.serve(async (req) => {
     const history: {
       written: number; evaluated: number; failed: number;
       raw_detail: number; error: string | null; band_source: string;
-    } = { written: 0, evaluated: 0, failed: 0, raw_detail: 0, error: null, band_source: "absolute" };
+      expected: number; complete: boolean;
+    } = { written: 0, evaluated: 0, failed: 0, raw_detail: 0, error: null, band_source: "absolute", expected: 0, complete: false };
     try {
       if (latestTradeDate) {
         // Bands are relative to the day's own liquid distribution (the same
@@ -815,20 +852,38 @@ Deno.serve(async (req) => {
         history.raw_detail = histRows.filter((r) => r.raw_buckets != null).length;
         // Write failures used to be swallowed (`if (!error)`), which is how
         // raw_buckets stayed NULL on every stored row while the run reported ok.
-        for (let i = 0; i < histRows.length; i += 500) {
-          const chunk = histRows.slice(i, i + 500);
-          const { error } = await svc.from("market_score_history")
-            .upsert(chunk, { onConflict: "symbol,exchange,trade_date,model" });
-          if (error) {
+        // A single 500-row chunk failing used to drop 500 snapshots on the
+        // floor and leave the session with a partial history (Aug 03 landed
+        // 102 of ~2,545 rows). Chunks are smaller, retried once, and then
+        // split in half so one poison row can't take a whole batch with it.
+        const writeChunk = async (chunk: typeof histRows, depth = 0): Promise<void> => {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const { error } = await svc.from("market_score_history")
+              .upsert(chunk, { onConflict: "symbol,exchange,trade_date,model" });
+            if (!error) { history.written += chunk.length; return; }
+            if (attempt === 0) { await new Promise((r) => setTimeout(r, 400)); continue; }
+            if (chunk.length > 1 && depth < 6) {
+              const mid = Math.floor(chunk.length / 2);
+              await writeChunk(chunk.slice(0, mid), depth + 1);
+              await writeChunk(chunk.slice(mid), depth + 1);
+              return;
+            }
             history.failed += chunk.length;
             if (!history.error) {
               history.error = [error.message, (error as { details?: string }).details]
                 .filter(Boolean).join(" | ");
             }
-          } else {
-            history.written += chunk.length;
+            return;
           }
+        };
+        for (let i = 0; i < histRows.length; i += 200) {
+          await writeChunk(histRows.slice(i, i + 200));
         }
+        // Coverage assertion: the run is only "complete" when nearly every
+        // scored symbol got a snapshot. Reported so a partial pass can't look
+        // healthy just because one row landed.
+        history.expected = histRows.length;
+        history.complete = histRows.length > 0 && history.written >= Math.floor(histRows.length * 0.98);
 
         // Forward returns, calibration and the band distribution are NOT
         // computed here any more. The old inline loop wrote *today's* return

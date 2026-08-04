@@ -43,9 +43,25 @@ function justClosedWindow(): boolean {
 // Every market hook used the number form, so a tab mounted before 09:15 kept
 // polling at the closed-market cadence (e.g. 120 s) for the whole session.
 // This helper keeps the cadence honest without needing a re-render.
-export function liveInterval(openMs: number, closedMs: number | false, justClosedMs?: number) {
-  return () => (marketOpen() ? openMs : justClosedWindow() ? (justClosedMs ?? closedMs) : closedMs);
+//
+// EGRESS: a *visible but unfocused* window (second monitor, split screen) is
+// not being watched tick-by-tick, yet it used to poll at the full open-market
+// rate. Anything faster than BLURRED_MIN_MS backs off to it while blurred.
+const BLURRED_MIN_MS = 15_000;
+
+export function windowFocused(): boolean {
+  if (typeof document === "undefined") return true;
+  if (document.visibilityState !== "visible") return false;
+  return typeof document.hasFocus === "function" ? document.hasFocus() : true;
 }
+
+export function liveInterval(openMs: number, closedMs: number | false, justClosedMs?: number) {
+  return () => {
+    if (marketOpen()) return windowFocused() ? openMs : Math.max(BLURRED_MIN_MS, openMs);
+    return justClosedWindow() ? (justClosedMs ?? closedMs) : closedMs;
+  };
+}
+
 
 export function useMarketSettings() {
   return useQuery({
@@ -175,10 +191,16 @@ export function useMarketStatus() {
 }
 
 export function useQuotes(keys: string[], opts?: { intervalMs?: number }) {
-  // Callers can override the market-hours REST poll interval, but the default
-  // is a trading-app cadence: one Kotak-primary quote batch per second.
-  // Off-hours we keep the just-closed short window then stop.
+  // Broker-only live prices, as fast as the broker will answer: 1 s while the
+  // window is focused. Only *on-screen* symbol sets use this hook (open stock,
+  // watchlist, holdings, the screener's current page), so the 1 s cadence is
+  // bounded by what you can actually see. A visible-but-unfocused window backs
+  // off to 15 s via liveInterval, and off-hours the poll stops entirely.
+  // Sub-second movement still arrives on the free Kotak WS push tick; this
+  // REST loop is the gap-filler. Server-side coalescing in quoteCache means N
+  // subscribers to the same symbol still cost one upstream broker call.
   const openInterval = opts?.intervalMs ?? 1_000;
+
   return useQuery({
     queryKey: ["market", "quotes", [...keys].sort().join(",")],
     queryFn: () => callMarketFn<{ quotes: Quote[]; source: string; provider?: string }>("market-quotes", { symbols: keys }),
@@ -192,7 +214,7 @@ export function useQuotes(keys: string[], opts?: { intervalMs?: number }) {
     // an Infinity staleTime (and focus/reconnect refetches disabled) for the
     // whole session. Short stale window always; off-hours the interval is
     // already false so nothing polls anyway.
-    staleTime: Math.max(500, openInterval - 200),
+    staleTime: Math.max(250, openInterval - 200),
     refetchOnWindowFocus: true,
     refetchOnReconnect: true,
     // Keep the last successful batch visible while a new fetch is in flight
@@ -209,7 +231,11 @@ const QUOTE_BATCH_SIZE = 200;
 // rate limits this app is already tight against (see the "quotes degraded"
 // banner elsewhere). Each chunk is its own react-query entry via useQueries
 // so chunks can fail/retry independently without invalidating the rest.
-export function useQuotesBatched(keys: string[], chunkSize = QUOTE_BATCH_SIZE) {
+export function useQuotesBatched(
+  keys: string[],
+  chunkSize = QUOTE_BATCH_SIZE,
+  opts?: { refetchIntervalMs?: number | false; staleTimeMs?: number },
+) {
   const sortedKeys = [...keys].sort();
   const chunks: string[][] = [];
   for (let i = 0; i < sortedKeys.length; i += chunkSize) chunks.push(sortedKeys.slice(i, i + chunkSize));
@@ -219,10 +245,12 @@ export function useQuotesBatched(keys: string[], chunkSize = QUOTE_BATCH_SIZE) {
       queryKey: ["market", "quotes-batch", chunk.join(",")],
       queryFn: () => callMarketFn<{ quotes: Quote[]; source: string }>("market-quotes", { symbols: chunk }),
       enabled: chunk.length > 0,
-      staleTime: 20_000,
-      refetchInterval: false as const,
+      staleTime: opts?.staleTimeMs ?? 20_000,
+      refetchInterval: (opts?.refetchIntervalMs ?? false) as number | false,
     })),
   });
+
+
 
   const quotes: Quote[] = [];
   let anyFailed = false;
@@ -470,7 +498,7 @@ export function useBreadth() {
 // the whole market. Individual symbols get a daily row written ad-hoc while a
 // chart is open, so `max(trade_date)` alone reports "today" off a handful of
 // unsettled rows.
-const COMPLETE_SESSION_MIN_ROWS = 500;
+const COMPLETE_SESSION_MIN_ROWS = 2000;
 
 export interface LatestPriceSessionInfo {
   /** Newest trade_date whose NSE row count looks like a full bhavcopy. */
@@ -481,9 +509,9 @@ export interface LatestPriceSessionInfo {
   partialLatest: string | null;
 }
 
-async function countRowsForSession(date: string): Promise<number> {
+async function countRowsForSession(date: string, table: "market_eod_nse" | "market_daily_prices" = "market_eod_nse"): Promise<number> {
   const { count, error } = await supabase
-    .from("market_daily_prices" as any)
+    .from(table as any)
     .select("symbol", { count: "exact", head: true })
     .eq("exchange", "NSE")
     .eq("trade_date", date);
@@ -491,9 +519,9 @@ async function countRowsForSession(date: string): Promise<number> {
   return count ?? 0;
 }
 
-async function newestSessionBefore(date: string | null): Promise<string | null> {
+async function newestSessionBefore(date: string | null, table: "market_eod_nse" | "market_daily_prices" = "market_eod_nse"): Promise<string | null> {
   let q = supabase
-    .from("market_daily_prices" as any)
+    .from(table as any)
     .select("trade_date")
     .eq("exchange", "NSE")
     .order("trade_date", { ascending: false })
@@ -518,13 +546,15 @@ export function useLatestPriceSession() {
       // Walk back at most a handful of stored dates; each hop is a tiny
       // head-count request and the whole result is cached for 10 minutes.
       for (let hop = 0; hop < 8 && sessions.length < 6; hop++) {
-        const date: string | null = await newestSessionBefore(cursor);
+        const date: string | null = await newestSessionBefore(cursor, "market_eod_nse");
         if (!date) break;
         cursor = date;
-        const rows = await countRowsForSession(date);
+        const rows = await countRowsForSession(date, "market_eod_nse");
         if (rows >= COMPLETE_SESSION_MIN_ROWS) sessions.push(date);
         else if (sessions.length === 0 && partialLatest == null) partialLatest = date;
       }
+      const latestDaily = await newestSessionBefore(null, "market_daily_prices");
+      if (latestDaily && (!sessions[0] || latestDaily > sessions[0])) partialLatest = latestDaily;
       return { latestComplete: sessions[0] ?? null, sessions, partialLatest };
     },
     staleTime: 10 * 60_000,
@@ -617,6 +647,13 @@ function mergeCandles(prev: CandleDto[], next: CandleDto[]): CandleDto[] {
   return [...head, ...next];
 }
 
+// Backfill-on-open: live prices are never persisted, so a symbol you have
+// never opened can have a shallow (or empty) stored history. Opening its chart
+// is the trigger to deepen it — once per symbol per session, for the symbol
+// only, never for the universe.
+const MIN_DAILY_BARS = 320;
+const backfillRequested = new Set<string>();
+
 export function useCandles(
   symbol: string | undefined,
   timeframe: string,
@@ -630,7 +667,7 @@ export function useCandles(
   const range = opts.range ?? (/^\d+m$/.test(timeframe) ? "5d" : undefined);
   const qc = useQueryClient();
   const queryKey = ["market", "candles", symbol ?? "", timeframe, exchange, allowDelayed, range ?? ""];
-  return useQuery({
+  const query = useQuery({
     queryKey,
     // EGRESS: a full response is up to ~1 800 bars. Once we hold a series we
     // ask only for bars from our last bar onwards and stitch them on, so the
@@ -677,6 +714,30 @@ export function useCandles(
 
     refetchIntervalInBackground: false,
   });
+
+  // Coverage check on open: if the stored daily history is missing or too
+  // shallow for the long-window indicators (EMA200, 52-week levels), ask
+  // market-history-backfill to deepen just this symbol, then re-read.
+  const [backfilling, setBackfilling] = useState(false);
+  const barCount = query.data?.candles?.length ?? null;
+  useEffect(() => {
+    if (!symbol || intraday || barCount == null) return;
+    if (barCount >= MIN_DAILY_BARS) return;
+    const key = `${exchange}:${symbol}`;
+    if (backfillRequested.has(key)) return;
+    backfillRequested.add(key);
+    let cancelled = false;
+    setBackfilling(true);
+    callMarketFn("market-history-backfill", {
+      symbols: [symbol], exchange, limit: 1, min_bars: MIN_DAILY_BARS, force: true,
+    })
+      .then(() => { if (!cancelled) query.refetch(); })
+      .catch(() => { /* history stays shallow; the chart still renders */ })
+      .finally(() => { if (!cancelled) setBackfilling(false); });
+    return () => { cancelled = true; };
+  }, [symbol, exchange, intraday, barCount]);
+
+  return { ...query, backfilling };
 }
 
 export interface DepthRow { price: number; qty: number; orders: number }
@@ -726,7 +787,10 @@ export function useSavedScreeners() {
     queryKey: ["market", "screeners"],
     queryFn: async (): Promise<SavedScreener[]> => {
       const { data, error } = await supabase
-        .from("market_saved_screeners").select("*").order("name");
+        .from("market_saved_screeners")
+        .select("id,name,description,filters,sort")
+        .order("name");
+
       if (error) throw error;
       return (data ?? []) as unknown as SavedScreener[];
     },

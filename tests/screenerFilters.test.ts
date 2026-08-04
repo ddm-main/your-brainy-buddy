@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { filterMatches, excludedByMissingData, coverageOf, latestTradeDateOf, type ActiveFilter } from "../src/lib/market/screenerCatalog";
+import { filterMatches, excludedByMissingData, coverageOf, latestTradeDateOf, filterMatchesLive, type ActiveFilter } from "../src/lib/market/screenerCatalog";
 import { colsFromActiveFilters } from "../src/lib/market/screenerColumnModel";
 
 // A row with a full EOD triple (ltp/change_pct/volume via trade_date) but no
@@ -280,3 +280,31 @@ describe("display value and filtered value come from the same session", () => {
   });
 });
 
+
+describe("filterMatchesLive — broker-only live values", () => {
+  const row = {
+    symbol: "FOO", exchange: "NSE", instrument_type: "EQ",
+    trade_date: "2026-07-29", vol_avg30: 100_000,
+  };
+
+  it("accepts a Kotak live value that satisfies the filter", () => {
+    expect(filterMatchesLive(row, { id: "change_pct", min: 5 } as ActiveFilter,
+      { ltp: 100, change_pct: 7.2, volume: 500_000, provider: "kotak" })).toBe(true);
+  });
+
+  it("rejects a non-broker live value even when it would satisfy the filter", () => {
+    expect(filterMatchesLive(row, { id: "change_pct", min: 5 } as ActiveFilter,
+      { ltp: 100, change_pct: 7.2, volume: 500_000, provider: "yahoo" })).toBe(false);
+  });
+
+  it("rejects a row with no live value at all", () => {
+    expect(filterMatchesLive(row, { id: "ltp", min: 50 } as ActiveFilter, undefined)).toBe(false);
+  });
+
+  it("rejects a non-broker volume value for the vol_gt_avg30 toggle", () => {
+    const live = { ltp: 100, change_pct: 1, volume: 500_000, provider: "yahoo" };
+    expect(filterMatchesLive(row, { id: "vol_gt_avg30", bool: true } as ActiveFilter, live)).toBe(false);
+    expect(filterMatchesLive(row, { id: "vol_gt_avg30", bool: true } as ActiveFilter,
+      { ...live, provider: "kotak" })).toBe(true);
+  });
+});

@@ -1,6 +1,30 @@
 {
   "custom_components_and_routes": [
     {
+      "path": "supabase/functions/market-daily-sync/index.ts",
+      "purpose": "Post-close orchestration with canonical NSE price promotion, ordered rescoring, and coverage-based freshness assertions."
+    },
+    {
+      "path": "src/routes/market/Analysis.tsx",
+      "purpose": "Analysis workbench with explicit settled-session versus technical-pipeline status."
+    },
+    {
+      "path": "src/lib/market/hooks.ts",
+      "purpose": "Shared market hooks using authoritative full-market NSE sessions for freshness classification."
+    },
+    {
+      "path": "dependency_manifest.json",
+      "purpose": "Registry of project files changed by custom market and portfolio work."
+    },
+    {
+      "path": "walkthrough.md",
+      "purpose": "User-facing walkthrough of market freshness and portfolio behavior."
+    },
+    {
+      "path": "System/Logs/2026-08-03.md",
+      "purpose": "Append-only daily record of the Aug 3 market-data repair."
+    },
+    {
       "path": "src/components/market/FundsCard.tsx",
       "purpose": "Kite-style funds breakdown with cooldown/no-snapshot handling."
     },

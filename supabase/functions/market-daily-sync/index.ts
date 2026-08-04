@@ -10,6 +10,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 type StepFn =
   | "market-nse-bhavcopy-sync"
   | "market-nse-master-sync"
+  | "promote-market-eod-session"
   | "market-fundamentals-global-sync"
   | "market-shares-outstanding-sync"
   | "market-pipeline-eod"
@@ -23,11 +24,12 @@ const CHAIN: Array<{ fn: StepFn; label: string; chunked: boolean }> = [
   // scan picks them up the same day.
   { fn: "market-nse-bhavcopy-sync",        label: "NSE bhavcopy",       chunked: false },
   { fn: "market-nse-master-sync",          label: "NSE master",         chunked: false },
+  { fn: "promote-market-eod-session",      label: "Promote EOD prices", chunked: false },
+  { fn: "market-rescore-from-prices",      label: "Price-table rescore", chunked: false },
+  { fn: "market-pipeline-eod",             label: "EOD technicals",     chunked: true  },
+  { fn: "market-pipeline-aggregates",      label: "Breadth aggregates", chunked: false },
   { fn: "market-fundamentals-global-sync", label: "Fundamentals",       chunked: true  },
   { fn: "market-shares-outstanding-sync",  label: "Shares outstanding", chunked: true  },
-  { fn: "market-pipeline-eod",             label: "EOD technicals",     chunked: true  },
-  { fn: "market-rescore-from-prices",       label: "Price-table rescore", chunked: false },
-  { fn: "market-pipeline-aggregates",      label: "Breadth aggregates", chunked: false },
   { fn: "market-parity-refresh",           label: "Tickertape parity",  chunked: false },
 ];
 
@@ -96,7 +98,14 @@ Deno.serve(async (req) => {
         lastBody = null;
         error = undefined;
         try {
-          if (step.fn === "market-rescore-from-prices") {
+          if (step.fn === "promote-market-eod-session") {
+            iterations++;
+            const { data, error: rpcErr } = await svc.rpc("promote_market_eod_session", {
+              _trade_date: null,
+            });
+            if (rpcErr) throw new Error(rpcErr.message);
+            lastBody = Array.isArray(data) ? data[0] : data;
+          } else if (step.fn === "market-rescore-from-prices") {
             // Keyset-batched: one 3000-symbol call exceeded the statement
             // timeout and aborted the whole recovery pass.
             let cursor: string | null = null;
@@ -194,23 +203,50 @@ Deno.serve(async (req) => {
     // Every step can report "ok" while the thing users actually read — the
     // score table — is still on an older session. Compare it to the price
     // table and fail the run loudly when it lags.
-    const [{ data: fp }, { data: fs }] = await Promise.all([
+    const [{ data: fp }, { data: fs }, { data: fe }] = await Promise.all([
       svc.from("market_daily_prices").select("trade_date").eq("exchange", "NSE")
         .order("trade_date", { ascending: false }).limit(1).maybeSingle(),
       svc.from("market_stock_scores").select("trade_date").eq("exchange", "NSE")
         .order("trade_date", { ascending: false }).limit(1).maybeSingle(),
+      svc.from("market_eod_nse").select("trade_date").eq("exchange", "NSE")
+        .order("trade_date", { ascending: false }).limit(1).maybeSingle(),
     ]);
     const priceDate = (fp?.trade_date as string | null) ?? null;
     const scoreDate = (fs?.trade_date as string | null) ?? null;
+    const sourceDate = (fe?.trade_date as string | null) ?? null;
+    let sourceRows = 0;
+    let priceRows = 0;
+    let scoreRows = 0;
     let staleScores = 0;
-    if (priceDate) {
-      const { count } = await svc.from("market_stock_scores")
-        .select("symbol", { count: "exact", head: true })
-        .eq("exchange", "NSE")
-        .lt("trade_date", priceDate);
-      staleScores = count ?? 0;
+    let missingSamples: string[] = [];
+    if (sourceDate) {
+      const [{ count: sourceCount }, { count: priceCount }, { count: scoreCount }, { count: staleCount }] = await Promise.all([
+        svc.from("market_eod_nse").select("symbol", { count: "exact", head: true }).eq("exchange", "NSE").eq("trade_date", sourceDate),
+        svc.from("market_daily_prices").select("symbol", { count: "exact", head: true }).eq("exchange", "NSE").eq("trade_date", sourceDate),
+        svc.from("market_stock_scores").select("symbol", { count: "exact", head: true }).eq("exchange", "NSE").eq("trade_date", sourceDate),
+        svc.from("market_stock_scores").select("symbol", { count: "exact", head: true }).eq("exchange", "NSE").lt("trade_date", sourceDate),
+      ]);
+      sourceRows = sourceCount ?? 0;
+      priceRows = priceCount ?? 0;
+      scoreRows = scoreCount ?? 0;
+      staleScores = staleCount ?? 0;
+      const { data: sourceSymbols } = await svc.from("market_eod_nse").select("symbol")
+        .eq("exchange", "NSE").eq("trade_date", sourceDate).limit(200);
+      const sampleSymbols = (sourceSymbols ?? []).map((row) => String(row.symbol));
+      if (sampleSymbols.length > 0) {
+        const { data: scoredSymbols } = await svc.from("market_stock_scores").select("symbol")
+          .eq("exchange", "NSE").eq("trade_date", sourceDate).in("symbol", sampleSymbols);
+        const scored = new Set((scoredSymbols ?? []).map((row) => String(row.symbol)));
+        missingSamples = sampleSymbols.filter((symbol) => !scored.has(symbol)).slice(0, 10);
+      }
     }
-    const freshnessOk = !!priceDate && scoreDate === priceDate && staleScores === 0;
+    const priceCoverage = sourceRows > 0 ? priceRows / sourceRows : 0;
+    const scoreCoverage = priceRows > 0 ? scoreRows / priceRows : 0;
+    const freshnessOk = !!sourceDate
+      && priceDate === sourceDate
+      && scoreDate === sourceDate
+      && priceCoverage >= 0.8
+      && scoreCoverage >= 0.8;
 
     const failedSteps = summary.filter((s) => s.status === "failed");
     await svc.from("market_ingestion_runs").insert({
@@ -222,7 +258,19 @@ Deno.serve(async (req) => {
       metadata: {
         steps: summary.map((s) => ({ fn: s.fn, status: s.status, duration_ms: s.duration_ms, iterations: s.iterations, error: s.error ?? null })),
         failed_count: failedSteps.length,
-        freshness: { price_date: priceDate, score_date: scoreDate, stale_scores: staleScores, ok: freshnessOk },
+        freshness: {
+          source_date: sourceDate,
+          price_date: priceDate,
+          score_date: scoreDate,
+          source_rows: sourceRows,
+          price_rows: priceRows,
+          score_rows: scoreRows,
+          price_coverage_pct: Math.round(priceCoverage * 1000) / 10,
+          score_coverage_pct: Math.round(scoreCoverage * 1000) / 10,
+          stale_scores: staleScores,
+          missing_symbol_samples: missingSamples,
+          ok: freshnessOk,
+        },
       },
       finished_at: new Date().toISOString(),
     });

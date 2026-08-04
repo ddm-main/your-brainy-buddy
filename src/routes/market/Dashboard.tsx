@@ -11,7 +11,7 @@ import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { WatchlistPanel } from "@/components/market/WatchlistPanel";
 import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "@/lib/market/api";
-import { useIndices, useIndexWatch, useIndexWatchMutations, useMarketSettings, usePositions, useQuotes, useSavedScreeners, useStockScores } from "@/lib/market/hooks";
+import { liveInterval, useIndices, useIndexWatch, useIndexWatchMutations, useMarketSettings, usePositions, useQuotes, useSavedScreeners, useStockScores } from "@/lib/market/hooks";
 import { useBrokerOrders } from "@/lib/market/orderHooks";
 import { FILTER_BY_ID, canonicalFilterId, filterMatches, latestTradeDateOf, type ActiveFilter, type UniverseId } from "@/lib/market/screenerCatalog";
 import { useScreenerData, type ScreenerRow } from "@/lib/market/screenerRun";
@@ -193,9 +193,10 @@ export default function MarketDashboard() {
   const scoreKeys = useMemo(() => (scoreKeysJoined ? scoreKeysJoined.split(",") : []), [scoreKeysJoined]);
   // Top Breakouts symbols rotate with filter selection, so most of them are
   // outside the Kotak WS relay's holdings/watchlist subscription set. Poll
-  // the Kotak-primary REST batch every second during market hours to match
-  // trading-app quote cadence.
-  const { data: scoreQuotes, isError: scoreQuotesError } = useQuotes(scoreKeys, { intervalMs: 1_000 });
+  // the Kotak-primary REST batch on the shared 5 s focused / 15 s blurred
+  // cadence; sub-second movement arrives on the WS push tick, which wins the
+  // merge below, so a 1 s REST poll only bought egress.
+  const { data: scoreQuotes, isError: scoreQuotesError } = useQuotes(scoreKeys);
   const _ticksRev_pushTicks = useTicksRevision();
   const pushTicks = useLiveTickStore.getState().ticks;
   void _ticksRev_pushTicks; // re-render on any tick flush; read fresh map above
@@ -264,7 +265,7 @@ export default function MarketDashboard() {
       return callMarketFn<{ quotes: Quote[] }>("market-quotes", { symbols: keys });
     },
     enabled: (counts?.holdingRows.length ?? 0) > 0,
-    refetchInterval: () => (nseOpenNow() ? 3_000 : false),
+    refetchInterval: liveInterval(5_000, false, 15_000),
     refetchIntervalInBackground: false,
     placeholderData: (prev: unknown) => prev as any,
   });

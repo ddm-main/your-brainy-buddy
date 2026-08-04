@@ -2,7 +2,17 @@ import { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { X, ScanSearch } from "lucide-react";
 import { Btn, Chip } from "@/components/hud/HudControls";
+import { tierOf } from "@/lib/market/patternLabels";
 import type { CandleMark, ChartShape } from "../../../supabase/functions/_shared/market/pattern-series";
+
+const tierReason = (key: string) => {
+  const t = tierOf(key);
+  return t === "key"
+    ? "Key tier: a standalone reversal/continuation read with a defined trigger and invalidation, so it gets a label on the chart."
+    : t === "context"
+      ? "Context tier: supports a thesis but is not tradeable alone — drawn as an unlabelled dot."
+      : "Noise tier: fires constantly and mostly describes the bar (inside/narrow bars, gaps, wick shapes, swing labels) — hidden by default.";
+};
 
 type Candle = { time: number | string; open: number; high: number; low: number; close: number; volume: number };
 export type PatternSelection = { kind: "candle"; result: CandleMark } | { kind: "shape"; result: ChartShape };
@@ -48,6 +58,7 @@ export function PatternDetailDialog({ selection, candles, timeframe, onClose, on
     return { c, range, body, upper, lower, relVol: avg ? c.volume / avg : null, inWindow: ctxStart + offset >= start };
   });
   const shape = selection.kind === "shape" ? selection.result : null;
+  const mark = selection.kind === "candle" ? selection.result : null;
   const tone = result.tone === "bullish" ? "ok" : result.tone === "bearish" ? "err" : "neutral";
   const lastClose = candles[candles.length - 1]?.close ?? null;
   const dist = (target: number | null | undefined) => {
@@ -57,11 +68,14 @@ export function PatternDetailDialog({ selection, candles, timeframe, onClose, on
     return `${diff >= 0 ? "+" : ""}${diff.toFixed(2)} (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`;
   };
   const triggerTarget = shape ? (shape.tone === "bearish" ? shape.lower : shape.upper) ?? shape.level : null;
-  const invalidTarget = shape ? (shape.tone === "bearish" ? shape.upper : shape.lower) : null;
-  const alsoHere = selection.kind === "candle"
-    ? siblings.filter((m) => m.index === selection.result.index && m.key !== selection.result.key)
+  const invalidTarget = shape
+    ? (shape.tone === "bearish" ? shape.upper : shape.lower)
+    : mark?.invalidateLevel ?? null;
+  const alsoHere = mark
+    ? siblings.filter((m) => m.index === mark.index && m.key !== mark.key)
     : [];
-  const evidence = shape ? Object.entries(shape.evidence ?? {}) : [];
+  const evidence = Object.entries((shape ? shape.evidence : mark?.evidence) ?? {});
+  const windowText = `${end - start + 1} bar${end - start === 0 ? "" : "s"} · ${time(candles[start]?.time ?? Date.now())} → ${time(candles[end]?.time ?? Date.now())} (${timeframe})`;
 
   return createPortal(
     <div role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }} style={{
@@ -86,15 +100,16 @@ export function PatternDetailDialog({ selection, candles, timeframe, onClose, on
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 8, margin: "12px 0" }}>
-          <Fact label="Window" value={`bars ${start}–${end} (${end - start + 1}) · ${time(candles[start]?.time ?? Date.now())} → ${time(candles[end]?.time ?? Date.now())}`} />
-          <Fact label="Upper / lower" value={`${number(shape?.upper)} / ${number(shape?.lower)}`} />
-          <Fact label="Level" value={number(shape?.level)} />
-          <Fact label="Touches" value={shape ? `${shape.evidence.upper_touches ?? 0} upper / ${shape.evidence.lower_touches ?? 0} lower` : "candle pattern"} />
+          <Fact label="Window" value={windowText} />
+          {shape && <Fact label="Upper / lower" value={`${number(shape.upper)} / ${number(shape.lower)}`} />}
+          {shape?.level != null && <Fact label="Level" value={number(shape.level)} />}
+          {shape && <Fact label="Touches" value={`${shape.evidence.upper_touches ?? 0} upper / ${shape.evidence.lower_touches ?? 0} lower`} />}
           {shape && <Fact label="To trigger" value={`${number(triggerTarget)} · ${dist(triggerTarget)}`} />}
-          {shape && <Fact label="To invalidation" value={`${number(invalidTarget)} · ${dist(invalidTarget)}`} />}
+          {invalidTarget != null && <Fact label="To invalidation" value={`${number(invalidTarget)} · ${dist(invalidTarget)}`} />}
           {!shape && <Fact label="Last close" value={number(lastClose)} />}
-          {!shape && <Fact label="Also on this bar" value={alsoHere.length ? alsoHere.map((m) => m.label).join(", ") : "nothing else detected"} />}
+          {!shape && alsoHere.length > 0 && <Fact label="Also on this bar" value={alsoHere.map((m) => m.label).join(", ")} />}
         </div>
+
 
         {evidence.length > 0 && (
           <div style={{ marginBottom: 12 }}>
@@ -114,9 +129,11 @@ export function PatternDetailDialog({ selection, candles, timeframe, onClose, on
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 8, marginBottom: 12 }}>
           <Evidence label="Detected because" value={result.formula} />
-          <Evidence label="Confirmation" value={shape?.confirmText ?? "Completed candle satisfies the geometry and context rule."} />
-          <Evidence label="Invalidation" value={shape?.invalidateText ?? "A later candle must confirm direction; the candle itself is historical evidence."} />
+          <Evidence label="Confirmation" value={shape?.confirmText ?? mark?.confirmText ?? "Completed candle satisfies the geometry and context rule."} />
+          <Evidence label="Invalidation" value={shape?.invalidateText ?? mark?.invalidateText ?? "A later candle must confirm direction; the candle itself is historical evidence."} />
+          <Evidence label="Why this tier" value={tierReason(result.key)} />
         </div>
+
 
         <div className="hud-label" style={{ marginBottom: 6 }}>Referenced candles · pattern bars highlighted</div>
         <div style={{ overflowX: "auto", border: "1px solid var(--edge)" }}>

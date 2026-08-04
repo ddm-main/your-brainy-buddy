@@ -5,11 +5,19 @@ import { useNavigate } from "react-router-dom";
 import { Chip } from "@/components/hud/HudControls";
 import { useScoreHistory } from "@/lib/market/scoreHistory";
 import { buildBucketRows, bandOf, BUCKET_COLORS } from "@/lib/market/scoreExplain";
+import { useLatestPriceSession } from "@/lib/market/hooks";
+import { classifyFreshness } from "@/lib/market/freshness";
 
 export function ScoreHistoryPanel({ symbol, exchange }: { symbol: string; exchange: string }) {
   const nav = useNavigate();
   const { data: history = [], isLoading } = useScoreHistory(symbol, exchange, 10);
   const latest = history.length ? history[history.length - 1] : null;
+  const { data: sessionInfo } = useLatestPriceSession();
+  const fresh = classifyFreshness({
+    dataDate: latest?.trade_date,
+    latestComplete: sessionInfo?.latestComplete,
+    sessions: sessionInfo?.sessions ?? [],
+  });
 
   const rows = buildBucketRows(latest?.buckets, latest?.coverage);
   const earned = rows.reduce((s, r) => s + r.earned, 0);
@@ -17,7 +25,7 @@ export function ScoreHistoryPanel({ symbol, exchange }: { symbol: string; exchan
   return (
     <>
       <div className="hud-label" style={{ fontSize: 9, letterSpacing: "0.14em", color: "var(--accent-soft)", margin: "10px 0 4px" }}>
-        Last EOD score
+        {fresh.state === "settled" ? "Latest EOD score" : "Last EOD score"}
       </div>
       {isLoading ? (
         <div style={{ fontSize: 11, color: "var(--text-muted)" }}>loading…</div>
@@ -32,9 +40,11 @@ export function ScoreHistoryPanel({ symbol, exchange }: { symbol: string; exchan
               {latest.score}
             </span>
             <Chip tone={bandOf(latest.score).tone}>{latest.band ?? bandOf(latest.score).label}</Chip>
-            <span style={{ fontSize: 9, color: "var(--text-muted)" }}>
-              {new Date(latest.trade_date).toLocaleDateString([], { day: "2-digit", month: "short" })}
-              {latest.context_neutral ? " · neutral context" : ""}
+            {/* Date only when this snapshot isn't the current settled session. */}
+            <span style={{ fontSize: 9, color: fresh.state === "settled" ? "var(--text-muted)" : "var(--warn)" }}
+                  title={fresh.title}>
+              {fresh.label ?? ""}
+              {latest.context_neutral ? `${fresh.label ? " · " : ""}neutral context` : ""}
               {latest.is_liquid_tradable === false ? " · illiquid" : ""}
             </span>
           </div>
