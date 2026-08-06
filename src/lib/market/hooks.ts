@@ -5,6 +5,9 @@ import { supabase } from "@/integrations/supabase/client";
 import { callMarketFn } from "./api";
 import { nseOpenNow } from "./liveTickStore";
 import { useLiveDepthStore, isFreshDepth } from "./liveDepthStore";
+import { TF_FETCH_RANGE } from "./chartWindows";
+import { safeStorage } from "@/lib/safeStorage";
+
 
 import type {
   ApiSettings,
@@ -664,7 +667,8 @@ export function useCandles(
   const allowDelayed = !!opts.allowDelayed;
   // Intraday charts open on today's session, so a shallow upstream window is
   // enough and loads far faster than 60d/max of minute bars.
-  const range = opts.range ?? (/^\d+m$/.test(timeframe) ? "5d" : undefined);
+  // Fetch deeper than the default visible window so panning left has data.
+  const range = opts.range ?? TF_FETCH_RANGE[timeframe];
   const qc = useQueryClient();
   const queryKey = ["market", "candles", symbol ?? "", timeframe, exchange, allowDelayed, range ?? ""];
   const query = useQuery({
@@ -898,28 +902,98 @@ export interface StockInsight {
   alignment?: "confirms" | "neutral" | "contradicts";
   score_adjustment?: number | null;
   adjustment_reason?: string | null;
+  // Provenance recorded when the verdict was generated — what it actually saw.
+  score_date?: string | null;
+  model?: string | null;
+  quote_used?: boolean;
+  breadth_used?: boolean;
+  quote_age_minutes?: number | null;
+  news_count?: number | null;
+  fundamentals_as_of?: string | null;
 }
-export function useStockInsight(symbol: string | undefined, exchange = "NSE") {
+// `persisted` is false when the cache write failed — the verdict is valid but
+// the daily cache will not engage, so every view pays for a fresh AI call.
+// `payload` is NULL on a read-only miss: no verdict exists for today's session
+// and the caller did not ask to spend an AI call. `stale_payload` then carries
+// the previous day's verdict so the panel can offer it as clearly-old context.
+export interface StockInsightResponse {
+  payload: StockInsight | null;
+  cached: boolean;
+  generated?: boolean;
+  stale?: boolean;
+  stale_payload?: StockInsight | null;
+  computed_at: string | null;
+  persisted?: boolean;
+  quote_used?: boolean;
+  breadth_used?: boolean;
+  quote_age_minutes?: number | null;
+  score_date?: string | null;
+  model?: string | null;
+}
+
+/** IST calendar day key — the unit the verdict cache is scoped to. */
+export const istDayKey = (d = new Date()): string =>
+  new Date(d.getTime() + 330 * 60_000).toISOString().slice(0, 10);
+
+const GEN_KEY = "market:insight:generated";
+/** True when this symbol has not yet been generated/attempted today (IST). */
+export function insightNeedsFirstRun(symbol: string, exchange = "NSE"): boolean {
+  const store = safeStorage.getJSON<{ day: string; keys: string[] }>(GEN_KEY, { day: "", keys: [] });
+  if (store.day !== istDayKey()) return true;
+  return !store.keys.includes(`${symbol}:${exchange}`);
+}
+/** Mark this symbol as generated/attempted for today so re-opens stay free. */
+export function markInsightRun(symbol: string, exchange = "NSE"): void {
+  const day = istDayKey();
+  const store = safeStorage.getJSON<{ day: string; keys: string[] }>(GEN_KEY, { day: "", keys: [] });
+  const keys = store.day === day ? store.keys : [];
+  const k = `${symbol}:${exchange}`;
+  if (!keys.includes(k)) keys.push(k);
+  safeStorage.setJSON(GEN_KEY, { day, keys: keys.slice(-400) });
+}
+
+/**
+ * Reads the AI verdict. `generate` is the ONLY way an AI call can be spent:
+ * the Analysis page passes it true exactly once per symbol per IST day (first
+ * open), so navigating back to a stock later in the day is free.
+ */
+export function useStockInsight(symbol: string | undefined, exchange = "NSE", generate = false) {
   return useQuery({
     queryKey: ["market", "insight", symbol ?? "", exchange],
-    queryFn: () => callMarketFn<{ payload: StockInsight; cached: boolean; computed_at: string }>(
-      "market-stock-insight", { symbol, exchange },
-    ),
+    queryFn: async () => {
+      if (symbol && generate) markInsightRun(symbol, exchange);
+      return await callMarketFn<StockInsightResponse>(
+        "market-stock-insight", { symbol, exchange, generate },
+      );
+    },
     enabled: !!symbol,
-    staleTime: 6 * 3600_000,
-    retry: 1,
+    // Verdicts change once per session; hold the result for the rest of the day
+    // so panel remounts and tab-hops never re-invoke the function.
+    staleTime: 12 * 3600_000,
+    gcTime: 12 * 3600_000,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    // A failure must never silently pay for a second gateway call.
+    retry: false,
   });
 }
 export function useRefreshStockInsight() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ symbol, exchange = "NSE" }: { symbol: string; exchange?: string }) =>
-      callMarketFn<{ payload: StockInsight; cached: boolean; computed_at: string }>(
+    mutationFn: ({ symbol, exchange = "NSE" }: { symbol: string; exchange?: string }) => {
+      markInsightRun(symbol, exchange);
+      return callMarketFn<StockInsightResponse>(
         "market-stock-insight", { symbol, exchange, force: true },
-      ),
-    onSuccess: (_r, v) => qc.invalidateQueries({ queryKey: ["market", "insight", v.symbol, v.exchange ?? "NSE"] }),
+      );
+    },
+    retry: false,
+    // Write the fresh verdict straight into the query cache: invalidating
+    // instead would re-invoke the function for a result we already hold.
+    onSuccess: (r, v) => qc.setQueryData(["market", "insight", v.symbol, v.exchange ?? "NSE"], r),
   });
 }
+
+
 
 export function useOptionChain(symbol: string | undefined, expiry?: string) {
   return useQuery({

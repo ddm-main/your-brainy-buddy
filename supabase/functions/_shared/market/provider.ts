@@ -235,7 +235,7 @@ const ALL_SETTINGS_COLS = Array.from(new Set(
   (KOTAK_SETTINGS_COLS + "," + SHOONYA_SETTINGS_COLS + ",active_provider").split(","),
 )).join(",");
 const settingsCache = new Map<string, { rows: SettingsRow[]; expiresAt: number }>();
-const SETTINGS_TTL_MS = 60_000;
+const SETTINGS_TTL_MS = 10 * 60_000; // EGRESS: settings change by hand, not by the minute.
 
 async function getSettingsRows(svc: SupabaseClient, userId: string): Promise<SettingsRow[]> {
   const cached = settingsCache.get(userId);
@@ -271,7 +271,7 @@ async function getFreshSettingsRow(
 // own. We now resolve only the symbols a request actually asks for and cache
 // each entry for 30 minutes (market_stocks only changes on the scrip sync).
 const tokenCache = new Map<string, { entry: TokenEntry | null; expiresAt: number }>();
-const TOKEN_TTL_MS = 30 * 60_000;
+const TOKEN_TTL_MS = 12 * 3_600_000; // EGRESS: instrument tokens are stable for the trading day.
 const TOKEN_MISS_TTL_MS = 5 * 60_000;
 
 
@@ -420,8 +420,13 @@ function rangeSeconds(range: string): number {
   const YEAR = 365 * 86400;
   const dayMatch = range.match(/^(\d+)d$/);
   if (dayMatch) return Number(dayMatch[1]) * 86400;
+  // Yahoo-style month ranges ("1mo","3mo","6mo") — without this a 3mo request
+  // silently fell through to the 2-year default.
+  const monthMatch = range.match(/^(\d+)mo$/);
+  if (monthMatch) return Number(monthMatch[1]) * 30 * 86400;
   const yearMatch = range.match(/^(\d+)y$/);
   if (yearMatch) return Number(yearMatch[1]) * YEAR;
+
   const direct: Record<string, number> = {
     "1d": 86400, "5d": 5 * 86400, "7d": 7 * 86400, "30d": 30 * 86400, "60d": 60 * 86400,
     "1y": YEAR, "2y": 2 * YEAR, "5y": 5 * YEAR, "10y": 10 * YEAR, "max": 40 * YEAR,
@@ -1645,7 +1650,10 @@ export async function getActiveProvider(
 // the app runs it off one designated "system" Kotak connection
 // (market_api_settings.is_system) instead of requiring every user to connect
 // their own broker. Users only connect Kotak for their own account data.
-const SYSTEM_FEED_TTL_MS = 15_000;
+// EGRESS: the system feed row changes only when the user reconnects a broker,
+// and every such path calls invalidateSystemFeedCache(). A 15 s TTL made this
+// the app's most-requested table (1,492 reads/day, 5.8 MB) for no benefit.
+const SYSTEM_FEED_TTL_MS = 10 * 60_000;
 let systemFeedCache: { row: SettingsRow | null; expiresAt: number } | null = null;
 
 export function invalidateSystemFeedCache(): void {

@@ -8,3 +8,6 @@ verify_jwt = false
 
 [functions.market-close-snapshot]
 verify_jwt = false
+
+[functions.market-penny-sweep]
+verify_jwt = false

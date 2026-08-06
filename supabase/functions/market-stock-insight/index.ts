@@ -15,7 +15,15 @@ import { classifyHeadline, windowSentiment } from "../_shared/market/newsSentime
 // gateway rejecting the model, not a real coverage gap.
 const MODEL = "google/gemini-2.5-flash";
 const FALLBACK_MODEL = "google/gemini-2.5-pro";
-const TTL_MS = 6 * 3600_000;
+// Freshness is anchored on the IST trading day, not a rolling 6h window: the
+// inputs (EOD technicals, breadth, news) only change once per session, so one
+// verdict per symbol per day is the correct cadence and the cheapest one.
+function istDayStartMs(now = new Date()): number {
+  const ist = new Date(now.getTime() + 330 * 60_000);
+  const y = ist.getUTCFullYear(), m = ist.getUTCMonth(), d = ist.getUTCDate();
+  return Date.UTC(y, m, d) - 330 * 60_000;
+}
+
 // AI is the most expensive endpoint here — 20/min/user is generous and
 // still blocks a runaway loop from torching gateway credits.
 const limiter = createMarketLimiter(20, 60_000);
@@ -37,7 +45,17 @@ interface AiPayload {
   alignment?: "confirms" | "neutral" | "contradicts";
   score_adjustment?: number | null;   // −10..+10
   adjustment_reason?: string | null;
+  // Provenance, stored inside the payload so a cached read can say exactly
+  // what the verdict saw instead of the panel guessing from its own state.
+  score_date?: string | null;
+  model?: string | null;
+  quote_used?: boolean;
+  breadth_used?: boolean;
+  quote_age_minutes?: number | null;
+  news_count?: number | null;
+  fundamentals_as_of?: string | null;
 }
+
 
 const SYSTEM = `You are JARVIS, Deepak's Indian equities trading analyst.
 Given technical, fundamental, news-sentiment and market-context data for a
@@ -56,7 +74,14 @@ to add. "adjustment_reason" is one short clause.
 
 Numbers must be plausible relative to the current price. If the setup is
 weak, say "wait" or "avoid". Never invent numbers not derivable from the
-given context. Keep rationale under 60 words.`;
+given context. Keep rationale under 60 words.
+
+ALWAYS fill entry, stop_loss, at least one target and holding_period_days —
+they are never null. For "wait" the entry is the trigger level you would act
+on (e.g. the breakout or the pullback price); for "avoid" it is the level that
+would invalidate your view. A plan with no levels is useless, so state them
+even when your verdict is to stand aside.`;
+
 
 async function callAiOnce(apiKey: string, prompt: string, model: string): Promise<AiPayload> {
   const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
@@ -87,6 +112,7 @@ async function callAiOnce(apiKey: string, prompt: string, model: string): Promis
 
 async function callAi(apiKey: string, prompt: string): Promise<AiPayload> {
   let parsed: AiPayload;
+  let usedModel = MODEL;
   try {
     parsed = await callAiOnce(apiKey, prompt, MODEL);
   } catch (e) {
@@ -95,11 +121,13 @@ async function callAi(apiKey: string, prompt: string): Promise<AiPayload> {
     // otherwise so the caller sees the real gateway response instead of a
     // generic "AI unavailable".
     if (/ai_gateway_(429|5\d\d)/.test(msg)) {
+      usedModel = FALLBACK_MODEL;
       parsed = await callAiOnce(apiKey, prompt, FALLBACK_MODEL);
     } else {
       throw e;
     }
   }
+
   return {
     verdict: (["buy", "hold", "wait", "avoid"].includes(parsed.verdict) ? parsed.verdict : "hold") as Verdict,
     // Cap at 0.95: models routinely emit 1.0 ("certain") for an equity call
@@ -116,8 +144,10 @@ async function callAi(apiKey: string, prompt: string): Promise<AiPayload> {
     score_adjustment: Number.isFinite(Number(parsed.score_adjustment))
       ? Math.max(-10, Math.min(10, Math.round(Number(parsed.score_adjustment)))) : 0,
     adjustment_reason: parsed.adjustment_reason ? String(parsed.adjustment_reason).slice(0, 160) : null,
+    model: usedModel,
   };
 }
+
 
 // The nightly `market-ai-recommend` cron writes rows shaped as
 // `{ recommendation, entry_price, targets, stop_loss, ... }`, while this
@@ -127,7 +157,7 @@ async function callAi(apiKey: string, prompt: string): Promise<AiPayload> {
 // the same UI contract.
 function normalizeAiPayload(p: any): AiPayload {
   if (!p || typeof p !== "object") {
-    return { verdict: "hold", confidence: 0, entry: null, stop_loss: null, targets: [], holding_period_days: null, rationale: "", risks: [] };
+    return { verdict: "hold", confidence: 0, entry: null, stop_loss: null, targets: [], holding_period_days: null, rationale: "", risks: [], alignment: undefined, score_adjustment: null, adjustment_reason: null };
   }
   const verdictRaw = p.verdict ?? p.recommendation;
   const map: Record<string, Verdict> = {
@@ -151,6 +181,14 @@ function normalizeAiPayload(p: any): AiPayload {
     score_adjustment: Number.isFinite(Number(p.score_adjustment))
       ? Math.max(-10, Math.min(10, Math.round(Number(p.score_adjustment)))) : null,
     adjustment_reason: p.adjustment_reason ? String(p.adjustment_reason).slice(0, 160) : null,
+    score_date: p.score_date ? String(p.score_date).slice(0, 10) : null,
+    model: p.model ? String(p.model) : null,
+    quote_used: !!p.quote_used,
+    breadth_used: !!p.breadth_used,
+    quote_age_minutes: Number.isFinite(Number(p.quote_age_minutes)) ? Math.round(Number(p.quote_age_minutes)) : null,
+    news_count: Number.isFinite(Number(p.news_count)) ? Number(p.news_count) : null,
+    fundamentals_as_of: p.fundamentals_as_of ? String(p.fundamentals_as_of).slice(0, 10) : null,
+
   };
 }
 
@@ -164,43 +202,79 @@ Deno.serve(async (req) => {
     const symbol = String(body?.symbol ?? "").toUpperCase();
     const exchange = String(body?.exchange ?? "NSE").toUpperCase();
     const force = !!body?.force;
+    // Read-only by default. A page open must NEVER spend an AI call unless the
+    // caller explicitly asks for one (first open of the symbol today, or the
+    // refresh/generate button). Previously every mount past the 6h TTL paid
+    // for a fresh gateway call with no user intent.
+    const generate = force || !!body?.generate;
     if (!symbol) return errorResponse(req, "symbol required");
 
     const svc = svcClient();
 
-    // Cache hit within TTL? Scope by (user_id, symbol, exchange) so one user's
-    // manual refresh doesn't shadow another's, and to match the unique index
-    // that lets us upsert below.
+    // Latest settled session for this symbol — used both as the freshness
+    // anchor for the cache and as the technicals the verdict reasons off.
+    const { data: score } = await svc.from("market_stock_scores")
+      .select("*").eq("symbol", symbol).eq("exchange", exchange).maybeSingle();
+    const scoreDate = (score?.trade_date as string | null) ?? null;
+
+    // A cached verdict is fresh when it was computed today (IST) AND after the
+    // session its technicals come from. The old wall-clock 6h TTL expired in
+    // the evening on data that cannot change until the next session, so an
+    // evening visit re-paid for an identical verdict.
+    const isFresh = (computedAt: string | null | undefined, cachedScoreDate?: string | null): boolean => {
+      if (!computedAt) return false;
+      const t = new Date(computedAt).getTime();
+      if (!Number.isFinite(t)) return false;
+      if (t < istDayStartMs()) return false;
+      if (scoreDate && cachedScoreDate && String(cachedScoreDate).slice(0, 10) < scoreDate.slice(0, 10)) return false;
+      return true;
+    };
+
+    // Cache scoped by (user_id, symbol, exchange) so one user's manual refresh
+    // doesn't shadow another's, and to match the upsert's unique index.
     if (!force) {
       const { data: cached } = await svc.from("market_stock_ai")
         .select("payload, computed_at")
         .eq("user_id", auth.userId).eq("symbol", symbol).eq("exchange", exchange)
         .order("computed_at", { ascending: false })
         .limit(1).maybeSingle();
-      if (cached && Date.now() - new Date(cached.computed_at).getTime() < TTL_MS) {
-        return jsonResponse(req, { payload: normalizeAiPayload(cached.payload), cached: true, computed_at: cached.computed_at });
-      }
       // The nightly cron (market-ai-recommend) already scores every symbol
       // under SHARED_CACHE_USER_ID — check that before spending a fresh LLM
-      // call. Previously these two paths never shared a cache at all: an
-      // on-demand click re-paid for a symbol the nightly job scored hours
-      // earlier, and the two payload shapes could disagree on verdict for
-      // the same symbol at the same time. normalizeAiPayload already
-      // reconciles the shape difference (recommendation/entry_price vs
-      // verdict/entry).
+      // call, and normalizeAiPayload reconciles the two payload shapes
+      // (recommendation/entry_price vs verdict/entry).
       const { data: sharedCached } = await svc.from("market_stock_ai")
         .select("payload, computed_at")
         .eq("user_id", SHARED_CACHE_USER_ID).eq("symbol", symbol).eq("exchange", exchange)
         .order("computed_at", { ascending: false })
         .limit(1).maybeSingle();
-      if (sharedCached && Date.now() - new Date(sharedCached.computed_at).getTime() < TTL_MS) {
-        return jsonResponse(req, { payload: normalizeAiPayload(sharedCached.payload), cached: true, computed_at: sharedCached.computed_at });
+
+      const candidates = [cached, sharedCached].filter(Boolean) as Array<{ payload: unknown; computed_at: string }>;
+      const usable = candidates
+        .filter((c) => isFresh(c.computed_at, (c.payload as { score_date?: string } | null)?.score_date))
+        .sort((a, b) => new Date(b.computed_at).getTime() - new Date(a.computed_at).getTime())[0];
+      if (usable) {
+        const p = normalizeAiPayload(usable.payload);
+        return jsonResponse(req, {
+          payload: p, cached: true, persisted: true, computed_at: usable.computed_at,
+          score_date: p.score_date ?? null, model: p.model ?? null,
+          quote_used: !!p.quote_used, breadth_used: !!p.breadth_used,
+          quote_age_minutes: p.quote_age_minutes ?? null,
+        });
+      }
+
+      // No verdict for today and the caller didn't ask to spend a call.
+      if (!generate) {
+        const newest = candidates.sort((a, b) => new Date(b.computed_at).getTime() - new Date(a.computed_at).getTime())[0];
+        const p = newest ? normalizeAiPayload(newest.payload) : null;
+        return jsonResponse(req, {
+          payload: null, cached: false, stale: !!newest, generated: false,
+          computed_at: newest?.computed_at ?? null,
+          stale_payload: p, score_date: p?.score_date ?? null,
+        });
       }
     }
-
-    const { data: score } = await svc.from("market_stock_scores")
-      .select("*").eq("symbol", symbol).eq("exchange", exchange).maybeSingle();
     if (!score) return errorResponse(req, "no coverage — run pipeline for this symbol first", 404);
+
 
     // Fundamentals: the per-user `market_fundamentals` cache is populated only
     // for symbols someone opened the fundamentals panel on, so most verdicts
@@ -229,16 +303,54 @@ Deno.serve(async (req) => {
     // Extra evidence the verdict used to be blind to: live price, the news
     // window with per-headline sentiment, detected patterns, the v4 bucket
     // breakdown, and the market/sector regime.
+    //
+    // Column names matter here: `market_quotes` is (symbol, price, change_pct,
+    // fetched_at) with NO exchange column, and `market_breadth_daily` has
+    // advances/declines rather than a precomputed ratio. The previous selects
+    // named columns that do not exist, so BOTH queries errored on every call
+    // and the model was silently handed "live price unavailable / breadth
+    // unknown" for every stock — which is exactly what it echoed back as a risk.
+    const NEWS_WINDOW_DAYS = 14;
+    const newsSince = new Date(Date.now() - NEWS_WINDOW_DAYS * 86400_000).toISOString();
     const [{ data: quoteRow }, { data: newsRows }, { data: breadth }] = await Promise.all([
-      svc.from("market_quotes").select("ltp,day_change_pct,as_of")
-        .eq("symbol", symbol).eq("exchange", exchange)
-        .order("as_of", { ascending: false }).limit(1).maybeSingle(),
+      svc.from("market_quotes").select("price,change_pct,fetched_at,source")
+        .eq("symbol", symbol)
+        .order("fetched_at", { ascending: false }).limit(1).maybeSingle(),
       svc.from("market_news").select("headline,sentiment,published_at")
         .eq("symbol", symbol).eq("exchange", exchange)
+        .gte("published_at", newsSince)
         .order("published_at", { ascending: false }).limit(8),
-      svc.from("market_breadth_daily").select("regime,adv_decline_ratio,trade_date")
+      svc.from("market_breadth_daily")
+        .select("regime,advances,declines,market_score,india_vix,nifty_change_pct,trade_date")
         .order("trade_date", { ascending: false }).limit(1).maybeSingle(),
     ]);
+
+    // `market_quotes` only holds symbols someone has an index/watch card for —
+    // most stocks have no row at all, which read as "live price unavailable"
+    // even while the tick pipeline had a price. `market_live_prices` is the
+    // universe-wide table the sweep writes, so fall back to it.
+    let priceAt: string | null = (quoteRow?.fetched_at as string | null) ?? null;
+    let priceVal: number | null = quoteRow?.price != null ? Number(quoteRow.price) : null;
+    let priceChangePct: number | null = quoteRow?.change_pct != null ? Number(quoteRow.change_pct) : null;
+    if (priceVal == null) {
+      const { data: lp } = await svc.from("market_live_prices")
+        .select("ltp,change_pct,as_of").eq("symbol", symbol)
+        .order("as_of", { ascending: false }).limit(1).maybeSingle();
+      if (lp?.ltp != null) {
+        priceVal = Number(lp.ltp);
+        priceChangePct = lp.change_pct != null ? Number(lp.change_pct) : null;
+        priceAt = (lp.as_of as string | null) ?? null;
+      }
+    }
+    // A price older than ~18h is a previous session's print — never call that
+    // "live", and never let it become the plausibility anchor.
+    const quoteAgeMs = priceAt ? Date.now() - new Date(priceAt).getTime() : null;
+    const quoteFresh = priceVal != null && quoteAgeMs != null && quoteAgeMs < 18 * 3600_000;
+    const livePrice = quoteFresh ? priceVal : null;
+
+    const advDecl = breadth && Number(breadth.declines) > 0
+      ? (Number(breadth.advances) / Number(breadth.declines)) : null;
+
 
     const newsItems = (newsRows ?? []).map((n) => ({
       headline: String(n.headline ?? ""),
@@ -262,7 +374,7 @@ Deno.serve(async (req) => {
 Sector: ${score.sector ?? "unknown"}
 Data vintage: technicals are end-of-day for ${score.trade_date ?? "an unknown session"} (today is ${new Date().toISOString().slice(0, 10)}).
 EOD close: ${score.close}  Change%: ${score.change_pct}
-${quoteRow?.ltp != null ? `LIVE price: ${quoteRow.ltp} (${quoteRow.day_change_pct ?? "?"}% today, as of ${quoteRow.as_of}) — anchor entry/stop/targets on this, not the EOD close.` : "Live price: unavailable."}
+${livePrice != null ? `LIVE price: ${livePrice} (${priceChangePct ?? "?"}% today, as of ${priceAt}) — anchor entry/stop/targets on this, not the EOD close.` : "Live price: unavailable — anchor on the EOD close and do NOT list price staleness as a risk."}
 Volume: ${score.volume}  RelVol: ${score.rel_volume}  Delivery%: ${score.delivery_pct ?? "n/a"}
 RSI14: ${score.rsi14}  ADX14: ${score.adx14}  ATR%: ${score.atr_pct}
 MACD: ${score.macd}/${score.macd_signal}  BB width: ${score.bb_width}  BB squeeze: ${score.bb_squeeze}
@@ -272,8 +384,10 @@ Support/Resistance: ${score.support_level}/${score.resistance_level}
 Higher lows: ${score.higher_lows}  Above 200EMA: ${score.above_ema200}  Near resistance: ${score.near_resistance}
 Chart patterns: ${patternText}
 Breakout score: ${score.breakout_score}   Pre-breakout: ${score.prebreakout_score}   Band: ${score.breakout_band ?? "n/a"}
-Rel strength vs Nifty: ${score.rel_strength_nifty}   Sector strength: ${score.sector_strength ?? "n/a"}
-Market breadth regime: ${breadth?.regime ?? "unknown"}${breadth?.adv_decline_ratio != null ? ` (A/D ${breadth.adv_decline_ratio})` : ""}
+Rel strength vs Nifty: ${score.rel_strength_nifty}   Sector strength: ${score.sector_strength ?? "n/a"}   Breakout rank pct: ${score.breakout_v4_rank_pct ?? score.breakout_rank_pct ?? "n/a"}
+Liquidity: tradable=${score.is_liquid_tradable ?? "n/a"}   Delivery%: ${score.delivery_pct ?? "n/a"}
+Market breadth: ${breadth?.regime ?? "unknown"}${advDecl != null ? ` · A/D ${advDecl.toFixed(2)} (${breadth?.advances} adv / ${breadth?.declines} dec)` : ""}${breadth?.india_vix != null ? ` · VIX ${breadth.india_vix}` : ""}${breadth?.nifty_change_pct != null ? ` · Nifty ${breadth.nifty_change_pct}%` : ""}${breadth?.trade_date ? ` · as of ${breadth.trade_date}` : ""}
+${breadth ? "" : "Breadth data is unavailable — do not list market breadth as a risk."}
 News sentiment: ${sent.avg != null ? sent.avg.toFixed(2) : "n/a"} across ${sent.count} headlines (${sent.positive} positive / ${sent.negative} negative)
 Recent headlines:
 ${newsText}
@@ -285,8 +399,7 @@ ${fundText ? `\nFundamentals${fundAsOf ? ` (as of ${String(fundAsOf).slice(0, 10
     if (!apiKey) return errorResponse(req, "LOVABLE_API_KEY not configured", 500);
 
     const raw = await callAi(apiKey, prompt);
-    const closePrice = quoteRow?.ltp != null ? Number(quoteRow.ltp)
-      : score.close != null ? Number(score.close) : null;
+    const closePrice = livePrice ?? (score.close != null ? Number(score.close) : null);
     const sane = sanitizeAiTrade({ verdict: raw.verdict, entry: raw.entry, stop_loss: raw.stop_loss, targets: raw.targets }, closePrice);
     // A verdict with no entry, no stop and no targets carries nothing the user
     // can act on — the model still routinely returned 1.0 ("certain") for it,
@@ -297,7 +410,16 @@ ${fundText ? `\nFundamentals${fundAsOf ? ` (as of ${String(fundAsOf).slice(0, 10
     const payload: AiPayload = {
       ...raw, confidence, entry: sane.entry, stop_loss: sane.stop_loss, targets: sane.targets,
       plausibility_flags: sane.flags.length ? sane.flags : undefined,
+      // Provenance travels with the payload so a cached read is as honest as a
+      // fresh one about what evidence the verdict actually had.
+      score_date: scoreDate,
+      quote_used: livePrice != null,
+      breadth_used: !!breadth,
+      quote_age_minutes: quoteAgeMs != null ? Math.round(quoteAgeMs / 60000) : null,
+      news_count: newsItems.length,
+      fundamentals_as_of: fundAsOf ? String(fundAsOf).slice(0, 10) : null,
     };
+
     const computed_at = new Date().toISOString();
     // Upsert on the unique (user_id, symbol, exchange) index so the cache
     // table stays one-row-per-user-per-stock instead of growing forever.
@@ -305,19 +427,44 @@ ${fundText ? `\nFundamentals${fundAsOf ? ` (as of ${String(fundAsOf).slice(0, 10
     // market-ai-recommend job and every list view read those columns, and
     // writing only the JSON blob left them NULL — a stored verdict that no
     // other reader could see.
-    await svc.from("market_stock_ai").upsert({
+    //
+    // The write result is CHECKED and logged: it was silently discarded before,
+    // and a failing upsert means the 6h TTL never engages and every page view
+    // pays for a fresh LLM call. `persisted:false` surfaces that in the UI
+    // instead of hiding it.
+    const { error: writeErr } = await svc.from("market_stock_ai").upsert({
       user_id: auth.userId, symbol, exchange, payload, computed_at,
-      recommendation: payload.verdict,
-      confidence: payload.confidence,
+      // The flat column carries a CHECK for 'Buy'|'Hold'|'Wait'|'Avoid'
+      // (the nightly cron's casing). Writing the payload's lowercase verdict
+      // violated it, so EVERY on-demand verdict failed to persist and each
+      // page open re-paid for an AI call.
+      recommendation: payload.verdict.charAt(0).toUpperCase() + payload.verdict.slice(1),
+
+      // Cap the flat column too — list views read it directly and older rows
+      // stored an uncapped 1.0.
+      confidence: Math.min(0.95, payload.confidence),
       entry_price: payload.entry,
       stop_loss: payload.stop_loss,
       targets: payload.targets.length ? payload.targets : null,
       holding_period_days: payload.holding_period_days,
       rationale: payload.rationale || null,
     }, { onConflict: "user_id,symbol,exchange" });
-    return jsonResponse(req, { payload, cached: false, computed_at });
+    if (writeErr) {
+      console.error("market_stock_ai upsert failed", { symbol, exchange, error: writeErr.message, details: (writeErr as { details?: string }).details });
+    }
+    return jsonResponse(req, {
+      payload, cached: false, generated: true, computed_at,
+      persisted: !writeErr,
+      quote_used: livePrice != null,
+      breadth_used: !!breadth,
+      quote_age_minutes: payload.quote_age_minutes ?? null,
+      score_date: scoreDate,
+      model: payload.model ?? null,
+    });
+
 
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 502);
+
   }
 });

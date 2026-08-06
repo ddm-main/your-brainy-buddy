@@ -22,7 +22,7 @@ const DEFAULT_LIMIT = 100;
 
 type Bar = [string, number | null, number | null, number | null, number | null, number | null];
 
-interface Body { limit?: number }
+interface Body { limit?: number; mode?: "archive" | "prune" }
 
 function gzip(bytes: Uint8Array): Promise<Uint8Array> {
   const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"));
@@ -49,6 +49,56 @@ Deno.serve(async (req) => {
     const limit = Math.max(1, Math.min(Number(body.limit ?? DEFAULT_LIMIT) || DEFAULT_LIMIT, 120));
 
     const svc = svcClient();
+
+    // mode: "prune" — drop archive objects that must not exist any more:
+    // anything belonging to a penny-flagged symbol, and anything whose whole
+    // window sits beyond the 2-year history ceiling. SQL cannot delete bucket
+    // objects, so the sweep lives here.
+    if (body.mode === "prune") {
+      const { data: cfg } = await svc.from("system_retention_config")
+        .select("days").eq("key", "max_history_days").maybeSingle();
+      const keepDays = Math.max(90, Number((cfg as any)?.days ?? 730));
+      const cutoff = new Date(Date.now() - keepDays * 86400_000).toISOString().slice(0, 10);
+
+      // Penny symbols must be paged: there are >1k of them and a plain select
+      // silently stops at PostgREST's 1000-row default, leaving archives behind.
+      const pennyRows = await fetchAllRows<{ symbol: string; exchange: string }>((from, to) =>
+        svc.from("market_stocks").select("symbol,exchange")
+          .eq("penny_excluded", true).order("symbol", { ascending: true }).range(from, to) as any,
+      );
+      const { data: oldRows } = await svc.from("market_archive_index")
+        .select("symbol,exchange,object_path").lt("last_date", cutoff);
+      const pennyKeys = new Set(pennyRows.map((r) => `${r.exchange}:${r.symbol}`));
+
+      const idx = await fetchAllRows<{ symbol: string; exchange: string; object_path: string }>((from, to) =>
+        svc.from("market_archive_index").select("symbol,exchange,object_path").range(from, to) as any,
+      );
+      const doomed = new Map<string, { symbol: string; exchange: string; object_path: string }>();
+      for (const r of idx) {
+        if (pennyKeys.has(`${r.exchange}:${r.symbol}`)) doomed.set(r.object_path, r);
+      }
+      for (const r of (oldRows ?? []) as any[]) doomed.set(r.object_path, r);
+
+      const paths = [...doomed.keys()];
+      let objectsRemoved = 0, indexRemoved = 0;
+      for (let i = 0; i < paths.length; i += 100) {
+        const batch = paths.slice(i, i + 100);
+        const { error: rmErr } = await svc.storage.from(BUCKET).remove(batch);
+        if (!rmErr) objectsRemoved += batch.length;
+        for (const p of batch) {
+          const row = doomed.get(p)!;
+          const { error: delErr } = await svc.from("market_archive_index")
+            .delete().eq("symbol", row.symbol).eq("exchange", row.exchange);
+          if (!delErr) indexRemoved += 1;
+        }
+      }
+
+      return jsonResponse(req, {
+        ok: true, mode: "prune", cutoff,
+        objects_removed: objectsRemoved, index_rows_removed: indexRemoved,
+      });
+    }
+
 
     // Hot windows come from the retention config so they can be tightened by
     // the governor without a redeploy.

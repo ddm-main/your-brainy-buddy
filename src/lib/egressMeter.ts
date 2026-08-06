@@ -15,7 +15,13 @@ type Row = { calls: number; bytes: number; max: number };
 type Source = "postgrest" | "functions" | "storage" | "auth" | "realtime" | "unknown";
 
 const WARN_BYTES = 256 * 1024; // one read shipping a quarter MB is worth a look
+// Hard budget ceiling. The project's target is <=1 MB per user action and
+// <=20 MB/day, so any single response over this is a bug, not a big page —
+// it gets reported in every environment (not just DEV) and tagged in the
+// route label so `system_egress_daily` shows which read broke the budget.
+const OVERSIZE_BYTES = 400 * 1024;
 const FLUSH_MS = 60_000;
+
 
 const session = new Map<string, Row>();          // dev table, per read label
 const pending = new Map<string, Row>();          // not yet reported, per source|route
@@ -145,13 +151,24 @@ export function installEgressMeter() {
     res.clone().arrayBuffer().then((buf) => {
       const bytes = wireBytes(res, buf.byteLength);
       if (bytes <= 0) return;
-      bump(pending, `${hit.source}|${hit.route}`, bytes);
-      bump(session, hit.route, bytes);
-      if (import.meta.env.DEV && bytes >= WARN_BYTES) {
+      // Over-budget reads are tagged so they are identifiable in
+      // `system_egress_daily` without having to correlate byte totals by hand.
+      const oversize = bytes >= OVERSIZE_BYTES;
+      const route = oversize ? `${hit.route} !OVER` : hit.route;
+      bump(pending, `${hit.source}|${route}`, bytes);
+      bump(session, route, bytes);
+      if (oversize) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `[egress] BUDGET: ${hit.route} → ${human(bytes)} in one response ` +
+          `(ceiling ${human(OVERSIZE_BYTES)}). This read needs server-side filtering.`,
+        );
+      } else if (import.meta.env.DEV && bytes >= WARN_BYTES) {
         // eslint-disable-next-line no-console
         console.warn(`[egress] ${hit.route} → ${human(bytes)} in one response`);
       }
     }).catch(() => {
+
       // Streamed bodies (SSE) are not measurable — count the headers at least.
       bump(pending, `${hit.source}|${hit.route}`, HEADER_OVERHEAD);
     });

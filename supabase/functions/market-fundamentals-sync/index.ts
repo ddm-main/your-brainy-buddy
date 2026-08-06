@@ -53,6 +53,9 @@ Deno.serve(async (req) => {
         .select("symbol,exchange")
         .eq("is_active", true)
         .eq("in_universe", true)
+        // Penny names are gated at the DB anyway; skipping them here saves the
+        // provider round-trips instead of throwing the rows away on write.
+        .not("penny_excluded", "is", true)
         .order("symbol", { ascending: true })
         .range(from, from + PAGE - 1);
       if (error) return errorResponse(req, error.message, 500);

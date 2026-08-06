@@ -3112,8 +3112,11 @@ export type Database = {
           created_at: string
           exchange: string
           ltp: number | null
+          market_cap_live: number | null
           prev_close: number | null
           provider: string | null
+          quote_rejected: boolean
+          reject_reason: string | null
           session_date: string
           sweep_id: string
           symbol: string
@@ -3126,8 +3129,11 @@ export type Database = {
           created_at?: string
           exchange?: string
           ltp?: number | null
+          market_cap_live?: number | null
           prev_close?: number | null
           provider?: string | null
+          quote_rejected?: boolean
+          reject_reason?: string | null
           session_date: string
           sweep_id: string
           symbol: string
@@ -3140,8 +3146,11 @@ export type Database = {
           created_at?: string
           exchange?: string
           ltp?: number | null
+          market_cap_live?: number | null
           prev_close?: number | null
           provider?: string | null
+          quote_rejected?: boolean
+          reject_reason?: string | null
           session_date?: string
           sweep_id?: string
           symbol?: string
@@ -3171,8 +3180,11 @@ export type Database = {
           change_pct: number | null
           exchange: string
           ltp: number | null
+          market_cap_live: number | null
           prev_close: number | null
           provider: string | null
+          quote_rejected: boolean
+          reject_reason: string | null
           session_date: string
           sweep_id: string | null
           symbol: string
@@ -3185,8 +3197,11 @@ export type Database = {
           change_pct?: number | null
           exchange?: string
           ltp?: number | null
+          market_cap_live?: number | null
           prev_close?: number | null
           provider?: string | null
+          quote_rejected?: boolean
+          reject_reason?: string | null
           session_date: string
           sweep_id?: string | null
           symbol: string
@@ -3199,8 +3214,11 @@ export type Database = {
           change_pct?: number | null
           exchange?: string
           ltp?: number | null
+          market_cap_live?: number | null
           prev_close?: number | null
           provider?: string | null
+          quote_rejected?: boolean
+          reject_reason?: string | null
           session_date?: string
           sweep_id?: string | null
           symbol?: string
@@ -4995,6 +5013,9 @@ export type Database = {
           market_cap_source: string | null
           next_earnings_at: string | null
           pe_ttm: number | null
+          penny_checked_at: string | null
+          penny_excluded: boolean
+          penny_reason: string | null
           price_sync_attempts: number
           price_sync_attempts_day: string | null
           roe: number | null
@@ -5044,6 +5065,9 @@ export type Database = {
           market_cap_source?: string | null
           next_earnings_at?: string | null
           pe_ttm?: number | null
+          penny_checked_at?: string | null
+          penny_excluded?: boolean
+          penny_reason?: string | null
           price_sync_attempts?: number
           price_sync_attempts_day?: string | null
           roe?: number | null
@@ -5093,6 +5117,9 @@ export type Database = {
           market_cap_source?: string | null
           next_earnings_at?: string | null
           pe_ttm?: number | null
+          penny_checked_at?: string | null
+          penny_excluded?: boolean
+          penny_reason?: string | null
           price_sync_attempts?: number
           price_sync_attempts_day?: string | null
           roe?: number | null
@@ -6804,8 +6831,10 @@ export type Database = {
       market_screener_rows: {
         Row: {
           above_ema200: boolean | null
+          above_ema200_live: boolean | null
           adx14: number | null
           atr_pct: number | null
+          atr_pct_live: number | null
           atr14: number | null
           bb_lower: number | null
           bb_squeeze: boolean | null
@@ -6813,6 +6842,7 @@ export type Database = {
           bb_width: number | null
           book_value: number | null
           breakout_score: number | null
+          breakout_score_v4: number | null
           change_abs: number | null
           change_pct: number | null
           change_pct_raw: number | null
@@ -6826,10 +6856,21 @@ export type Database = {
           debt_to_equity: number | null
           dii_holding: number | null
           dividend_yield: number | null
+          dividend_yield_live: number | null
+          earnings_yield_live: number | null
           ema100: number | null
           ema20: number | null
           ema200: number | null
           ema50: number | null
+          eod_change_abs: number | null
+          eod_change_pct: number | null
+          eod_change_pct_raw: number | null
+          eod_close: number | null
+          eod_market_cap: number | null
+          eod_previous_close: number | null
+          eod_trade_date: string | null
+          eod_vol_gt_avg30: boolean | null
+          eod_volume: number | null
           eps_growth_yoy: number | null
           eps_ttm: number | null
           exchange: string | null
@@ -6841,6 +6882,7 @@ export type Database = {
           fundamental_price: number | null
           fundamentals_updated_at: string | null
           high_52w: number | null
+          high_52w_live: number | null
           higher_lows: boolean | null
           in_universe: boolean | null
           industry: string | null
@@ -6854,29 +6896,44 @@ export type Database = {
           last_fundamentals_sync_at: string | null
           last_price_sync_at: string | null
           liquidity_reasons: Json | null
+          live_age_s: number | null
           live_as_of: string | null
           live_provider: string | null
+          live_session_date: string | null
+          live_stale: boolean | null
+          live_sweep_id: string | null
+          live_volume: number | null
           low_52w: number | null
+          low_52w_live: number | null
           macd: number | null
           macd_hist: number | null
           macd_signal: number | null
           market_cap: number | null
           market_cap_reported: number | null
+          mcap_basis: string | null
           near_resistance: boolean | null
+          near_resistance_live: boolean | null
           pb: number | null
+          pb_live: number | null
           pct_from_52w_high: number | null
+          pct_from_52w_high_live: number | null
+          pe_live: number | null
           pe_ttm: number | null
           peg: number | null
+          peg_live: number | null
           prebreakout_score: number | null
           previous_close: number | null
+          price_basis_ratio: number | null
           profit_growth_yoy: number | null
           profit_ttm_cr: number | null
           promoter_holding: number | null
           promoter_pledge: number | null
           quick_ratio: number | null
+          quote_state: string | null
           refreshed_at: string | null
           rel_strength_nifty: number | null
           rel_volume: number | null
+          rel_volume_live: number | null
           resistance_level: number | null
           ret_21d: number | null
           ret_5d: number | null
@@ -6891,7 +6948,9 @@ export type Database = {
           score_trade_date: string | null
           sector: string | null
           sector_strength: number | null
+          session_elapsed_frac: number | null
           sme: boolean | null
+          stale_live_session_date: string | null
           strict_ok: boolean | null
           sub_sector: string | null
           support_level: number | null
@@ -6903,6 +6962,8 @@ export type Database = {
           vol_avg20: number | null
           vol_avg30: number | null
           vol_gt_avg30: boolean | null
+          vol_gt_avg30_paced: boolean | null
+          vol_pace_ratio: number | null
           volume: number | null
           yahoo_symbol: string | null
         }
@@ -7058,6 +7119,17 @@ export type Database = {
           trade_date: string
         }[]
       }
+      market_live_settled_anchors_lean: {
+        Args: { _before: string; _symbols: string[] }
+        Returns: {
+          prev_close: number
+          symbol: string
+        }[]
+      }
+      market_penny_sweep: {
+        Args: { _min_cap_cr?: number; _min_price?: number }
+        Returns: Json
+      }
       market_rescore_latest_from_prices: {
         Args: { _limit?: number; _trade_date?: string }
         Returns: number
@@ -7187,6 +7259,7 @@ export type Database = {
         Returns: Json
       }
       prune_batched: { Args: { _sql: string }; Returns: number }
+      prune_beyond_history_ceiling: { Args: never; Returns: Json }
       prune_old_data: { Args: { _aggressive?: boolean }; Returns: Json }
       purge_old_jarvis_interactions: { Args: never; Returns: undefined }
       purge_old_ticker_trace: { Args: never; Returns: undefined }

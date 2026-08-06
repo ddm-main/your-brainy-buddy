@@ -6,6 +6,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { inputStyle as baseInputStyle } from "@/components/hud/HudControls";
+import { SYMBOL_ALIASES } from "@/lib/market/symbolAliases";
 
 export type SymbolOption = { symbol: string; exchange: string; company_name: string | null };
 
@@ -49,7 +50,9 @@ export function SymbolSearchInput({
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    const term = value.trim().toUpperCase().replace(/[^A-Z0-9 ]/g, "");
+    const typed = value.trim().toUpperCase().replace(/[^A-Z0-9 ]/g, "");
+    // A renamed ticker (GLS → ALIVUS) otherwise returns nothing at all.
+    const term = SYMBOL_ALIASES[typed.replace(/ /g, "")] ?? typed;
     if (!term) { setOptions([]); return; }
     const seq = ++reqSeq.current;
     const t = setTimeout(async () => {

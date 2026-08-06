@@ -26,7 +26,15 @@ export function overviewColumnMap<TRow extends Record<string, any>>(onScoreClick
     industry: { header: "Industry", accessorKey: "industry", cell: ({ getValue }: any) => <span style={{ fontSize: 11 }}>{(getValue() as string) ?? "—"}</span> },
     market_cap: {
       header: "Mcap (₹Cr)", accessorKey: "market_cap", meta: { align: "right" } as any,
-      cell: ({ getValue }: any) => fmtInt(getValue() as number | null),
+      cell: ({ row, getValue }: any) => {
+        const basis = row.original?.mcap_basis as string | null | undefined;
+        const label = basis === "reported_live" ? "Reported cap revalued at the live price"
+          : basis === "reported_eod" ? "Reported cap revalued at the settled close"
+          : basis === "reported" ? "As reported by the fundamentals source"
+          : basis === "derived" ? "Estimated internally — no reported cap available"
+          : undefined;
+        return <span title={label}>{fmtInt(getValue() as number | null)}</span>;
+      },
     },
     close: {
       id: "close", header: "LTP (₹)", meta: { align: "right" } as any,

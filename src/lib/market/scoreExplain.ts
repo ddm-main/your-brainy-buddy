@@ -164,7 +164,13 @@ export function buildBucketRows(
   coverage: Record<string, number> | null | undefined,
 ): BucketRow[] {
   const cov = coverage ?? {};
-  const pts = buckets ?? {};
+  // Some stored snapshots (a bad write on 2026-08-03) put the whole components
+  // envelope `{buckets, factors, penalties}` in the `buckets` column. Unwrap it
+  // so those rows read as points instead of a column of 0.0.
+  const rawPts = (buckets ?? {}) as Record<string, unknown>;
+  const pts = (rawPts.buckets && typeof rawPts.buckets === "object"
+    ? rawPts.buckets
+    : rawPts) as Record<string, number>;
   const present = V4_BUCKETS.filter((b) => Number(cov[b.key] ?? 0) >= BUCKET_MIN_COVERAGE);
   const presentW = present.reduce((s, b) => s + b.weight, 0);
   return V4_BUCKETS.map((b) => {

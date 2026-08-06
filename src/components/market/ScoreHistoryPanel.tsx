@@ -1,92 +1,114 @@
-// Analysis rail: one score, one 100-point distribution, one button.
-// Everything deeper — sub-factor maths, penalties, criteria, history,
-// forward returns, calibration — lives on /market/score/:symbol/explain.
-import { useNavigate } from "react-router-dom";
+// Analysis rail: the EOD vintage of the score as one compact block —
+// number + band + a single 100-point distribution. Everything deeper
+// (sub-factor maths, penalties, criteria, history, forward returns,
+// calibration) lives on /market/score/:symbol/explain.
 import { Chip } from "@/components/hud/HudControls";
 import { useScoreHistory } from "@/lib/market/scoreHistory";
-import { buildBucketRows, bandOf, BUCKET_COLORS } from "@/lib/market/scoreExplain";
+import { buildBucketRows, bandOf, BUCKET_COLORS, V4_BUCKETS } from "@/lib/market/scoreExplain";
 import { useLatestPriceSession } from "@/lib/market/hooks";
 import { classifyFreshness } from "@/lib/market/freshness";
 
-export function ScoreHistoryPanel({ symbol, exchange }: { symbol: string; exchange: string }) {
-  const nav = useNavigate();
+/** Current-session score row, used when score history hasn't caught up yet. */
+export interface ScoreFallback {
+  tradeDate: string | null;
+  score: number | null;
+  band: string | null;
+  components: Record<string, number> | null;
+}
+
+/** Derive a bucket-points + coverage pair from the flat v4 components map. */
+function fromComponents(components: Record<string, number> | null | undefined) {
+  const src = (components ?? {}) as Record<string, unknown>;
+  const flat = (src.buckets && typeof src.buckets === "object" ? src.buckets : src) as Record<string, number>;
+  const pts: Record<string, number> = {};
+  const cov: Record<string, number> = {};
+  for (const b of V4_BUCKETS) {
+    const v = Number(flat[b.key]);
+    if (Number.isFinite(v)) { pts[b.key] = v; cov[b.key] = 1; }
+  }
+  return { pts, cov, any: Object.keys(pts).length > 0 };
+}
+
+export function ScoreHistoryPanel({
+  symbol, exchange, fallback,
+}: { symbol: string; exchange: string; fallback?: ScoreFallback }) {
   const { data: history = [], isLoading } = useScoreHistory(symbol, exchange, 10);
   const latest = history.length ? history[history.length - 1] : null;
   const { data: sessionInfo } = useLatestPriceSession();
+
+  // The history writer runs behind the scores table; when the score row is for
+  // a newer session, show that instead of a stale snapshot.
+  const fb = fromComponents(fallback?.components);
+  const useFallback =
+    !!fallback?.tradeDate && fallback.score != null && fb.any &&
+    (!latest || String(fallback.tradeDate) > String(latest.trade_date));
+
+  const dataDate = useFallback ? fallback!.tradeDate! : latest?.trade_date;
+  const score = useFallback ? fallback!.score! : latest?.score ?? null;
+  const rawBand = useFallback ? fallback!.band : latest?.band;
+  const rows = useFallback
+    ? buildBucketRows(fb.pts, fb.cov)
+    : buildBucketRows(latest?.buckets, latest?.coverage);
+
   const fresh = classifyFreshness({
-    dataDate: latest?.trade_date,
+    dataDate,
     latestComplete: sessionInfo?.latestComplete,
     sessions: sessionInfo?.sessions ?? [],
   });
 
-  const rows = buildBucketRows(latest?.buckets, latest?.coverage);
-  const earned = rows.reduce((s, r) => s + r.earned, 0);
+  if (isLoading) return <div style={{ fontSize: 11, color: "var(--text-muted)" }}>loading…</div>;
+  if (score == null) {
+    return (
+      <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>
+        No v4 snapshot for {symbol} yet — the nightly aggregates pass writes one per session.
+      </div>
+    );
+  }
+
+  const band = rawBand ?? bandOf(score).label;
+  const shown = rows.filter((r) => r.present);
+  const dark = rows.filter((r) => !r.present);
+  const earned = shown.reduce((s, r) => s + r.earned, 0);
 
   return (
-    <>
-      <div className="hud-label" style={{ fontSize: 9, letterSpacing: "0.14em", color: "var(--accent-soft)", margin: "10px 0 4px" }}>
-        {fresh.state === "settled" ? "Latest EOD score" : "Last EOD score"}
+    <div style={{ marginTop: 8, borderTop: "1px solid var(--edge)", paddingTop: 6 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: "var(--font-hud)", fontSize: 20, color: "var(--text)", lineHeight: 1 }}>{score}</span>
+        <span style={{ fontSize: 10, color: "var(--text-muted)" }}>/ 100</span>
+        <Chip tone={bandOf(score).tone}>{band}</Chip>
+        <span style={{ fontSize: 9, color: fresh.state === "settled" ? "var(--text-muted)" : "var(--warn)" }} title={fresh.title}>
+          EOD{fresh.label ? ` ${fresh.label}` : ""}
+        </span>
       </div>
-      {isLoading ? (
-        <div style={{ fontSize: 11, color: "var(--text-muted)" }}>loading…</div>
-      ) : !latest || latest.score == null ? (
-        <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>
-          No v4 snapshot for {symbol} yet — the nightly aggregates pass writes one per session.
-        </div>
-      ) : (
-        <>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
-            <span style={{ fontFamily: "var(--font-hud)", fontSize: 30, color: "var(--text)", lineHeight: 1 }}>
-              {latest.score}
+
+      {/* the full 100 in one bar: earned per bucket + everything unearned */}
+      <div style={{ display: "flex", height: 6, background: "var(--edge)", marginTop: 6, overflow: "hidden" }}>
+        {shown.filter((r) => r.earned > 0).map((r) => (
+          <div key={r.key} title={`${r.key} ${r.earned.toFixed(1)} pts`}
+               style={{ width: `${r.earned}%`, height: "100%", background: BUCKET_COLORS[r.key] }} />
+        ))}
+        <div style={{ flex: 1, background: "repeating-linear-gradient(45deg, var(--edge) 0 3px, transparent 3px 6px)" }} />
+      </div>
+
+      <div style={{
+        display: "grid", gridTemplateColumns: "1fr 1fr", columnGap: 12,
+        fontSize: 10, fontFamily: "var(--font-hud)", marginTop: 6,
+      }}>
+        {shown.map((r) => (
+          <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 5, padding: "1px 0" }}>
+            <span style={{ width: 5, height: 5, background: BUCKET_COLORS[r.key], flex: "0 0 auto" }} />
+            <span style={{ color: "var(--text-dim)", flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{r.key}</span>
+            <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text)" }}>
+              {r.earned.toFixed(1)}<span style={{ color: "var(--text-muted)" }}>/{r.weight}</span>
             </span>
-            <Chip tone={bandOf(latest.score).tone}>{latest.band ?? bandOf(latest.score).label}</Chip>
-            {/* Date only when this snapshot isn't the current settled session. */}
-            <span style={{ fontSize: 9, color: fresh.state === "settled" ? "var(--text-muted)" : "var(--warn)" }}
-                  title={fresh.title}>
-              {fresh.label ?? ""}
-              {latest.context_neutral ? `${fresh.label ? " · " : ""}neutral context` : ""}
-              {latest.is_liquid_tradable === false ? " · illiquid" : ""}
-            </span>
           </div>
+        ))}
+      </div>
 
-          {/* the full 100 in one bar: earned per bucket + everything unearned */}
-          <div style={{ display: "flex", height: 8, background: "var(--edge)", marginTop: 8, overflow: "hidden" }}>
-            {rows.filter((r) => r.earned > 0).map((r) => (
-              <div key={r.key} title={`${r.key} ${r.earned.toFixed(1)} pts`}
-                   style={{ width: `${r.earned}%`, height: "100%", background: BUCKET_COLORS[r.key] }} />
-            ))}
-            <div style={{ flex: 1, background: "repeating-linear-gradient(45deg, var(--edge) 0 3px, transparent 3px 6px)" }} />
-          </div>
-          <div style={{ fontSize: 9, color: "var(--text-muted)", marginTop: 3 }}>
-            {earned.toFixed(1)} earned · {(100 - earned).toFixed(1)} not earned, out of 100
-          </div>
-
-          <div style={{ fontSize: 10, fontFamily: "var(--font-hud)", marginTop: 6 }}>
-            {rows.map((r) => (
-              <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 6, padding: "1px 0" }}>
-                <span style={{ width: 6, height: 6, background: BUCKET_COLORS[r.key], flex: "0 0 auto", opacity: r.present ? 1 : 0.25 }} />
-                <span style={{ color: r.present ? "var(--text-dim)" : "var(--text-muted)", flex: "0 0 66px" }}>{r.key}</span>
-                <span style={{ flex: 1, height: 3, background: "var(--edge)" }}>
-                  <span style={{
-                    display: "block", height: "100%",
-                    width: `${r.ceiling > 0 ? Math.min(100, (r.earned / r.ceiling) * 100) : 0}%`,
-                    background: BUCKET_COLORS[r.key],
-                  }} />
-                </span>
-                <span style={{ flex: "0 0 62px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: r.present ? "var(--text)" : "var(--text-muted)" }}>
-                  {r.present ? `${r.earned.toFixed(1)} / ${r.weight}` : r.partial ? "part. data" : "no data"}
-                </span>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-
-      <button className="hud-btn" style={{ fontSize: 10, width: "100%", marginTop: 10 }}
-              onClick={() => nav(`/market/score/${encodeURIComponent(symbol)}/explain?exchange=${encodeURIComponent(exchange)}`)}>
-        More Details →
-      </button>
-    </>
+      <div style={{ fontSize: 9, color: "var(--text-muted)", marginTop: 4 }}>
+        {earned.toFixed(0)} earned{dark.length > 0 ? ` · no data: ${dark.map((r) => r.key).join(", ")}` : ""}
+      </div>
+    </div>
   );
 }
 

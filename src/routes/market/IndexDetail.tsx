@@ -11,7 +11,7 @@ import { CandleChart, type ChartType } from "@/components/market/CandleChart";
 import { PatternPanel } from "@/components/market/PatternPanel";
 import { detailToParam, type PatternDetail } from "@/lib/market/patternLabels";
 import { PatternDetailDialog, type PatternSelection } from "@/components/market/PatternDetailDialog";
-import { ChartToolbar, DEFAULT_SETTINGS, isIntraday, type ChartSettings } from "@/components/market/ChartToolbar";
+import { ChartToolbar, DEFAULT_SETTINGS, defaultVisibleBars, isIntraday, type ChartSettings } from "@/components/market/ChartToolbar";
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
 import { NewAlertModal, StockAlertsPanel } from "@/components/market/StockAlerts";
 import { DEFAULT_STUDIES, makeStudy, normalizeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
@@ -287,6 +287,8 @@ export default function IndexDetail() {
                     onEditStudy={setEditingId}
                     onRemoveStudy={removeStudy}
                     source={candlesData?.provider ?? null}
+                    viewportKey={`index:${symbol}:${tf}`}
+                    visibleBars={defaultVisibleBars(candles, tf)}
                     focusRange={patternFocus}
                     onPatternPick={setChartPatternSel}
                   />

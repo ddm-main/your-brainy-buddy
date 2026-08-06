@@ -385,7 +385,12 @@ async function loadDaily(
   userId: string,
   symbol: string,
   exchange: string,
+  // The chart's default daily window is 2 years (5 years weekly), so when the
+  // client explicitly asks for `max` we must guarantee deep history rather
+  // than relying on the shallow/sparse heuristics below.
+  deepRequested = false,
 ): Promise<{ rows: OutCandle[]; provider: SourceName; reason?: string }> {
+
   // Newest-first read then reverse: ordering ascending with a LIMIT returned
   // the OLDEST N rows, which silently dropped the most recent bars once a
   // symbol had more history than the cap.
@@ -434,7 +439,7 @@ async function loadDaily(
     ? Math.max(1, (Date.parse(latestCached) - Date.parse(oldestCached)) / 86_400_000 / 30.4375)
     : 1;
   const sparse = byDate.size > 0 && byDate.size / monthsCovered < MIN_BARS_PER_MONTH;
-  const wantDeep = (byDate.size < SHALLOW_BARS || sparse) && Date.now() - deepAt > DEEP_TTL_MS;
+  const wantDeep = (deepRequested || byDate.size < SHALLOW_BARS || sparse) && Date.now() - deepAt > DEEP_TTL_MS;
 
   // Nothing fetched this call means the cached series is being served as-is.
   let providerName: SourceName = "cache";
@@ -537,7 +542,7 @@ Deno.serve(async (req) => {
       const session = await computeMarketSession(svc, exchange);
       let daily: { rows: OutCandle[]; provider: SourceName; reason?: string };
       try {
-        daily = await loadDaily(svc, auth.userId, symbol, exchange);
+        daily = await loadDaily(svc, auth.userId, symbol, exchange, String(b?.range ?? "") === "max");
       } catch (e) {
         // Broker down and no cached history: report it honestly with a 200 so
         // the chart can render an "unavailable" state instead of a hard 502.
@@ -633,13 +638,17 @@ Deno.serve(async (req) => {
 
     const baseCfg = INTRADAY[timeframe];
     if (!baseCfg) return errorResponse(req, `Unsupported timeframe: ${timeframe}`);
-    // The client can ask for a shallower window (default intraday view only
-    // needs the current session) — a smaller upstream range is dramatically
-    // faster to fetch and parse than 60d/max of 5-minute bars.
-    const rangeHint = typeof b?.range === "string" && /^\d+d$/.test(b.range) ? String(b.range) : null;
-    const cfg = rangeHint && /^\d+m$/.test(timeframe)
+    // The client asks for exactly the depth its default visible window needs
+    // (1m 7d, 5m 10d, 15m 20d, 1h 3mo) — a smaller upstream range is
+    // dramatically faster to fetch and parse than 60d/max of minute bars, and
+    // hour grains no longer silently fall back to `max`.
+    const rangeHint = typeof b?.range === "string" && /^(?:\d+d|\d+mo|max)$/.test(b.range)
+      ? String(b.range)
+      : null;
+    const cfg = rangeHint && /^\d+(?:m|h)$/.test(timeframe)
       ? { interval: baseCfg.interval, range: rangeHint }
       : baseCfg;
+
 
     // Intraday cache in market_intraday_prices (keyed by timeframe now, so
     // 5m/15m/1h bars for the same symbol don't collide).  Flow:

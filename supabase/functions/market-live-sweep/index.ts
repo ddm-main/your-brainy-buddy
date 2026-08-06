@@ -25,6 +25,16 @@ const CHUNK = 400;          // symbols per invocation
 const QUOTE_CHUNK = 100;    // symbols per upstream quote call
 const YAHOO_CAP = 120;      // bounded gap-filler per invocation
 
+// NSE cash-market circuit bands top out at 20%. A print beyond that is not a
+// trade, it is an anchor problem — almost always a previous close that predates
+// an unapplied split/bonus (TEMBO 574.15 -> 66.85, WINSOME 836.67 -> 50.20).
+// Those leak into every "1D return >" screen as fake 300-2400% gainers, so the
+// quote is marked rejected and the screener falls back to the settled close
+// rather than silently ranking a phantom mover at the top of the page.
+const MAX_SESSION_MOVE_PCT = 21;
+// SME/Emerge board. Quoted for completeness, excluded from mainboard screens.
+const SME_SERIES = new Set(["SM", "ST"]);
+
 // deno-lint-ignore no-explicit-any
 declare const EdgeRuntime: any;
 
@@ -91,10 +101,13 @@ Deno.serve(async (req) => {
     // Keyset batch over the active NSE universe — the exact same universe the
     // screener screens, so the plane can never be a subset of it.
     let q = svc.from("market_stocks")
-      .select("symbol,exchange,yahoo_symbol")
+      .select("symbol,exchange,yahoo_symbol,series,total_shares_cr")
       .eq("is_active", true)
       .eq("exchange", "NSE")
       .eq("instrument_type", "EQ")
+      // Penny names are purged from every price table by a DB trigger; fetching
+      // them here would only burn quota on ticks that can never be stored.
+      .not("penny_excluded", "is", true)
       .order("symbol", { ascending: true })
       .limit(limit);
     if (cursor) q = q.gt("symbol", cursor);
@@ -118,7 +131,10 @@ Deno.serve(async (req) => {
     // never accepted as a 1D anchor.
     const anchors = new Map<string, number>();
     {
-      const { data: settled } = await svc.rpc("market_live_settled_anchors", {
+      // EGRESS: the `_lean` variant returns only symbol + prev_close for the
+      // symbols in THIS chunk. The full anchor set was 32 KB a call × 428
+      // calls/day (13.7 MB) for two fields.
+      const { data: settled } = await svc.rpc("market_live_settled_anchors_lean", {
         _symbols: symbols,
         _before: sessionDate,
       });
@@ -178,10 +194,47 @@ Deno.serve(async (req) => {
     }
 
     const rows: Array<Record<string, unknown>> = [];
+    // Share counts and series ride along from the universe batch so live market
+    // cap is revalued on the same row the filters read — ET revalues cap
+    // continuously, and a cap anchored to yesterday's close makes the
+    // "MCap >" gate admit and reject the wrong stocks.
+    const meta = new Map<string, { shares: number | null; series: string }>();
+    for (const s of list) {
+      meta.set(String(s.symbol), {
+        shares: s.total_shares_cr != null ? Number(s.total_shares_cr) : null,
+        series: String(s.series ?? "EQ"),
+      });
+    }
     for (const [symbol, p] of priced) {
       // Settled anchor wins; the feed's own previous close is the fallback.
       const prev = anchors.get(symbol) ?? (p.prevFromFeed && p.prevFromFeed > 0 ? p.prevFromFeed : null);
       const changeAbs = prev != null ? p.ltp - prev : null;
+      const changePct = changeAbs != null && prev
+        ? Number(((changeAbs / prev) * 100).toFixed(4))
+        : null;
+
+      const m = meta.get(symbol);
+      // Sanity gate. SME series keep their own (much wider) price behaviour and
+      // are screened out by scope rather than by band, so the band is only
+      // enforced on the mainboard where it is a hard exchange rule.
+      const onSme = m ? SME_SERIES.has(m.series) : false;
+      let rejected = false;
+      let rejectReason: string | null = null;
+      if (prev == null) {
+        rejected = true;
+        rejectReason = "no_settled_anchor";
+      } else if (!onSme && changePct != null && Math.abs(changePct) > MAX_SESSION_MOVE_PCT) {
+        rejected = true;
+        rejectReason = "circuit_band_exceeded";
+      }
+
+      // Live cap in crore = shares (crore) x price. Null shares stay null so the
+      // screener can mark the row unjudgeable instead of filtering it on a
+      // stale settled cap.
+      const capLive = m?.shares != null && m.shares > 0 && !rejected
+        ? Number((m.shares * p.ltp).toFixed(4))
+        : null;
+
       rows.push({
         symbol,
         exchange: "NSE",
@@ -189,8 +242,11 @@ Deno.serve(async (req) => {
         ltp: p.ltp,
         prev_close: prev,
         change_abs: changeAbs != null ? Number(changeAbs.toFixed(2)) : null,
-        change_pct: changeAbs != null && prev ? Number(((changeAbs / prev) * 100).toFixed(4)) : null,
+        change_pct: changePct,
         volume: p.volume != null ? Math.round(Number(p.volume)) : null,
+        market_cap_live: capLive,
+        quote_rejected: rejected,
+        reject_reason: rejectReason,
         provider: p.provider,
         sweep_id: sweepId,
         as_of: asOf,

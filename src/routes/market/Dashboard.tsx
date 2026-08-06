@@ -150,7 +150,15 @@ export default function MarketDashboard() {
   const { data: topBreakouts = [] } = useStockScores({ orderBy: "breakout_score", limit: 60 });
   const { data: preBreakouts = [] } = useStockScores({ orderBy: "prebreakout_score", limit: 10 });
   const usingSavedScreen = Boolean(selectedScreen);
-  const { data: savedScreenerRows = [], isFetching: savedScreenerFetching } = useScreenerData(selectedScreenState.universe, null, usingSavedScreen);
+  // EGRESS: the overview widget renders five core columns plus whatever the
+  // saved screen filters on. Asking for exactly those keeps this off the full
+  // 108-column plane.
+  const savedScreenerFields = useMemo(() => {
+    const core = ["symbol", "close", "change_pct", "market_cap", "breakout_score", "sector", "industry"];
+    const filterCols = colsFromActiveFilters(selectedScreenState.active, { skipBooleans: false });
+    return Array.from(new Set([...core, ...filterCols]));
+  }, [selectedScreenState.active]);
+  const { data: savedScreenerRows = [], isFetching: savedScreenerFetching } = useScreenerData(selectedScreenState.universe, null, usingSavedScreen, savedScreenerFields);
 
   const hasActiveFilters = selectedScreenState.active.length > 0;
   const matchingBreakouts = useMemo<BreakoutDisplayRow[]>(() => {

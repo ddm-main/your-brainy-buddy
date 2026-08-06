@@ -1,6 +1,20 @@
-// Data validation engine — runs nightly after all sync jobs complete.
-// Validates: no duplicates, market_cap > 0, PE matches Price/EPS, ROE recalc, etc.
-
+// Data validation engine — nightly, after the sync jobs settle.
+//
+// Rewritten: the previous version read `market_data`, a table that no longer
+// exists, so every run failed before it checked anything. It also *mutated*
+// rows (nulling market caps, overwriting PE) from a job nobody was reading —
+// silent writes from a validator are how bad data becomes permanent. This
+// version is strictly read-only and reports against the tables the pipeline
+// actually writes today:
+//
+//   market_stocks              — reference universe
+//   market_fundamentals_global — fundamentals plane
+//   market_daily_prices        — settled bars
+//   market_stock_scores        — derived scores
+//   market_live_prices / _runs — atomic live plane
+//
+// Anything it finds is returned as an error (breaks an invariant) or a warning
+// (suspicious, needs eyes). Fixes belong in the sync job that produced the row.
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 
@@ -9,11 +23,31 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
-  }
+const PAGE = 1000;
 
+/** Supabase caps a single select at 1000 rows; page through it explicitly so a
+ *  "clean" report can never just mean "we only looked at the first 1000". */
+async function selectAll<T = any>(
+  supabase: any,
+  table: string,
+  columns: string,
+  build: (q: any) => any = (q) => q,
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await build(supabase.from(table).select(columns)).range(from, from + PAGE - 1);
+    if (error) throw new Error(`${table}: ${error.message}`);
+    const batch = (data ?? []) as T[];
+    out.push(...batch);
+    if (batch.length < PAGE) return out;
+    if (out.length > 60_000) return out; // safety valve
+  }
+}
+
+serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+
+  const started = Date.now();
   try {
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
@@ -22,179 +56,265 @@ serve(async (req) => {
 
     const errors: string[] = [];
     const warnings: string[] = [];
+    const checks: Record<string, unknown> = {};
     let validated = 0;
-    let fixed = 0;
 
-    // 1. Check for duplicate symbols
-    const { data: duplicates } = await supabase.rpc("check_duplicate_symbols");
-    if (duplicates && duplicates.length > 0) {
-      errors.push(`Found ${duplicates.length} duplicate symbols`);
-      console.error("Duplicate symbols:", duplicates);
-    }
+    // ---- 1. Reference universe -------------------------------------------
+    const stocks = await selectAll<any>(
+      supabase, "market_stocks", "symbol,exchange,market_cap,roe,is_active,series,instrument_type",
+      (q) => q.eq("is_active", true),
+    );
+    validated += stocks.length;
+    checks.active_symbols = stocks.length;
 
-    // 2. Fetch all active rows for validation
-    const { data: rows, error: fetchError } = await supabase
-      .from("market_data")
-      .select("symbol, exchange, ltp, market_cap, pe, eps, roe, debt_equity, sales, net_profit")
-      .eq("is_active", true);
-
-    if (fetchError) throw fetchError;
-    if (!rows) throw new Error("No data to validate");
-
-    validated = rows.length;
-
-    for (const row of rows) {
-      const updates: Record<string, any> = {};
-      let needsUpdate = false;
-
-      // 3. Validate market_cap > 0
-      if (row.market_cap != null && Number(row.market_cap) <= 0) {
-        warnings.push(`${row.symbol}: negative/zero market_cap (${row.market_cap})`);
-        updates.market_cap = null; // Clear invalid data
-        needsUpdate = true;
+    const seen = new Set<string>();
+    let dupes = 0;
+    for (const s of stocks) {
+      const key = `${s.exchange}:${s.symbol}`;
+      if (seen.has(key)) { dupes++; errors.push(`duplicate active row: ${key}`); }
+      seen.add(key);
+      if (s.market_cap != null && Number(s.market_cap) <= 0) {
+        warnings.push(`${s.symbol}: non-positive market_cap (${s.market_cap})`);
       }
-
-      // 4. Recalculate PE = Price / EPS if mismatch > 5%
-      if (row.ltp != null && row.eps != null && Number(row.eps) > 0) {
-        const expectedPe = Number(row.ltp) / Number(row.eps);
-        const actualPe = row.pe != null ? Number(row.pe) : null;
-
-        if (actualPe != null) {
-          const diff = Math.abs((actualPe - expectedPe) / expectedPe);
-          if (diff > 0.05) {
-            warnings.push(`${row.symbol}: PE mismatch (stored ${actualPe.toFixed(2)}, calc ${expectedPe.toFixed(2)})`);
-            updates.pe = expectedPe;
-            needsUpdate = true;
-          }
-        } else if (expectedPe > 0) {
-          // Missing PE but we can calculate it
-          updates.pe = expectedPe;
-          needsUpdate = true;
-        }
-      }
-
-      // 5. Recalculate ROE from net profit / equity if available
-      // (Simplified: would need balance sheet data for true equity)
-      // Skip for now — requires book_value or shareholders_equity field
-
-      // 6. Validate debt_equity is not negative
-      if (row.debt_equity != null && Number(row.debt_equity) < 0) {
-        warnings.push(`${row.symbol}: negative debt_equity (${row.debt_equity})`);
-        updates.debt_equity = null;
-        needsUpdate = true;
-      }
-
-      // 7. Apply updates if needed
-      if (needsUpdate) {
-        const { error: updateError } = await supabase
-          .from("market_data")
-          .update(updates)
-          .eq("symbol", row.symbol)
-          .eq("exchange", row.exchange);
-
-        if (updateError) {
-          errors.push(`Failed to update ${row.symbol}: ${updateError.message}`);
-        } else {
-          fixed++;
-        }
+      if (s.roe != null && Math.abs(Number(s.roe)) > 300) {
+        warnings.push(`${s.symbol}: implausible ROE (${s.roe}%)`);
       }
     }
+    checks.duplicate_symbols = dupes;
 
-    // 8. Check for NULL treated as 0 (should be explicit 0 or NULL, never implicit)
-    // This is a data entry issue — validate during sync, not here
+    // ---- 2. Fundamentals plane -------------------------------------------
+    const funds = await selectAll<any>(
+      supabase, "market_fundamentals_global",
+      "symbol,exchange,price,pe_ttm,eps_ttm,debt_to_equity,market_cap_cr,high_52w,low_52w,data_as_of",
+    );
+    validated += funds.length;
+    checks.fundamentals_rows = funds.length;
 
-    // 9. Price-table sanity — previously this validator only ever checked
-    // `market_data` (a fundamentals table). The tables the EOD pipeline
-    // actually writes (market_daily_prices, market_stock_scores) had no
-    // guard at all: no negative-price check, no high>=low check. Scoped to
-    // the latest trade_date only, matching this job's "validate what just
-    // synced" nightly role rather than re-scanning the full history.
+    let peMismatch = 0;
+    for (const f of funds) {
+      const price = f.price == null ? null : Number(f.price);
+      const eps = f.eps_ttm == null ? null : Number(f.eps_ttm);
+      const pe = f.pe_ttm == null ? null : Number(f.pe_ttm);
+      if (price != null && eps != null && eps > 0 && pe != null && pe > 0) {
+        const expected = price / eps;
+        if (Math.abs((pe - expected) / expected) > 0.1) {
+          peMismatch++;
+          warnings.push(`${f.symbol}: PE ${pe.toFixed(2)} vs price/EPS ${expected.toFixed(2)}`);
+        }
+      }
+      if (f.debt_to_equity != null && Number(f.debt_to_equity) < 0) {
+        warnings.push(`${f.symbol}: negative debt/equity (${f.debt_to_equity})`);
+      }
+      if (f.high_52w != null && f.low_52w != null && Number(f.high_52w) < Number(f.low_52w)) {
+        errors.push(`${f.symbol}: 52w high (${f.high_52w}) < 52w low (${f.low_52w})`);
+      }
+      if (price != null && f.high_52w != null && Number(price) > Number(f.high_52w) * 1.02) {
+        warnings.push(`${f.symbol}: price ${price} above 52w high ${f.high_52w}`);
+      }
+    }
+    checks.pe_mismatches = peMismatch;
+
+    // ---- 3. Settled bars --------------------------------------------------
     const { data: latestPriceRow } = await supabase
-      .from("market_daily_prices")
-      .select("trade_date")
-      .order("trade_date", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (latestPriceRow?.trade_date) {
-      const latestDate = latestPriceRow.trade_date as string;
-      const { data: priceRows } = await supabase
-        .from("market_daily_prices")
-        .select("symbol,exchange,open,high,low,close")
-        .eq("trade_date", latestDate);
-      for (const r of (priceRows ?? []) as any[]) {
+      .from("market_daily_prices").select("trade_date")
+      .order("trade_date", { ascending: false }).limit(1).maybeSingle();
+    const latestDate = latestPriceRow?.trade_date as string | undefined;
+    checks.latest_price_session = latestDate ?? null;
+
+    if (!latestDate) {
+      errors.push("market_daily_prices is empty — the EOD pipeline has never landed a bar");
+    } else {
+      const priceRows = await selectAll<any>(
+        supabase, "market_daily_prices", "symbol,exchange,open,high,low,close,volume",
+        (q) => q.eq("trade_date", latestDate),
+      );
+      validated += priceRows.length;
+      checks.latest_session_rows = priceRows.length;
+      // Coverage: a session that priced a fraction of the universe is a failed
+      // ingest even when every row it *did* write is internally consistent.
+      const coverage = stocks.length > 0 ? (priceRows.length / stocks.length) * 100 : null;
+      checks.latest_session_coverage_pct = coverage == null ? null : Number(coverage.toFixed(2));
+      if (coverage != null && coverage < 90) {
+        errors.push(`settled session ${latestDate} covers only ${coverage.toFixed(1)}% of the active universe`);
+      }
+      for (const r of priceRows) {
         const { symbol, open, high, low, close } = r;
-        if (close != null && Number(close) <= 0) {
-          errors.push(`${symbol}: non-positive close (${close}) on ${latestDate}`);
-          continue;
-        }
-        if (high != null && low != null && Number(high) < Number(low)) {
-          errors.push(`${symbol}: high (${high}) < low (${low}) on ${latestDate}`);
-          continue;
-        }
+        if (close != null && Number(close) <= 0) { errors.push(`${symbol}: non-positive close (${close}) on ${latestDate}`); continue; }
+        if (high != null && low != null && Number(high) < Number(low)) { errors.push(`${symbol}: high (${high}) < low (${low}) on ${latestDate}`); continue; }
         if (low != null && high != null) {
           if (close != null && (Number(close) < Number(low) || Number(close) > Number(high))) {
-            errors.push(`${symbol}: close (${close}) outside [low ${low}, high ${high}] on ${latestDate}`);
+            errors.push(`${symbol}: close (${close}) outside [${low}, ${high}] on ${latestDate}`);
           }
           if (open != null && (Number(open) < Number(low) || Number(open) > Number(high))) {
-            errors.push(`${symbol}: open (${open}) outside [low ${low}, high ${high}] on ${latestDate}`);
+            errors.push(`${symbol}: open (${open}) outside [${low}, ${high}] on ${latestDate}`);
+          }
+        }
+        if (r.volume != null && Number(r.volume) < 0) errors.push(`${symbol}: negative volume on ${latestDate}`);
+      }
+    }
+
+    // ---- 4. Scores --------------------------------------------------------
+    const { data: latestScoreRow } = await supabase
+      .from("market_stock_scores").select("trade_date")
+      .order("trade_date", { ascending: false }).limit(1).maybeSingle();
+    const scoreDate = latestScoreRow?.trade_date as string | undefined;
+    checks.latest_score_session = scoreDate ?? null;
+    if (scoreDate) {
+      if (latestDate && scoreDate < latestDate) {
+        warnings.push(`scores lag prices: scores ${scoreDate} vs prices ${latestDate}`);
+      }
+      const scoreRows = await selectAll<any>(
+        supabase, "market_stock_scores", "symbol,close", (q) => q.eq("trade_date", scoreDate),
+      );
+      validated += scoreRows.length;
+      checks.latest_score_rows = scoreRows.length;
+      for (const r of scoreRows) {
+        if (r.close != null && Number(r.close) <= 0) {
+          errors.push(`${r.symbol}: non-positive close (${r.close}) in scores on ${scoreDate}`);
+        }
+      }
+    } else {
+      warnings.push("market_stock_scores is empty");
+    }
+
+    // ---- 5. Live plane ----------------------------------------------------
+    // The screener reads the live plane directly, so its integrity is now a
+    // first-class check: a promoted sweep must be recent, near-complete, and
+    // must not disagree wildly with the settled anchor it was priced against.
+    const { data: run } = await supabase
+      .from("market_live_price_runs")
+      .select("sweep_id,session_date,as_of,status,expected_count,priced_count,failed_count")
+      .eq("status", "complete").order("as_of", { ascending: false }).limit(1).maybeSingle();
+
+    if (!run) {
+      warnings.push("no completed live sweep on record");
+      checks.live_plane = null;
+    } else {
+      const expected = Number(run.expected_count ?? 0);
+      const priced = Number(run.priced_count ?? 0);
+      const cov = expected > 0 ? (priced / expected) * 100 : null;
+      const ageMin = run.as_of ? Math.round((Date.now() - Date.parse(run.as_of)) / 60_000) : null;
+      checks.live_plane = {
+        sweep_id: run.sweep_id, session_date: run.session_date,
+        priced, expected, coverage_pct: cov == null ? null : Number(cov.toFixed(2)),
+        failed: Number(run.failed_count ?? 0), age_minutes: ageMin,
+      };
+      if (cov != null && cov < 95) errors.push(`live sweep coverage ${cov.toFixed(1)}% (${priced}/${expected})`);
+
+      const liveRows = await selectAll<any>(
+        supabase, "market_live_prices", "symbol,ltp,prev_close,change_pct",
+        (q) => q.eq("sweep_id", run.sweep_id),
+      );
+      validated += liveRows.length;
+      let published = 0, wild = 0;
+      for (const r of liveRows) {
+        published++;
+        if (r.ltp != null && Number(r.ltp) <= 0) errors.push(`${r.symbol}: non-positive live ltp (${r.ltp})`);
+        if (r.change_pct != null && Math.abs(Number(r.change_pct)) > 25) {
+          wild++;
+          warnings.push(`${r.symbol}: live change ${Number(r.change_pct).toFixed(1)}% — verify against the settled anchor`);
+        }
+        if (r.ltp != null && r.prev_close != null && Number(r.prev_close) > 0) {
+          const derived = (Number(r.ltp) - Number(r.prev_close)) / Number(r.prev_close) * 100;
+          if (r.change_pct != null && Math.abs(derived - Number(r.change_pct)) > 0.5) {
+            errors.push(`${r.symbol}: change_pct ${r.change_pct} disagrees with ltp/prev_close (${derived.toFixed(2)})`);
           }
         }
       }
-      validated += (priceRows ?? []).length;
+      (checks.live_plane as any).published_rows = published;
+      (checks.live_plane as any).outlier_moves = wild;
+      if (published !== priced) {
+        warnings.push(`live sweep says ${priced} priced but ${published} rows are published`);
+      }
+
+      // ---- 5b. Settled anchor parity ------------------------------------
+      // A wrong prev_close silently poisons every 1D-return filter, so the
+      // anchor is compared against the last settled bhavcopy close.
+      const { data: prevSession } = await supabase
+        .from("market_eod_nse").select("trade_date")
+        .lt("trade_date", run.session_date)
+        .order("trade_date", { ascending: false }).limit(1).maybeSingle();
+      const prevDate = prevSession?.trade_date as string | undefined;
+      (checks.live_plane as any).anchor_session = prevDate ?? null;
+      if (prevDate) {
+        const eod = await selectAll<any>(
+          supabase, "market_eod_nse", "symbol,close", (q) => q.eq("trade_date", prevDate),
+        );
+        const closeBy = new Map(eod.map((r: any) => [r.symbol, Number(r.close)]));
+        let anchorDrift = 0;
+        for (const r of liveRows) {
+          const settled = closeBy.get(r.symbol);
+          if (settled == null || !(settled > 0) || r.prev_close == null) continue;
+          if (Math.abs(Number(r.prev_close) - settled) / settled > 0.005) {
+            anchorDrift++;
+            if (anchorDrift <= 25) {
+              warnings.push(`${r.symbol}: prev_close ${r.prev_close} vs settled ${prevDate} close ${settled}`);
+            }
+          }
+        }
+        (checks.live_plane as any).anchor_drift = anchorDrift;
+      }
+
+      // ---- 5c. Symbols the sweep failed to price -------------------------
+      const { data: staged } = await supabase
+        .from("market_live_price_stage").select("symbol,error")
+        .eq("sweep_id", run.sweep_id).not("error", "is", null).limit(50);
+      const failedSymbols = (staged ?? []).map((s: any) => s.symbol);
+      (checks.live_plane as any).failed_symbols = failedSymbols;
+      if (failedSymbols.length > 0) {
+        warnings.push(`sweep could not price: ${failedSymbols.join(", ")}`);
+      }
     }
 
-    const { data: latestScoreRow } = await supabase
-      .from("market_stock_scores")
-      .select("trade_date")
-      .order("trade_date", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (latestScoreRow?.trade_date) {
-      const latestDate = latestScoreRow.trade_date as string;
-      const { data: scoreRows } = await supabase
-        .from("market_stock_scores")
-        .select("symbol,close")
-        .eq("trade_date", latestDate);
-      for (const r of (scoreRows ?? []) as any[]) {
-        if (r.close != null && Number(r.close) <= 0) {
-          errors.push(`${r.symbol}: non-positive close (${r.close}) in market_stock_scores on ${latestDate}`);
+    // ---- 6. Market-cap parity --------------------------------------------
+    // The screener revalues the *reported* cap at the live price. If the
+    // internally-derived cap disagrees by a wide margin, the fundamentals
+    // plane (shares outstanding) is stale for that symbol.
+    {
+      const capRows = await selectAll<any>(
+        supabase, "market_screener_rows",
+        "symbol,market_cap,market_cap_reported,mcap_basis",
+        (q) => q.eq("is_active", true).eq("exchange", "NSE").eq("instrument_type", "EQ"),
+      );
+      let drifted = 0, unreported = 0;
+      for (const r of capRows) {
+        if (r.mcap_basis === "derived" || r.mcap_basis === "none") { unreported++; continue; }
+        const rep = r.market_cap_reported == null ? null : Number(r.market_cap_reported);
+        const cap = r.market_cap == null ? null : Number(r.market_cap);
+        if (rep == null || cap == null || !(rep > 0)) continue;
+        // Revaluation at the live price is expected to move the cap, but a
+        // >50% gap means the reported cap and the price basis disagree.
+        if (Math.abs(cap - rep) / rep > 0.5) {
+          drifted++;
+          if (drifted <= 25) warnings.push(`${r.symbol}: market cap ${cap.toFixed(0)} vs reported ${rep.toFixed(0)} Cr`);
         }
       }
-      validated += (scoreRows ?? []).length;
+      checks.market_cap = { rows: capRows.length, drifted, no_reported_cap: unreported };
     }
 
     const summary = {
+      ok: errors.length === 0,
       validated,
-      fixed,
       errors: errors.length,
       warnings: warnings.length,
-      details: {
-        errors: errors.slice(0, 50),
-        warnings: warnings.slice(0, 50),
-      },
+      duration_ms: Date.now() - started,
+      checks,
+      details: { errors: errors.slice(0, 50), warnings: warnings.slice(0, 50) },
     };
 
-    console.log("Validation summary:", summary);
+    console.log("validation summary:", JSON.stringify({ ...summary, details: undefined }));
 
+    // 200 even when invariants break: this is a report, and a non-2xx makes the
+    // cron scheduler retry a job whose whole output is the body.
     return new Response(JSON.stringify(summary), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
-      status: errors.length > 0 ? 500 : 200,
+      status: 200,
     });
   } catch (error) {
-    console.error("Validation failed:", error);
+    console.error("validation failed:", error);
     return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
+      JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 500 },
     );
   }
 });
-
-// Helper SQL function for checking duplicates
-// CREATE OR REPLACE FUNCTION check_duplicate_symbols()
-// RETURNS TABLE(symbol text, exchange text, count bigint) AS $$
-//   SELECT symbol, exchange, count(*) as count
-//   FROM market_data
-//   WHERE is_active = true
-//   GROUP BY symbol, exchange
-//   HAVING count(*) > 1;
-// $$ LANGUAGE SQL;

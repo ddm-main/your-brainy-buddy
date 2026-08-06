@@ -118,6 +118,9 @@ Deno.serve(async (req) => {
         .from("market_stocks")
         .select("symbol,shares_sync_attempts,shares_sync_attempted_at")
         .eq("is_active", true).eq("exchange", "NSE")
+        // Penny-excluded names are out of the universe; their share counts are
+        // never read and market_shares_outstanding rejects their rows anyway.
+        .not("penny_excluded", "is", true)
         .order("symbol")
         .range(from, to) as any,
     );

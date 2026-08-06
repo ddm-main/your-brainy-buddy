@@ -42,7 +42,7 @@ const SCORE_AGG_COLUMNS = [
   "base_depth_pct", "base_duration_days", "base_tightness", "higher_lows", "near_resistance",
   "resistance_level", "resistance_above", "resistance_fallback", "support_level", "support_fallback",
   "breakout_state", "breakout_state_days", "breakout_freshness_days", "breakout_level_cleared",
-  "pattern_flags", "raw_buckets",
+  "pattern_flags",
   "weekly_bars", "weekly_close", "weekly_ema20", "weekly_rsi14", "weekly_trend_up", "weekly_higher_lows",
 ].join(",");
 

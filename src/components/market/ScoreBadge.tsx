@@ -8,7 +8,7 @@ import { supabase } from "@/integrations/supabase/client";
 // screener rows to serve a tooltip that opens on one row at a time was one of
 // the biggest egress items in the app, so the badge now fetches the breakdown
 // for a single symbol on first hover and caches it for the session.
-type ComponentKind = "breakout" | "prebreakout" | "swing" | "intraday";
+type ComponentKind = "breakout" | "prebreakout" | "swing" | "intraday" | "breakout_v4";
 const componentCache = new Map<string, Record<string, number> | null>();
 
 async function loadComponents(
@@ -18,6 +18,9 @@ async function loadComponents(
   if (componentCache.has(cacheKey)) return componentCache.get(cacheKey) ?? null;
   const column = kind === "swing" ? "swing_components"
     : kind === "intraday" ? "intraday_components"
+    // v4 keeps its buckets in their own blob; it used to ride along with every
+    // screener row (~10 MB/day) purely to serve this hover tooltip.
+    : kind === "breakout_v4" ? "breakout_v4_components"
     : "score_components";
   const { data } = await (supabase as any)
     .from("market_stock_scores")
@@ -25,10 +28,13 @@ async function loadComponents(
     .eq("symbol", symbol).eq("exchange", exchange)
     .maybeSingle();
   const blob = data?.v ?? null;
-  const out = (kind === "breakout" || kind === "prebreakout") ? (blob?.[kind] ?? null) : blob;
+  const out = kind === "breakout_v4" ? (blob?.buckets ?? null)
+    : (kind === "breakout" || kind === "prebreakout") ? (blob?.[kind] ?? null)
+    : blob;
   componentCache.set(cacheKey, out);
   return out;
 }
+
 
 export function ScoreBadge({
   score,

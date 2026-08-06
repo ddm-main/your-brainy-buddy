@@ -14,7 +14,7 @@ import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { AddToWatchlistButton } from "@/components/market/AddToWatchlistButton";
 
 import { useSavedScreeners, useScreenerMutations, useQuotes, useMarketSettings, useFavoriteFilters, useFavoriteFilterMutations, useLatestPriceSession } from "@/lib/market/hooks";
-import { useScreenerData, useScreenerSectors, useScreenerIndustries, getAsofMeta, type AsofMeta, type ScreenerRow } from "@/lib/market/screenerRun";
+import { useScreenerData, useScreenerSectors, useScreenerIndustries, getAsofMeta, projectRowsForMode, type AsofMeta, type ScreenerRow } from "@/lib/market/screenerRun";
 import { todayIstDateString } from "@/lib/market/liveSnapshot";
 import { quoteKey } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore, useTicksRevision} from "@/lib/market/liveTickStore";
@@ -30,8 +30,6 @@ import {
   FILTER_BY_ID,
   UNIVERSES,
   filterMatches,
-  filterMatchesLive,
-  LIVE_FILTER_IDS,
   coverageOf,
   canonicalFilterId,
   latestTradeDateOf,
@@ -48,7 +46,7 @@ import { AlertTriangle, Check, Database, Download, Plus, RotateCcw, Save, Search
 import ErrorBoundary from "@/components/hud/ErrorBoundary";
 
 import { safeStorage } from "@/lib/safeStorage";
-import { useScreenerLiveQuotes, LIVE_QUOTE_CAP } from "@/lib/market/screenerLive";
+import { useLivePlaneStatus, planeAgeMinutes } from "@/lib/market/livePlane";
 
 // ---- Columns ----
 interface ColSpec { id: string; label: string; align?: "right" | "left"; default?: boolean }
@@ -211,7 +209,11 @@ function ScreenerInner() {
   // excluding names with no way back. `is_liquid_tradable == null` (gate not
   // yet computed for this row, e.g. pre-migration backfill) is treated as
   // "unknown" and always shown so this never hides the whole universe.
-  const [hideIlliquid, setHideIlliquid] = useState<boolean>(() => safeStorage.getJSON<boolean>(HIDE_ILLIQUID_KEY, true));
+  // Default OFF: the gate was quietly removing legitimate screen matches
+  // (illiquid but real NSE names such as UEL, HMVL, AARTISURF) so app results
+  // disagreed with external screeners. It stays available as an explicit
+  // opt-in, and when on the results header reports what it removed.
+  const [hideIlliquid, setHideIlliquid] = useState<boolean>(() => safeStorage.getJSON<boolean>(HIDE_ILLIQUID_KEY, false));
   useEffect(() => { safeStorage.setJSON(HIDE_ILLIQUID_KEY, hideIlliquid); }, [hideIlliquid]);
 
   const [page, setPage] = useState(0);
@@ -221,7 +223,50 @@ function ScreenerInner() {
   });
   useEffect(() => { safeStorage.set(PAGE_SIZE_KEY, String(pageSize)); }, [pageSize]);
 
-  const { data: rows = [], isFetching, error } = useScreenerData(universe, asOfDate);
+  // Live vs EOD is a projection of one fetched row set (both planes travel in
+  // the same row), so filters, sort, table cells and CSV can never disagree.
+  // While the market is open the screener always opens in Live mode: a sticky
+  // "0" from a previous EOD session otherwise made an intraday screen compare
+  // yesterday's settled closes against live prices elsewhere.
+  const [liveMode, setLiveMode] = useState<boolean>(() => {
+    const ist = new Date(Date.now() + 5.5 * 3600_000);
+    const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    const day = ist.getUTCDay();
+    const openNow = day >= 1 && day <= 5 && mins >= 555 && mins < 930;
+    return openNow || safeStorage.get("screener.liveMode") !== "0";
+  });
+  useEffect(() => { safeStorage.set("screener.liveMode", liveMode ? "1" : "0"); }, [liveMode]);
+
+  // "Volume > 30D Avg" basis: pace-adjusted (intraday volume vs pro-rated
+  // average — the correct intraday test) or raw (cumulative vs full-day
+  // average, which is what Economic Times and other screeners print).
+  const [volBasis, setVolBasis] = useState<"paced" | "raw">(
+    () => (safeStorage.get("screener.volBasis") === "raw" ? "raw" : "paced"),
+  );
+  useEffect(() => { safeStorage.set("screener.volBasis", volBasis); }, [volBasis]);
+
+  // EGRESS: only the columns this screen can actually render right now are
+  // fetched. Everything the table shows, everything the active filters gate on,
+  // and the sidebar's sector/industry pickers — nothing else.
+  const neededFields = useMemo(() => {
+    const shown = active.length === 0 ? visibleCols : DEFAULT_COLS;
+    const filterCols = sharedColsFromActiveFilters(active, { skipBooleans: false });
+    return Array.from(new Set([
+      ...DEFAULT_COLS, ...shown, ...filterCols, "sector", "industry",
+    ]));
+  }, [active, visibleCols]);
+
+  const { data: rawRows = [], isFetching, error } = useScreenerData(universe, asOfDate, true, neededFields);
+
+  // A back-dated run has no live plane — it is settled history by definition.
+  const rows = useMemo(
+    () => projectRowsForMode(rawRows, liveMode && !asOfDate, volBasis),
+    [rawRows, liveMode, asOfDate, volBasis],
+  );
+  const { data: plane } = useLivePlaneStatus(!asOfDate);
+  const planeAge = planeAgeMinutes(plane);
+
+
   // Coverage/date telemetry for the back-date run — recomputed whenever the
   // run settles so the rail can explain snapping and skipped symbols.
   const asOfMeta = useMemo(
@@ -246,23 +291,55 @@ function ScreenerInner() {
   const istDay = nowIst.getUTCDay();
   const nseOpenNow = istDay >= 1 && istDay <= 5 && istMin >= 555 && istMin < 930;
 
-  // During market hours the EOD pipeline can already have stamped a partial
-  // set of rows with today's date. Gating on that partial date silences every
-  // symbol not yet re-synced, so we gate on the last session that actually
-  // covers the universe (coverage >= MIN_SESSION_COVERAGE), and intraday we
-  // additionally refuse today's date outright.
+  // Live mode and EOD mode do not share a reference session.
+  //
+  // In EOD mode the reference is the last *settled* session: during market
+  // hours the EOD pipeline can already have stamped part of the universe with
+  // today's date, so we gate on the newest session that actually covers the
+  // universe and refuse today's date outright.
+  //
+  // In Live mode the reference is the promoted sweep's session (today). Using
+  // the settled date here was the parity bug: every live-priced row carries
+  // today's `trade_date`, which the exact-session gate read as "newer than the
+  // reference" and rejected — so a Price/1D/Volume screen could only ever
+  // match the handful of rows the sweep had NOT priced.
+  const liveActive = liveMode && !asOfDate;
   const refSession = useMemo(
-    () => resolveReferenceSession(rows, { settledOnly: nseOpenNow, todayIst: todayIstDateString() }),
-    [rows, nseOpenNow],
+    () => resolveReferenceSession(rows, { settledOnly: nseOpenNow && !liveActive, todayIst: todayIstDateString() }),
+    [rows, nseOpenNow, liveActive],
   );
-  const latestTradeDate = refSession.tradeDate;
+  // Prefer the promoted sweep's own session date in Live mode: it is
+  // authoritative and immune to a coverage dip mid-sweep sending the resolver
+  // back to yesterday.
+  const latestTradeDate = (liveActive && plane?.session_date)
+    ? String(plane.session_date).slice(0, 10)
+    : refSession.tradeDate;
   // Symbols that carry no row for the reference session — the exact-session
   // filters (ltp / 1D return / volume) can't judge them, so they are excluded
-  // and we say so instead of silently shrinking the result count.
-  const excludedNoSession = useMemo(() => {
-    if (!latestTradeDate) return 0;
-    return Math.max(0, refSession.coverage.total - refSession.coverage.covered);
-  }, [latestTradeDate, refSession]);
+  // and we say so instead of silently shrinking the result count. Counted
+  // against the session actually in force (live sweep or settled EOD) so the
+  // chip can never disagree with the filters.
+  const sessionCoverage = useMemo(() => {
+    let total = 0, covered = 0;
+    for (const r of rows) {
+      if (!isEquityRow(r as any)) continue;
+      total++;
+      if (latestTradeDate && String(r.trade_date ?? "").slice(0, 10) === latestTradeDate) covered++;
+    }
+    return { total, covered };
+  }, [latestTradeDate, rows]);
+  const excludedNoSession = latestTradeDate ? Math.max(0, sessionCoverage.total - sessionCoverage.covered) : 0;
+
+
+  // Naming the symbols beats a bare count: with 99.9% coverage the handful of
+  // stragglers are actionable (renamed/delisted tickers), not a pipeline alarm.
+  const noQuoteSymbols = useMemo(() => {
+    if (!latestTradeDate) return [] as string[];
+    return rows
+      .filter((r) => isEquityRow(r as any) && String(r.trade_date ?? "") !== String(latestTradeDate))
+      .map((r) => r.symbol)
+      .sort();
+  }, [rows, latestTradeDate]);
 
 
   // Relative freshness (above) can't catch a pipeline that's stale across a
@@ -324,53 +401,47 @@ function ScreenerInner() {
   // while the results table's Chg%/Price columns overlay a live quote for
   // display — filtering on the stale value while showing the live one meant a
   // user's range could silently disagree with what they saw on screen. Defer
-  // those two filters to a second pass, applied against the same live overlay
-  // the columns already use, once the candidate set is narrowed by everything
-  // else and small enough to batch-quote.
-  // Screener parity is EOD-first: filters and visible Price/Chg% are evaluated
-  // from the same settled row, matching Tickertape-style screeners. Live quote
-  // overlays made the result set drift during market hours.
+  // ONE pass, ONE source. Price / 1D Return / Volume come from the promoted
+  // live sweep (or, in EOD mode, the settled bhavcopy row) on the row itself,
+  // so the value a filter evaluates is byte-identical to the value the table
+  // renders, sorts and exports. The old candidate-quote path — capped at
+  // 1 000 symbols with a second live pass — is gone: it silently truncated
+  // result sets and could disagree with the displayed number.
   // Freshness is enforced by rowIsApplicable inside filterMatches (tech scope),
-  // which allows a small lag window (see TECH_FRESHNESS_LAG_DAYS). Dropping
-  // every row not on the exact latestTradeDate here was silently removing
-  // symbols one trading-day behind (Yahoo skipped a session) and made the
-  // result count differ from Tickertape. The scoped applicability check now
-  // owns freshness; this pass just runs the active filters.
-  // Live mode: Price / 1D Return / Volume filters are evaluated against the
-  // same live quote the table renders (see screenerLive.ts). EOD mode keeps
-  // settled-session parity with Tickertape-style screeners.
-  const [liveMode, setLiveMode] = useState<boolean>(() => safeStorage.get("screener.liveMode") === "1");
-  useEffect(() => { safeStorage.set("screener.liveMode", liveMode ? "1" : "0"); }, [liveMode]);
-
-  const liveActive = useMemo(
-    () => active.filter((af) => LIVE_FILTER_IDS.has(canonicalFilterId(af.id))),
-    [active],
-  );
-  const eodActive = useMemo(
-    () => (liveMode ? active.filter((af) => !LIVE_FILTER_IDS.has(canonicalFilterId(af.id))) : active),
-    [active, liveMode],
-  );
-
-  // Pass 1 — narrow the universe on structural / settled fields.
-  const eodFiltered = useMemo(() => {
+  // which allows a small lag window (see TECH_FRESHNESS_LAG_DAYS).
+  // Filter first, gate second, so we can say exactly how many *matching* rows
+  // the liquidity/SME gate is removing. Hiding them silently was the reason a
+  // screen that returns 20 rows in the database showed 10 on screen.
+  const matched = useMemo(() => {
     let out: ScreenerRow[] = rows;
-    if (hideIlliquid) out = out.filter((r) => r.is_liquid_tradable !== false);
-    for (const af of eodActive) {
+    for (const af of active) {
       out = out.filter((r) => filterMatches(r as any, af, latestTradeDate));
     }
     return out;
-  }, [rows, eodActive, latestTradeDate, hideIlliquid]);
+  }, [rows, active, latestTradeDate]);
+  const hiddenByLiquidity = useMemo(
+    () => (hideIlliquid ? matched.filter((r) => r.is_liquid_tradable === false).length : 0),
+    [matched, hideIlliquid],
+  );
+  // Rows a live "Volume > 30D Avg" screen cannot judge because the 30-day
+  // average itself is missing. They are unknown, not "no" — reporting the
+  // count keeps a data gap from looking like an empty market.
+  const volUnknownCount = useMemo(() => {
+    const wantsVol = active.some((af) => af.id === "vol_gt_avg30" && af.bool !== undefined);
+    if (!wantsVol) return 0;
+    let n = 0;
+    for (const r of rows) {
+      if (r.instrument_type !== "EQ") continue;
+      if (r.vol_avg30 == null) n++;
+    }
+    return n;
+  }, [rows, active]);
+  const filtered = useMemo(
+    () => (hideIlliquid ? matched.filter((r) => r.is_liquid_tradable !== false) : matched),
+    [matched, hideIlliquid],
+  );
 
-  const screenerLive = useScreenerLiveQuotes(eodFiltered, liveMode);
 
-  // Pass 2 — live predicates against the batch-quoted candidates.
-  const filtered = useMemo(() => {
-    if (!liveMode || liveActive.length === 0) return eodFiltered;
-    return eodFiltered.filter((r) => {
-      const live = screenerLive.byKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
-      return liveActive.every((af) => filterMatchesLive(r as any, af, live));
-    });
-  }, [eodFiltered, liveMode, liveActive, screenerLive.byKey]);
 
 
   useEffect(() => { setPage(0); }, [active, universe, pageSize]);
@@ -648,14 +719,16 @@ function ScreenerInner() {
   const paged = useMemo(() => sorted.slice(pageStart, pageStart + pageSize), [sorted, pageStart, pageSize]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
 
-  // ---- Live overlay for visible rows (Kotak WS push + 1s REST poll) --------
-  // Filter math stays on EOD (see comment at "Screener parity is EOD-first"
-  // above). But the *displayed* Price and 1D% shouldn't sit frozen at
-  // yesterday's close all session — overlay live quotes on top of the
-  // currently paginated set only (Kotak batch quote limit + relay cap ~100).
+  // ---- Sub-minute tick overlay for visible rows (Kotak WS push + REST) -----
+  // The row's own live value (from the promoted sweep) is what filters and CSV
+  // use. This overlay only refreshes the *displayed* Price/1D% of the ~50 rows
+  // on screen between sweeps, and is disabled in EOD mode so settled numbers
+  // never get repainted with an intraday tick.
   const visibleKeysJoined = useMemo(
-    () => Array.from(new Set(paged.map((r) => quoteKey(r.exchange ?? "NSE", r.symbol)))).sort().join(","),
-    [paged],
+    () => (liveMode && !asOfDate
+      ? Array.from(new Set(paged.map((r) => quoteKey(r.exchange ?? "NSE", r.symbol)))).sort().join(",")
+      : ""),
+    [paged, liveMode, asOfDate],
   );
   const visibleKeys = useMemo(() => (visibleKeysJoined ? visibleKeysJoined.split(",") : []), [visibleKeysJoined]);
   // No interval override: useQuotes polls 1 s focused / 15 s blurred and stops
@@ -668,11 +741,7 @@ function ScreenerInner() {
   useEffect(() => { subscribeSymbolsForTicks(visibleKeys); }, [visibleKeysJoined]);
   const liveByKey = useMemo(() => {
     const m = new Map<string, { ltp: number | null; change_pct: number | null; provider: string | null }>();
-    // Base layer: the candidate-wide live map the live filter pass used, so a
-    // filtered row always displays the value it was filtered on.
-    for (const [k, v] of screenerLive.byKey) {
-      m.set(k, { ltp: v.ltp, change_pct: v.change_pct, provider: v.provider ?? null });
-    }
+    if (!liveMode || asOfDate) return m;
     for (const q of liveQuotes?.quotes ?? []) {
       m.set(quoteKey(q.exchange, q.symbol), {
         ltp: q.ltp ?? null,
@@ -686,7 +755,8 @@ function ScreenerInner() {
       m.set(key, { ltp: tick.ltp, change_pct: tick.change_pct, provider: "kotak" });
     }
     return m;
-  }, [liveQuotes, pushTicks, screenerLive.byKey]);
+  }, [liveQuotes, pushTicks, liveMode, asOfDate]);
+
   const anyPush = useMemo(() => visibleKeys.some((k) => isFreshTick(pushTicks[k])), [visibleKeys, pushTicks]);
   const quoteProvider = (liveQuotes as any)?.provider as "kotak" | "none" | undefined;
   // The quote route is broker-only now: it returns Kotak prices or nothing at
@@ -721,26 +791,33 @@ function ScreenerInner() {
       symbol: {
         header: "Stock", accessorKey: "symbol",
         cell: ({ row }) => {
-          // Only rows BEHIND the reference session are stale. A row dated
-          // after it (today's forming/unsettled bar) is newer, not stale —
-          // flagging those painted the whole table red every afternoon.
-          const stale = latestTradeDate != null && row.original.trade_date != null
-            && String(row.original.trade_date) < String(latestTradeDate);
+          // Freshness is a plane-level fact (see the sweep chip in the header),
+          // not a per-row alarm. The only per-row thing worth saying is "this
+          // one wasn't in the live sweep", and only while in live mode.
+          const notLive = liveMode && !asOfDate && row.original.quote_state !== "live";
 
           const name = row.original.company_name;
           return (
             <span style={{ display: "inline-flex", flexDirection: "column", lineHeight: 1.2 }}>
               <span style={{ color: "var(--text)", fontWeight: 500 }}>
                 {name ?? row.original.symbol}
-                {stale && (
-                  <span title={`EOD stale: ${row.original.trade_date} vs latest ${latestTradeDate}`}
-                    style={{ marginLeft: 6, fontSize: 9, color: "var(--danger, #ff6a6a)", border: "1px solid currentColor", padding: "0 4px", borderRadius: 2 }}>STALE</span>
+                {notLive && (
+                  <span title={row.original.quote_state === "stale_live"
+                    ? "Live tick belongs to an older session — showing settled data instead"
+                    : row.original.quote_state === "eod"
+                    ? `Not priced by the latest sweep — showing settled ${row.original.eod_trade_date ?? row.original.trade_date ?? "session"}`
+                    : "No quote available for this symbol"}
+                    style={{ marginLeft: 6, fontSize: 9, color: "var(--text-muted)", border: "1px solid var(--edge)", padding: "0 4px", borderRadius: 2 }}>
+                    {row.original.quote_state === "no_quote" ? "N/Q" : "EOD"}
+                  </span>
                 )}
+
               </span>
               <span style={{ color: "var(--accent)", fontSize: 10 }}>{row.original.symbol}</span>
             </span>
           );
         },
+
       },
       sector:  {
         header: "Sector",  accessorKey: "sector",
@@ -844,7 +921,7 @@ function ScreenerInner() {
         header: "Breakout", accessorKey: "breakout_score_v4", meta: { align: "right" },
         // v4 buckets, so the popover breakdown sums to the number above it —
         // the old pairing showed a v4 score over a v2 component map.
-        cell: ({ row }) => <ScoreBadge score={row.original.breakout_score_v4} components={row.original.breakout_v4_buckets ?? undefined} label="breakout v4 buckets" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
+        cell: ({ row }) => <ScoreBadge score={row.original.breakout_score_v4} symbol={row.original.symbol} exchange={row.original.exchange} kind="breakout_v4" label="breakout v4 buckets" onClick={() => nav(`/market/score/${encodeURIComponent(row.original.symbol)}/explain?exchange=${encodeURIComponent(row.original.exchange ?? "NSE")}`)} />,
       },
       breakout_score: {
         header: "Breakout (v2)", accessorKey: "breakout_score", meta: { align: "right" },
@@ -971,19 +1048,19 @@ function ScreenerInner() {
       )}
 
       {excludedNoSession > 0 && (
-        <div style={{
-          display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
-          border: "1px solid var(--warn)", borderRadius: 2, background: "rgba(255,176,32,0.08)",
-        }}>
-          <AlertTriangle size={14} color="var(--warn)" style={{ flexShrink: 0 }} />
-          <span style={{ fontSize: 12, color: "var(--warn)" }}>
-            {excludedNoSession.toLocaleString()} stock{excludedNoSession === 1 ? "" : "s"} excluded from
-            price / 1D-return / volume filters — no {String(latestTradeDate)} session stored yet
-            {refSession.newestIsForming && refSession.newestTradeDate
-              ? ` (${String(refSession.newestTradeDate)} is still forming: ${refSession.newestCoverage.covered.toLocaleString()} of ${refSession.newestCoverage.total.toLocaleString()} symbols)`
-              : ""}. The post-close snapshot fills the rest of the universe shortly after 15:40 IST; the bhavcopy pass reconciles it at 18:45 IST.
+        <div
+          title={noQuoteSymbols.length
+            ? `No ${String(latestTradeDate)} quote: ${noQuoteSymbols.slice(0, 40).join(", ")}${noQuoteSymbols.length > 40 ? ` +${noQuoteSymbols.length - 40} more` : ""}`
+            : undefined}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 8, padding: "4px 9px",
+            border: "1px solid var(--edge)", borderRadius: 2, alignSelf: "flex-start",
+          }}>
+          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            {sessionCoverage.covered.toLocaleString()}/{sessionCoverage.total.toLocaleString()} priced
+            {" · "}{excludedNoSession.toLocaleString()} no quote
+            {noQuoteSymbols.length > 0 && noQuoteSymbols.length <= 6 ? ` (${noQuoteSymbols.join(", ")})` : ""}
           </span>
-
         </div>
       )}
 
@@ -1084,37 +1161,115 @@ function ScreenerInner() {
                         : healthSummary.tone === "warn" ? "var(--warn, #d29a2b)"
                         : "var(--danger, #ff6a6a)",
                     }} />
-                    {liveMode ? "LIVE · quote-matched values" : `EOD ${healthSummary.eod ?? "—"} · same-session values`}
+                    {liveMode && !asOfDate
+                      ? `LIVE ${latestTradeDate ?? "—"} · sweep-matched values`
+                      : `EOD ${healthSummary.eod ?? "—"} · same-session values`}
+
                   </button>
                 )}
                 <button type="button" onClick={() => setLiveMode((v) => !v)}
                   title={liveMode
-                    ? `Live mode: Price, 1D Return and Volume filters run on live quotes (up to ${LIVE_QUOTE_CAP} candidates) — the value filtered is the value shown. Click for settled EOD parity.`
-                    : "EOD mode: filters run on the last settled session (Tickertape parity). Click to filter on live intraday values instead."}
+                    ? "Live mode: every row is priced by the latest promoted sweep — the whole universe, not a capped sample. Click for settled EOD parity."
+                    : "EOD mode: filters and columns use the last settled session (Tickertape parity). Click to use live sweep values instead."}
                   aria-label="Toggle live filtering"
                   aria-pressed={liveMode}
+                  disabled={!!asOfDate}
                   style={{
                     display: "inline-flex", alignItems: "center", gap: 6,
                     padding: "3px 8px", border: "1px solid var(--edge)",
-                    background: liveMode ? "var(--accent-dim, rgba(255,184,77,0.12))" : "transparent",
-                    color: liveMode ? "var(--accent)" : "var(--text-muted)",
-                    cursor: "pointer",
+                    background: liveMode && !asOfDate ? "var(--accent-dim, rgba(255,184,77,0.12))" : "transparent",
+                    color: liveMode && !asOfDate ? "var(--accent)" : "var(--text-muted)",
+                    cursor: asOfDate ? "not-allowed" : "pointer", opacity: asOfDate ? 0.5 : 1,
                     fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
                     borderRadius: 2,
                   }}>
-                  {liveMode ? "Filters · live" : "Filters · EOD"}
+                  {liveMode && !asOfDate ? "Filters · live" : "Filters · EOD"}
                 </button>
-                {liveMode && screenerLive.truncated && (
-                  <span title={`Only the first ${screenerLive.quoted} of ${screenerLive.candidates} candidates were live-quoted — add more filters to narrow the set.`}
+                {/* Plane freshness — one honest chip for the whole screen,
+                    driven by the last promoted sweep rather than per-row guesses. */}
+                {liveMode && !asOfDate && (
+                  <span
+                    title={plane
+                      ? `Sweep ${plane.sweep_id.slice(0, 8)} · session ${plane.session_date} · ${plane.priced_count ?? "—"} of ${plane.expected_count ?? "—"} priced`
+                        + (plane.kotak_count != null ? ` · kotak ${plane.kotak_count}` : "")
+                        + (plane.yahoo_count != null ? ` · yahoo ${plane.yahoo_count}` : "")
+                        + (planeAge != null ? ` · ${planeAge} min ago` : "")
+                      : "No promoted sweep yet — rows fall back to the settled session."}
                     style={{
                       display: "inline-flex", alignItems: "center", gap: 6,
                       padding: "3px 8px", border: "1px solid var(--edge)",
-                      color: "var(--warn, #d29a2b)",
+                      color: !plane ? "var(--text-muted)"
+                        : planeAge != null && planeAge > 20 ? "var(--warn, #d29a2b)"
+                        : "var(--ok, #4ade80)",
                       fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
                       borderRadius: 2,
                     }}>
-                    <AlertTriangle size={11} /> live {screenerLive.quoted} of {screenerLive.candidates}
+                    {!plane ? <><AlertTriangle size={11} /> no sweep</>
+                      : <>sweep {plane.coverage_pct != null ? `${plane.coverage_pct.toFixed(1)}%` : "—"}
+                        {planeAge != null ? ` · ${planeAge}m` : ""}</>}
                   </span>
+                )}
+
+                {/* Intraday honesty: EOD mode while the market is open means
+                    every price on screen is yesterday's close. Say so. */}
+                {!liveMode && !asOfDate && nseOpenNow && (
+                  <button type="button" onClick={() => setLiveMode(true)}
+                    title="The market is open but this screen is filtering on the last settled session. Click to switch to live sweep values."
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: 6,
+                      padding: "3px 8px", border: "1px solid var(--warn, #d29a2b)",
+                      background: "rgba(255,176,32,0.08)", color: "var(--warn, #d29a2b)",
+                      cursor: "pointer", fontFamily: "var(--font-hud)", fontSize: 10,
+                      letterSpacing: "0.14em", textTransform: "uppercase", borderRadius: 2,
+                    }}>
+                    <AlertTriangle size={11} /> market open · switch to live
+                  </button>
+                )}
+
+                {/* Volume comparison basis — pace-adjusted vs ET-style raw. */}
+                {liveMode && !asOfDate && (
+                  <button type="button" onClick={() => setVolBasis((v) => (v === "raw" ? "paced" : "raw"))}
+                    title={volBasis === "raw"
+                      ? "Volume > 30D Avg compares cumulative session volume against the full-day 30-day average (Economic Times parity). Click for pace-adjusted."
+                      : "Volume > 30D Avg compares session volume against the 30-day average pro-rated to the elapsed session. Click for raw ET-parity comparison."}
+                    aria-label="Toggle volume comparison basis"
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: 6,
+                      padding: "3px 8px", border: "1px solid var(--edge)", background: "transparent",
+                      color: "var(--text-muted)", cursor: "pointer",
+                      fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
+                      borderRadius: 2,
+                    }}>
+                    vol · {volBasis === "raw" ? "raw" : "paced"}
+                  </button>
+                )}
+
+                {volUnknownCount > 0 && (
+                  <span
+                    title="These stocks have no 30-day average volume yet, so the volume filter cannot judge them — they are unknown, not excluded for failing."
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: 6,
+                      padding: "3px 8px", border: "1px solid var(--edge)",
+                      color: "var(--text-muted)", fontFamily: "var(--font-hud)", fontSize: 10,
+                      letterSpacing: "0.14em", textTransform: "uppercase", borderRadius: 2,
+                    }}>
+                    {volUnknownCount} no 30d avg
+                  </span>
+                )}
+
+
+                {hiddenByLiquidity > 0 && (
+                  <button type="button" onClick={() => setHideIlliquid(false)}
+                    title="These rows match every active filter but sit below the liquidity floor (penny/SME). Click to show them."
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: 6,
+                      padding: "3px 8px", border: "1px solid var(--warn, #d29a2b)",
+                      background: "rgba(255,176,32,0.08)", color: "var(--warn, #d29a2b)",
+                      cursor: "pointer", fontFamily: "var(--font-hud)", fontSize: 10,
+                      letterSpacing: "0.14em", textTransform: "uppercase", borderRadius: 2,
+                    }}>
+                    {hiddenByLiquidity} hidden — show
+                  </button>
                 )}
                 <button type="button" onClick={() => setHideIlliquid((v) => !v)}
                   title={hideIlliquid

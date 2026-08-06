@@ -11,7 +11,7 @@ import { Btn, Chip, EmptyState } from "@/components/hud/HudControls";
 import { CandleChart, type ChartType } from "@/components/market/CandleChart";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { ScoreHistoryPanel } from "@/components/market/ScoreHistoryPanel";
-import { ChartToolbar, CHART_RANGES, DEFAULT_SETTINGS, isIntraday, rangeToBars, type ChartRange, type ChartSettings } from "@/components/market/ChartToolbar";
+import { ChartToolbar, CHART_RANGES, DEFAULT_RANGE_BY_TF, DEFAULT_SETTINGS, defaultVisibleBars, isIntraday, rangeToBars, type ChartRange, type ChartSettings } from "@/components/market/ChartToolbar";
 import { safeStorage } from "@/lib/safeStorage";
 import { IndicatorSettingsModal } from "@/components/market/IndicatorSettingsModal";
 import { NewAlertModal, StockAlertsPanel } from "@/components/market/StockAlerts";
@@ -22,15 +22,18 @@ import { marketOpen } from "@/lib/market/hooks";
 import { PatternPanel } from "@/components/market/PatternPanel";
 import { detailToParam, type PatternDetail } from "@/lib/market/patternLabels";
 import { PatternDetailDialog, type PatternSelection } from "@/components/market/PatternDetailDialog";
-import { useBreadth, useCandles, useCorporateActions, useDepth, useFundamentals, useLatestPriceSession, useMarketNews, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores, useSyncNewsAndActions } from "@/lib/market/hooks";
+import { type StockInsight, insightNeedsFirstRun, useBreadth, useCandles, useCorporateActions, useDepth, useFundamentals, useLatestPriceSession, useMarketNews, useQuotes, useRefreshStockInsight, useSectorStrength, useStockInsight, useStockScores, useSyncNewsAndActions } from "@/lib/market/hooks";
+import { HudModal } from "@/components/hud/HudModal";
+
 import { MarketDepthLadder, DepthToggleButton } from "@/components/market/MarketDepthLadder";
 import { useMarketOpen } from "@/lib/market/useMarketOpen";
 
 import { useDepthPanelStore } from "@/lib/market/depthPanelPrefs";
-import { classifyHeadline, windowSentiment } from "../../../supabase/functions/_shared/market/newsSentiment";
+import { classifyHeadline } from "../../../supabase/functions/_shared/market/newsSentiment";
 import { computeLiveScore } from "@/lib/market/liveSnapshot";
 import { readPatterns } from "@/lib/market/patternLabels";
 import { deriveBreakoutStage, STAGE_TONE } from "@/lib/market/breakoutStage";
+import { bandOf } from "@/lib/market/scoreExplain";
 import { subscribeSymbolsForTicks, usePreferLiveTick } from "@/lib/market/useRealtimeTicks";
 import { getTrustedDayChange } from "@/lib/market/pnl";
 import { FullscreenShell } from "@/components/market/FullscreenShell";
@@ -40,7 +43,6 @@ import { currentUserId } from "@/lib/useSession";
 import { classifyFreshness, isDateOnly, shortDate, shortTime } from "@/lib/market/freshness";
 
 const STATE_STORE = "jarvis.analysis.state.v5";
-const RANGE_STORE = "jarvis.analysis.range.v1";
 const LAYOUTS_STORE = "jarvis.analysis.layouts.v1";
 // Per-symbol chart-type preference. Timeframe is intentionally not restored:
 // every newly opened symbol must start at the requested 5-minute view.
@@ -61,23 +63,6 @@ const defaultState: Persisted = {
   settings: DEFAULT_SETTINGS,
 };
 
-
-// Bars belonging to the newest trading day — the default viewport for
-// intraday charts (history stays loaded, just scrolled out of view).
-function todayBarCount(candles: Array<{ time: number | string }> | undefined): number | null {
-  if (!candles || candles.length === 0) return null;
-  const istDay = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
-  });
-  const dayOf = (t: number | string) => {
-    const ms = typeof t === "number" ? t * 1000 : Date.parse(String(t));
-    return istDay.format(new Date(ms));
-  };
-  const lastDay = dayOf(candles[candles.length - 1].time);
-  let n = 0;
-  for (let i = candles.length - 1; i >= 0 && dayOf(candles[i].time) === lastDay; i--) n++;
-  return n > 0 ? n : null;
-}
 
 // Drop studies whose type no longer exists and backfill missing params/colours.
 function loadStudies(saved: unknown): Study[] {
@@ -170,11 +155,13 @@ export default function Analysis() {
   const chartType: ChartType = "candles";
   const setChartType = (_v: ChartType) => { /* fixed to candles */ };
   const [fs, setFs] = useState(false);
-  const [range, setRange] = useState<ChartRange>(() => {
-    const v = safeStorage.get(RANGE_STORE);
-    return (CHART_RANGES.some((r) => r.key === v) ? v : "1Y") as ChartRange;
-  });
-  useEffect(() => { safeStorage.set(RANGE_STORE, range); }, [range]);
+  // Range follows the interval's default (1D → 2Y, 1W → 5Y, 1M → All) until
+  // the user picks one for the interval they're on.
+  const [rangeSel, setRangeSel] = useState<{ tf: string; value: ChartRange } | null>(null);
+  const range: ChartRange = rangeSel?.tf === tf && CHART_RANGES.some((r) => r.key === rangeSel.value)
+    ? rangeSel.value
+    : (DEFAULT_RANGE_BY_TF[tf] ?? "1Y");
+  const setRange = useCallback((v: ChartRange) => setRangeSel({ tf, value: v }), [tf]);
   // Bumping this clears user-dragged sub-pane heights inside the chart.
   const [paneResetToken, setPaneResetToken] = useState(0);
   const [patternFocus, setPatternFocus] = useState<{ startIndex: number; endIndex: number; token: number } | null>(null);
@@ -429,12 +416,19 @@ export default function Analysis() {
     () => computeLiveScore(dailyCandleData?.candles, quote, score, breadth, marketCapCr),
     [dailyCandleData, quote, score, breadth, marketCapCr],
   );
-  const { data: insightData, isLoading: insightLoading, error: insightError } = useStockInsight(sym, exchange);
+  // One AI call per symbol per IST day: the first open of the day generates,
+  // every later open reads the cache. Computed once per mount so the flag can't
+  // flip to false mid-flight (the hook marks the day as used when it fires).
+  const insightFirstOpen = useMemo(
+    () => (sym ? insightNeedsFirstRun(sym, exchange) : false),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sym, exchange],
+  );
+  const { data: insightData, isLoading: insightLoading, error: insightError } = useStockInsight(sym, exchange, insightFirstOpen);
   const refreshInsight = useRefreshStockInsight();
+  const [insightDetailOpen, setInsightDetailOpen] = useState(false);
+
   const { data: news = [], error: newsError } = useMarketNews(sym, exchange);
-  // Recency-weighted headline sentiment over the loaded window. Feeds the
-  // Breakout panel's sentiment line and the AI verdict prompt context.
-  const newsSent = useMemo(() => windowSentiment(news), [news]);
   const { data: corpActions = [] } = useCorporateActions(sym, exchange);
   const syncNews = useSyncNewsAndActions();
   const insight = insightData?.payload;
@@ -716,7 +710,9 @@ export default function Analysis() {
                   onEditStudy={setEditingId}
                   onRemoveStudy={removeStudy}
                   source={chartSource}
-                  visibleBars={isIntraday(tf) ? todayBarCount(candleData.candles) : rangeToBars(range, tf)}
+                  visibleBars={isIntraday(tf)
+                    ? defaultVisibleBars(candleData.candles, tf)
+                    : (rangeSel?.tf === tf ? rangeToBars(range, tf) : defaultVisibleBars(candleData.candles, tf))}
                   paneResetToken={paneResetToken}
                   focusRange={patternFocus}
                   onPatternPick={setChartPatternSel}
@@ -789,18 +785,29 @@ export default function Analysis() {
           </div>
         )}
 
-        {/* AI Verdict — cached 6h per symbol. refreshInsight is one shared
-            mutation instance; scope its pending state to the symbol
-            actually in flight so navigating to a different symbol mid-refresh
-            doesn't show a stale "analyzing…" for the wrong one. */}
-        {(() => { const refreshingThis = refreshInsight.isPending && refreshInsight.variables?.symbol === sym; return (
+        {/* AI Verdict — one generated verdict per symbol per IST trading day.
+            Opening the page later in the day reads the cache and spends nothing;
+            only the first open of the day, or this refresh button, pays for a
+            call. refreshInsight is one shared mutation instance, so scope its
+            pending state to the symbol actually in flight. */}
+        {(() => {
+          const refreshingThis = refreshInsight.isPending && refreshInsight.variables?.symbol === sym;
+          const stalePayload = insightData?.stale_payload ?? null;
+          return (
+        <>
         <HudPanel flow title="AI Verdict" index="A2"
           actions={
-            <Btn size="sm" variant="ghost" disabled={!sym || refreshingThis}
-              onClick={() => sym && refreshInsight.mutate({ symbol: sym, exchange })}
-              aria-label="refresh AI verdict">
-              <RefreshCw size={11} />
-            </Btn>
+            <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+              {insight && (
+                <Btn size="sm" variant="ghost" onClick={() => setInsightDetailOpen(true)}
+                  title="Full verdict, levels and what the model saw">Detail</Btn>
+              )}
+              <Btn size="sm" variant="ghost" disabled={!sym || refreshingThis}
+                onClick={() => sym && refreshInsight.mutate({ symbol: sym, exchange })}
+                aria-label="refresh AI verdict" title="Regenerate — costs one AI call">
+                <RefreshCw size={11} />
+              </Btn>
+            </div>
           }>
           {insightLoading || refreshingThis ? (
             <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)" }}>analyzing…</div>
@@ -811,81 +818,56 @@ export default function Analysis() {
                 : "AI unavailable — try refresh"}
             </div>
           ) : insight ? (
-            <>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
-                <Chip tone={insight.verdict === "buy" ? "ok" : insight.verdict === "avoid" ? "err" : insight.verdict === "wait" ? "warn" : "accent"}>
-                  {insight.verdict.toUpperCase()}
-                </Chip>
-                {/* Confidence is capped server-side at 95% — an equity call is
-                    never certain, and the model routinely emitted 1.0. */}
-                <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                  conf {Math.round(insight.confidence * 100)}%
-                </span>
-                {insight.alignment && (
-                  <Chip tone={insight.alignment === "confirms" ? "ok" : insight.alignment === "contradicts" ? "warn" : undefined}>
-                    {insight.alignment}
-                  </Chip>
-                )}
-                {insightData?.computed_at && (
-                  <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                    generated {new Date(insightData.computed_at).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
-                  </span>
-                )}
-              </div>
-              {scoreDate && (
-                <div style={{ fontSize: 9, color: "var(--text-muted)", marginBottom: 6 }}>
-                  based on EOD technicals · {new Date(scoreDate).toLocaleDateString([], { day: "2-digit", month: "short" })}
-                  {quoteAsOf ? " · live price context included" : ""}
-                </div>
-              )}
-              {/* A 6h-cached verdict priced off a close the market has since
-                  left is worse than no verdict — say how far it has drifted. */}
-              {(() => {
-                const anchor = insight.entry ?? score?.close ?? null;
-                if (anchor == null || !ltp) return null;
-                const drift = ((ltp - anchor) / anchor) * 100;
-                if (Math.abs(drift) < 2) return null;
-                return (
-                  <div style={{ fontSize: 10, color: "var(--warn, #ffb84d)", marginBottom: 6 }}>
-                    price has moved {drift > 0 ? "+" : ""}{drift.toFixed(1)}% since this verdict — refresh before acting
-                  </div>
-                );
-              })()}
-              {insight.plausibility_flags && insight.plausibility_flags.length > 0 && (
-                <div style={{ fontSize: 10, color: "var(--warn, #ffb84d)", marginBottom: 6 }}>
-                  adjusted: {insight.plausibility_flags.join(", ")}
-                </div>
-              )}
-
-              {(insight.entry || insight.stop_loss || insight.targets.length > 0) && (
-                <div style={{ display: "flex", flexDirection: "column", fontSize: 11, marginBottom: 6 }}>
-                  {insight.entry != null && <Row label="Entry" mono>₹{fmtNum(insight.entry, 2)}</Row>}
-                  {insight.stop_loss != null && <Row label="Stop" mono>₹{fmtNum(insight.stop_loss, 2)}</Row>}
-                  {insight.targets.map((t, i) => (
-                    <Row key={i} label={`T${i + 1}`} mono>₹{fmtNum(t, 2)}</Row>
-                  ))}
-                  {insight.holding_period_days != null && (
-                    <Row label="Hold" mono>{insight.holding_period_days}d</Row>
-                  )}
-                </div>
-              )}
-              <div style={{ fontSize: 11, lineHeight: 1.5, color: "var(--text)", marginBottom: 4 }}>
-                {insight.rationale}
-              </div>
-              {insight.risks.length > 0 && (
-                <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 4 }}>
-                  <div className="hud-label" style={{ marginBottom: 2 }}>Risks</div>
-                  <ul style={{ margin: 0, paddingLeft: 14 }}>
-                    {insight.risks.map((r, i) => <li key={i}>{r}</li>)}
-                  </ul>
-                </div>
-              )}
-            </>
+            <AiVerdictBody
+              insight={insight}
+              computedAt={insightData?.computed_at ?? null}
+              persisted={insightData?.persisted}
+              quoteUsed={insightData?.quote_used ?? insight.quote_used}
+              scoreDate={scoreDate}
+              scoreClose={score?.close ?? null}
+              ltp={ltp}
+            />
           ) : (
-            <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)" }}>press refresh</div>
+            // Read-only miss: no verdict for today's session yet. Say so, and
+            // offer the previous one as explicitly-old context rather than
+            // silently spending a call.
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <div className="hud-label" style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                no verdict for today yet
+              </div>
+              {stalePayload && (
+                <AiVerdictBody
+                  insight={stalePayload}
+                  computedAt={insightData?.computed_at ?? null}
+                  quoteUsed={stalePayload.quote_used}
+                  scoreDate={scoreDate}
+                  scoreClose={score?.close ?? null}
+                  ltp={ltp}
+                />
+              )}
+              <Btn size="sm" variant="ghost" disabled={!sym}
+                onClick={() => sym && refreshInsight.mutate({ symbol: sym, exchange })}
+                title="Costs one AI call">Generate</Btn>
+            </div>
           )}
         </HudPanel>
+        {insight && (
+          <HudModal open={insightDetailOpen} onClose={() => setInsightDetailOpen(false)} width={520}
+            title={`AI verdict · ${sym}`}>
+            <AiVerdictDetail
+              insight={insight}
+              computedAt={insightData?.computed_at ?? null}
+              cached={insightData?.cached}
+              persisted={insightData?.persisted}
+              model={insightData?.model ?? insight.model ?? null}
+              scoreDate={scoreDate}
+            />
+          </HudModal>
+        )}
+        </>
+
         ); })()}
+
 
         {!score ? (
           <HudPanel flow title="Coverage" index="A3">
@@ -897,7 +879,15 @@ export default function Analysis() {
           </HudPanel>
         ) : (
         <>
-        <HudPanel flow title="Breakout Intelligence" index="A3" actions={vintageChip}>
+        <HudPanel flow title="Breakout Intelligence" index="A3" actions={
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            {vintageChip}
+            <button className="hud-link" style={{ fontSize: 9, background: "none", border: 0, color: "var(--accent)", cursor: "pointer", padding: 0 }}
+                    onClick={() => nav(`/market/score/${encodeURIComponent(sym)}/explain?exchange=${encodeURIComponent(exchange)}`)}>
+              details →
+            </button>
+          </span>
+        }>
           {(() => {
             // Score-only panel: the number, why it can (or cannot) be trusted,
             // and the score-history feedback loop that shows what actually
@@ -909,7 +899,6 @@ export default function Analysis() {
             const stage = deriveBreakoutStage(snap ?? null);
             const stageTone = STAGE_TONE[stage.stage];
             const chipTone = stageTone === "neutral" ? undefined : stageTone;
-            const band = score?.breakout_band ?? null;
             const reason = score?.score_unavailable_reason ?? null;
             // The AI verdict is a real input to the read, not a side panel:
             // it nudges the displayed score by up to ±10. The raw pipeline
@@ -930,45 +919,51 @@ export default function Analysis() {
                 </div>
               );
             }
+            // Never clamp a live setup to a flat 0 — that is the same pixel as
+            // "not scoreable". Floor at 1 whenever the raw score is positive.
+            const adjusted = Math.min(100, Math.round(breakoutScore + aiAdj));
+            const shownScore = breakoutScore > 0 ? Math.max(1, adjusted) : Math.max(0, adjusted);
+            // The band column is NULL on many live score rows; derive it so the
+            // chip never appears and disappears between vintages.
+            const band = (score?.breakout_band ?? bandOf(Math.round(breakoutScore))?.label ?? "").toUpperCase();
+            const isLive = !!(liveScore && quote?.ltp && sessionOpen);
+            const detail = [
+              aiAdj !== 0 ? `raw ${Math.round(breakoutScore)}` : null,
+              aiAdj !== 0 ? (insight?.adjustment_reason ?? (insight?.verdict ? `AI verdict ${insight.verdict}` : null)) : null,
+              stage.detail && stage.detail !== "no snapshot" ? stage.detail : null,
+            ].filter(Boolean).join(" · ");
             return (
               <>
-                <Row label={liveScore && quote?.ltp && sessionOpen ? "Breakout Score (live)" : "Breakout Score (EOD)"}>
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-                    <ScoreBadge
-                      score={Math.max(0, Math.min(100, Math.round(breakoutScore + aiAdj)))}
-                      components={components}
-                      label="breakout components"
-                      onClick={() => nav(`/market/score/${encodeURIComponent(sym)}/explain?exchange=${encodeURIComponent(exchange)}`)}
-                    />
-                    {aiAdj !== 0 && (
-                      <Chip tone={aiAdj > 0 ? "ok" : "warn"}>AI {aiAdj > 0 ? "+" : ""}{aiAdj}</Chip>
-                    )}
-                    {band && <Chip tone={band === "STRONG" ? "ok" : band === "WEAK" ? "warn" : "accent"}>{band}</Chip>}
-                    {chipTone && <Chip tone={chipTone}>{stage.stage}</Chip>}
-                  </span>
-                </Row>
-                {aiAdj !== 0 && (
-                  <div style={{ fontSize: 10, color: "var(--text-muted)", padding: "2px 0", textAlign: "right" }}>
-                    raw {Math.round(breakoutScore)} · {insight?.adjustment_reason ?? `AI verdict ${insight?.verdict ?? ""}`}
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <ScoreBadge
+                    score={shownScore}
+                    components={components}
+                    label="breakout components"
+                    onClick={() => nav(`/market/score/${encodeURIComponent(sym)}/explain?exchange=${encodeURIComponent(exchange)}`)}
+                  />
+                  {band && <Chip tone={band === "STRONG" ? "ok" : band === "WEAK" ? "warn" : "accent"}>{band}</Chip>}
+                  {chipTone && <Chip tone={chipTone}>{stage.stage}</Chip>}
+                  {aiAdj !== 0 && (
+                    <Chip tone={aiAdj > 0 ? "ok" : "warn"}>AI {aiAdj > 0 ? "+" : ""}{aiAdj}</Chip>
+                  )}
+                  <Chip tone="neutral">{isLive ? "live" : "EOD"}</Chip>
+                </div>
+                {detail && (
+                  <div style={{ fontSize: 10, color: "var(--text-muted)", padding: "3px 0 0", lineHeight: 1.4 }}>
+                    {detail}
                   </div>
                 )}
-                {newsSent.count > 0 && (
-                  <div style={{ fontSize: 10, color: "var(--text-muted)", padding: "2px 0", textAlign: "right" }}>
-                    news sentiment {newsSent.avg != null && newsSent.avg >= 0 ? "+" : ""}{newsSent.avg?.toFixed(2)} · {newsSent.positive}↑ / {newsSent.negative}↓ of {newsSent.count}
-                  </div>
-                )}
-                {/* "no snapshot" is a not-loaded-yet placeholder, not a verdict —
-                    never render it as if it were analysis. */}
-                {stage.detail && stage.detail !== "no snapshot" && (
-                  <div style={{ fontSize: 10, color: "var(--text-muted)", padding: "2px 0 4px", textAlign: "right" }}>
-                    {stage.detail}
-                  </div>
-                )}
-                <ScoreHistoryPanel symbol={sym} exchange={exchange} />
+                <ScoreHistoryPanel symbol={sym} exchange={exchange} fallback={{
+                  tradeDate: score?.trade_date ?? null,
+                  score: score?.breakout_score_v4 ?? score?.breakout_score ?? null,
+                  band: score?.breakout_band ?? null,
+                  components: (score?.breakout_v4_components ?? score?.score_components?.breakout ?? null) as Record<string, number> | null,
+                }} />
               </>
             );
           })()}
         </HudPanel>
+
 
 
         <PatternPanel candles={candleData?.candles as never} tf={tf} index="A4"
@@ -1239,6 +1234,211 @@ function CompactStat({ label, value }: { label: string; value: React.ReactNode }
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 6, padding: "3px 0", borderBottom: "1px solid var(--edge)", fontSize: 11 }}>
       <span className="hud-label" style={{ color: "var(--text-dim)" }}>{label}</span>
       <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text)", textAlign: "right" }}>{value}</span>
+    </div>
+  );
+}
+
+// ---- A2 AI Verdict body -----------------------------------------------------
+// Compact by construction: one dense header line, a wrapping level grid, a
+// clamped rationale, and every secondary detail (risks, plausibility flags,
+// adjustment reason) behind a single disclosure line. Only the warnings that
+// matter before acting — price drift and a verdict older than the technicals —
+// stay unconditional.
+function AiVerdictBody({
+  insight, computedAt, persisted, quoteUsed, scoreDate, scoreClose, ltp,
+}: {
+  insight: StockInsight;
+  computedAt: string | null;
+  persisted?: boolean;
+  quoteUsed?: boolean;
+  scoreDate: string | null;
+  scoreClose: number | null;
+  ltp: number | null;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const [expandRationale, setExpandRationale] = useState(false);
+
+  const adj = insight.score_adjustment != null && Number.isFinite(insight.score_adjustment)
+    ? Math.max(-10, Math.min(10, Math.round(Number(insight.score_adjustment)))) : null;
+
+  const age = (() => {
+    if (!computedAt) return null;
+    const mins = Math.round((Date.now() - new Date(computedAt).getTime()) / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const h = Math.round(mins / 60);
+    if (h < 48) return `${h}h ago`;
+    return `${Math.round(h / 24)}d ago`;
+  })();
+
+  // Older than the session the technicals come from → it cannot have seen them.
+  const predatesSession = !!(computedAt && scoreDate && computedAt.slice(0, 10) < scoreDate.slice(0, 10));
+
+  // Drift is measured against the close the verdict was reasoned off, not the
+  // suggested entry — a deliberate pullback entry is not "the price moved".
+  const driftAnchor = quoteUsed ? null : scoreClose;
+  const drift = driftAnchor && ltp ? ((ltp - driftAnchor) / driftAnchor) * 100 : null;
+  const entryGap = insight.entry && ltp ? ((ltp - insight.entry) / insight.entry) * 100 : null;
+
+  const levels: Array<[string, string]> = [];
+  if (insight.entry != null) levels.push(["Entry", `₹${fmtNum(insight.entry, 2)}`]);
+  if (insight.stop_loss != null) levels.push(["Stop", `₹${fmtNum(insight.stop_loss, 2)}`]);
+  insight.targets.forEach((t, i) => levels.push([`T${i + 1}`, `₹${fmtNum(t, 2)}`]));
+  if (insight.holding_period_days != null) levels.push(["Hold", `${insight.holding_period_days}d`]);
+
+  const details: string[] = [
+    ...(insight.adjustment_reason ? [insight.adjustment_reason] : []),
+    ...(insight.plausibility_flags ?? []),
+    ...insight.risks,
+  ];
+
+  const muted = { fontSize: 10, color: "var(--text-muted)" } as const;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        <Chip tone={insight.verdict === "buy" ? "ok" : insight.verdict === "avoid" ? "err" : insight.verdict === "wait" ? "warn" : "accent"}>
+          {insight.verdict.toUpperCase()}
+        </Chip>
+        {/* Confidence is capped server-side at 95% — an equity call is never certain. */}
+        <span style={{ fontSize: 10, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>
+          {Math.round(Math.min(0.95, insight.confidence) * 100)}%
+        </span>
+        {insight.alignment && (
+          <Chip tone={insight.alignment === "confirms" ? "ok" : insight.alignment === "contradicts" ? "warn" : undefined}>
+            {insight.alignment}
+          </Chip>
+        )}
+        {adj != null && adj !== 0 && (
+          <Chip tone={adj > 0 ? "ok" : "warn"}>{adj > 0 ? `+${adj}` : adj}</Chip>
+        )}
+        {persisted === false && <Chip tone="warn">not cached</Chip>}
+        <span
+          style={{ ...muted, marginLeft: "auto" }}
+          title={computedAt ? `generated ${new Date(computedAt).toLocaleString()}` : undefined}
+        >
+          {scoreDate ? `EOD ${new Date(scoreDate).toLocaleDateString([], { day: "2-digit", month: "short" })}` : ""}
+          {quoteUsed ? " + live" : ""}{age ? ` · ${age}` : ""}
+        </span>
+      </div>
+
+      {levels.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 12px", fontSize: 11 }}>
+          {levels.map(([l, v]) => (
+            <span key={l} style={{ whiteSpace: "nowrap" }}>
+              <span className="hud-label" style={{ color: "var(--text-dim)", marginRight: 4 }}>{l}</span>
+              <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--text)" }}>{v}</span>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {(drift != null && Math.abs(drift) >= 2) && (
+        <div style={{ fontSize: 10, color: "var(--warn, #ffb84d)" }}>
+          price {drift > 0 ? "+" : ""}{drift.toFixed(1)}% vs the close this verdict used — refresh before acting
+        </div>
+      )}
+      {predatesSession && (
+        <div style={{ fontSize: 10, color: "var(--warn, #ffb84d)" }}>
+          verdict predates the {new Date(scoreDate!).toLocaleDateString([], { day: "2-digit", month: "short" })} session
+        </div>
+      )}
+
+      <div
+        style={{
+          fontSize: 11, lineHeight: 1.45, color: "var(--text)",
+          display: expandRationale ? "block" : "-webkit-box",
+          WebkitLineClamp: expandRationale ? undefined : 2,
+          WebkitBoxOrient: "vertical", overflow: "hidden", cursor: "pointer",
+        }}
+        title="click to expand"
+        onClick={() => setExpandRationale((v) => !v)}
+      >
+        {insight.rationale}
+      </div>
+
+      {details.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowAll((v) => !v)}
+          style={{ ...muted, background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer" }}
+        >
+          {showAll ? "▾ hide" : "▸"} {details.length} note{details.length > 1 ? "s" : ""}
+          {entryGap != null ? ` · ${entryGap > 0 ? "+" : ""}${entryGap.toFixed(1)}% vs entry` : ""}
+        </button>
+      )}
+      {showAll && (
+        <ul style={{ margin: 0, paddingLeft: 14, fontSize: 10, color: "var(--text-dim)", lineHeight: 1.5 }}>
+          {details.map((d, i) => <li key={i}>{d}</li>)}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// Full verdict, one field per line — the place to read everything the compact
+// A2 panel deliberately hides, plus the provenance of the call (what data
+// reached the model, which model answered, whether it is cached).
+function AiVerdictDetail({
+  insight, computedAt, cached, persisted, model, scoreDate,
+}: {
+  insight: StockInsight;
+  computedAt: string | null;
+  cached?: boolean;
+  persisted?: boolean;
+  model: string | null;
+  scoreDate: string | null;
+}) {
+  const conf = Math.round(Math.min(0.95, insight.confidence) * 100);
+  const rows: Array<[string, React.ReactNode]> = [
+    ["Verdict", insight.verdict.toUpperCase()],
+    ["Confidence", `${conf}%`],
+    ["Alignment", insight.alignment ?? "—"],
+    ["Score adjustment", insight.score_adjustment != null ? (insight.score_adjustment > 0 ? `+${insight.score_adjustment}` : String(insight.score_adjustment)) : "—"],
+    ["Entry", insight.entry != null ? `₹${fmtNum(insight.entry, 2)}` : "—"],
+    ["Stop loss", insight.stop_loss != null ? `₹${fmtNum(insight.stop_loss, 2)}` : "—"],
+    ["Targets", insight.targets.length ? insight.targets.map((t) => `₹${fmtNum(t, 2)}`).join("  ") : "—"],
+    ["Hold period", insight.holding_period_days != null ? `${insight.holding_period_days}d` : "—"],
+  ];
+  const provenance: Array<[string, React.ReactNode]> = [
+    ["Technicals", scoreDate ? shortDate(scoreDate) : "—"],
+    ["Live price", insight.quote_used
+      ? `used${insight.quote_age_minutes != null ? ` · ${insight.quote_age_minutes}m old` : ""}`
+      : "not available"],
+    ["Market breadth", insight.breadth_used ? "used" : "not available"],
+    ["Headlines", insight.news_count != null ? `${insight.news_count} (14d)` : "—"],
+    ["Fundamentals", insight.fundamentals_as_of ? shortDate(insight.fundamentals_as_of) : "—"],
+    ["Model", model ?? "—"],
+    ["Generated", computedAt ? new Date(computedAt).toLocaleString() : "—"],
+    ["Cache", persisted === false ? "not stored" : cached ? "served from cache" : "stored"],
+  ];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div>{rows.map(([l, v]) => <CompactStat key={l} label={l} value={v} />)}</div>
+      <div style={{ fontSize: 11, lineHeight: 1.5, color: "var(--text)" }}>{insight.rationale}</div>
+      {insight.adjustment_reason && (
+        <div style={{ fontSize: 10, color: "var(--text-dim)" }}>{insight.adjustment_reason}</div>
+      )}
+      {insight.risks.length > 0 && (
+        <div>
+          <div className="hud-label" style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 2 }}>risks</div>
+          <ul style={{ margin: 0, paddingLeft: 14, fontSize: 10, color: "var(--text-dim)", lineHeight: 1.5 }}>
+            {insight.risks.map((r, i) => <li key={i}>{r}</li>)}
+          </ul>
+        </div>
+      )}
+      {(insight.plausibility_flags?.length ?? 0) > 0 && (
+        <div>
+          <div className="hud-label" style={{ fontSize: 10, color: "var(--warn, #ffb84d)", marginBottom: 2 }}>dropped as implausible</div>
+          <ul style={{ margin: 0, paddingLeft: 14, fontSize: 10, color: "var(--text-dim)", lineHeight: 1.5 }}>
+            {insight.plausibility_flags!.map((f, i) => <li key={i}>{f}</li>)}
+          </ul>
+        </div>
+      )}
+      <div style={{ borderTop: "1px solid var(--edge)", paddingTop: 6 }}>
+        <div className="hud-label" style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 2 }}>what the model saw</div>
+        {provenance.map(([l, v]) => <CompactStat key={l} label={l} value={v} />)}
+      </div>
     </div>
   );
 }

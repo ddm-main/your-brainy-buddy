@@ -44,6 +44,12 @@ import { safeStorage } from "@/lib/safeStorage";
 
 export type ChartType = "candles" | "bars" | "line" | "area" | "heikin_ashi" | "baseline";
 
+// Bars of empty space kept to the right of the newest candle (TradingView's
+// `rightOffset`). Programmatic ranges add it too so the live bar never gets
+// welded to the right border.
+const RIGHT_AIR = 8;
+
+
 // Chart colour tokens — resolved once from CSS custom properties so the whole
 // canvas stays theme-aware. lightweight-charts wants concrete strings, not
 // var(...) references, so we read them at chart-build time (see readTokens()).
@@ -295,10 +301,33 @@ export function CandleChart({
   const chartRef = useRef<IChartApi | null>(null);
   const [legend, setLegend] = useState<CandleDto | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-  // preserve zoom/scroll across rebuilds; reset only when the candle set changes
-  const rangeRef = useRef<{ from: number; to: number } | null>(null);
-  const candlesKeyRef = useRef<string>("");
-  const viewportKeyRef = useRef<string | undefined>(viewportKey);
+  // Viewport preservation. Absolute logical indices are useless across data
+  // refreshes: appending a bar (and trimming the oldest one on a rolling
+  // intraday window) shifts every index, which used to drag the view
+  // backwards in time until the chart showed stale candles. We store the view
+  // ANCHORED TO THE NEWEST BAR instead — span plus distance from the right
+  // edge — which is what TradingView effectively does.
+  const viewAnchorRef = useRef<{ span: number; barsFromEnd: number } | null>(null);
+  const dataLenRef = useRef(0);
+  // While the viewport sits at the real-time edge we keep following new bars;
+  // once the user scrolls back we hold their range exactly.
+  const followLiveRef = useRef(true);
+  const [atLiveEdge, setAtLiveEdge] = useState(true);
+  const identityRef = useRef<string | null>(null);
+  const userInteractedRef = useRef(false);
+  const programmaticRangeRef = useRef(false);
+  // Gesture guard: while the user is actively wheeling/dragging the chart we
+  // never rebuild it — a rebuild landing mid-gesture is exactly what made
+  // zooming "snap back". The idle window is generous (1.2s) so a slow drag or
+  // a stuttering wheel flick never reads as "user finished".
+  const pointerDownRef = useRef(false);
+  const lastInteractRef = useRef(0);
+  const IDLE_MS = 1200;
+  const isInteractingRef = useRef(() => pointerDownRef.current || Date.now() - lastInteractRef.current < IDLE_MS);
+  const isInteracting = () => isInteractingRef.current();
+
+
+
   // live-tick plumbing: refs so the 1s price update never tears down the chart
   const priceSeriesRef = useRef<ISeriesApi<any> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<any> | null>(null);
@@ -333,8 +362,16 @@ export function CandleChart({
     if (!chart || !focusRange) return;
     const span = Math.max(3, focusRange.endIndex - focusRange.startIndex + 1);
     const pad = Math.max(2, Math.ceil(span * 0.15));
-    chart.timeScale().setVisibleLogicalRange({ from: focusRange.startIndex - pad, to: focusRange.endIndex + pad });
-    rangeRef.current = { from: focusRange.startIndex - pad, to: focusRange.endIndex + pad };
+    const from = focusRange.startIndex - pad;
+    const to = focusRange.endIndex + pad;
+    chart.timeScale().setVisibleLogicalRange({ from, to });
+    // Jumping to a pattern is an explicit navigation: stop following the live
+    // edge and remember the range anchored to the newest bar.
+    followLiveRef.current = false;
+    setAtLiveEdge(false);
+    userInteractedRef.current = true;
+    viewAnchorRef.current = { span: to - from, barsFromEnd: Math.max(0, dataLenRef.current - 1 - to) };
+
   }, [focusRange]);
 
 
@@ -379,6 +416,87 @@ export function CandleChart({
     });
   }, [cleanCandles, studies]);
 
+  // ---- rebuild gate -------------------------------------------------------
+  // The chart used to be destroyed and recreated on every candle poll (the
+  // render effect depended on the candle array), which threw the zoom/pan
+  // state away several times a minute and made the live edge jitter. Rebuild
+  // only when the bar STRUCTURE changes (new/removed bars, new studies); when
+  // a poll merely revalues the forming bar, update that bar in place.
+  const candlesRef = useRef(cleanCandles);
+  const computedRef = useRef(computed);
+  const studiesSig = useMemo(() => JSON.stringify(studies), [studies]);
+  const structKeyRef = useRef<string>("");
+  const [renderTick, setRenderTick] = useState(0);
+  // Bumped to re-evaluate a deferred structural rebuild once the user stops
+  // interacting with the chart.
+  const [deferTick, setDeferTick] = useState(0);
+  useEffect(() => {
+    candlesRef.current = cleanCandles;
+    computedRef.current = computed;
+    const lastC = cleanCandles[cleanCandles.length - 1];
+    const key = `${cleanCandles.length}|${cleanCandles[0]?.time ?? ""}|${lastC?.time ?? ""}|${studiesSig}`;
+    let deferTimer: number | undefined;
+    if (key !== structKeyRef.current) {
+      // Never tear the chart down while a zoom/pan gesture is in flight —
+      // retry once the user has actually stopped working the chart. The last
+      // bar is still pushed in place below (LWC `update` appends when the time
+      // is newer), so the live edge keeps moving without a rebuild.
+      if (structKeyRef.current && isInteracting()) {
+        deferTimer = window.setTimeout(() => setDeferTick((d) => d + 1), 500);
+      } else {
+        structKeyRef.current = key;
+        setRenderTick((t) => t + 1);
+        return;
+      }
+    }
+    const series = priceSeriesRef.current;
+    if (!series || !lastC) return () => { if (deferTimer) window.clearTimeout(deferTimer); };
+    const t = lastC.time as any;
+    try {
+      if (chartType === "line" || chartType === "area" || chartType === "baseline") {
+        series.update({ time: t, value: lastC.close });
+      } else if (chartType !== "heikin_ashi") {
+        series.update({ time: t, open: lastC.open, high: lastC.high, low: lastC.low, close: lastC.close });
+      }
+      liveBarRef.current = {
+        seriesTime: t, rawTime: lastC.time,
+        open: lastC.open, high: lastC.high, low: lastC.low, close: lastC.close, volume: lastC.volume,
+      };
+      setLiveBar(null);
+    } catch { /* the next structural rebuild will resync */ }
+    return () => { if (deferTimer) window.clearTimeout(deferTimer); };
+  }, [cleanCandles, computed, studiesSig, chartType, deferTick]);
+
+
+  // Track pointer/wheel activity on the chart container so the gesture guard
+  // above (and the programmatic range application) knows when to stand down.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const mark = () => { lastInteractRef.current = Date.now(); };
+    const down = () => { pointerDownRef.current = true; mark(); };
+    const up = () => { pointerDownRef.current = false; mark(); };
+    const move = () => { if (pointerDownRef.current) mark(); };
+    el.addEventListener("pointerdown", down, { capture: true });
+    window.addEventListener("pointerup", up, { capture: true });
+    window.addEventListener("pointercancel", up, { capture: true });
+    window.addEventListener("pointermove", move, { capture: true, passive: true });
+    el.addEventListener("wheel", mark, { capture: true, passive: true });
+    el.addEventListener("touchmove", mark, { capture: true, passive: true });
+    return () => {
+      el.removeEventListener("pointerdown", down, { capture: true } as any);
+      window.removeEventListener("pointerup", up, { capture: true } as any);
+      window.removeEventListener("pointercancel", up, { capture: true } as any);
+      window.removeEventListener("pointermove", move, { capture: true } as any);
+      el.removeEventListener("wheel", mark, { capture: true } as any);
+      el.removeEventListener("touchmove", mark, { capture: true } as any);
+    };
+  }, []);
+
+
+
+
+
 
   // Restore persisted pane heights when the opened chart identity changes,
   // and drop them when the parent asks for a reset.
@@ -399,7 +517,8 @@ export function CandleChart({
     // Studies are computed over the SAME cleaned/sorted series the chart draws
     // (see `cleanCandles`) — plotting is positional, so using the raw prop here
     // shifted every indicator by one bar whenever a duplicate was dropped.
-    const data = cleanCandles;
+    const data = candlesRef.current;
+    const computedNow = computedRef.current;
 
 
     // NSE session is 09:15–15:30 IST. Lightweight-charts defaults to UTC, so
@@ -524,14 +643,47 @@ export function CandleChart({
       },
       timeScale: {
         borderColor: "rgba(53,214,237,0.15)",
-        timeVisible: data.some((c) => typeof c.time === "number"),
+        // Time-of-day on the axis only for intraday grains — daily bars
+        // delivered as epoch numbers were rendering "09:15"-style ticks.
+        timeVisible: isIntraday,
+        secondsVisible: false,
         tickMarkFormatter: fmtAxis,
-        // "Session breaks" hides the non-trading gaps by tightly packing bars
-        // — LWC exposes this via `shiftVisibleRangeOnNewBar` + `barSpacing`;
-        // the closest built-in is disabling `ticksVisible` on off-hours, but
-        // the most visible knob is `rightOffset` + `fixLeftEdge`.
-        rightOffset: sSessionBreaks ? 0 : 5,
+        // TradingView leaves air to the right of the last bar and lets you
+        // scroll freely into that whitespace. Pinning BOTH edges (fixLeftEdge +
+        // fixRightEdge) clamps the logical range so hard that the newest candle
+        // is welded to the right border and panning snaps straight back — which
+        // is exactly the "can't move the chart" behaviour. Leave both edges
+        // free, like every real trading terminal.
+        rightOffset: RIGHT_AIR,
+        fixLeftEdge: false,
+        fixRightEdge: false,
+        // Zoom-out floor: minute series with thousands of bars used to clip
+        // instead of compressing.
+        minBarSpacing: 0.12,
+
+        // New bars scroll the view only while it's parked at the live edge —
+        // LWC honours the user's scrollback otherwise.
+        shiftVisibleRangeOnNewBar: true,
+        allowShiftVisibleRangeOnWhitespaceReplacement: true,
+        // Resizing the window or dragging a pane divider must not re-frame.
+        lockVisibleTimeRangeOnResize: true,
       },
+      // TradingView contract: wheel/pinch zoom time, axis drag scales its own
+      // axis, double-click an axis resets it, kinetic scroll on touch only.
+      handleScale: {
+        mouseWheel: true,
+        pinch: true,
+        axisPressedMouseMove: { time: true, price: true },
+        axisDoubleClickReset: { time: true, price: true },
+      },
+      handleScroll: {
+        mouseWheel: false,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: false,
+      },
+      kineticScroll: { touch: true, mouse: false },
+
       crosshair: {
         // Normal = free-floating crosshair: the horizontal line and its price
         // label follow the exact cursor y instead of snapping to the hovered
@@ -659,7 +811,7 @@ export function CandleChart({
     const primitives: VolumeProfilePrimitive[] = [];
     patternHitsRef.current = { marks: [], shapes: [] };
 
-    for (const { study, data: c } of computed) {
+    for (const { study, data: c } of computedNow) {
       if (!study.visible) continue;
       const def = defByType(study.type);
       if (def.group !== "overlay") continue;
@@ -915,9 +1067,9 @@ export function CandleChart({
       // volume handled below in its own pane so it gets a proper K/M axis
     }
 
-    for (const pl of priceLines ?? []) {
-      priceSeries.createPriceLine({ price: pl.price, color: pl.color, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: pl.label });
-    }
+    // Support/resistance lines are drawn by their own effect (they change with
+    // every live quote and must never rebuild the chart).
+
 
     // ---- oscillators + volume (visible, one sub-pane each) ----
     let pane = 1;
@@ -934,7 +1086,7 @@ export function CandleChart({
     // `volume` study (opt-out, not opt-in) — this keeps volume visible after
     // TF changes, indicator resets, or on old saved states that never had a
     // volume study added. Industry standard (TV/Kite): volume is always on.
-    const volumeStudy = computed.find(({ data: c }) => c.g === "volume");
+    const volumeStudy = computedNow.find(({ data: c }) => c.g === "volume");
     const showVolume =
       (volumeStudy && volumeStudy.study.visible) || (!volumeStudy);
     const hasAnyVolume = data.some((c) => Number(c.volume) > 0);
@@ -959,7 +1111,7 @@ export function CandleChart({
 
 
 
-    for (const { study, data: c } of computed) {
+    for (const { study, data: c } of computedNow) {
       if (!study.visible) continue;
       const def = defByType(study.type);
       if (def.group !== "oscillator") continue;
@@ -1008,7 +1160,7 @@ export function CandleChart({
     const subCount = Math.max(0, panes.length - 1);
     const paneSig = [
       showVolume && hasAnyVolume ? "volume" : "",
-      ...computed.filter(({ study }) => study.visible && defByType(study.type).group === "oscillator").map(({ study }) => study.id),
+      ...computedNow.filter(({ study }) => study.visible && defByType(study.type).group === "oscillator").map(({ study }) => study.id),
     ].filter(Boolean).join("|");
     paneSigRef.current = paneSig;
     if (subCount > 0) {
@@ -1057,20 +1209,73 @@ export function CandleChart({
       if (shape) pick({ kind: "shape", result: shape });
     });
 
-    // preserve view across param edits; fit only on a new candle set
-    const candlesKey = `${data.length}:${data[0] ? String(data[0].time) : ""}:${data[data.length - 1] ? String(data[data.length - 1].time) : ""}:${visibleBars ?? "all"}`;
-    const sameViewport = viewportKey === viewportKeyRef.current;
-    if (sameViewport && candlesKey === candlesKeyRef.current && rangeRef.current) {
-      chart.timeScale().setVisibleLogicalRange(rangeRef.current);
-    } else if (visibleBars && data.length > visibleBars) {
-      // Deep series stay fully loaded; the viewport just opens on the most
-      // recent `visibleBars` so a 20-year chart isn't squashed by default.
-      chart.timeScale().setVisibleLogicalRange({ from: data.length - visibleBars, to: data.length - 1 });
-    } else {
-      chart.timeScale().fitContent();
+    // Preserve the view across every rebuild of the SAME chart, anchored to the
+    // newest bar. New/updated/trimmed bars must never re-frame the viewport —
+    // only a genuine identity change (symbol, timeframe, chart type, scale)
+    // re-frames to that interval's default window.
+    const identity = `${viewportKey ?? "default"}|${chartType}|${sLog ? "log" : "lin"}`;
+    const sameIdentity = identity === identityRef.current;
+    if (!sameIdentity) {
+      userInteractedRef.current = false;
+      followLiveRef.current = true;
+      viewAnchorRef.current = null;
+      setAtLiveEdge(true);
     }
-    candlesKeyRef.current = candlesKey;
-    viewportKeyRef.current = viewportKey;
+    dataLenRef.current = data.length;
+    const lastIdx = data.length - 1;
+    const applyRange = () => {
+      // This runs on a freshly created chart, which has no viewport of its own:
+      // skipping it would leave lightweight-charts' default frame on screen —
+      // that WAS the "it reset itself to default" bug. Always apply; when the
+      // identity is unchanged the range applied is the user's own edge-anchored
+      // view, so it is a no-op visually.
+      programmaticRangeRef.current = true;
+
+      const anchor = viewAnchorRef.current;
+      if (sameIdentity && anchor && !followLiveRef.current) {
+        // Held range: re-derive indices from the right edge so appended or
+        // trimmed bars can't slide the window into the past.
+        const to = lastIdx - anchor.barsFromEnd;
+        chart.timeScale().setVisibleLogicalRange({ from: to - anchor.span, to });
+      } else if (sameIdentity && anchor) {
+        // Following the live edge: keep the zoom level, stay glued to the last
+        // bar with TradingView's right-hand air.
+        chart.timeScale().setVisibleLogicalRange({ from: lastIdx - anchor.span + RIGHT_AIR, to: lastIdx + RIGHT_AIR });
+      } else if (visibleBars && data.length > visibleBars) {
+        // Deep series stay fully loaded; the viewport just opens on the most
+        // recent `visibleBars` so a 20-year chart isn't squashed by default.
+        chart.timeScale().setVisibleLogicalRange({ from: lastIdx - visibleBars + 1, to: lastIdx + RIGHT_AIR });
+
+      } else {
+        chart.timeScale().fitContent();
+      }
+      requestAnimationFrame(() => { programmaticRangeRef.current = false; });
+    };
+    // Indicator panes are still sizing on this frame; applying the range after
+    // layout settles stops the visible one-off re-frame. On an unchanged
+    // identity one pass is enough — a second pass can stomp a fresh gesture.
+    applyRange();
+    if (!sameIdentity) requestAnimationFrame(applyRange);
+
+    identityRef.current = identity;
+
+    // Track the range continuously so a rebuild always has the latest, and
+    // detect whether the user is parked at the live edge or scrolled back.
+    chart.timeScale().subscribeVisibleLogicalRangeChange((r) => {
+      if (!r) return;
+      const from = r.from as number;
+      const to = r.to as number;
+      const barsFromEnd = Math.max(0, dataLenRef.current - 1 - to);
+      viewAnchorRef.current = { span: Math.max(1, to - from), barsFromEnd };
+      if (!programmaticRangeRef.current) {
+        userInteractedRef.current = true;
+        // Within one bar of the newest print counts as "at the live edge".
+        const live = barsFromEnd <= 1;
+        if (live !== followLiveRef.current) setAtLiveEdge(live);
+        followLiveRef.current = live;
+      }
+    });
+
 
     const doResize = () => {
       const w = el.clientWidth;
@@ -1083,7 +1288,14 @@ export function CandleChart({
 
     return () => {
       const r = chart.timeScale().getVisibleLogicalRange();
-      if (r) rangeRef.current = { from: r.from as number, to: r.to as number };
+      if (r) {
+        const to = r.to as number;
+        viewAnchorRef.current = {
+          span: Math.max(1, to - (r.from as number)),
+          barsFromEnd: Math.max(0, dataLenRef.current - 1 - to),
+        };
+      }
+
       // Capture any height the user dragged so the next rebuild replays it.
       try {
         const ps = chart.panes();
@@ -1105,7 +1317,35 @@ export function CandleChart({
       priceSeriesRef.current = null;
       volumeSeriesRef.current = null;
     };
-  }, [cleanCandles, computed, priceLines, height, fill, chartType, intraday, sGrid, sLog, sPriceLine, sSessionBreaks, sMagnet, visibleBars, viewportKey, paneResetToken]);
+  }, [renderTick, height, fill, chartType, intraday, sGrid, sLog, sPriceLine, sSessionBreaks, sMagnet, visibleBars, viewportKey, paneResetToken]);
+
+  // ---- support/resistance price lines, applied without rebuilding ----
+  // These values come off the live snapshot, so the array identity changes on
+  // every quote tick. Drawing them here (keyed by VALUE, not identity) keeps
+  // the chart — and the user's zoom — untouched.
+  const priceLinesSig = useMemo(
+    () => (priceLines ?? []).map((p) => `${p.price}|${p.label}|${p.color}`).join(","),
+    [priceLines],
+  );
+  const priceLinesRef = useRef(priceLines);
+  priceLinesRef.current = priceLines;
+  useEffect(() => {
+    const series = priceSeriesRef.current;
+    if (!series) return;
+    const created = (priceLinesRef.current ?? []).map((pl) =>
+      series.createPriceLine({
+        price: pl.price, color: pl.color, lineWidth: 1,
+        lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: pl.label,
+      }),
+    );
+    return () => {
+      for (const line of created) {
+        try { series.removePriceLine(line); } catch { /* series already gone */ }
+      }
+    };
+  }, [priceLinesSig, renderTick]);
+
+
 
 
   // ---- live tick: move/extend the rightmost bar without rebuilding the chart ----
@@ -1295,12 +1535,45 @@ export function CandleChart({
   const chg = deltaPctVsPrev;
 
   // Keyboard shortcuts: +/− zoom, ←/→ pan, Alt+H fit, Alt+L toggle log.
+  // Re-glue the viewport to the newest bar, keeping the current zoom level.
+  const jumpToLatest = () => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const ts = chart.timeScale();
+    const span = viewAnchorRef.current?.span;
+    programmaticRangeRef.current = true;
+    if (span && dataLenRef.current > span) {
+      const to = dataLenRef.current - 1 + RIGHT_AIR;
+      ts.setVisibleLogicalRange({ from: to - span, to });
+    } else {
+      ts.scrollToRealTime();
+    }
+    followLiveRef.current = true;
+    setAtLiveEdge(true);
+    requestAnimationFrame(() => { programmaticRangeRef.current = false; });
+  };
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+
     const chart = chartRef.current;
     if (!chart) return;
     const ts = chart.timeScale();
     const range = ts.getVisibleLogicalRange();
-    if (e.altKey && (e.key === "h" || e.key === "H")) { ts.fitContent(); e.preventDefault(); return; }
+    // Alt+H = full history (explicit, so it leaves the live edge); Alt+E (or
+    // End) snaps back to the latest bar.
+    if (e.altKey && (e.key === "h" || e.key === "H")) {
+      ts.fitContent();
+      followLiveRef.current = false;
+      setAtLiveEdge(false);
+      e.preventDefault();
+      return;
+    }
+    if (e.key === "End" || (e.altKey && (e.key === "e" || e.key === "E"))) {
+      jumpToLatest();
+      e.preventDefault();
+      return;
+    }
+
     if (!range) return;
     const span = (range.to as number) - (range.from as number);
     if (e.key === "+" || e.key === "=") {
@@ -1400,7 +1673,24 @@ export function CandleChart({
           onRemove={(id) => onRemoveStudy?.(id)}
         />
       )}
+      {!atLiveEdge && cleanCandles.length > 0 && (
+        <button
+          type="button"
+          onClick={jumpToLatest}
+          title="Jump to the latest bar and resume following the live edge"
+          style={{
+            position: "absolute", bottom: 26, right: 10, zIndex: 4,
+            fontFamily: "var(--font-hud)", fontSize: 9, letterSpacing: "0.12em",
+            textTransform: "uppercase", cursor: "pointer",
+            color: "var(--chart-up)", background: "rgba(4,16,22,0.75)",
+            border: "1px solid var(--chart-up-edge)", padding: "2px 7px", borderRadius: 2,
+          }}
+        >
+          Latest ›
+        </button>
+      )}
       <div ref={ref} style={{ width: "100%", height: "100%" }} />
     </div>
+
   );
 }

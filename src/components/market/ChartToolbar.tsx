@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Activity, Bell, Camera, LayoutGrid, Maximize2, Minimize2, Save, Search, Star, Trash2 } from "lucide-react";
 import { Menu, MenuItem, MenuGroup, MenuDivider } from "@/components/hud/Menu";
 import { safeStorage } from "@/lib/safeStorage";
+import { TIMEFRAMES, CHART_RANGES, type ChartRange } from "@/lib/market/chartWindows";
 import type { ChartType } from "@/components/market/CandleChart";
 import {
   OVERLAY_DEFS, OSCILLATOR_DEFS,
@@ -13,60 +14,12 @@ const FAV_INDICATORS_KEY = "mk.chart.favIndicators";
 const ALL_TYPES = new Set<IndicatorType>([...OVERLAY_DEFS, ...OSCILLATOR_DEFS].map((d) => d.type));
 
 
-// Trimmed to the timeframes the backend actually serves without duplicates.
-// Dropped: 3m/30m (dupes of neighbours), 2h/4h (no EOD pipeline coverage for
-// Indian equities), 45m/3h (no INTRADAY map entry in market-candles — the
-// edge fn 400s on them and the chart went blank). TV mode still accepts
-// everything via tvInterval(). 1W/1M are resampled from the stored daily
-// series by market-candles.
-export const TIMEFRAMES = [
-  { key: "1m", label: "1m", intraday: true },
-  { key: "5m", label: "5m", intraday: true },
-  { key: "15m", label: "15m", intraday: true },
-  { key: "1h", label: "1h", intraday: true },
-  { key: "1D", label: "1D", intraday: false },
-  { key: "1W", label: "1W", intraday: false },
-  { key: "1M", label: "1M", intraday: false },
-] as const;
-
-// Viewport ranges for non-intraday charts. These only move the visible
-// window — the full series stays loaded, so panning left still reveals
-// everything the provider returned.
-export const CHART_RANGES = [
-  { key: "1Y", label: "1Y", years: 1 },
-  { key: "3Y", label: "3Y", years: 3 },
-  { key: "5Y", label: "5Y", years: 5 },
-  { key: "ALL", label: "All", years: null },
-] as const;
-
-export type ChartRange = typeof CHART_RANGES[number]["key"];
-
-// Approximate bars per year for each timeframe — NSE trades ~250 sessions a
-// year, ~6.25 hourly bars per session.
-const BARS_PER_YEAR: Record<string, number> = {
-  "1m": 250 * 375,
-  "5m": 250 * 75,
-  "15m": 250 * 25,
-  "1h": 250 * 6.25,
-  "1D": 250,
-  "1W": 52,
-  "1M": 12,
-};
-
-// Approximate bar counts per timeframe for a given number of years.
-export function rangeToBars(range: ChartRange, tf: string): number | null {
-  const years = CHART_RANGES.find((r) => r.key === range)?.years ?? null;
-  if (years == null) return null;
-  const perYear = BARS_PER_YEAR[tf] ?? 250;
-  return Math.max(20, Math.round(years * perYear));
-}
-
-export function isIntraday(tf: string): boolean {
-  return TIMEFRAMES.find((t) => t.key === tf)?.intraday ?? false;
-}
 
 
-
+export {
+  TIMEFRAMES, CHART_RANGES, TF_WINDOWS, TF_FETCH_RANGE, DEFAULT_RANGE_BY_TF,
+  defaultVisibleBars, rangeToBars, isIntraday, type ChartRange, type TfWindow,
+} from "@/lib/market/chartWindows";
 
 export interface ChartSettings {
   grid: boolean;
