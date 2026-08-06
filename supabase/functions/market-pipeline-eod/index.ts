@@ -296,10 +296,21 @@ Deno.serve(async (req) => {
             swing_components: sw.components,
             intraday_score: is.score,
             intraday_components: is.components,
+            // The score just written is neutral-context, so the context columns
+            // from the PREVIOUS aggregates run no longer describe it. Leaving
+            // them behind produced the contradiction on the Analysis page: the
+            // row showed rel_strength_nifty 7.66 / sector_strength 0.67 while
+            // breakout_v4_coverage.strength was 0.25, i.e. the strength bucket
+            // had actually been dropped. Clear them together with the score;
+            // market-pipeline-aggregates repopulates both in one write.
+            sector_strength: null,
+            rel_strength_nifty: null,
+            rs_percentile: null,
             // Neutral-context preliminary write; market-pipeline-aggregates
             // recomputes with real sector/RS/regime context and flips this true.
             context_complete: false,
           };
+
 
           const { error: scoreErr } = await svc.from("market_stock_scores").upsert({
             symbol: stock.symbol,

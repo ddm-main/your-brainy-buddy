@@ -39,3 +39,16 @@ export const BAND_COLOR: Record<ScoreBand, string> = {
   watch: "var(--warn)",
   weak: "var(--danger)",
 };
+
+/** Chip tone per band — keeps every band chip in the app on one mapping. */
+export const BAND_TONE: Record<ScoreBand, "ok" | "warn" | "err" | undefined> = {
+  strong: "ok",
+  moderate: undefined,
+  watch: "warn",
+  weak: "err",
+};
+
+/** Uppercase display label for a band (stored bands come back lowercase). */
+export function bandLabel(band: ScoreBand): string {
+  return band.toUpperCase();
+}

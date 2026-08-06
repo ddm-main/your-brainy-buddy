@@ -1223,7 +1223,16 @@ export function CandleChart({
     }
     dataLenRef.current = data.length;
     const lastIdx = data.length - 1;
+    // lightweight-charts throws "Object is disposed" when anything touches the
+    // chart after `chart.remove()`. Frames queued by requestAnimationFrame and
+    // ResizeObserver callbacks routinely land one tick AFTER unmount (exiting
+    // fullscreen tears the chart down mid-frame), so every deferred callback in
+    // this effect checks this flag first.
+    let disposed = false;
+    const rafs: number[] = [];
+    const raf = (fn: () => void) => { rafs.push(requestAnimationFrame(() => { if (!disposed) fn(); })); };
     const applyRange = () => {
+      if (disposed) return;
       // This runs on a freshly created chart, which has no viewport of its own:
       // skipping it would leave lightweight-charts' default frame on screen —
       // that WAS the "it reset itself to default" bug. Always apply; when the
@@ -1249,20 +1258,20 @@ export function CandleChart({
       } else {
         chart.timeScale().fitContent();
       }
-      requestAnimationFrame(() => { programmaticRangeRef.current = false; });
+      raf(() => { programmaticRangeRef.current = false; });
     };
     // Indicator panes are still sizing on this frame; applying the range after
     // layout settles stops the visible one-off re-frame. On an unchanged
     // identity one pass is enough — a second pass can stomp a fresh gesture.
     applyRange();
-    if (!sameIdentity) requestAnimationFrame(applyRange);
+    if (!sameIdentity) raf(applyRange);
 
     identityRef.current = identity;
 
     // Track the range continuously so a rebuild always has the latest, and
     // detect whether the user is parked at the live edge or scrolled back.
     chart.timeScale().subscribeVisibleLogicalRangeChange((r) => {
-      if (!r) return;
+      if (!r || disposed) return;
       const from = r.from as number;
       const to = r.to as number;
       const barsFromEnd = Math.max(0, dataLenRef.current - 1 - to);
@@ -1278,15 +1287,20 @@ export function CandleChart({
 
 
     const doResize = () => {
+      if (disposed) return;
       const w = el.clientWidth;
       const h = fill ? el.clientHeight : height;
       if (w > 0 && h > 0) chart.resize(w, h);
     };
-    requestAnimationFrame(doResize);
+    raf(doResize);
     const ro = new ResizeObserver(doResize);
     ro.observe(el);
 
     return () => {
+      // Stop every deferred callback BEFORE the chart is torn down.
+      disposed = true;
+      rafs.forEach((id) => cancelAnimationFrame(id));
+      ro.disconnect();
       const r = chart.timeScale().getVisibleLogicalRange();
       if (r) {
         const to = r.to as number;
@@ -1308,7 +1322,6 @@ export function CandleChart({
           }
         }
       } catch { /* noop */ }
-      ro.disconnect();
       try { markersPlugins.forEach((p) => p.detach()); } catch { /* noop */ }
       try { primitives.forEach((vp) => (priceSeries as any).detachPrimitive?.(vp)); } catch { /* noop */ }
       obvLiveRef.current = null;

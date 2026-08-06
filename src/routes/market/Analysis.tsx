@@ -18,7 +18,6 @@ import { NewAlertModal, StockAlertsPanel } from "@/components/market/StockAlerts
 import { DEFAULT_STUDIES, makeStudy, normalizeStudy, type IndicatorType, type Study } from "@/lib/market/indicatorRegistry";
 import { fmtNum, fmtInt, fmtPct, Return1DCell, deriveChangeAbs } from "@/components/hud/DataTable";
 import type { CorporateActionRow } from "@/lib/market/hooks";
-import { marketOpen } from "@/lib/market/hooks";
 import { PatternPanel } from "@/components/market/PatternPanel";
 import { detailToParam, type PatternDetail } from "@/lib/market/patternLabels";
 import { PatternDetailDialog, type PatternSelection } from "@/components/market/PatternDetailDialog";
@@ -33,7 +32,8 @@ import { classifyHeadline } from "../../../supabase/functions/_shared/market/new
 import { computeLiveScore } from "@/lib/market/liveSnapshot";
 import { readPatterns } from "@/lib/market/patternLabels";
 import { deriveBreakoutStage, STAGE_TONE } from "@/lib/market/breakoutStage";
-import { bandOf } from "@/lib/market/scoreExplain";
+import { bandOf as bandOfCuts, bandLabel, BAND_TONE } from "@/lib/market/scoreBands";
+import { useScoreBandCuts } from "@/lib/market/scoreHistory";
 import { subscribeSymbolsForTicks, usePreferLiveTick } from "@/lib/market/useRealtimeTicks";
 import { getTrustedDayChange } from "@/lib/market/pnl";
 import { FullscreenShell } from "@/components/market/FullscreenShell";
@@ -432,7 +432,11 @@ export default function Analysis() {
   const { data: corpActions = [] } = useCorporateActions(sym, exchange);
   const syncNews = useSyncNewsAndActions();
   const insight = insightData?.payload;
-  const sessionOpen = marketOpen();
+  // Reactive: `marketOpen()` read at render kept the wrong vintage on screen
+  // until some unrelated state change re-rendered the page. useMarketOpen
+  // re-evaluates every 30 s so live/EOD flips at 09:15 and 15:30 on its own.
+  const sessionOpen = marketOpenNow;
+  const { data: bandCuts } = useScoreBandCuts();
   const fundAsOf = (() => {
 
     const raw = fund?.data_as_of ?? fundData?.fetched_at;
@@ -923,10 +927,20 @@ export default function Analysis() {
             // "not scoreable". Floor at 1 whenever the raw score is positive.
             const adjusted = Math.min(100, Math.round(breakoutScore + aiAdj));
             const shownScore = breakoutScore > 0 ? Math.max(1, adjusted) : Math.max(0, adjusted);
-            // The band column is NULL on many live score rows; derive it so the
-            // chip never appears and disappears between vintages.
-            const band = (score?.breakout_band ?? bandOf(Math.round(breakoutScore))?.label ?? "").toUpperCase();
+            // One band source for the whole panel: the same calibrated
+            // percentile cuts ScoreBadge colours the number with. The stored
+            // `breakout_band` column is NULL on many rows and lowercase on
+            // others, so the chip used to disagree with the badge beside it.
+            const bandKey = bandOfCuts(shownScore, bandCuts);
+            const band = bandLabel(bandKey);
             const isLive = !!(liveScore && quote?.ltp && sessionOpen);
+            const eodScoreValue = score?.breakout_score_v4 ?? score?.breakout_score ?? null;
+            // Live and EOD are two vintages of the SAME number. When they
+            // differ materially, say so — the breakdown underneath explains
+            // the EOD one only.
+            const vintageGap = isLive && eodScoreValue != null
+              ? Math.round(breakoutScore) - Math.round(eodScoreValue)
+              : 0;
             const detail = [
               aiAdj !== 0 ? `raw ${Math.round(breakoutScore)}` : null,
               aiAdj !== 0 ? (insight?.adjustment_reason ?? (insight?.verdict ? `AI verdict ${insight.verdict}` : null)) : null,
@@ -941,24 +955,37 @@ export default function Analysis() {
                     label="breakout components"
                     onClick={() => nav(`/market/score/${encodeURIComponent(sym)}/explain?exchange=${encodeURIComponent(exchange)}`)}
                   />
-                  {band && <Chip tone={band === "STRONG" ? "ok" : band === "WEAK" ? "warn" : "accent"}>{band}</Chip>}
+                  {band && <Chip tone={BAND_TONE[bandKey]}>{band}</Chip>}
                   {chipTone && <Chip tone={chipTone}>{stage.stage}</Chip>}
                   {aiAdj !== 0 && (
                     <Chip tone={aiAdj > 0 ? "ok" : "warn"}>AI {aiAdj > 0 ? "+" : ""}{aiAdj}</Chip>
                   )}
                   <Chip tone="neutral">{isLive ? "live" : "EOD"}</Chip>
+                  {score?.context_complete === false && (
+                    <span title="This session's score was written by the preliminary EOD pass, before market context (sector strength, relative strength, breadth) was computed — the strength bucket is dropped and its weight redistributed. The aggregates pass fills it in later today.">
+                      <Chip tone="warn">context pending</Chip>
+                    </span>
+                  )}
                 </div>
                 {detail && (
                   <div style={{ fontSize: 10, color: "var(--text-muted)", padding: "3px 0 0", lineHeight: 1.4 }}>
                     {detail}
                   </div>
                 )}
+                {Math.abs(vintageGap) >= 5 && (
+                  <div style={{ fontSize: 10, color: "var(--warn)", padding: "3px 0 0", lineHeight: 1.4 }}
+                       title="The live number reruns the same v4 engine on today's forming bar; the EOD number is the stored close-of-session score. The breakdown below explains the EOD one.">
+                    live recompute is {vintageGap > 0 ? "+" : ""}{vintageGap} vs the stored EOD score — today's bar has moved
+                  </div>
+                )}
                 <ScoreHistoryPanel symbol={sym} exchange={exchange} fallback={{
                   tradeDate: score?.trade_date ?? null,
-                  score: score?.breakout_score_v4 ?? score?.breakout_score ?? null,
-                  band: score?.breakout_band ?? null,
+                  score: eodScoreValue,
+                  band: null,
                   components: (score?.breakout_v4_components ?? score?.score_components?.breakout ?? null) as Record<string, number> | null,
+                  coverage: (score?.breakout_v4_coverage ?? null) as Record<string, number> | null,
                 }} />
+
               </>
             );
           })()}
