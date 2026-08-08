@@ -9,7 +9,11 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip } from "@/components/hud/HudControls";
+import { CalibrationDialog } from "@/components/market/CalibrationDialog";
+
 import { useStockScores } from "@/lib/market/hooks";
+import { useScoreBandStats, useScoreHistory, MIN_BAND_SAMPLE } from "@/lib/market/scoreHistory";
+
 import {
   V4_BUCKETS, FUNDAMENTAL_FACTORS, FUNDAMENTAL_MULT_MIN, FUNDAMENTAL_MULT_MAX,
   PENALTY_LABELS, BUCKET_COLORS, buildBucketRows, factorsFor, factorPoints,
@@ -28,6 +32,8 @@ export default function ScoreExplain() {
   const exchange = sp.get("exchange") ?? "NSE";
   const nav = useNavigate();
   const sym = symbol.toUpperCase();
+  const [calibOpen, setCalibOpen] = useState(false);
+
 
   const { data: scores = [], isLoading } = useStockScores({ symbol: sym, exchange, limit: 1 });
   const score = scores[0];
@@ -51,6 +57,30 @@ export default function ScoreExplain() {
   const rankPct = score?.breakout_v4_rank_pct == null ? null : Number(score.breakout_v4_rank_pct);
   const topPct = rankPct == null ? null : Math.max(0.1, 100 - rankPct);
 
+  // Points and coverage say how the number was built; only the band's matured
+  // history says whether the number has ever been worth acting on.
+  const { data: bandStats = [] } = useScoreBandStats("all");
+  const bandLabel = String(score?.breakout_band ?? (total == null ? "" : bandOf(total).label)).toUpperCase();
+  const bandStat = bandStats.find((b) => (b.band ?? "").toUpperCase() === bandLabel) ?? null;
+
+  // The band's aggregate is other stocks. This symbol's own matured snapshots
+  // are the only evidence about *this* name, so they belong on the same screen.
+  const { data: history = [] } = useScoreHistory(sym, exchange, 120);
+  const ownMatured = useMemo(
+    () => history.filter((h) => h.fwd_ret_21d != null).slice(-8).reverse(),
+    [history],
+  );
+  const ownAvgRel = useMemo(() => {
+    const vals = ownMatured.map((h) => h.fwd_rel_21d).filter((v): v is number => v != null);
+    return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+  }, [ownMatured]);
+  const ownHit = useMemo(() => {
+    const vals = ownMatured.map((h) => h.fwd_ret_21d).filter((v): v is number => v != null);
+    return vals.length ? (100 * vals.filter((v) => v > 0).length) / vals.length : null;
+  }, [ownMatured]);
+
+
+
   return (
     <div style={{ display: "grid", gap: 8, padding: 10 }}>
       {/* header — identity, score, and every outbound link in one row */}
@@ -71,7 +101,9 @@ export default function ScoreExplain() {
         <div style={{ flex: 1 }} />
         <Btn size="sm" onClick={() => nav(`/market/analysis/${encodeURIComponent(sym)}`)}>Chart</Btn>
         <Btn size="sm" onClick={() => nav(`/market/score/${encodeURIComponent(sym)}`)}>History</Btn>
-        <Btn size="sm" onClick={() => nav("/market/breakout")}>Calibration</Btn>
+        <Btn size="sm" onClick={() => setCalibOpen(true)}>Calibration</Btn>
+        <CalibrationDialog open={calibOpen} onOpenChange={setCalibOpen} />
+
       </div>
 
       {isLoading ? (
@@ -91,6 +123,83 @@ export default function ScoreExplain() {
         </HudPanel>
       ) : (
         <>
+          {/* ---------- does this band actually work? ---------- */}
+          <HudPanel title="Track record of this band">
+            {!bandStat ? (
+              <div style={{ fontSize: 11, color: muted }}>
+                no matured history for the {bandLabel} band yet — this score is unproven.
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 10 }}>
+                <Chip tone={bandStat.sample_21d >= MIN_BAND_SAMPLE ? "neutral" : "warn"}>
+                  {bandStat.sample_21d} matured rows
+                </Chip>
+                <Chip>hit 21d {bandStat.hit_rate_21d == null ? "—" : `${bandStat.hit_rate_21d}%`}</Chip>
+                <Chip>
+                  avg rel 21d {bandStat.avg_rel_21d == null ? "—" : bandStat.avg_rel_21d.toFixed(2)}
+                </Chip>
+                {bandStat.sample_21d < MIN_BAND_SAMPLE && (
+                  <Chip tone="warn">under {MIN_BAND_SAMPLE} matured rows — unproven, treat as noise</Chip>
+                )}
+                {bandStat.avg_rel_21d != null && bandStat.avg_rel_21d < 0 && (
+                  <Chip tone="err">this band has under-performed NIFTY on matured history</Chip>
+                )}
+                <div style={{ flex: 1 }} />
+                <Btn size="sm" onClick={() => setCalibOpen(true)}>Open Calibration Lab</Btn>
+              </div>
+            )}
+          </HudPanel>
+
+          {/* ---------- what this symbol's own scores did next ---------- */}
+          <HudPanel title="This symbol's matured snapshots">
+            {ownMatured.length === 0 ? (
+              <div style={{ fontSize: 11, color: muted }}>
+                no snapshot of {sym} has matured 21 sessions yet — nothing measured on this name itself.
+              </div>
+            ) : (
+              <>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 10, marginBottom: 6 }}>
+                  <Chip>{ownMatured.length} matured</Chip>
+                  <Chip tone={ownHit != null && ownHit >= 50 ? "ok" : "warn"}>
+                    hit 21d {ownHit == null ? "—" : `${Math.round(ownHit)}%`}
+                  </Chip>
+                  <Chip tone={ownAvgRel == null ? "neutral" : ownAvgRel >= 0 ? "ok" : "err"}>
+                    avg rel 21d {ownAvgRel == null ? "—" : ownAvgRel.toFixed(2)}
+                  </Chip>
+                </div>
+                <div style={{ fontSize: 10, fontFamily: "var(--font-hud)" }}>
+                  <Grid head>
+                    <span>date</span>
+                    <span style={{ textAlign: "right" }}>score</span>
+                    <span style={{ textAlign: "right" }}>+21d</span>
+                    <span style={{ textAlign: "right" }}>rel 21d</span>
+                  </Grid>
+                  {ownMatured.map((h) => (
+                    <Grid key={h.trade_date}>
+                      <span style={{ color: dim }}>
+                        {h.trade_date}
+                        {h.context_neutral && <span title="replayed with neutral market context" style={{ color: muted }}> ·r</span>}
+                      </span>
+                      <Num color="var(--text)">{h.score ?? "—"}</Num>
+                      <Num color={h.fwd_ret_21d == null ? muted : h.fwd_ret_21d > 0 ? "var(--ok)" : "var(--danger)"}>
+                        {h.fwd_ret_21d == null ? "—" : h.fwd_ret_21d.toFixed(2)}
+                      </Num>
+                      <Num color={h.fwd_rel_21d == null ? muted : h.fwd_rel_21d > 0 ? "var(--ok)" : "var(--danger)"}>
+                        {h.fwd_rel_21d == null ? "—" : h.fwd_rel_21d.toFixed(2)}
+                      </Num>
+                    </Grid>
+                  ))}
+                </div>
+                <div style={{ fontSize: 9, color: muted, marginTop: 5 }}>
+                  Newest first, up to 8 snapshots. Rows marked ·r were replayed without live market context.
+                </div>
+              </>
+            )}
+          </HudPanel>
+
+
+
+
           {/* ---------- distribution of 100 ---------- */}
           <HudPanel title="Distribution of 100">
             <div style={{ display: "flex", height: 14, background: "var(--edge)", overflow: "hidden" }}>
@@ -284,7 +393,8 @@ function HowItWorks() {
         <div style={{ padding: "6px 12px 8px", fontSize: 10, color: muted, lineHeight: 1.6 }}>
           Breakout Intelligence v4 is a coverage-aware 100-point model: seven buckets of 0–1 sub-factors,
           raw weights summing to 100. Missing sub-factors renormalise inside their bucket, buckets under{" "}
-          {Math.round(BUCKET_MIN_COVERAGE * 100)}% coverage are dropped and their weight redistributed,
+          {Math.round(BUCKET_MIN_COVERAGE * 100)}% coverage are dropped and their weight partly redistributed
+          (capped at 85% coverage, so a thin name is scored against a lower ceiling instead of being scaled up),
           penalties are subtracted in points, then regime and fundamentals multipliers scale the result.
           Under 120 sessions of history or 45% coverage it returns no score at all.
           Hover any bucket or sub-factor for what it measures and what full credit looks like.

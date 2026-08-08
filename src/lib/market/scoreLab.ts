@@ -12,16 +12,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { SCORE_MODEL } from "@/lib/market/scoreHistory";
 
-/** Live v4 bucket weights — mirror of V4_WEIGHTS in the edge scorer. */
-export const V4_WEIGHTS: Record<string, number> = {
-  levels: 22,
-  volume: 16,
-  indicators: 16,
-  setups: 13,
-  strength: 13,
-  patterns: 11,
-  sentiment: 9,
-};
+/**
+ * Live v4 bucket weights — imported from the very file the edge scorer uses,
+ * not copied. A hand-maintained mirror silently drifted the moment the scorer
+ * changed, which made every "vs live" delta in the weight bars a lie.
+ */
+export { V4_WEIGHTS } from "../../../supabase/functions/_shared/market/v4Weights";
+
+
 
 const num = (v: unknown): number | null =>
   v == null || Number.isNaN(Number(v)) ? null : Number(v);
@@ -53,14 +51,22 @@ export interface CohortSymbol {
   best_ret_21d: number | null;
 }
 
-/** Per-session count of names above `threshold`, and what happened next. */
-export function useScoreCohort(days = 30, threshold = 70) {
+/**
+ * Per-session count of names above `threshold`, and what happened next.
+ *
+ * `_population` is always sent explicitly. Two overloads of this function used
+ * to exist (with and without the population argument) and every argument had a
+ * default, so PostgREST could not choose between them and the call failed —
+ * which is why the lab rendered as "no history yet" while the table held
+ * thousands of rows.
+ */
+export function useScoreCohort(days = 30, threshold = 70, population: "fit" | "all" = "all") {
   return useQuery({
-    queryKey: ["market", "score-cohort", days, threshold],
+    queryKey: ["market", "score-cohort", days, threshold, population],
     staleTime: 5 * 60_000,
     queryFn: async (): Promise<CohortDay[]> => {
       const { data, error } = await (supabase as any).rpc("market_score_cohort", {
-        _model: SCORE_MODEL, _days: days, _threshold: threshold,
+        _model: SCORE_MODEL, _days: days, _threshold: threshold, _population: population,
       });
       if (error) throw error;
       return (data ?? []).map((r: any): CohortDay => ({
@@ -80,13 +86,16 @@ export function useScoreCohort(days = 30, threshold = 70) {
 }
 
 /** Membership + persistence: how many sessions each name held the threshold. */
-export function useScoreCohortSymbols(days = 30, threshold = 70, limit = 200) {
+export function useScoreCohortSymbols(
+  days = 30, threshold = 70, limit = 200, population: "fit" | "all" = "all",
+) {
   return useQuery({
-    queryKey: ["market", "score-cohort-symbols", days, threshold, limit],
+    queryKey: ["market", "score-cohort-symbols", days, threshold, limit, population],
     staleTime: 5 * 60_000,
     queryFn: async (): Promise<CohortSymbol[]> => {
       const { data, error } = await (supabase as any).rpc("market_score_cohort_symbols", {
         _model: SCORE_MODEL, _days: days, _threshold: threshold, _limit: limit,
+        _population: population,
       });
       if (error) throw error;
       return (data ?? []).map((r: any): CohortSymbol => ({
@@ -105,6 +114,7 @@ export function useScoreCohortSymbols(days = 30, threshold = 70, limit = 200) {
     },
   });
 }
+
 
 export interface OptimizerMetrics {
   sample_n: number;
@@ -152,7 +162,12 @@ export function useOptimizerRuns(limit = 10) {
     queryFn: async (): Promise<OptimizerRun[]> => {
       const { data, error } = await (supabase as any)
         .from("market_score_optimizer_runs")
-        .select("id,model,params,baseline,candidates,best,sample_n,created_at")
+        // "*" on purpose: the run row carries the population / hold-out
+        // provenance (population, live_rows, neutral_rows, split_ok, test_n),
+        // and a hand-written column list silently dropped all of it, so the
+        // "previous runs" list could not say which pool a run was fitted on.
+        .select("*")
+
         .order("created_at", { ascending: false })
         .limit(limit);
       if (error) throw error;
@@ -182,5 +197,146 @@ export function useRunOptimizer() {
       };
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["market", "optimizer-runs"] }); },
+  });
+}
+
+/**
+ * How much *usable* evidence the lab actually has. The panels used to say
+ * "no matured snapshots" without ever saying how far off maturity was, so an
+ * empty lab and a broken lab looked identical.
+ */
+export interface LabCoverage {
+  rows: number;
+  matured21: number;
+  maturedFit: number;
+  liveRows: number;
+  unknownLiquidity: number;
+  /**
+   * Rows the weight search can actually use, counted the way the optimizer
+   * counts them: matured on the 21d relative horizon, carrying stored bucket
+   * detail, and not explicitly illiquid — split by pool, because the optimizer
+   * fits the live pool and only falls back to the replayed one.
+   */
+  optimizerLive: number;
+  optimizerNeutral: number;
+}
+
+const countRows = async (
+  build: (q: any) => any,
+): Promise<number> => {
+  let q = (supabase as any)
+    .from("market_score_history")
+    .select("id", { count: "exact", head: true })
+    .eq("model", SCORE_MODEL);
+  q = build(q);
+  const { count, error } = await q;
+  if (error) throw error;
+  return Number(count ?? 0);
+};
+
+/** The optimizer's own row filter, minus the de-overlap thinning it applies. */
+const optimizerPool = (q: any, neutral: boolean) =>
+  q.not("fwd_rel_21d", "is", null)
+    .not("buckets", "is", null)
+    .not("is_liquid_tradable", "is", false)
+    .eq("context_neutral", neutral);
+
+export function useLabCoverage() {
+  return useQuery({
+    queryKey: ["market", "score-lab-coverage", SCORE_MODEL],
+    staleTime: 5 * 60_000,
+    queryFn: async (): Promise<LabCoverage> => {
+      const [rows, matured21, maturedFit, liveRows, unknownLiquidity, optimizerLive, optimizerNeutral] =
+        await Promise.all([
+          countRows((q) => q),
+          countRows((q) => q.not("fwd_rel_21d", "is", null)),
+          countRows((q) => q.not("fwd_rel_21d", "is", null).eq("context_neutral", false).eq("is_liquid_tradable", true)),
+          countRows((q) => q.eq("context_neutral", false)),
+          countRows((q) => q.is("is_liquid_tradable", null)),
+          countRows((q) => optimizerPool(q, false)),
+          countRows((q) => optimizerPool(q, true)),
+        ]);
+      return {
+        rows, matured21, maturedFit, liveRows, unknownLiquidity,
+        optimizerLive, optimizerNeutral,
+      };
+    },
+  });
+}
+
+/**
+ * Minimum usable rows the weight search needs before it can say anything.
+ * This is the optimizer's real floor (`usable.length < 100` in
+ * market-score-optimize), not a softer UI number — the lab used to unblock the
+ * button at 20 rows and then surface the engine's refusal as a result.
+ */
+export const MIN_OPTIMIZER_ROWS = 100;
+
+/** The pool the search will actually fit on, and how far short it is. */
+export function optimizerReadiness(coverage: LabCoverage | undefined) {
+  if (!coverage) return null;
+  const usesLive = coverage.optimizerLive >= MIN_OPTIMIZER_ROWS;
+  const pool = usesLive ? coverage.optimizerLive : coverage.optimizerNeutral;
+  return {
+    population: usesLive ? ("full_context" as const) : ("replayed_neutral" as const),
+    pool,
+    shortfall: Math.max(0, MIN_OPTIMIZER_ROWS - pool),
+    ready: pool >= MIN_OPTIMIZER_ROWS,
+  };
+}
+
+/**
+ * Mature + fit pass. Backfill only writes snapshots; this is the step that
+ * fills forward returns, refits the calibration, refreshes the distribution
+ * and stamps ranks. Without it in the UI, a fresh backfill stayed unmatured
+ * and "not fitted yet" until the nightly cron happened to run.
+ */
+export function useRunEvaluate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const { data, error } = await supabase.functions.invoke("market-score-evaluate", {
+        body: { model: SCORE_MODEL },
+      });
+      if (error) throw error;
+      return data as {
+        ok: boolean;
+        evaluated_rows?: number;
+        calibration_rows?: number;
+        distribution_rows?: number;
+        ranked_rows?: number;
+        self_check?: Record<string, number>;
+        coverage?: unknown;
+      };
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["market", "score-lab-coverage"] });
+      qc.invalidateQueries({ queryKey: ["market", "score-cohort"] });
+      qc.invalidateQueries({ queryKey: ["market", "score-band-stats"] });
+      qc.invalidateQueries({ queryKey: ["market", "score-calibration"] });
+    },
+  });
+}
+
+
+/** Bounded backfill pass — replays scoring history for more symbols. */
+export function useRunBackfill() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (params: { limit?: number; sessions?: number }) => {
+      const { data, error } = await supabase.functions.invoke("market-score-backfill", {
+        body: { limit: params.limit ?? 20, sessions: params.sessions ?? 120 },
+      });
+      if (error) throw error;
+      return data as {
+        ok: boolean; drained?: boolean; skipped?: string;
+        symbols?: number; rows_written?: number;
+      };
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["market", "score-lab-coverage"] });
+      qc.invalidateQueries({ queryKey: ["market", "score-cohort"] });
+      qc.invalidateQueries({ queryKey: ["market", "score-band-stats"] });
+    },
   });
 }

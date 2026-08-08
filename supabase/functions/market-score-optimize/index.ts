@@ -190,7 +190,8 @@ Deno.serve(async (req) => {
     // Prefer live rows; fall back to the replayed neutral pool only when the
     // live one cannot support a fit, and name the population in the response
     // so nobody mistakes a replay for live evidence.
-    const population = liveRows.length >= 100 ? "full_context" : "replayed_neutral";
+    const MIN_ROWS = 100;
+    const population = liveRows.length >= MIN_ROWS ? "full_context" : "replayed_neutral";
     const rows = population === "full_context" ? liveRows : neutralRows;
 
     // Thin the overlap, then split train / test by date.
@@ -209,18 +210,30 @@ Deno.serve(async (req) => {
     const splitOk = trainRows.length >= 100 && testRows.length >= 50;
     const fitRows = splitOk ? trainRows : usable;
 
-    if (usable.length < 100) {
+    // A fit that never saw a live full-context row is a hypothesis about a
+    // model that has not been observed trading. It still runs — the search is
+    // how the pool gets diagnosed — but it is never a "result".
+    const advisory = population !== "full_context" || !splitOk;
+    const advisoryReason = population !== "full_context"
+      ? `fitted on replayed context-neutral rows (only ${liveRows.length} live rows, need ${MIN_ROWS})`
+      : !splitOk
+        ? "no hold-out — in-sample only"
+        : null;
+
+    if (usable.length < MIN_ROWS) {
       return jsonResponse(req, {
         ok: false,
         reason: "not_enough_history",
         population,
-        message: `only ${usable.length} non-overlapping matured snapshots with bucket detail in the last ${days} days (live pool ${liveRows.length}, replayed pool ${neutralRows.length}) — need 100+. Run market-score-backfill and market-score-evaluate first.`,
+        min_rows: MIN_ROWS,
+        message: `only ${usable.length} non-overlapping matured snapshots with bucket detail in the last ${days} days (live pool ${liveRows.length}, replayed pool ${neutralRows.length}) — need ${MIN_ROWS}+. Run market-score-backfill and market-score-evaluate first.`,
         sample_n: usable.length,
         raw_rows: rows.length,
         live_rows: liveRows.length,
         neutral_rows: neutralRows.length,
       });
     }
+
 
 
     const baseline = evaluate(fitRows, BASE, threshold);
@@ -281,7 +294,10 @@ Deno.serve(async (req) => {
         params: {
           days, threshold, horizon, iterations, since, population,
           deoverlap, test_fraction: testFraction, split_ok: splitOk, split_date: cut,
+          test_n: testRows.length, live_rows: liveRows.length, neutral_rows: neutralRows.length,
+          advisory, advisory_reason: advisoryReason,
         },
+
         baseline: { weights: BASE, metrics: baseline, test_metrics: baselineTest },
         candidates: top,
         best: winner,
@@ -295,8 +311,11 @@ Deno.serve(async (req) => {
       ok: true, run_id: runId, model,
       params: { days, threshold, horizon, iterations, deoverlap, test_fraction: testFraction },
       population,
+      advisory,
+      advisory_reason: advisoryReason,
       live_rows: liveRows.length,
       neutral_rows: neutralRows.length,
+
       sample_n: fitRows.length,
       test_n: testRows.length,
       split_ok: splitOk,

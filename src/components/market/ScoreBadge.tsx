@@ -1,6 +1,7 @@
 // 0–100 score chip with component-breakdown tooltip.
 import { useEffect, useState } from "react";
 import { BAND_COLOR, bandOf } from "@/lib/market/scoreBands";
+import { buildBucketRows } from "@/lib/market/scoreExplain";
 import { useScoreBandCuts } from "@/lib/market/scoreHistory";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -9,28 +10,37 @@ import { supabase } from "@/integrations/supabase/client";
 // the biggest egress items in the app, so the badge now fetches the breakdown
 // for a single symbol on first hover and caches it for the session.
 type ComponentKind = "breakout" | "prebreakout" | "swing" | "intraday" | "breakout_v4";
-const componentCache = new Map<string, Record<string, number> | null>();
+const componentCache = new Map<string, Loaded>();
+
+interface Loaded {
+  components: Record<string, number> | null;
+  /** Only for v4: per-bucket coverage, used to show the score's real ceiling. */
+  coverage: Record<string, number> | null;
+}
 
 async function loadComponents(
   symbol: string, exchange: string, kind: ComponentKind,
-): Promise<Record<string, number> | null> {
+): Promise<Loaded> {
   const cacheKey = `${exchange}:${symbol}:${kind}`;
-  if (componentCache.has(cacheKey)) return componentCache.get(cacheKey) ?? null;
+  const hit = componentCache.get(cacheKey);
+  if (hit) return hit;
   const column = kind === "swing" ? "swing_components"
     : kind === "intraday" ? "intraday_components"
     // v4 keeps its buckets in their own blob; it used to ride along with every
     // screener row (~10 MB/day) purely to serve this hover tooltip.
     : kind === "breakout_v4" ? "breakout_v4_components"
     : "score_components";
+  const isV4 = kind === "breakout_v4";
   const { data } = await (supabase as any)
     .from("market_stock_scores")
-    .select(`v:${column}`)
+    .select(isV4 ? `v:${column},cov:breakout_v4_coverage` : `v:${column}`)
     .eq("symbol", symbol).eq("exchange", exchange)
     .maybeSingle();
   const blob = data?.v ?? null;
-  const out = kind === "breakout_v4" ? (blob?.buckets ?? null)
+  const components = isV4 ? (blob?.buckets ?? null)
     : (kind === "breakout" || kind === "prebreakout") ? (blob?.[kind] ?? null)
     : blob;
+  const out: Loaded = { components, coverage: isV4 ? (data?.cov ?? null) : null };
   componentCache.set(cacheKey, out);
   return out;
 }
@@ -63,7 +73,7 @@ export function ScoreBadge({
   onClick?: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [lazy, setLazy] = useState<Record<string, number> | null>(null);
+  const [lazy, setLazy] = useState<Loaded | null>(null);
   // Cached query — every badge on a table shares the one distribution row.
   const { data: cuts } = useScoreBandCuts();
 
@@ -77,7 +87,12 @@ export function ScoreBadge({
     return () => { alive = false; };
   }, [wantsLazy, symbol, exchange, kind]);
 
-  const shown = components ?? lazy;
+  const shown = components ?? lazy?.components ?? null;
+  // Real ceiling this score was measured against: with buckets dropped, a 78%
+  // coverage score is NOT comparable to a fully covered one.
+  const ceiling = lazy?.coverage
+    ? buildBucketRows(null, lazy.coverage).reduce((s, r) => s + r.ceiling, 0)
+    : null;
 
   if (score == null) return <span style={{ color: "var(--text-muted)" }}>—</span>;
 
@@ -142,6 +157,11 @@ export function ScoreBadge({
           )}
           {wantsLazy && !shown && (
             <span style={{ display: "block", color: "var(--text-muted)" }}>loading breakdown…</span>
+          )}
+          {ceiling != null && ceiling < 99.5 && (
+            <span style={{ display: "block", color: "var(--warn)", marginBottom: 6 }}>
+              coverage {Math.round(ceiling)}% — scored against a {Math.round(ceiling)}/100 ceiling
+            </span>
           )}
 
           {Object.entries(shown ?? {})

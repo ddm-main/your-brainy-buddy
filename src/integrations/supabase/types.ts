@@ -7030,6 +7030,10 @@ export type Database = {
       }
       db_size_report: { Args: never; Returns: Json }
       egress_cycle_rollup: { Args: never; Returns: Json }
+      ema_step: {
+        Args: { k: number; state: number; val: number }
+        Returns: number
+      }
       evaluate_score_history_forward: {
         Args: { _limit?: number }
         Returns: number

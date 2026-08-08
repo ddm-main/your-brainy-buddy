@@ -226,8 +226,15 @@ function weeklyPatternsFromRow(r: any): BreakoutPatterns | undefined {
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
+  // Hoisted so the failure path can still record the run. A pass that throws
+  // used to leave nothing behind but an HTTP 500 in the orchestrator log, which
+  // is how the context pass stayed broken for two sessions unnoticed.
+  let runSvc: ReturnType<typeof svcClient> | null = null;
+  let runStart = new Date().toISOString();
+  let runTradeDate: string | null = null;
   try {
     const svc = svcClient();
+    runSvc = svc;
     if (req.headers.get("x-cron-secret") != null) {
       const guard = await requireCronSecret(req);
       if (guard) return guard;
@@ -242,6 +249,7 @@ Deno.serve(async (req) => {
     // resolved below from the newest price bar.
     const calendarDate = istTradeDate();
     const runStartedAt = new Date().toISOString();
+    runStart = runStartedAt;
 
     // Pull all scored rows, then join sector/is_active/market_cap from
     // market_stocks in-memory (no FK between the two tables, so PostgREST
@@ -278,6 +286,7 @@ Deno.serve(async (req) => {
       .order("trade_date", { ascending: false }).limit(1).maybeSingle();
     if (newestErr) return errorResponse(req, newestErr.message, 500);
     const latestTradeDate: string | null = (newest?.trade_date as string | undefined) ?? null;
+    runTradeDate = latestTradeDate;
     if (!latestTradeDate) return jsonResponse(req, { ok: true, note: "no trade data yet — run market-pipeline-eod first" });
 
     const { count: staleCount } = await svc.from("market_stock_scores")
@@ -745,6 +754,18 @@ Deno.serve(async (req) => {
       v4Pool.sort((a, b) => a.v - b.v);
       const v4Rank = new Map<string, number>();
       v4Pool.forEach((it, i) => v4Rank.set(it.k, v4Pool.length > 1 ? Math.round((i / (v4Pool.length - 1)) * 1000) / 10 : 50));
+      // breakout_band was NULL for the entire universe: nothing ever wrote it,
+      // so every consumer (screener chip, A3 header, alerts) had to re-derive
+      // the band from raw thresholds and disagreed with the calibrated badge.
+      // Persist it here, from the same day-cuts the badge uses, in UPPERCASE
+      // so no reader has to normalise casing.
+      const bandCuts = percentileBandCuts(v4Pool.map((p) => p.v));
+      const bandFor = (v: number | null): string | null => {
+        if (v == null) return null;
+        const strong = Math.max(bandCuts.strong, SCORE_BAND_MODERATE);
+        const moderate = Math.max(bandCuts.moderate, SCORE_BAND_WEAK);
+        return v >= strong ? "STRONG" : v >= moderate ? "MODERATE" : v >= bandCuts.watch ? "WATCH" : "WEAK";
+      };
       for (let i = 0; i < scored.length; i += 50) {
         const batch = scored.slice(i, i + 50);
         await Promise.all(batch.map(async (x) => {
@@ -753,7 +774,8 @@ Deno.serve(async (req) => {
             breakout_rank_pct: boRank.get(k) ?? null,
             swing_rank_pct: swRank.get(k) ?? null,
             breakout_v4_rank_pct: v4Rank.get(k) ?? null,
-          }).eq("symbol", x.symbol).eq("exchange", x.exchange);
+            breakout_band: bandFor(x.v4),
+          }).eq("symbol", x.symbol).eq("exchange", x.exchange).eq("trade_date", latestTradeDate);
           if (!error) ranked++;
         }));
       }
@@ -1271,8 +1293,39 @@ Deno.serve(async (req) => {
       stats: payload as unknown as Record<string, unknown>,
     }).then(() => {}, () => {});
 
+    // Same run, on the table the pipeline health strip actually reads. A pass
+    // that re-scored nothing is a failure even when it returns 200: that is
+    // exactly the shape the broken deploy had.
+    const rescoreOk = rescoreFailed === 0 && updated > 0;
+    await svc.from("market_ingestion_runs").insert({
+      source: "market-pipeline-aggregates",
+      stage: "aggregates",
+      status: rescoreOk ? "ok" : "failed",
+      trade_date: latestTradeDate,
+      rows_ingested: updated,
+      duration_ms: Date.now() - new Date(runStartedAt).getTime(),
+      error_message: rescoreOk
+        ? null
+        : (rescoreFirstError ?? `re-scored ${updated} rows, ${rescoreFailed} failed`).slice(0, 500),
+      metadata: payload as unknown as Record<string, unknown>,
+      finished_at: new Date().toISOString(),
+    }).then(() => {}, () => {});
+
     return jsonResponse(req, payload);
   } catch (e) {
-    return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
+    const msg = e instanceof Error ? e.message : String(e);
+    if (runSvc) {
+      await runSvc.from("market_ingestion_runs").insert({
+        source: "market-pipeline-aggregates",
+        stage: "aggregates",
+        status: "failed",
+        trade_date: runTradeDate,
+        rows_ingested: 0,
+        duration_ms: Date.now() - new Date(runStart).getTime(),
+        error_message: msg.slice(0, 500),
+        finished_at: new Date().toISOString(),
+      }).then(() => {}, () => {});
+    }
+    return errorResponse(req, msg, 500);
   }
 });

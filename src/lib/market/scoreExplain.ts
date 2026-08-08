@@ -10,6 +10,8 @@
 // saying why it scored what it scored.
 
 export const BUCKET_MIN_COVERAGE = 0.35;
+/** Mirrors V4_FULL_RENORM_COVERAGE in the scorer — see tests/v4-weights.test.ts. */
+export const V4_FULL_RENORM_COVERAGE = 0.85;
 
 export interface FactorSpec {
   key: string;
@@ -173,6 +175,10 @@ export function buildBucketRows(
     : rawPts) as Record<string, number>;
   const present = V4_BUCKETS.filter((b) => Number(cov[b.key] ?? 0) >= BUCKET_MIN_COVERAGE);
   const presentW = present.reduce((s, b) => s + b.weight, 0);
+  // Mirror the scorer: renormalisation is capped at V4_FULL_RENORM_COVERAGE, so
+  // the ceilings shown here sum to the score's real ceiling (which can be well
+  // under 100) rather than always to 100.
+  const scale = presentW > 0 ? Math.min(100 / presentW, 1 / V4_FULL_RENORM_COVERAGE) : 0;
   return V4_BUCKETS.map((b) => {
     const c = Number(cov[b.key] ?? 0);
     const isPresent = c >= BUCKET_MIN_COVERAGE;
@@ -180,7 +186,7 @@ export function buildBucketRows(
       key: b.key,
       label: b.label,
       weight: b.weight,
-      ceiling: isPresent && presentW > 0 ? Math.round((b.weight * 100 * 10) / presentW) / 10 : 0,
+      ceiling: isPresent ? Math.round(b.weight * scale * 10) / 10 : 0,
       earned: Number(pts[b.key] ?? 0),
       coverage: c,
       present: isPresent,
@@ -238,8 +244,8 @@ export function bucketSentence(
 ): string {
   if (!bucket.present) {
     return bucket.partial
-      ? `Dropped: only ${Math.round(bucket.coverage * 100)}% of this bucket's sub-factors had data, below the ${Math.round(BUCKET_MIN_COVERAGE * 100)}% minimum, so its ${bucket.weight} raw points were redistributed across the buckets that did have data.`
-      : `No inputs at all for this bucket, so its ${bucket.weight} raw points were redistributed across the rest.`;
+      ? `Dropped: only ${Math.round(bucket.coverage * 100)}% of this bucket's sub-factors had data, below the ${Math.round(BUCKET_MIN_COVERAGE * 100)}% minimum, so its ${bucket.weight} raw points were partly redistributed across the buckets that did have data — redistribution is capped at ${Math.round(V4_FULL_RENORM_COVERAGE * 100)}% coverage, so the rest simply lowers this score's ceiling.`
+      : `No inputs at all for this bucket. Its ${bucket.weight} raw points are only partly redistributed (capped at ${Math.round(V4_FULL_RENORM_COVERAGE * 100)}% coverage); the remainder lowers the ceiling this score is measured against.`;
   }
   const have = rows.filter((r) => r.value != null);
   if (!have.length) return "Covered, but no sub-factor values were recorded.";

@@ -858,16 +858,12 @@ export const SCORE_BAND_WEAK = 40;                       // 40-54 weak / wait
 // while consumers migrate onto v4.
 // ============================================================================
 
-export const V4_WEIGHTS = {
-  volume: 16,
-  indicators: 16,
-  setups: 13,
-  levels: 22,
-  strength: 13,
-  patterns: 11,
-  sentiment: 9,
-} as const;
-export type V4Bucket = keyof typeof V4_WEIGHTS;
+// Defined in v4Weights.ts and re-exported here so the Calibration Lab (which
+// cannot import Deno modules) reads the exact same numbers as the scorer.
+export { V4_WEIGHTS } from "./v4Weights.ts";
+export type { V4Bucket } from "./v4Weights.ts";
+import { V4_WEIGHTS, type V4Bucket } from "./v4Weights.ts";
+
 
 // Fundamentals are NOT a bucket. Good books can never manufacture a breakout
 // score on their own, and 8 additive points let them do exactly that. They
@@ -887,6 +883,15 @@ export const BUCKET_MIN_COVERAGE = 0.35;
 // Below this share of TOTAL weight covered, the chart is unreadable and we
 // refuse to emit a number — a 20 that means "no data" is worse than no score.
 const MIN_TOTAL_COVERAGE = 0.45;
+// Renormalisation cap. Dropped buckets used to have their weight redistributed
+// in full over the survivors, so a stock scored on 60% of the model was scaled
+// by 1/0.60 = 1.67x and printed the same 100-point number as a fully covered
+// one. That is a systematic upward bias on exactly the thinnest names. Scaling
+// is now capped: at or above V4_FULL_RENORM_COVERAGE the behaviour is
+// unchanged, below it the surviving buckets are only scaled part of the way and
+// the score is published against its real (lower) ceiling.
+export const V4_FULL_RENORM_COVERAGE = 0.85;
+
 
 export interface V4Fundamentals {
   revenueGrowthYoy: number | null;
@@ -1192,7 +1197,11 @@ export function breakoutScoreV4(input: V4Input): V4Result {
     ["rel_strength", 0.25, ctx.relStrengthNifty == null ? null : ramp(ctx.relStrengthNifty, -5, 15)],
     ["rs_percentile", 0.20, s.rsPercentile == null ? null : ramp(s.rsPercentile, 50, 90)],
     ["sector_strength", 0.20, ctx.sectorStrength],
-    ["breadth", 0.10, ctx.regime == null ? null : (ctx.regime === "bullish" ? 1 : ctx.regime === "neutral" ? 0.5 : 0)],
+    // Unknown regime is charged as neutral (0.5), not as absent. Dropping the
+    // factor shrank the strength bucket's coverage below its floor on the
+    // neutral-context pass, which erased all 13 of its points; "we don't know
+    // the tape" is exactly what a neutral reading means.
+    ["breadth", 0.10, ctx.regime === "bullish" ? 1 : ctx.regime === "bearish" ? 0 : 0.5],
   ]);
 
   // ---- 6. Chart patterns --------------------------------------------------
@@ -1301,14 +1310,21 @@ export function breakoutScoreV4(input: V4Input): V4Result {
       liquidityOk: liquidity.ok, liquidityReasons: liquidity.reasons,
     };
   }
-  // Renormalise: each present bucket's weight is scaled up so the present
-  // weights sum to 100 again.
-  const scale = totalWeight / weightHave;
+  // Renormalise, but never past V4_FULL_RENORM_COVERAGE of the model. Full
+  // redistribution rewards missing data; the cap means a thin name is scored
+  // against a genuinely lower ceiling instead of being scaled up to 100.
+  const scale = Math.min(totalWeight / weightHave, 1 / V4_FULL_RENORM_COVERAGE);
   for (const [name, part] of parts) {
     if (part.value == null) { buckets[name] = 0; continue; }
     buckets[name] = Math.round(part.value * V4_WEIGHTS[name] * scale * 10) / 10;
   }
-  const raw = (weighted / weightHave) * 100;
+  // Same scale as the buckets, so the printed breakdown always sums to the
+  // pre-penalty score instead of drifting from it.
+  const raw = (weighted / totalWeight) * scale * 100;
+  // The ceiling this score was actually measured against (100 when fully
+  // covered, less when the cap bit). Surfaced so the UI can say "44 of 87".
+  const ceiling = Math.round(Math.min(100, coverShare * scale * 100) * 10) / 10;
+
 
   // ---- Penalties ----------------------------------------------------------
   // Point penalties are deducted AFTER the multipliers, not before. Deducting
@@ -1374,6 +1390,9 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   components.fundamental_mult = Math.round(fundMult * 1000) / 1000;
   components.coverage_share = Math.round(coverShare * 100) / 100;
   components.coverage_mult = 1; // retired — kept at 1 so stored rows stay comparable
+  // The real ceiling after the capped renormalisation, so a reader can tell
+  // "44 out of a possible 87" from "44 out of 100".
+  components.score_ceiling = ceiling;
   components.score_before_penalty = Math.round(adjusted * 10) / 10;
 
 

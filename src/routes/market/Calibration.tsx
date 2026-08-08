@@ -17,8 +17,11 @@ import { Btn, Chip } from "@/components/hud/HudControls";
 import { fmtPct } from "@/components/hud/DataTable";
 import {
   useScoreCohort, useScoreCohortSymbols, useOptimizerRuns, useRunOptimizer,
+  useLabCoverage, useRunBackfill, useRunEvaluate, MIN_OPTIMIZER_ROWS, optimizerReadiness,
   V4_WEIGHTS, type OptimizerCandidate, type OptimizerMetrics,
 } from "@/lib/market/scoreLab";
+
+
 import { useScoreBandStats, useScoreCalibration, sortBands, MIN_BAND_SAMPLE, BUCKET_PREFIX } from "@/lib/market/scoreHistory";
 
 const BUCKETS = Object.keys(V4_WEIGHTS);
@@ -80,7 +83,7 @@ export default function Calibration() {
   const nav = useNavigate();
   const [days, setDays] = useState(30);
   const [threshold, setThreshold] = useState(70);
-  const [population, setPopulation] = useState<"fit" | "all">("fit");
+  const [population, setPopulation] = useState<"fit" | "all">("all");
   const [horizon, setHorizon] = useState<"5d" | "10d" | "21d">("21d");
   const [searchDays, setSearchDays] = useState(120);
   const [result, setResult] = useState<{
@@ -100,12 +103,17 @@ export default function Calibration() {
     ok?: boolean;
   } | null>(null);
 
-  const { data: cohort = [], isLoading: cohortLoading } = useScoreCohort(days, threshold);
-  const { data: members = [] } = useScoreCohortSymbols(days, threshold, 200);
+  const [batch, setBatch] = useState<{ running: boolean; passes: number; symbols: number; rows: number; note: string } | null>(null);
+
+  const { data: cohort = [], isLoading: cohortLoading, error: cohortError } = useScoreCohort(days, threshold, population);
+  const { data: members = [], error: membersError } = useScoreCohortSymbols(days, threshold, 200, population);
   const { data: bands = [] } = useScoreBandStats(population);
   const { data: calibrationData } = useScoreCalibration();
   const { data: runs = [] } = useOptimizerRuns(5);
+  const { data: coverage } = useLabCoverage();
   const optimize = useRunOptimizer();
+  const backfill = useRunBackfill();
+  const evaluate = useRunEvaluate();
 
   const calibration = calibrationData?.rows ?? [];
   const totalQualified = cohort.reduce((s, d) => s + d.n_qualified, 0);
@@ -128,7 +136,29 @@ export default function Calibration() {
           + ` sessions ${String(notFittedMeta?.sessions ?? "?")}/${String(notFittedMeta?.min_sessions ?? "?")})`,
       }
     : null;
+  // Older writers stuffed the coverage verdict into a plain component string
+  // ("coverage:insufficient population=… symbols=… sessions=…"). Those rows are
+  // not diagnostics by `kind`, so the panel used to drop them silently and just
+  // report "not fitted yet" with no reason at all.
+  const legacyCoverage = !notFitted && !coverageMeta
+    ? calibration.find((c) => c.component.startsWith("coverage:")) ?? null
+    : null;
 
+  // Anti-predictive is a property of the evidence, not only of a fitted slope
+  // — with no fit ever stored, the warning could never fire.
+  const bandOf = (name: string) => bands.find((b) => (b.band ?? "").toUpperCase() === name);
+  const strong = bandOf("STRONG");
+  const weak = bandOf("WEAK");
+  const bandInverted =
+    strong?.avg_rel_21d != null && weak?.avg_rel_21d != null &&
+    strong.sample_21d > 0 && weak.sample_21d > 0 &&
+    strong.avg_rel_21d < weak.avg_rel_21d;
+
+  const maturedPool = population === "fit" ? (coverage?.maturedFit ?? 0) : (coverage?.matured21 ?? 0);
+  // Gate on the pool the engine actually fits — matured, with bucket detail,
+  // not illiquid — instead of every matured row in the table.
+  const readiness = optimizerReadiness(coverage);
+  const searchBlocked = readiness != null && !readiness.ready;
 
   const run = () => {
     optimize.mutate({ days: searchDays, threshold, horizon, iterations: 400 }, {
@@ -136,10 +166,51 @@ export default function Calibration() {
     });
   };
 
+  /** Bounded backfill passes, chained, with the pool refreshed after each one. */
+  const runBackfillBatch = async (passes = 5) => {
+    setBatch({ running: true, passes: 0, symbols: 0, rows: 0, note: "" });
+    let symbols = 0, rows = 0;
+    for (let i = 0; i < passes; i++) {
+      try {
+        const d = await backfill.mutateAsync({ limit: 20, sessions: 120 });
+        symbols += d.symbols ?? 0;
+        rows += d.rows_written ?? 0;
+        setBatch({ running: true, passes: i + 1, symbols, rows, note: d.skipped ?? "" });
+        if (d.drained || d.skipped) {
+          setBatch({ running: false, passes: i + 1, symbols, rows, note: d.skipped ?? "no candidates left to replay" });
+          return;
+        }
+      } catch (e) {
+        setBatch({ running: false, passes: i, symbols, rows, note: (e as Error).message });
+        return;
+      }
+    }
+    setBatch({ running: false, passes, symbols, rows, note: "" });
+  };
+
+
+
   return (
     <div style={{ display: "grid", gap: 10, padding: 10 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      {/* One summary strip, pinned. The lab used to scroll every inner panel
+          separately, so the state of the fit disappeared as soon as you read
+          any of the evidence. */}
+      <div
+        style={{
+          position: "sticky", top: -14, zIndex: 2,
+          display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+          padding: "8px 0", margin: "-4px 0 0",
+          background: "var(--bg-deep, #071019)", borderBottom: "1px solid var(--edge)",
+        }}
+      >
         <span className="hud-label" style={{ fontSize: 14, color: "var(--text)" }}>Model Calibration Lab</span>
+        <Chip tone={readiness?.ready ? "ok" : "warn"}>
+          {readiness ? `${readiness.pool}/${MIN_OPTIMIZER_ROWS} usable` : "— usable"}
+        </Chip>
+        <Chip>{coverage?.matured21 ?? "—"} matured</Chip>
+
+        <Chip>{cohort.length} sessions</Chip>
+        <Chip>{members.length} symbols</Chip>
         {fitLine ? (
           <>
             <Chip tone={(fitLine.weight ?? 0) > 0 ? "ok" : "err"}>
@@ -150,6 +221,11 @@ export default function Calibration() {
           </>
         ) : <Chip tone="warn">not fitted yet</Chip>}
         {insufficient && <Chip tone="warn">{insufficient.component}</Chip>}
+        {legacyCoverage && (
+          <Chip tone="warn">
+            last fit refused — {legacyCoverage.component.replace(/^coverage:/, "").replace(/_/g, " ")}
+          </Chip>
+        )}
 
         {popRow && (
           <Chip tone={popRow.component.endsWith("full_context") ? "ok" : "warn"}>
@@ -160,7 +236,92 @@ export default function Calibration() {
         {fitLine && (fitLine.weight ?? 0) < 0 && (
           <Chip tone="err">score is currently anti-predictive — higher score, worse forward return</Chip>
         )}
+        {!fitLine && bandInverted && (
+          <Chip tone="err">
+            STRONG is under-performing WEAK on matured rows ({strong!.avg_rel_21d!.toFixed(2)} vs{" "}
+            {weak!.avg_rel_21d!.toFixed(2)} rel 21d) — the score is anti-predictive today
+          </Chip>
+        )}
       </div>
+
+
+      {/* ---- Evidence available ---- */}
+      <HudPanel
+        title="Evidence available"
+        actions={
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <Btn size="sm" disabled={backfill.isPending || batch?.running}
+                 onClick={() => backfill.mutate({ limit: 20, sessions: 120 })}>
+              {backfill.isPending && !batch?.running ? "backfilling…" : "Backfill once"}
+            </Btn>
+            <Btn size="sm" disabled={backfill.isPending || batch?.running} onClick={() => runBackfillBatch(5)}>
+              {batch?.running ? `backfilling… pass ${batch.passes}/5` : "Backfill ×5"}
+            </Btn>
+            <Btn size="sm" variant="primary" disabled={evaluate.isPending} onClick={() => evaluate.mutate()}>
+              {evaluate.isPending ? "evaluating…" : "Evaluate & fit"}
+            </Btn>
+          </div>
+        }
+      >
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 10 }}>
+          <Chip>{coverage?.rows ?? "—"} snapshots</Chip>
+          <Chip tone={(coverage?.matured21 ?? 0) > 0 ? "neutral" : "warn"}>
+            {coverage?.matured21 ?? "—"} matured 21d
+          </Chip>
+          <Chip tone={(coverage?.maturedFit ?? 0) > 0 ? "ok" : "warn"}>
+            {coverage?.maturedFit ?? "—"} matured in liquid + full context
+          </Chip>
+          <Chip>{coverage?.liveRows ?? "—"} live-context rows</Chip>
+          <Chip tone={readiness?.ready ? "ok" : "warn"}>
+            search pool {readiness?.pool ?? "—"}/{MIN_OPTIMIZER_ROWS}
+            {readiness ? ` (${readiness.population.replace(/_/g, " ")})` : ""}
+          </Chip>
+          {(coverage?.unknownLiquidity ?? 0) > 0 && (
+            <Chip tone="warn">
+              {coverage!.unknownLiquidity} rows with unknown liquidity — excluded from every population
+            </Chip>
+          )}
+        </div>
+        {backfill.isError && (
+          <div style={{ fontSize: 10, color: "var(--danger)", marginTop: 6 }}>{(backfill.error as Error).message}</div>
+        )}
+        {batch && (
+          <div style={{ fontSize: 10, color: batch.note && !batch.running ? "var(--warn)" : "var(--text-muted)", marginTop: 6 }}>
+            {batch.running ? "running" : "finished"} · {batch.passes} pass{batch.passes === 1 ? "" : "es"} ·{" "}
+            {batch.symbols} symbols · {batch.rows} rows written{batch.note ? ` · ${batch.note}` : ""}
+          </div>
+        )}
+        {!batch && backfill.data && (
+          <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 6 }}>
+            {backfill.data.skipped
+              ? `backfill skipped — ${backfill.data.skipped}`
+              : backfill.data.drained
+                ? "no candidates left to replay"
+                : `replayed ${backfill.data.symbols ?? 0} symbols · ${backfill.data.rows_written ?? 0} rows written`}
+          </div>
+        )}
+        {evaluate.isError && (
+          <div style={{ fontSize: 10, color: "var(--danger)", marginTop: 6 }}>
+            evaluate failed — {(evaluate.error as Error).message}
+          </div>
+        )}
+        {evaluate.data && (
+          <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 6, lineHeight: 1.6 }}>
+            matured {evaluate.data.evaluated_rows ?? 0} rows ·{" "}
+            {(evaluate.data.calibration_rows ?? 0) > 0
+              ? `fit wrote ${evaluate.data.calibration_rows} calibration rows`
+              : "fit produced no slope — not enough rows, symbols or sessions for this model"}
+            {" "}· ranked {evaluate.data.ranked_rows ?? 0} · distribution {evaluate.data.distribution_rows ?? 0}
+          </div>
+        )}
+        <div style={{ fontSize: 9, color: "var(--text-muted)", marginTop: 6, lineHeight: 1.6 }}>
+          A snapshot only becomes evidence 21 sessions after it was taken. Backfill replays older
+          sessions for symbols that have price history but no stored score, in bounded batches;
+          "Evaluate &amp; fit" is the pass that fills the forward returns, refits the calibration and
+          restamps the bands. Backfill alone changes nothing you can read here.
+        </div>
+      </HudPanel>
+
 
       {/* ---- Controls ---- */}
       <HudPanel title="Cohort window">
@@ -177,22 +338,39 @@ export default function Calibration() {
               {[80, 70, 60, 55, 50, 40].map((d) => <option key={d} value={d}>score ≥ {d}</option>)}
             </select>
           </label>
+          <span style={{ color: "var(--text-muted)" }}>population</span>
+          {(["all", "fit"] as const).map((p) => (
+            <Btn key={p} size="sm" variant={population === p ? "primary" : undefined} onClick={() => setPopulation(p)}>
+              {p === "fit" ? "liquid + full context" : "everything"}
+            </Btn>
+          ))}
           <Chip>{totalQualified} qualifiers</Chip>
           <Chip tone={daysWithNone > cohort.length / 2 ? "warn" : "neutral"}>
             {daysWithNone}/{cohort.length} sessions with none
           </Chip>
+          <Chip tone={maturedPool > 0 ? "neutral" : "warn"}>{maturedPool} matured in this population</Chip>
         </div>
       </HudPanel>
 
       {/* ---- 1. Per-session cohort ---- */}
       <HudPanel title={`Sessions above ${threshold}`}>
-        {cohortLoading ? (
+        {cohortError ? (
+          <div style={{ fontSize: 11, color: "var(--danger)" }}>
+            cohort query failed — {(cohortError as Error).message}
+          </div>
+        ) : cohortLoading ? (
           <div style={{ fontSize: 11, color: "var(--text-muted)" }}>loading…</div>
         ) : cohort.length === 0 ? (
-          <div style={{ fontSize: 11, color: "var(--text-muted)" }}>no score history in this window yet</div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            {(coverage?.rows ?? 0) === 0
+              ? "no score history stored for this model yet"
+              : `${coverage?.rows} snapshots exist, but none in the last ${days} sessions matched this population`}
+          </div>
         ) : (
-          <div style={{ fontSize: 10, fontFamily: "var(--font-hud)", maxHeight: 320, overflow: "auto" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.7fr 0.7fr repeat(5, 1fr)", gap: 6, color: "var(--text-muted)", position: "sticky", top: 0, background: "var(--bg-deep, #071019)", padding: "2px 0" }}>
+
+          <div style={{ fontSize: 10, fontFamily: "var(--font-hud)" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.7fr 0.7fr repeat(5, 1fr)", gap: 6, color: "var(--text-muted)", position: "sticky", top: 40, zIndex: 1, background: "var(--bg-deep, #071019)", padding: "2px 0" }}>
+
               <span>date</span><span style={{ textAlign: "right" }}>n</span><span style={{ textAlign: "right" }}>avg score</span>
               <span style={{ textAlign: "right" }}>+5d</span><span style={{ textAlign: "right" }}>+10d</span>
               <span style={{ textAlign: "right" }}>+21d</span><span style={{ textAlign: "right" }}>rel 21d</span>
@@ -219,13 +397,20 @@ export default function Calibration() {
 
       {/* ---- 2. Persistence per symbol ---- */}
       <HudPanel title="Who qualified, and did it stick">
-        {members.length === 0 ? (
+        {membersError ? (
+          <div style={{ fontSize: 11, color: "var(--danger)" }}>
+            membership query failed — {(membersError as Error).message}
+          </div>
+        ) : members.length === 0 ? (
           <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
             nothing crossed {threshold} in the last {days} sessions
+            {population === "fit" ? " within the liquid + full-context population" : ""}
           </div>
         ) : (
-          <div style={{ fontSize: 10, fontFamily: "var(--font-hud)", maxHeight: 360, overflow: "auto" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1.4fr 0.8fr 0.8fr 0.8fr 1.1fr 1.1fr repeat(3, 1fr)", gap: 6, color: "var(--text-muted)", position: "sticky", top: 0, background: "var(--bg-deep, #071019)", padding: "2px 0" }}>
+
+          <div style={{ fontSize: 10, fontFamily: "var(--font-hud)" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1.4fr 0.8fr 0.8fr 0.8fr 1.1fr 1.1fr repeat(3, 1fr)", gap: 6, color: "var(--text-muted)", position: "sticky", top: 40, zIndex: 1, background: "var(--bg-deep, #071019)", padding: "2px 0" }}>
+
               <span>symbol</span><span style={{ textAlign: "right" }}>days in</span>
               <span style={{ textAlign: "right" }}>max</span><span style={{ textAlign: "right" }}>avg</span>
               <span>first</span><span>last</span>
@@ -271,8 +456,14 @@ export default function Calibration() {
         }
       >
         {bands.length === 0 ? (
-          <div style={{ fontSize: 11, color: "var(--text-muted)" }}>no matured snapshots in this population yet</div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            no matured snapshots in this population yet
+            {population === "fit" && (coverage?.matured21 ?? 0) > 0
+              ? ` — ${coverage!.matured21} matured rows exist, but all of them are replayed or illiquid. Switch to "everything" to see them.`
+              : ""}
+          </div>
         ) : (
+
           <div style={{ fontSize: 10, fontFamily: "var(--font-hud)" }}>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 0.7fr 0.7fr repeat(4, 1fr)", gap: 6, color: "var(--text-muted)" }}>
               <span>band</span><span style={{ textAlign: "right" }}>rows</span><span style={{ textAlign: "right" }}>matured</span>
@@ -324,13 +515,26 @@ export default function Calibration() {
             <select value={horizon} onChange={(e) => setHorizon(e.target.value as "5d" | "10d" | "21d")} className="hud-select" style={{ fontSize: 10 }}>
               {(["5d", "10d", "21d"] as const).map((h) => <option key={h} value={h}>{h} horizon</option>)}
             </select>
-            <Btn size="sm" variant="primary" disabled={optimize.isPending} onClick={run}>
+            <Btn size="sm" variant="primary" disabled={optimize.isPending || searchBlocked} onClick={run}>
               {optimize.isPending ? "searching…" : "Run search"}
             </Btn>
+
           </div>
         }
       >
+        {searchBlocked && readiness && (
+          <div style={{ fontSize: 10, color: "var(--warn)", lineHeight: 1.6, marginBottom: 6 }}>
+            Search disabled: {readiness.pool} of the {MIN_OPTIMIZER_ROWS} usable snapshots the engine
+            needs — {readiness.shortfall} short. Usable means matured on the 21-day relative horizon,
+            carrying stored bucket detail, and not flagged illiquid
+            {coverage ? ` (live pool ${coverage.optimizerLive}, replayed pool ${coverage.optimizerNeutral})` : ""}.
+            Run "Backfill ×5", then "Evaluate &amp; fit", or wait for live rows to mature. The count
+            here is before de-overlap thinning, so the engine may still see slightly fewer.
+          </div>
+        )}
+
         <div style={{ fontSize: 10, color: "var(--text-muted)", lineHeight: 1.6, marginBottom: 6 }}>
+
           Replays every stored snapshot under alternative bucket weights, using the per-bucket values
           the scorer actually recorded. Ranked by <strong>spread</strong>: mean benchmark-relative
           return of the top-scoring decile minus the bottom decile. A positive spread means the score
@@ -346,7 +550,15 @@ export default function Calibration() {
 
         {result?.candidates?.length ? (
           <>
+            {(result as { advisory?: boolean; advisory_reason?: string }).advisory && (
+              <div style={{ fontSize: 10, color: "var(--warn)", lineHeight: 1.6, marginBottom: 6 }}>
+                Advisory only — {(result as { advisory_reason?: string }).advisory_reason
+                  ?? "this fit is not backed by live full-context evidence"}. Do not promote these
+                weights on this run alone.
+              </div>
+            )}
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+
               <Chip>{result.sample_n} snapshots</Chip>
               <Chip>{result.sessions} sessions</Chip>
               <Chip>{horizon} horizon</Chip>
@@ -406,17 +618,36 @@ export default function Calibration() {
         {runs.length > 0 && (
           <div style={{ marginTop: 10, fontSize: 10, fontFamily: "var(--font-hud)" }}>
             <div className="hud-label" style={{ fontSize: 9, color: "var(--accent-soft)" }}>previous runs</div>
-            {runs.map((r) => (
-              <div key={r.id} style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr 1fr 1.6fr", gap: 6, padding: "1px 0" }}>
-                <span style={{ color: "var(--text-dim)" }}>{new Date(r.created_at).toLocaleString()}</span>
-                <span style={{ color: "var(--text-muted)" }}>{r.params?.days ?? "—"}d</span>
-                <span style={{ color: "var(--text-muted)" }}>{r.params?.horizon ?? "—"}</span>
-                <span style={{ color: "var(--text-muted)" }}>n {r.sample_n ?? "—"}</span>
-                <span style={{ color: retColor(r.best?.metrics?.spread ?? null) }}>
-                  best spread {r.best?.metrics?.spread?.toFixed(2) ?? "—"} ({r.best?.label ?? "—"})
-                </span>
-              </div>
-            ))}
+            {runs.map((r) => {
+              // The run row only guarantees these inside `params` — the engine
+              // writes provenance there, not as top-level columns, so reading
+              // r.split_ok alone reported every run as in-sample.
+              const p = (r.params ?? {}) as Record<string, unknown>;
+              const pop = String(r.population ?? p.population ?? "population ?");
+              const splitOk = r.split_ok ?? (p.split_ok as boolean | undefined) ?? false;
+              const splitDate = r.split_date ?? (p.split_date as string | undefined) ?? "—";
+              return (
+                <div key={r.id} style={{ display: "grid", gridTemplateColumns: "1.4fr 0.7fr 0.7fr 0.8fr 1.3fr 1.6fr", gap: 6, padding: "1px 0" }}>
+                  <span style={{ color: "var(--text-dim)" }}>{new Date(r.created_at).toLocaleString()}</span>
+                  <span style={{ color: "var(--text-muted)" }}>{r.params?.days ?? "—"}d</span>
+                  <span style={{ color: "var(--text-muted)" }}>{r.params?.horizon ?? "—"}</span>
+                  <span style={{ color: "var(--text-muted)" }}>n {r.sample_n ?? "—"}</span>
+                  {/* Which pool the run was fitted on decides whether it is
+                      evidence at all — a replayed-neutral fit is a hypothesis. */}
+                  <span
+                    title={splitOk ? `hold-out ${r.test_n ?? "—"} rows after ${splitDate}` : "in-sample only — no hold-out"}
+                    style={{ color: pop === "full_context" ? "var(--ok)" : "var(--warn)" }}
+                  >
+                    {pop.replace(/_/g, " ")}
+                    {splitOk ? "" : " · in-sample"}
+                  </span>
+                  <span style={{ color: retColor(r.best?.metrics?.spread ?? null) }}>
+                    best spread {r.best?.metrics?.spread?.toFixed(2) ?? "—"} ({r.best?.label ?? "—"})
+                  </span>
+                </div>
+              );
+            })}
+
           </div>
         )}
       </HudPanel>

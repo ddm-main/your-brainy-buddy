@@ -306,6 +306,11 @@ Deno.serve(async (req) => {
             sector_strength: null,
             rel_strength_nifty: null,
             rs_percentile: null,
+            // `breakout_band` is deliberately NOT cleared here. Nulling it left
+            // the band column empty for the entire universe whenever the
+            // aggregates pass failed, and every consumer fell back to fixed
+            // thresholds. The previous session's calibrated band is a better
+            // read than nothing; aggregates restates it on the same row.
             // Neutral-context preliminary write; market-pipeline-aggregates
             // recomputes with real sector/RS/regime context and flips this true.
             context_complete: false,

@@ -108,6 +108,22 @@ function Sparkline({ points }: { points: (number | null)[] }) {
   );
 }
 
+/**
+ * Largest single contributor to a stored v4 score, with its share of the
+ * earned points. Returns null when the pipeline stored no bucket detail.
+ */
+function topBucket(buckets: Record<string, number> | null | undefined):
+  { key: string; value: number; total: number; share: number } | null {
+  if (!buckets) return null;
+  const entries = Object.entries(buckets)
+    .map(([k, v]) => [k, Number(v)] as const)
+    .filter(([, v]) => Number.isFinite(v) && v > 0);
+  if (entries.length === 0) return null;
+  const total = entries.reduce((s, [, v]) => s + v, 0);
+  const [key, value] = entries.sort((a, b) => b[1] - a[1])[0];
+  return { key, value, total, share: total > 0 ? value / total : 0 };
+}
+
 function BreakoutInner() {
   const nav = useNavigate();
   const [view, setView] = useState<View>("open");
@@ -152,10 +168,18 @@ function BreakoutInner() {
     const tick = liveTicks[quoteKey(e.exchange, e.symbol)];
     const live = isFreshTick(tick);
     const liveLtp = live ? tick!.ltp : meta?.ltp ?? e.current_close;
-    const entry = e.entry_close;
+    // On the detection session the entry *is* that day's close, so a return
+    // measured off it is 0.00% for every day-1 row by construction. The pivot
+    // the name actually broke is the honest basis there; from day 2 on the
+    // stored entry is the immutable history every other number is measured on.
+    const dayOne = (e.days_tracked ?? 1) <= 1;
+    const entry = dayOne && e.trigger_price != null && e.trigger_price > 0
+      ? e.trigger_price
+      : e.entry_close;
     const liveReturnPct = entry != null && entry > 0 && liveLtp != null
       ? ((liveLtp - entry) / entry) * 100
       : e.current_return_pct;
+
     const read = deriveBreakoutStage(meta ? ({
       close: meta.close ?? liveLtp ?? 0,
       ema20: meta.ema20,
@@ -226,6 +250,33 @@ function BreakoutInner() {
       ),
     },
     {
+      // A TRIGGERED row with Rel Vol 0.4 is only explainable if you can see
+      // which bucket actually carried the score. This names it in the row and
+      // links straight into the breakdown instead of making it a hunt.
+      id: "driver", header: "Driver", enableSorting: false,
+      cell: ({ row }) => {
+        const r = row.original;
+        const top = topBucket(r.meta?.breakout_v4_buckets ?? null);
+        if (!top) {
+          return <span style={{ color: "var(--text-muted)", fontSize: 10 }}>—</span>;
+        }
+        return (
+          <button
+            className="hud-btn" data-variant="ghost" data-size="sm"
+            title={`${top.key} contributed ${top.value.toFixed(1)} of ${top.total.toFixed(1)} earned points (${Math.round(top.share * 100)}%) — open the breakdown`}
+            onClick={(e) => {
+              e.stopPropagation();
+              nav(`/market/score/${encodeURIComponent(r.symbol)}/explain?exchange=${encodeURIComponent(r.exchange)}#${top.key}`);
+            }}
+            style={{ fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}
+          >
+            {top.key} {Math.round(top.share * 100)}%
+          </button>
+        );
+      },
+    },
+    {
+
       // "Setup" not "Stage": Status already owns the episode lifecycle
       // vocabulary, and two columns both called a stage read as contradictory
       // when one says EXTENDED and the other says Active.
@@ -279,8 +330,25 @@ function BreakoutInner() {
     },
     {
       id: "entry_close", header: "Entry ₹", accessorKey: "entry_close", meta: { align: "right" },
-      cell: ({ getValue }) => <span style={{ textAlign: "right", display: "block" }}>{fmtNum(getValue() as number)}</span>,
+      cell: ({ row }) => {
+        const r = row.original;
+        const dayOne = (r.days_tracked ?? 1) <= 1;
+        const usingTrigger = dayOne && r.trigger_price != null && r.trigger_price > 0;
+        return (
+          <span
+            style={{ textAlign: "right", display: "block" }}
+            title={r.trigger_price != null
+              ? `Detection close ${fmtNum(r.entry_close)} · pivot ${fmtNum(r.trigger_price)}`
+                + (usingTrigger ? " — day-1 return is measured from the pivot" : "")
+              : "No pivot recorded for this episode"}
+          >
+            {fmtNum(usingTrigger ? r.trigger_price : r.entry_close)}
+            {usingTrigger && <span style={{ color: "var(--text-muted)" }}> ▲</span>}
+          </span>
+        );
+      },
     },
+
     {
       id: "ltp", header: "LTP ₹", accessorFn: (r) => r.liveLtp, meta: { align: "right" },
       cell: ({ row }) => {
@@ -320,7 +388,14 @@ function BreakoutInner() {
       cell: ({ row }) => <div style={{ display: "flex", justifyContent: "flex-end" }}><Sparkline points={row.original.score_trend} /></div>,
     },
     {
-      id: "health", header: "Health", accessorFn: (r) => r.followthrough_score ?? -1, meta: { align: "right" },
+      // Day-1 rows have no follow-through at all. Scoring them -1 pinned every
+      // fresh detection to the bottom of a "best health" sort and to the *top*
+      // of a "worst health" sort, as if they had failed. They sort last either
+      // way now, which is what "unknown" means.
+      id: "health", header: "Health", sortUndefined: "last",
+      accessorFn: (r) => ((r.days_tracked ?? 1) <= 1 ? undefined : r.followthrough_score ?? undefined),
+      meta: { align: "right" },
+
       cell: ({ row }) => {
         // On the detection session there is no follow-through yet — a health
         // badge there is a made-up number, so show nothing.

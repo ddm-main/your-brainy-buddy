@@ -1926,6 +1926,42 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
   });
   const latestTradeDate = useMemo(() => latestTradeDateOf(rows), [rows]);
 
+  // The context pass (market-pipeline-aggregates) is the only writer of sector
+  // strength, relative strength, the calibrated band and the score-history
+  // snapshot. When it fails, every score in the table is a neutral-context
+  // score and nothing says so — this makes that failure loud.
+  const { data: aggHealth } = useQuery({
+    queryKey: ["market", "aggregates-health"],
+    queryFn: async () => {
+      const [run, hist] = await Promise.all([
+        supabase.from("market_ingestion_runs")
+          .select("status,error_message,finished_at,trade_date")
+          .eq("source", "market-pipeline-aggregates")
+          .order("finished_at", { ascending: false }).limit(1).maybeSingle(),
+        (supabase as any).from("market_score_history")
+          .select("trade_date").eq("model", "breakout_v4")
+          .order("trade_date", { ascending: false }).limit(1).maybeSingle(),
+      ]);
+      return {
+        run: (run.data ?? null) as { status: string; error_message: string | null; finished_at: string | null; trade_date: string | null } | null,
+        historyDate: (hist?.data?.trade_date ?? null) as string | null,
+      };
+    },
+    refetchInterval: () => (document.visibilityState === "visible" ? 5 * 60_000 : false),
+    staleTime: 5 * 60_000,
+  });
+
+  // More than one session of lag between the scores table and the snapshot the
+  // history writer produces means the context pass has not completed.
+  const contextStale = useMemo(() => {
+    const h = aggHealth?.historyDate;
+    if (!latestTradeDate || !h) return false;
+    const lag = Math.round(
+      (Date.parse(`${latestTradeDate}T00:00:00Z`) - Date.parse(`${h}T00:00:00Z`)) / 86_400_000,
+    );
+    return Number.isFinite(lag) && lag > 1;
+  }, [aggHealth?.historyDate, latestTradeDate]);
+
   // Live pipeline status from the DB view — reflects reality regardless of
   // whether the current user has ever triggered a sync from this browser.
   const { data: pipeline } = useQuery({
@@ -2113,6 +2149,19 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
       <span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
         {loading ? "loading…" : `${filteredCount} / ${stats.total}`}
       </span>
+      {(contextStale || aggHealth?.run?.status === "failed") && (
+        <span
+          title={aggHealth?.run?.error_message
+            ?? `Score history is at ${aggHealth?.historyDate ?? "—"} while prices are at ${latestTradeDate ?? "—"}.`}
+          style={{
+            fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em",
+            textTransform: "uppercase", color: "var(--err, #d4634e)",
+            border: "1px solid var(--err, #d4634e)", padding: "1px 6px", borderRadius: 2,
+          }}
+        >
+          Scores stale — context pass failed
+        </span>
+      )}
       <div style={{ flexBasis: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4, gap: 12, flexWrap: "wrap" }}>
         {dailySync?.finished_at ? (() => {
           const finished = new Date(dailySync.finished_at);

@@ -11,6 +11,8 @@ export function HudModal({
   children,
   footer,
   width = 420,
+  /** Fill the viewport height instead of hugging the content. */
+  fullHeight = false,
 }: {
   open: boolean;
   onClose: () => void;
@@ -18,6 +20,7 @@ export function HudModal({
   children: ReactNode;
   footer?: ReactNode;
   width?: number;
+  fullHeight?: boolean;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -42,8 +45,13 @@ export function HudModal({
       <div
         className="hud-panel mounted"
         onMouseDown={(e) => e.stopPropagation()}
-        style={{ width, maxWidth: "100%", maxHeight: "88vh", display: "flex", flexDirection: "column", overflow: "hidden" }}
+        style={{
+          width, maxWidth: "100%", maxHeight: "92vh",
+          ...(fullHeight ? { height: "92vh" } : null),
+          display: "flex", flexDirection: "column", overflow: "hidden",
+        }}
       >
+
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", borderBottom: "1px solid var(--edge)", flex: "0 0 auto" }}>
           <span className="hud-label" style={{ color: "var(--accent)", letterSpacing: "0.18em" }}>{title}</span>
           <button type="button" onClick={onClose} aria-label="Close" className="mk-menu-trigger" style={{ padding: 4 }}>

@@ -162,8 +162,19 @@ export function ScoreHistoryPanel({
 
       <div style={{ fontSize: 9, color: "var(--text-muted)", marginTop: 4, lineHeight: 1.5 }}>
         {earned.toFixed(1)} earned of {available.toFixed(1)} available
+        {" "}· coverage {Math.round(available)}%
+        {available < 99.5 && (
+          <span title="Buckets with too little data are dropped. Their weight is only partly redistributed (capped at 85% coverage), so this score is measured against a lower ceiling than a fully covered one — it is not directly comparable to a 100-point score.">
+            {" "}· ceiling {available.toFixed(0)}/100
+          </span>
+        )}
         {dark.length > 0 && (
-          <> · no data: {dark.map((r) => r.key).join(", ")} <span title="Buckets with too few sub-factors are dropped and their weight is redistributed across the buckets that did have data — they are not scored as zero.">(weight redistributed)</span></>
+          <> · no data: {dark.map((r) => r.key).join(", ")} <span title="Buckets with too few sub-factors are dropped — they are not scored as zero.">(dropped)</span></>
+        )}
+        {useFallback && (
+          <div style={{ color: "var(--warn)", marginTop: 2 }}>
+            snapshot pass behind — showing the live score row, not a stored snapshot
+          </div>
         )}
       </div>
     </div>
