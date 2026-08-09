@@ -616,8 +616,13 @@ export function useScreenerData(
   /** Field ids currently on screen (visible columns + active filter columns).
    *  Omit for the full plane. */
   fields: string[] | null = null,
+  /** Fetch the whole universe instead of just the first board page. Required by
+   *  client-side filtering, sorting on a non-server column and CSV export. */
+  loadAll = false,
 ) {
   const projection = useMemo(() => planProjection(fields), [fields?.join("|")]);
+  const cap = loadAll ? null : BOARD_ROWS;
+  const capKey = loadAll ? "all" : String(BOARD_ROWS);
 
   // ---- Back-date branch: one deterministic edge-function call, cached forever.
   const asof = useQuery({
