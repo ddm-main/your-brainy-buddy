@@ -121,6 +121,14 @@ function parseSince(raw: unknown): string | number | null {
 
 const limiter = createMarketLimiter(120, 60_000);
 
+// EGRESS: charts only ever draw a few hundred visible bars, but the provider
+// series can run into thousands. Cap what leaves the function at the newest
+// MAX_BARS — the chart's own pan window never reaches further back than this.
+const MAX_BARS = 1200;
+function capBars<T>(rows: T[]): T[] {
+  return rows.length > MAX_BARS ? rows.slice(-MAX_BARS) : rows;
+}
+
 
 // UI TF -> { provider interval, range }. Kotak-native intervals (1/5/15/30/60/D/W/M)
 // pass through as-is; non-native TFs (2h, 4h, 3m) keep the UI grain so
@@ -643,7 +651,7 @@ Deno.serve(async (req) => {
         symbols: candles.length,
         detail: reason ?? null,
       });
-      const dTrim = trimSince(candles, since);
+      const dTrim = trimSince(capBars(candles), since);
       return jsonResponse(req, withProvenance({
         candles: dTrim.candles, partial: dTrim.partial,
         emas, timeframe, provider: providerName, reason,
@@ -940,7 +948,7 @@ Deno.serve(async (req) => {
       symbols: candles.length,
       detail: stillCumulative ? `cumulative_volume_detected:${reason ?? providerName}` : (reason ?? null),
     });
-    const iTrim = trimSince(candles, since);
+    const iTrim = trimSince(capBars(candles), since);
     return jsonResponse(req, withProvenance({
       candles: iTrim.candles, partial: iTrim.partial,
       emas: {}, timeframe, provider: providerName, degraded, reason,
