@@ -711,7 +711,11 @@ function ScreenerInner() {
     });
   }, [filtered, sorting]);
 
+  const [exportPending, setExportPending] = useState(false);
   const exportCsv = () => {
+    // The board only holds the first page by default; a CSV of the universe has
+    // to load it first, so the click arms an export that fires once it lands.
+    if (partial) { setLoadAllRequested(true); setExportPending(true); return; }
     const csv = toCsv(sorted, effectiveCols);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -720,6 +724,12 @@ function ScreenerInner() {
     a.href = url; a.download = `screener_${universe}_${active.length}f_${sorted.length}rows_${stamp}.csv`;
     a.click(); URL.revokeObjectURL(url);
   };
+  useEffect(() => {
+    if (!exportPending || partial || isFetching) return;
+    setExportPending(false);
+    exportCsv();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exportPending, partial, isFetching]);
 
   // Paginate only after globally sorting the complete filtered collection.
   const pageStart = page * pageSize;
