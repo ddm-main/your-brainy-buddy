@@ -256,7 +256,14 @@ function ScreenerInner() {
     ]));
   }, [active, visibleCols]);
 
-  const { data: rawRows = [], isFetching, error } = useScreenerData(universe, asOfDate, true, neededFields);
+  // EGRESS: the default board only loads the top 300 rows by breakout score.
+  // Anything that needs the whole universe — an active filter, sorting the full
+  // set, a CSV export — flips this on explicitly.
+  const [loadAllRequested, setLoadAllRequested] = useState(false);
+  const loadAll = loadAllRequested || active.length > 0 || !!asOfDate;
+  const {
+    data: rawRows = [], isFetching, error, universeCount, partial,
+  } = useScreenerData(universe, asOfDate, true, neededFields, loadAll);
 
   // A back-dated run has no live plane — it is settled history by definition.
   const rows = useMemo(
