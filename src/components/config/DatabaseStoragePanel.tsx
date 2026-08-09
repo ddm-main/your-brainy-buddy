@@ -305,14 +305,24 @@ export default function DatabaseStoragePanel() {
           </div>
           {egressSources.length ? (
             <div style={{ marginBottom: 8, display: "flex", flexDirection: "column", gap: 1 }}>
-              {egressSources.map((s) => (
-                <div key={`${s.source}/${s.route}`} style={rowStyle}>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {s.source} · {s.route || "—"} · {s.requests.toLocaleString()} req
-                  </span>
-                  <span style={{ fontFamily: "var(--font-hud)", color: "var(--text)" }}>{human(s.bytes)}</span>
-                </div>
-              ))}
+              {egressSources.map((s) => {
+                // Two budget rules, surfaced where the bytes are: no route may
+                // average over 128 KB per request (missing server-side filter)
+                // and no route may exceed 2 000 requests/day (missing batching).
+                const per = s.requests > 0 ? s.bytes / s.requests : s.bytes;
+                const fat = per > 128 * 1024;
+                const chatty = s.requests > 2000;
+                return (
+                  <div key={`${s.source}/${s.route}`} style={rowStyle}>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {s.source} · {s.route || "—"} · {s.requests.toLocaleString()} req
+                      {fat ? <span style={{ color: "var(--danger, #e0524a)" }} title={`${Math.round(per / 1024)} KB per request — needs server-side filtering`}> · oversized</span> : null}
+                      {chatty ? <span style={{ color: "var(--warn, #d19a30)" }} title="Over 2,000 requests/day — batch these reads"> · chatty</span> : null}
+                    </span>
+                    <span style={{ fontFamily: "var(--font-hud)", color: "var(--text)" }}>{human(s.bytes)}</span>
+                  </div>
+                );
+              })}
             </div>
           ) : null}
         </>

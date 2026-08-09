@@ -59,11 +59,15 @@ Deno.serve(async (req) => {
     const cutoff = new Date(Date.now() - 7 * 86400_000).toISOString();
     const { data: stale } = await svc
       .from("market_stock_scores")
-      .select("symbol,exchange,computed_at,high_52w")
+      .select("symbol,exchange,computed_at,high_52w,low_52w")
       .eq("exchange", "NSE")
       .or(`high_52w.is.null,computed_at.lt.${cutoff}`)
       .limit(CHUNK * 4);
-    const work = (stale ?? []).slice(0, CHUNK).map((r: any) => ({ symbol: r.symbol, exchange: r.exchange }));
+    const work = (stale ?? []).slice(0, CHUNK).map((r: any) => ({
+      symbol: r.symbol, exchange: r.exchange,
+      prevHigh: r.high_52w == null ? null : Number(r.high_52w),
+      prevLow: r.low_52w == null ? null : Number(r.low_52w),
+    }));
 
     let updated = 0, failed = 0;
     const started = Date.now();
@@ -92,11 +96,16 @@ Deno.serve(async (req) => {
           const res = await compute52w(item.symbol, item.exchange);
           if (!res) { failed++; await sleep(150); continue; }
           const { high, low } = res;
-          const patches = [
-            svc.from("market_stock_scores").update({ high_52w: high, low_52w: low }).eq("symbol", item.symbol).eq("exchange", item.exchange),
-            svc.from("market_fundamentals_global").update({ high_52w: high, low_52w: low, updated_at: new Date().toISOString() }).eq("symbol", item.symbol).eq("exchange", item.exchange),
-          ];
-          await Promise.all(patches);
+          // EGRESS: 52w extremes barely move day to day. Skipping the no-op
+          // write removes two PostgREST round-trips per unchanged symbol.
+          const same = item.prevHigh != null && item.prevLow != null
+            && Math.abs(item.prevHigh - high) < 0.01 && Math.abs(item.prevLow - low) < 0.01;
+          if (!same) {
+            await Promise.all([
+              svc.from("market_stock_scores").update({ high_52w: high, low_52w: low }).eq("symbol", item.symbol).eq("exchange", item.exchange),
+              svc.from("market_fundamentals_global").update({ high_52w: high, low_52w: low, updated_at: new Date().toISOString() }).eq("symbol", item.symbol).eq("exchange", item.exchange),
+            ]);
+          }
           updated++;
         } catch { failed++; }
         await sleep(200 + Math.random() * 200);

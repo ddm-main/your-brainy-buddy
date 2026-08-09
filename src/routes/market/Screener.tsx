@@ -256,7 +256,14 @@ function ScreenerInner() {
     ]));
   }, [active, visibleCols]);
 
-  const { data: rawRows = [], isFetching, error } = useScreenerData(universe, asOfDate, true, neededFields);
+  // EGRESS: the default board only loads the top 300 rows by breakout score.
+  // Anything that needs the whole universe — an active filter, sorting the full
+  // set, a CSV export — flips this on explicitly.
+  const [loadAllRequested, setLoadAllRequested] = useState(false);
+  const loadAll = loadAllRequested || active.length > 0 || !!asOfDate;
+  const {
+    data: rawRows = [], isFetching, error, universeCount, partial,
+  } = useScreenerData(universe, asOfDate, true, neededFields, loadAll);
 
   // A back-dated run has no live plane — it is settled history by definition.
   const rows = useMemo(
@@ -704,7 +711,11 @@ function ScreenerInner() {
     });
   }, [filtered, sorting]);
 
+  const [exportPending, setExportPending] = useState(false);
   const exportCsv = () => {
+    // The board only holds the first page by default; a CSV of the universe has
+    // to load it first, so the click arms an export that fires once it lands.
+    if (partial) { setLoadAllRequested(true); setExportPending(true); return; }
     const csv = toCsv(sorted, effectiveCols);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -713,6 +724,12 @@ function ScreenerInner() {
     a.href = url; a.download = `screener_${universe}_${active.length}f_${sorted.length}rows_${stamp}.csv`;
     a.click(); URL.revokeObjectURL(url);
   };
+  useEffect(() => {
+    if (!exportPending || partial || isFetching) return;
+    setExportPending(false);
+    exportCsv();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exportPending, partial, isFetching]);
 
   // Paginate only after globally sorting the complete filtered collection.
   const pageStart = page * pageSize;
@@ -1289,6 +1306,19 @@ function ScreenerInner() {
                   {hideIlliquid ? <Check size={11} /> : <X size={11} />}
                   {hideIlliquid ? "Liquid only" : "All (incl. penny)"}
                 </button>
+                {partial && (
+                  <button type="button" onClick={() => setLoadAllRequested(true)}
+                    title="Load the full universe (larger download)"
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: 4,
+                      padding: "4px 8px", border: "1px solid var(--edge)",
+                      background: "transparent", color: "var(--text-muted)", cursor: "pointer",
+                      fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em",
+                      textTransform: "uppercase", borderRadius: 2,
+                    }}>
+                    Load all{universeCount ? ` (${universeCount})` : ""}
+                  </button>
+                )}
                 <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}
                   style={{ ...inputStyle, padding: "4px 6px", fontSize: 11 }}
                   title="Rows per page">
@@ -1297,7 +1327,9 @@ function ScreenerInner() {
                 {/* Columns · CSV grouped together as one cluster */}
                 <div style={{ display: "inline-flex", gap: 4, padding: 2, border: "1px solid var(--edge)", borderRadius: 2 }}>
                   <ColumnPicker value={visibleCols} onChange={setVisibleCols} />
-                  <Btn size="sm" onClick={exportCsv} disabled={filtered.length === 0} title="Export as CSV" aria-label="Export CSV">
+                  <Btn size="sm" onClick={exportCsv} disabled={filtered.length === 0}
+                    title={partial ? "Loads the full universe first, then exports" : "Export as CSV"}
+                    aria-label="Export CSV">
                     <Download size={11} />
                   </Btn>
                 </div>

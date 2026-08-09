@@ -357,12 +357,22 @@ function writeStaticCache(key: string, rows: any[]): void {
   } catch { /* ignore */ }
 }
 
+// EGRESS: the board only ever renders one page at a time, but both planes used
+// to ship the whole ~1 800-row universe on every open (206 KB + 154 KB). The
+// default read is now capped at BOARD_ROWS, server-ordered by breakout_score —
+// the same order the board opens in — and the full plane is only fetched when
+// something actually needs it (an active filter, a CSV export, "load all").
+export const BOARD_ROWS = 300;
+const PAGE = 1000;
+
 async function fetchScreenerRows(
   universeSet: Set<string> | "nifty500" | "fno" | "sme" | null,
   columns: string,
+  cap: number | null = null,
 ): Promise<any[]> {
   const rows: any[] = [];
-  for (let from = 0; ; from += 1000) {
+  const step = cap ? Math.min(cap, PAGE) : PAGE;
+  for (let from = 0; ; from += step) {
     const base = (supabase as any)
       .from("market_screener_rows")
       .select(columns)
@@ -371,13 +381,14 @@ async function fetchScreenerRows(
     const { data, error } = await applyUniverseQuery(base, universeSet)
       .order("breakout_score", { ascending: false, nullsFirst: false })
       .order("symbol", { ascending: true })
-      .range(from, from + 999);
+      .range(from, from + step - 1);
     if (error) throw error;
     const chunk = data ?? [];
     rows.push(...chunk);
-    if (chunk.length < 1000) break;
+    if (chunk.length < step) break;
+    if (cap && rows.length >= cap) break;
   }
-  return rows;
+  return cap ? rows.slice(0, cap) : rows;
 }
 
 
@@ -605,8 +616,13 @@ export function useScreenerData(
   /** Field ids currently on screen (visible columns + active filter columns).
    *  Omit for the full plane. */
   fields: string[] | null = null,
+  /** Fetch the whole universe instead of just the first board page. Required by
+   *  client-side filtering, sorting on a non-server column and CSV export. */
+  loadAll = false,
 ) {
   const projection = useMemo(() => planProjection(fields), [fields?.join("|")]);
+  const cap = loadAll ? null : BOARD_ROWS;
+  const capKey = loadAll ? "all" : String(BOARD_ROWS);
 
   // ---- Back-date branch: one deterministic edge-function call, cached forever.
   const asof = useQuery({
@@ -649,11 +665,11 @@ export function useScreenerData(
   // These only change after the close, so this is fetched once per session and
   // never polled — it is ~3/4 of the payload and 0 % of the intraday movement.
   const statics = useQuery({
-    queryKey: ["market", "screener-static-v2", universe, projection.key],
+    queryKey: ["market", "screener-static-v3", universe, projection.key, capKey],
     queryFn: async () => {
-      const cacheKey = `${universe}:${projection.key}`;
+      const cacheKey = `${universe}:${projection.key}:${capKey}`;
       const cached = readStaticCache(cacheKey);
-      const rows = cached ?? await fetchScreenerRows(await resolveUniverseFilter(universe), projection.statics);
+      const rows = cached ?? await fetchScreenerRows(await resolveUniverseFilter(universe), projection.statics, cap);
 
       if (rows.length === 0) return { rows, idxSets: EMPTY_IDX };
       if (!cached) writeStaticCache(cacheKey, rows);
@@ -672,10 +688,10 @@ export function useScreenerData(
   // ---- Live plane: the ~30 columns that actually tick. Polled on the server
   // sweep cadence (5 min) and never in a background tab.
   const live = useQuery({
-    queryKey: ["market", "screener-live-v2", universe, projection.key],
+    queryKey: ["market", "screener-live-v3", universe, projection.key, capKey],
     queryFn: async () => {
       const universeSet = await resolveUniverseFilter(universe);
-      return await fetchScreenerRows(universeSet, projection.live);
+      return await fetchScreenerRows(universeSet, projection.live, cap);
 
     },
     staleTime: marketOpen() ? 4 * 60_000 : 15 * 60_000,
@@ -684,6 +700,27 @@ export function useScreenerData(
     refetchIntervalInBackground: false,
     // EGRESS: "always" re-shipped the whole live plane on every tab focus.
     // The 5-minute poll already covers the sweep cadence.
+    refetchOnWindowFocus: false,
+    retry: false,
+    enabled: enabled && !asOfDate,
+  });
+
+  // Universe size for the "showing the top N of M" hint. `head: true` ships a
+  // Content-Range header and no rows, so this costs bytes in the hundreds.
+  const total = useQuery({
+    queryKey: ["market", "screener-count-v1", universe],
+    queryFn: async () => {
+      const base = (supabase as any)
+        .from("market_screener_rows")
+        .select("symbol", { count: "exact", head: true })
+        .eq("is_active", true)
+        .eq("exchange", "NSE");
+      const { count, error } = await applyUniverseQuery(base, await resolveUniverseFilter(universe));
+      if (error) throw error;
+      return Number(count ?? 0);
+    },
+    staleTime: 6 * 3_600_000,
+    gcTime: 6 * 3_600_000,
     refetchOnWindowFocus: false,
     retry: false,
     enabled: enabled && !asOfDate,
@@ -705,6 +742,10 @@ export function useScreenerData(
     isFetching: asOfDate ? asof.isFetching : (statics.isFetching || live.isFetching),
     error: (asOfDate ? asof.error : (statics.error ?? live.error)) as Error | null,
     dataUpdatedAt: asOfDate ? asof.dataUpdatedAt : live.dataUpdatedAt,
+    /** Universe size behind the current board (null while unknown). */
+    universeCount: asOfDate ? null : (total.data ?? null),
+    /** True while only the first board page is loaded. */
+    partial: !asOfDate && !loadAll && (total.data ?? 0) > merged.length,
     refetch: () => { if (asOfDate) { void asof.refetch(); } else { void statics.refetch(); void live.refetch(); } },
   };
 }

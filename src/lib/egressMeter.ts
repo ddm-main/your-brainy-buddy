@@ -14,12 +14,12 @@ import { supabase } from "@/integrations/supabase/client";
 type Row = { calls: number; bytes: number; max: number };
 type Source = "postgrest" | "functions" | "storage" | "auth" | "realtime" | "unknown";
 
-const WARN_BYTES = 256 * 1024; // one read shipping a quarter MB is worth a look
-// Hard budget ceiling. The project's target is <=1 MB per user action and
-// <=20 MB/day, so any single response over this is a bug, not a big page —
-// it gets reported in every environment (not just DEV) and tagged in the
-// route label so `system_egress_daily` shows which read broke the budget.
-const OVERSIZE_BYTES = 400 * 1024;
+const WARN_BYTES = 64 * 1024; // one read shipping 64 KB is worth a look
+// Hard budget ceiling. The project's target is <=8 MB/day, so any single
+// response over this is a bug, not a big page — it gets reported in every
+// environment (not just DEV) and tagged in the route label so
+// `system_egress_daily` shows which read broke the budget.
+const OVERSIZE_BYTES = 128 * 1024;
 const FLUSH_MS = 60_000;
 
 
