@@ -665,11 +665,11 @@ export function useScreenerData(
   // These only change after the close, so this is fetched once per session and
   // never polled — it is ~3/4 of the payload and 0 % of the intraday movement.
   const statics = useQuery({
-    queryKey: ["market", "screener-static-v2", universe, projection.key],
+    queryKey: ["market", "screener-static-v3", universe, projection.key, capKey],
     queryFn: async () => {
-      const cacheKey = `${universe}:${projection.key}`;
+      const cacheKey = `${universe}:${projection.key}:${capKey}`;
       const cached = readStaticCache(cacheKey);
-      const rows = cached ?? await fetchScreenerRows(await resolveUniverseFilter(universe), projection.statics);
+      const rows = cached ?? await fetchScreenerRows(await resolveUniverseFilter(universe), projection.statics, cap);
 
       if (rows.length === 0) return { rows, idxSets: EMPTY_IDX };
       if (!cached) writeStaticCache(cacheKey, rows);
@@ -688,10 +688,10 @@ export function useScreenerData(
   // ---- Live plane: the ~30 columns that actually tick. Polled on the server
   // sweep cadence (5 min) and never in a background tab.
   const live = useQuery({
-    queryKey: ["market", "screener-live-v2", universe, projection.key],
+    queryKey: ["market", "screener-live-v3", universe, projection.key, capKey],
     queryFn: async () => {
       const universeSet = await resolveUniverseFilter(universe);
-      return await fetchScreenerRows(universeSet, projection.live);
+      return await fetchScreenerRows(universeSet, projection.live, cap);
 
     },
     staleTime: marketOpen() ? 4 * 60_000 : 15 * 60_000,
@@ -700,6 +700,27 @@ export function useScreenerData(
     refetchIntervalInBackground: false,
     // EGRESS: "always" re-shipped the whole live plane on every tab focus.
     // The 5-minute poll already covers the sweep cadence.
+    refetchOnWindowFocus: false,
+    retry: false,
+    enabled: enabled && !asOfDate,
+  });
+
+  // Universe size for the "showing the top N of M" hint. `head: true` ships a
+  // Content-Range header and no rows, so this costs bytes in the hundreds.
+  const total = useQuery({
+    queryKey: ["market", "screener-count-v1", universe],
+    queryFn: async () => {
+      const base = (supabase as any)
+        .from("market_screener_rows")
+        .select("symbol", { count: "exact", head: true })
+        .eq("is_active", true)
+        .eq("exchange", "NSE");
+      const { count, error } = await applyUniverseQuery(base, await resolveUniverseFilter(universe));
+      if (error) throw error;
+      return Number(count ?? 0);
+    },
+    staleTime: 6 * 3_600_000,
+    gcTime: 6 * 3_600_000,
     refetchOnWindowFocus: false,
     retry: false,
     enabled: enabled && !asOfDate,
@@ -721,6 +742,10 @@ export function useScreenerData(
     isFetching: asOfDate ? asof.isFetching : (statics.isFetching || live.isFetching),
     error: (asOfDate ? asof.error : (statics.error ?? live.error)) as Error | null,
     dataUpdatedAt: asOfDate ? asof.dataUpdatedAt : live.dataUpdatedAt,
+    /** Universe size behind the current board (null while unknown). */
+    universeCount: asOfDate ? null : (total.data ?? null),
+    /** True while only the first board page is loaded. */
+    partial: !asOfDate && !loadAll && (total.data ?? 0) > merged.length,
     refetch: () => { if (asOfDate) { void asof.refetch(); } else { void statics.refetch(); void live.refetch(); } },
   };
 }
