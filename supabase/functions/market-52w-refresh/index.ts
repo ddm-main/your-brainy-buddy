@@ -96,11 +96,16 @@ Deno.serve(async (req) => {
           const res = await compute52w(item.symbol, item.exchange);
           if (!res) { failed++; await sleep(150); continue; }
           const { high, low } = res;
-          const patches = [
-            svc.from("market_stock_scores").update({ high_52w: high, low_52w: low }).eq("symbol", item.symbol).eq("exchange", item.exchange),
-            svc.from("market_fundamentals_global").update({ high_52w: high, low_52w: low, updated_at: new Date().toISOString() }).eq("symbol", item.symbol).eq("exchange", item.exchange),
-          ];
-          await Promise.all(patches);
+          // EGRESS: 52w extremes barely move day to day. Skipping the no-op
+          // write removes two PostgREST round-trips per unchanged symbol.
+          const same = item.prevHigh != null && item.prevLow != null
+            && Math.abs(item.prevHigh - high) < 0.01 && Math.abs(item.prevLow - low) < 0.01;
+          if (!same) {
+            await Promise.all([
+              svc.from("market_stock_scores").update({ high_52w: high, low_52w: low }).eq("symbol", item.symbol).eq("exchange", item.exchange),
+              svc.from("market_fundamentals_global").update({ high_52w: high, low_52w: low, updated_at: new Date().toISOString() }).eq("symbol", item.symbol).eq("exchange", item.exchange),
+            ]);
+          }
           updated++;
         } catch { failed++; }
         await sleep(200 + Math.random() * 200);
