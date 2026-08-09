@@ -18,7 +18,8 @@ const FLUSH_AFTER_REQUESTS = 25;
 const FLUSH_AFTER_MS = 10_000;
 // Any single server-side read over this is a missing filter, not a big table.
 // Tag it in the route label so `system_egress_daily` names the offender.
-const OVERSIZE_BYTES = 400 * 1024;
+// Mirrors the browser meter's ceiling in src/lib/egressMeter.ts.
+const OVERSIZE_BYTES = 128 * 1024;
 
 let installed = false;
 let originalFetch: typeof fetch | null = null;
