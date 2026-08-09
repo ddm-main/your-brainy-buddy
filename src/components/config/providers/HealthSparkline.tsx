@@ -5,18 +5,20 @@ import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { ago } from "./providerUtils";
 
-type Point = { ok: boolean; latency_ms: number | null; created_at: string; endpoint: string | null };
+type Point = { ok: boolean; latency_ms: number | null; created_at: string };
 
 export default function HealthSparkline({ provider }: { provider: string }) {
   const { data } = useQuery({
     queryKey: ["market", "provider-health-history", provider],
     queryFn: async () => {
+      // EGRESS: 40 points is plenty for a 240 px sparkline, and `endpoint` was
+      // never rendered — it was pure payload.
       const { data, error } = await supabase
         .from("market_provider_health")
-        .select("ok, latency_ms, created_at, endpoint")
+        .select("ok, latency_ms, created_at")
         .eq("provider", provider)
         .order("created_at", { ascending: false })
-        .limit(60);
+        .limit(40);
       if (error) throw error;
       return ((data ?? []) as Point[]).slice().reverse();
     },
