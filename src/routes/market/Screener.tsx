@@ -1296,6 +1296,19 @@ function ScreenerInner() {
                   {hideIlliquid ? <Check size={11} /> : <X size={11} />}
                   {hideIlliquid ? "Liquid only" : "All (incl. penny)"}
                 </button>
+                {partial && (
+                  <button type="button" onClick={() => setLoadAllRequested(true)}
+                    title="Load the full universe (larger download)"
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: 4,
+                      padding: "4px 8px", border: "1px solid var(--edge)",
+                      background: "transparent", color: "var(--text-muted)", cursor: "pointer",
+                      fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em",
+                      textTransform: "uppercase", borderRadius: 2,
+                    }}>
+                    Load all{universeCount ? ` (${universeCount})` : ""}
+                  </button>
+                )}
                 <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}
                   style={{ ...inputStyle, padding: "4px 6px", fontSize: 11 }}
                   title="Rows per page">
@@ -1304,7 +1317,9 @@ function ScreenerInner() {
                 {/* Columns · CSV grouped together as one cluster */}
                 <div style={{ display: "inline-flex", gap: 4, padding: 2, border: "1px solid var(--edge)", borderRadius: 2 }}>
                   <ColumnPicker value={visibleCols} onChange={setVisibleCols} />
-                  <Btn size="sm" onClick={exportCsv} disabled={filtered.length === 0} title="Export as CSV" aria-label="Export CSV">
+                  <Btn size="sm" onClick={exportCsv} disabled={filtered.length === 0}
+                    title={partial ? "Loads the full universe first, then exports" : "Export as CSV"}
+                    aria-label="Export CSV">
                     <Download size={11} />
                   </Btn>
                 </div>
