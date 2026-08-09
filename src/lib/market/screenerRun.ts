@@ -357,12 +357,22 @@ function writeStaticCache(key: string, rows: any[]): void {
   } catch { /* ignore */ }
 }
 
+// EGRESS: the board only ever renders one page at a time, but both planes used
+// to ship the whole ~1 800-row universe on every open (206 KB + 154 KB). The
+// default read is now capped at BOARD_ROWS, server-ordered by breakout_score —
+// the same order the board opens in — and the full plane is only fetched when
+// something actually needs it (an active filter, a CSV export, "load all").
+export const BOARD_ROWS = 300;
+const PAGE = 1000;
+
 async function fetchScreenerRows(
   universeSet: Set<string> | "nifty500" | "fno" | "sme" | null,
   columns: string,
+  cap: number | null = null,
 ): Promise<any[]> {
   const rows: any[] = [];
-  for (let from = 0; ; from += 1000) {
+  const step = cap ? Math.min(cap, PAGE) : PAGE;
+  for (let from = 0; ; from += step) {
     const base = (supabase as any)
       .from("market_screener_rows")
       .select(columns)
@@ -371,13 +381,14 @@ async function fetchScreenerRows(
     const { data, error } = await applyUniverseQuery(base, universeSet)
       .order("breakout_score", { ascending: false, nullsFirst: false })
       .order("symbol", { ascending: true })
-      .range(from, from + 999);
+      .range(from, from + step - 1);
     if (error) throw error;
     const chunk = data ?? [];
     rows.push(...chunk);
-    if (chunk.length < 1000) break;
+    if (chunk.length < step) break;
+    if (cap && rows.length >= cap) break;
   }
-  return rows;
+  return cap ? rows.slice(0, cap) : rows;
 }
 
 
