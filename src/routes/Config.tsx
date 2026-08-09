@@ -1,23 +1,16 @@
-import { NavLink, Route, Routes, useLocation } from "react-router-dom";
+import { NavLink, Route, Routes, useLocation, Navigate } from "react-router-dom";
 import { lazy, Suspense } from "react";
 import { useAccessStore } from "@/store/accessStore";
-
-const EmailConfig = lazy(() => import("@/routes/config/EmailConfig"));
-const ConfigHome = lazy(() => import("@/routes/config/ConfigHome"));
-const FinanceConfig = lazy(() => import("@/routes/config/FinanceConfig"));
-const ProjectsConfig = lazy(() => import("@/routes/config/ProjectsConfig"));
 
 const SystemDataConfig = lazy(() => import("@/routes/config/SystemDataConfig"));
 const AdminConfig = lazy(() => import("@/routes/config/AdminConfig"));
 
 const TABS = [
-  { to: "/config", label: "Home", exact: true, adminOnly: false },
-  { to: "/config/email", label: "Email", adminOnly: false },
-  { to: "/config/finance", label: "Finance", adminOnly: false },
-  { to: "/config/projects", label: "Projects", adminOnly: false },
-  { to: "/config/system-data", label: "Market Config", adminOnly: true },
-  { to: "/config/admin", label: "Admin", adminOnly: true },
-] as { to: string; label: string; exact?: boolean; adminOnly: boolean }[];
+  { to: "/config/feeds", label: "Feeds & Providers" },
+  { to: "/config/pipeline", label: "Data Pipeline" },
+  { to: "/config/storage", label: "Storage & Quota" },
+  { to: "/config/users", label: "Users" },
+];
 
 const tabBase: React.CSSProperties = {
   padding: "6px 12px", fontFamily: "var(--font-hud)", fontSize: 10,
@@ -28,16 +21,14 @@ const tabBase: React.CSSProperties = {
 export default function Config() {
   const loc = useLocation();
   const isAdmin = useAccessStore((s) => s.role === "admin");
-  const tabs = TABS.filter((t) => !t.adminOnly || isAdmin);
+  if (!isAdmin) return <Navigate to="/market" replace />;
   return (
     <div style={{ padding: 12, height: "100%", display: "flex", flexDirection: "column", gap: 12, minHeight: 0 }}>
-      <div role="tablist" aria-label="Config sections" style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-        {tabs.map((t) => {
-          const active = t.exact
-            ? loc.pathname === t.to || loc.pathname === t.to + "/"
-            : loc.pathname === t.to || loc.pathname.startsWith(t.to + "/");
+      <div role="tablist" aria-label="Admin config sections" style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+        {TABS.map((t) => {
+          const active = loc.pathname === t.to || loc.pathname.startsWith(t.to + "/");
           return (
-            <NavLink key={t.to} to={t.to} end={t.exact} role="tab" aria-selected={active}
+            <NavLink key={t.to} to={t.to} role="tab" aria-selected={active}
               style={{
                 ...tabBase,
                 border: `1px solid ${active ? "var(--edge-strong)" : "var(--edge)"}`,
@@ -47,18 +38,19 @@ export default function Config() {
           );
         })}
       </div>
-      <div style={{ flex: 1, minHeight: 0, minWidth: 0 }}>
+      <div style={{ flex: 1, minHeight: 0, minWidth: 0, overflow: "auto" }}>
         <Suspense fallback={<div className="hud-label">loading…</div>}>
           <Routes>
-            <Route index element={<ConfigHome />} />
-            <Route path="email/*" element={<EmailConfig />} />
-            <Route path="finance/*" element={<FinanceConfig />} />
-            <Route path="projects" element={<ProjectsConfig />} />
-            
-            {isAdmin && <Route path="system-data" element={<SystemDataConfig />} />}
-            {/* Friendlier alias for the renamed section; old links keep working. */}
-            {isAdmin && <Route path="market" element={<SystemDataConfig />} />}
-            {isAdmin && <Route path="admin" element={<AdminConfig />} />}
+            <Route index element={<Navigate to="/config/feeds" replace />} />
+            <Route path="feeds" element={<SystemDataConfig view="feeds" />} />
+            <Route path="pipeline" element={<SystemDataConfig view="pipeline" />} />
+            <Route path="storage" element={<SystemDataConfig view="storage" />} />
+            <Route path="users" element={<AdminConfig />} />
+            {/* Legacy links keep working. */}
+            <Route path="system-data" element={<Navigate to="/config/feeds" replace />} />
+            <Route path="market" element={<Navigate to="/config/feeds" replace />} />
+            <Route path="admin" element={<Navigate to="/config/users" replace />} />
+            <Route path="*" element={<Navigate to="/config/feeds" replace />} />
           </Routes>
         </Suspense>
       </div>

@@ -94,6 +94,9 @@ export interface SystemFeedStatus {
   configured: boolean;
   designated: boolean;
   status: string;
+  /** Broker behind the designated data feed (kotak_neo | shoonya), if any. */
+  provider?: string | null;
+
   healthy: boolean;
   last_error: string | null;
   last_sync_at: string | null;

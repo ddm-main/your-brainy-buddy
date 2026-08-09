@@ -1,9 +1,8 @@
-// Market Config — admin-only config for the app-wide market data pipeline,
-// storage quota and shared data providers (Kotak Neo primary, Yahoo/NSE/BSE/
-// Alpha Vantage/FMP fallbacks).
-// This is NOT a per-user broker connection — that lives at /market/settings.
+// Admin Config — app-wide config for the market data pipeline, providers,
+// storage quota and users. One tab bar lives in Config.tsx; this file renders
+// the content for a single tab (`view`).
+// Per-user broker connections live at /market/settings, not here.
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import HudPanel from "@/components/hud/HudPanel";
 import { Chip } from "@/components/hud/HudControls";
@@ -34,16 +33,14 @@ function timeAgo(ts: string | null): string {
   if (s < 86400) return `${Math.round(s / 3600)}h ago`;
   return `${Math.round(s / 86400)}d ago`;
 }
-type Tab = "providers" | "storage";
 
-export default function SystemDataConfig() {
+export type ConfigView = "feeds" | "pipeline" | "storage";
 
-  const nav = useNavigate();
+export default function SystemDataConfig({ view = "feeds" }: { view?: ConfigView }) {
   const push = useUi((s) => s.push);
   const qc = useQueryClient();
 
   const [busy, setBusy] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("providers");
 
   const mounted = useRef(true);
   useEffect(() => {
@@ -62,6 +59,7 @@ export default function SystemDataConfig() {
       if (error) throw error;
       return data as Pipeline;
     },
+    enabled: view === "pipeline",
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
@@ -107,46 +105,19 @@ export default function SystemDataConfig() {
     { fn: "market-indices", label: "Index refresh", text: "Indices", icon: RefreshCw },
   ];
 
-  const TABS: { key: Tab; label: string }[] = [
-    { key: "providers", label: "Providers" },
-    { key: "storage", label: "Storage & Quota" },
-  ];
+  if (view === "feeds") return <ProvidersPanel />;
+
+  if (view === "storage") {
+    return (
+      <div style={{ width: "100%", maxWidth: 860 }}>
+        <DatabaseStoragePanel />
+      </div>
+    );
+  }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10, height: "100%", minHeight: 0, overflow: "auto" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <button onClick={() => nav("/config")} className="hud-label"
-          style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: "4px 6px" }}>← config</button>
-        <span className="hud-label" style={{ color: "var(--accent)" }}>Market Config</span>
-      </div>
-
-      <div style={{ display: "flex", gap: 4 }}>
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className="hud-label"
-            style={{
-              padding: "6px 12px", cursor: "pointer",
-              border: "1px solid var(--edge)",
-              background: tab === t.key ? "rgba(53,214,237,0.10)" : "transparent",
-              color: tab === t.key ? "var(--accent)" : "var(--text-muted)",
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {tab === "providers" && <ProvidersPanel />}
-
-      {/* Storage + pipeline are dense stat panels — capped width and stacked as
-          two rows so they stop stretching across the full ultrawide layout. */}
-      {tab === "storage" && <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", maxWidth: 860 }}>
-      <DatabaseStoragePanel />
-
+    <div style={{ width: "100%", maxWidth: 860 }}>
       <HudPanel title="Market Data Pipeline" index="MKT" live={isLoading ? "warn" : "ok"} bodyClass="overflow-visible">
-
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 6 }}>
           <div style={stat}>
             <div style={statLabel}>Active Stocks</div>
@@ -188,8 +159,6 @@ export default function SystemDataConfig() {
           ))}
         </div>
       </HudPanel>
-      </div>}
     </div>
-
   );
 }

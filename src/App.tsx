@@ -6,25 +6,16 @@ import ErrorBoundary from "@/components/hud/ErrorBoundary";
 
 import CommandPalette from "@/components/hud/CommandPalette";
 import ToastLayer from "@/components/hud/ToastLayer";
-import ContentPanel from "@/components/hud/ContentPanel";
 import BootScanline from "@/components/hud/BootScanline";
 import AmbientLayer from "@/components/hud/AmbientLayer";
-import { useContent } from "@/store/contentStore";
-import { useUi } from "@/store/uiStore";
 import { useNotifications } from "@/store/notificationStore";
-import { startReminderPoller } from "@/lib/reminders";
 import { startMarketAlertsPoller, formatAlertEvent } from "@/lib/market/alertsPoller";
 import { useSession } from "@/lib/useSession";
 import { useAccessStore } from "@/store/accessStore";
 import AccessGate from "@/components/access/AccessGate";
 
 
-const Home = lazy(() => import("@/routes/Home"));
-const Inbox = lazy(() => import("@/routes/Inbox"));
-const Finance = lazy(() => import("@/routes/Finance"));
-const Projects = lazy(() => import("@/routes/Projects"));
 const Config = lazy(() => import("@/routes/Config"));
-const Tasks = lazy(() => import("@/routes/Tasks"));
 const Market = lazy(() => import("@/routes/Market"));
 const NotFound = lazy(() => import("@/routes/NotFound"));
 const Auth = lazy(() => import("@/routes/Auth"));
@@ -45,18 +36,6 @@ export default function App() {
   useEffect(() => {
     if (!session) return;
 
-    const stop = startReminderPoller((r) => {
-      useContent.getState().addCard({ type: "reminder", text: r.text, fireAt: r.fire_at } as any);
-      useNotifications.getState().add(r.text);
-      try {
-        const u = new SpeechSynthesisUtterance(`Reminder, sir: ${r.text}`);
-        window.speechSynthesis?.speak(u);
-      } catch { /* noop */ }
-      if ("Notification" in window && Notification.permission === "granted") {
-        try { new Notification("JARVIS reminder", { body: r.text }); } catch { /* noop */ }
-      }
-    });
-    // Ask for notification permission once, non-blocking.
     if ("Notification" in window && Notification.permission === "default") {
       Notification.requestPermission().catch((e) => { if (import.meta.env.DEV) console.warn("[JARVIS] notification prompt:", e); });
     }
@@ -68,19 +47,8 @@ export default function App() {
         try { new Notification("Market alert", { body: text }); } catch { /* noop */ }
       }
     });
-    // Global hotkey: ⌘/Ctrl+J → open conversation overlay.
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey)) return;
-      if (e.key.toLowerCase() !== "j") return;
-      const el = document.activeElement as HTMLElement | null;
-      const tag = el?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || el?.isContentEditable) return;
-      e.preventDefault();
-      useUi.getState().openConversation();
-    };
-    window.addEventListener("keydown", onKey);
 
-    return () => { stop(); stopAlerts(); window.removeEventListener("keydown", onKey); };
+    return () => { stopAlerts(); };
   }, [session]);
 
 
@@ -93,7 +61,7 @@ export default function App() {
 
   // Authenticated users hitting /auth should go home; keep /reset-password accessible for recovery flow.
   if (session && path === "/auth" && !isReset) {
-    return <Navigate to="/" replace />;
+    return <Navigate to="/market" replace />;
   }
 
   // Render minimal chrome on auth surfaces (signed out, or signed-in on /reset-password).
@@ -131,7 +99,6 @@ export default function App() {
         </main>
       </div>
 
-      <ContentPanel />
       <CommandPalette />
       <ToastLayer />
     </>
@@ -152,15 +119,8 @@ function AnimatedRoutes() {
         <BootScanline triggerKey={location.pathname} />
         <Routes location={location}>
 
-          <Route path="/" element={<AccessGate section="hud"><Home /></AccessGate>} />
-          <Route path="/tasks" element={<AccessGate section="tasks"><Tasks /></AccessGate>} />
+          <Route path="/" element={<Navigate to="/market" replace />} />
           <Route path="/market/*" element={<AccessGate section="market"><Market /></AccessGate>} />
-          <Route path="/notes" element={<Navigate to="/market" replace />} />
-          <Route path="/workspace" element={<Navigate to="/tasks" replace />} />
-          <Route path="/decisions" element={<Navigate to="/tasks" replace />} />
-          <Route path="/inbox" element={<AccessGate section="inbox"><Inbox /></AccessGate>} />
-          <Route path="/finance/*" element={<AccessGate section="finance"><Finance /></AccessGate>} />
-          <Route path="/projects/*" element={<AccessGate section="projects"><Projects /></AccessGate>} />
           <Route path="/config/*" element={<AccessGate section="config"><Config /></AccessGate>} />
           <Route path="/settings" element={<Navigate to="/config" replace />} />
           <Route path="/auth" element={<Auth />} />

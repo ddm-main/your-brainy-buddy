@@ -16,6 +16,7 @@ import FeedRoutingPanel from "./providers/FeedRoutingPanel";
 import { PROVIDERS, PROVIDER_ORDER, type ProviderId } from "./providers/feedCatalog";
 import { ago, callCreds, callTest, clean, type CredRow, type HealthRow } from "./providers/providerUtils";
 import { useRunSelfTest, SELFTEST_QUERY_KEY } from "@/lib/market/selftest";
+import { useDesignateSystemFeed, useSystemFeed } from "@/lib/market/hooks";
 
 export type { ProviderId };
 
@@ -31,6 +32,30 @@ export default function ProvidersPanel() {
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   const selfTest = useRunSelfTest();
+
+  // The app-wide market-data feed. Market data is operator-owned: it comes from
+  // a broker connection designated here, never from a user's personal session.
+  // (This replaces the old standalone "Data Feed Connection" panel — the
+  // provider rows below already list the same brokers.)
+  const { data: feed } = useSystemFeed();
+  const designate = useDesignateSystemFeed();
+  const { data: dataRows = [] } = useQuery({
+    queryKey: ["market", "data-feed-rows"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("market_api_settings")
+        .select("id,active_provider,connection_status,ucc,greeting_name")
+        .eq("purpose", "data");
+      if (error) throw error;
+      return (data ?? []) as Array<{
+        id: string; active_provider: string; connection_status: string | null;
+        ucc: string | null; greeting_name: string | null;
+      }>;
+    },
+    refetchInterval: 120_000,
+  });
+  const feedRowFor = (p: ProviderId) => dataRows.find((r) => r.active_provider === p) ?? null;
+
 
   const { data: creds } = useQuery({
     queryKey: ["market", "provider-credentials"],
@@ -49,12 +74,14 @@ export default function ProvidersPanel() {
         .from("market_provider_health")
         .select("provider,ok,error,created_at")
         .order("created_at", { ascending: false })
-        .limit(300);
+        // EGRESS: 300 rows of probe errors every 2 min was ~40 KB/poll; the
+        // panel only renders the latest handful per provider.
+        .limit(80);
       if (error) throw error;
       return data as HealthRow[];
     },
-    refetchInterval: 120_000,
-    staleTime: 60_000,
+    refetchInterval: 300_000,
+    staleTime: 120_000,
   });
 
   const historyFor = useMemo(() => {
@@ -197,9 +224,28 @@ export default function ProvidersPanel() {
           live={anyBad ? "err" : anyWarn ? "warn" : "ok"}
           bodyClass="overflow-visible"
           actions={
-            <span style={{ fontSize: 9, color: "var(--text-muted)", fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
-              {selfTest.isPending ? "testing…" : "use “test everything” above"}
-            </span>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <Chip tone={feed?.healthy ? "ok" : feed?.configured ? "warn" : "neutral"}>
+                {feed?.healthy
+                  ? `data feed live · ${feed.provider ?? "broker"}`
+                  : feed?.configured
+                  ? `data feed degraded · ${feed.status}`
+                  : "no data feed · public vendors"}
+              </Chip>
+              {feed?.last_sync_at && (
+                <span style={{ fontSize: 10, color: "var(--text-muted)" }}>synced {ago(feed.last_sync_at)}</span>
+              )}
+              {feed?.last_error && (
+                <span style={{ fontSize: 10, color: "var(--danger, #ef4444)", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={feed.last_error}>
+                  {feed.last_error}
+                </span>
+              )}
+              {selfTest.isPending && (
+                <span style={{ fontSize: 9, color: "var(--text-muted)", fontFamily: "var(--font-hud)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
+                  testing…
+                </span>
+              )}
+            </div>
           }
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
@@ -220,7 +266,22 @@ export default function ProvidersPanel() {
                   <Chip tone={tone}>{label}</Chip>
                   <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{meta.feeds.length} feeds</span>
                   {at && <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{ago(at)}</span>}
-                  <span style={{ marginLeft: "auto", display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+                  <span style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }} onClick={(e) => e.stopPropagation()}>
+                    {(() => {
+                      // Broker data-feed designation lives on the provider row
+                      // itself now — no separate connections panel.
+                      const row = feedRowFor(p);
+                      if (!row) return null;
+                      if (feed?.id === row.id && feed?.designated) return <Chip tone="accent">active feed</Chip>;
+                      return (
+                        <Btn size="sm" disabled={designate.isPending}
+                          title={`Serve app-wide market data from ${meta.name}`}
+                          onClick={async () => {
+                            try { await designate.mutateAsync(row.id); push("Data feed updated", "ok"); }
+                            catch (e) { push(toSafeError(e, "Could not designate feed").message, "err"); }
+                          }}>use as feed</Btn>
+                      );
+                    })()}
                     <Btn size="sm" onClick={() => openEdit(p)} disabled={busy !== null} title={`Edit ${meta.name}`}>
                       {meta.edit === "kotak" ? <KeyRound size={11} style={{ marginRight: 4 }} /> : <Settings2 size={11} style={{ marginRight: 4 }} />}
                       Edit

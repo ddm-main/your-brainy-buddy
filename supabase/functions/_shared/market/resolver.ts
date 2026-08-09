@@ -8,6 +8,7 @@ import { nseEquityMeta } from "./nseClient.ts";
 import * as fmp from "./fmpClient.ts";
 import * as alpha from "./alphaVantageClient.ts";
 import { yahooQuote } from "./yahooClient.ts";
+import { invalidateFeedRouteCache } from "./feedRoute.ts";
 
 type FieldName = string;
 
@@ -302,26 +303,33 @@ export const FEED_FIELDS: Record<string, string[]> = {
     "sma_20", "sma_50", "sma_200", "ema_20", "ema_50", "ema_100", "ema_200", "bb_upper", "bb_lower"],
   ownership: ["promoter_holding", "promoter_pledge", "fii_holding", "dii_holding"],
   shares: ["shares_outstanding"],
-  indices: ["ltp", "change_abs", "change_pct"],
+  // NOTE: "indices" is deliberately NOT mapped here. Field-level routing
+  // cannot tell an index quote from a stock quote (both are `ltp`), so an
+  // Indices pin used to silently re-route every stock price. Index routing is
+  // honoured directly in market-indices via resolveFeedRoute("indices").
 };
 
 
 const PREF_TTL_MS = 30_000;
 export type FieldPref = { primary?: string; fallback?: string };
+const SYSTEM_PREF_KEY = "__system__";
 const prefCache = new Map<string, { at: number; map: Record<string, FieldPref> }>();
 
-/** field → {primary, fallback}, derived from the user's market_feed_prefs rows. */
+/**
+ * field → {primary, fallback}, derived from the APP-WIDE market_feed_prefs
+ * rows (scope = 'system'). Feed routing is an operator decision, not a
+ * per-user preference, so the caller's identity is irrelevant here.
+ */
 export async function getFieldOverrides(
   svc: SupabaseClient,
-  userId: string | null,
+  _userId: string | null = null,
 ): Promise<Record<string, FieldPref>> {
-  if (!userId) return {};
-  const hit = prefCache.get(userId);
+  const hit = prefCache.get(SYSTEM_PREF_KEY);
   if (hit && Date.now() - hit.at < PREF_TTL_MS) return hit.map;
   const map: Record<string, FieldPref> = {};
   try {
     const { data } = await svc.from("market_feed_prefs")
-      .select("feed_id, provider, fallback_provider").eq("user_id", userId);
+      .select("feed_id, provider, fallback_provider").eq("scope", "system");
     for (const row of data ?? []) {
       const r = row as { feed_id: string; provider: string | null; fallback_provider: string | null };
       const fields = FEED_FIELDS[r.feed_id];
@@ -332,13 +340,17 @@ export async function getFieldOverrides(
       for (const f of fields) map[f] = { primary, fallback };
     }
   } catch { /* prefs are advisory — never block a data read */ }
-  prefCache.set(userId, { at: Date.now(), map });
+  prefCache.set(SYSTEM_PREF_KEY, { at: Date.now(), map });
   return map;
 }
 
-export function invalidateFeedPrefCache(userId?: string): void {
-  if (userId) prefCache.delete(userId); else prefCache.clear();
+export function invalidateFeedPrefCache(_userId?: string): void {
+  prefCache.clear();
+  // Live routes read the same rows through feedRoute.ts — clearing only one
+  // cache left the two planes disagreeing for up to 30s after a save.
+  invalidateFeedRouteCache();
 }
+
 
 /** primary → fallback → the rest of the built-in chain, de-duplicated. */
 export function buildChain(base: string[], pref?: FieldPref): string[] {

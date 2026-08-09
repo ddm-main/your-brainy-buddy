@@ -4,7 +4,6 @@ import { Bell, SlidersHorizontal, Wifi, LogOut, Settings as SettingsIcon, User a
 import { supabase } from "@/integrations/supabase/client";
 
 import { useEffect, useRef, useState } from "react";
-import { useAiStatus } from "@/store/aiStatusStore";
 import { useNotifications } from "@/store/notificationStore";
 import { useAccessStore, type AppSection } from "@/store/accessStore";
 import { motion, AnimatePresence } from "framer-motion";
@@ -13,11 +12,7 @@ import QuotaStatusChip from "@/components/hud/QuotaStatusChip";
 import FeedStatusChip from "@/components/hud/FeedStatusChip";
 
 const NAV: { to: string; label: string; section: AppSection }[] = [
-  { to: "/", label: "HUD", section: "hud" },
   { to: "/market", label: "Market", section: "market" },
-  { to: "/finance", label: "Finance", section: "finance" },
-  { to: "/tasks", label: "Tasks", section: "tasks" },
-  { to: "/projects", label: "Projects", section: "projects" },
 ];
 
 
@@ -75,7 +70,7 @@ export default function TopBar() {
       // has nothing to indicate, so it does not need to ask.
       if (document.visibilityState !== "visible") return;
       try {
-        const { error } = await supabase.from("banks").select("id", { head: true, count: "exact" }).limit(1);
+        const { error } = await supabase.from("market_holidays").select("id", { head: true, count: "exact" }).limit(1);
         if (!cancelled) setLinkOk(!error);
       } catch {
         if (!cancelled) setLinkOk(false);
@@ -88,7 +83,6 @@ export default function TopBar() {
     return () => { cancelled = true; clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
   }, []);
 
-  const aiOk = useAiStatus((s) => s.ok);
 
   const notifItems = useNotifications((s) => s.items);
   const unreadCount = useNotifications((s) => s.unreadCount);
@@ -127,7 +121,7 @@ export default function TopBar() {
         position: "relative",
       }}
     >
-      <Link to="/" style={{ textDecoration: "none", display: "flex", alignItems: "center", gap: 12 }}>
+      <Link to="/market" style={{ textDecoration: "none", display: "flex", alignItems: "center", gap: 12 }}>
         <motion.div
           animate={{ rotate: 360 }}
           transition={{ duration: 24, repeat: Infinity, ease: "linear" }}
@@ -153,11 +147,22 @@ export default function TopBar() {
       <nav style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
         {(() => {
           const onMarket = loc.pathname.startsWith("/market");
+          const onConfig = loc.pathname.startsWith("/config");
           const baseNav = NAV.filter((n) => sections.has(n.section));
+          const items: { to: string; label: string; end?: boolean; key: string; isActive: (p: string) => boolean }[] = [];
+          // Inside the admin panel the nav says where you are, not where you
+          // came from — "Market" becomes "Admin Config".
+          if (onConfig) {
+            items.push({
+              key: "admin-config",
+              to: "/config/feeds",
+              label: "Admin Config",
+              isActive: (p) => p.startsWith("/config"),
+            });
+          }
           // On /market, replace the single "Market" chip with its group tabs
           // to reclaim vertical space from the in-page sub-nav.
-          const items: { to: string; label: string; end?: boolean; key: string; isActive: (p: string) => boolean }[] = [];
-          for (const n of baseNav) {
+          for (const n of onConfig ? [] : baseNav) {
             if (onMarket && n.to === "/market") {
               // "Settings" is moved into the user (avatar) menu below to
               // declutter the top nav; skip it here.
@@ -223,12 +228,12 @@ export default function TopBar() {
         <FeedStatusChip />
         <QuotaStatusChip />
         {/* System-health chip only surfaces when something is actually down. */}
-        {!(linkOk && aiOk) && (
+        {!linkOk && (
           <StatusChip
             label="sys"
             ok={false}
             icon={<Wifi size={11} />}
-            title={`Link ${linkOk ? "OK" : "DOWN"} · AI ${aiOk ? "OK" : "DOWN"}`}
+            title={`Link ${linkOk ? "OK" : "DOWN"}`}
           />
         )}
 
@@ -287,7 +292,14 @@ export default function TopBar() {
               <motion.div
                 initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }}
                 className="hud-panel"
-                style={{ position: "absolute", top: "calc(100% + 8px)", right: 0, width: 240, zIndex: 50 }}
+                style={{
+                  position: "absolute", top: "calc(100% + 8px)", right: 0, width: 240, zIndex: 50,
+                  background: "var(--bg-panel-solid, #0d1f36)",
+                  backdropFilter: "blur(14px)",
+                  WebkitBackdropFilter: "blur(14px)",
+                  border: "1px solid var(--edge-strong)",
+                  boxShadow: "0 12px 32px rgba(0,0,0,0.6)",
+                }}
               >
                 <span className="hud-corner tl" /><span className="hud-corner tr" />
                 <span className="hud-corner bl" /><span className="hud-corner br" />

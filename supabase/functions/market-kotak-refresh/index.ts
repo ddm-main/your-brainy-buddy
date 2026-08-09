@@ -3,8 +3,8 @@
 // authenticated user for their own row ("Refresh session" button).
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
-import { KOTAK_SETTINGS_COLS, type KotakSettings, KotakError, kotakAutoLogin, persistSession, withReloginLock } from "../_shared/market/kotakClient.ts";
-import { encryptValue } from "../_shared/market/provider.ts";
+import { clearUnreadableKotakCredentials, isUnreadableKotakCredentialsError, KOTAK_SETTINGS_COLS, type KotakSettings, KotakError, kotakAutoLogin, persistSession, withReloginLock } from "../_shared/market/kotakClient.ts";
+import { encryptValue, invalidateSystemFeedCache } from "../_shared/market/provider.ts";
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
@@ -12,6 +12,7 @@ Deno.serve(async (req) => {
     const svc = svcClient();
     const isCron = req.headers.get("x-cron-secret") != null;
     let userFilter: string | null = null;
+    let purposeFilter: "account" | "data" | null = null;
 
     if (isCron) {
       const guard = await requireCronSecret(req);
@@ -20,6 +21,14 @@ Deno.serve(async (req) => {
       const auth = await requireUserId(req);
       if ("error" in auth) return auth.error;
       userFilter = auth.userId;
+      const body = await req.json().catch(() => ({}));
+      purposeFilter = String((body as any)?.purpose ?? "account") === "data" ? "data" : "account";
+      if (purposeFilter === "data") {
+        const isAdmin = await svc.from("user_roles").select("role")
+          .eq("user_id", auth.userId).eq("role", "admin").maybeSingle()
+          .then((r) => !!r.data, () => false);
+        if (!isAdmin) return errorResponse(req, "admin_only", 403);
+      }
     }
 
     let q = svc.from("market_api_settings")
@@ -27,10 +36,11 @@ Deno.serve(async (req) => {
       .eq("active_provider", "kotak_neo")
       .not("totp_secret_enc", "is", null);
     if (userFilter) q = q.eq("user_id", userFilter);
+    if (purposeFilter) q = q.eq("purpose", purposeFilter);
     const { data, error } = await q;
     if (error) return errorResponse(req, error.message, 500);
 
-    const results: Array<{ user_id: string; ok: boolean; error?: string; greeting_name?: string | null }> = [];
+    const results: Array<{ id: string; user_id: string; ok: boolean; error?: string; greeting_name?: string | null }> = [];
     for (const row of (data ?? []) as KotakSettings[]) {
       try {
         // Same per-settings-row mutex withKotakSession's 401 auto-relogin
@@ -40,25 +50,33 @@ Deno.serve(async (req) => {
         // no optimistic concurrency check).
         const sess = await withReloginLock(row.id, () => kotakAutoLogin(row));
         await persistSession(svc, row, sess, encryptValue);
-        results.push({ user_id: row.user_id, ok: true, greeting_name: sess.greetingName });
+        results.push({ id: row.id, user_id: row.user_id, ok: true, greeting_name: sess.greetingName });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         // Not a KotakError means the secret itself failed to decode, not a
         // broker/network hiccup — it'll fail identically every night
         // forever. Clear it so the auto-login status shown in Settings
         // reflects reality instead of silently retrying a known-dead value.
-        const badSecret = !(e instanceof KotakError);
-        await svc.from("market_api_settings")
-          .update({
-            connection_status: "error",
-            last_error: badSecret ? `Saved TOTP secret is invalid (${msg}) — cleared, re-save it to restore auto-login.` : `refresh: ${msg}`,
-            ...(badSecret ? { totp_secret_enc: null } : {}),
-          })
-          .eq("id", row.id);
-        results.push({ user_id: row.user_id, ok: false, error: msg });
+        const unreadable = isUnreadableKotakCredentialsError(e);
+        const badSecret = unreadable || !(e instanceof KotakError);
+        if (unreadable) {
+          await clearUnreadableKotakCredentials(svc, row);
+        } else {
+          await svc.from("market_api_settings")
+            .update({
+              connection_status: "error",
+              last_error: badSecret ? `Saved TOTP secret is invalid (${msg}) — cleared, re-save it to restore auto-login.` : `refresh: ${msg}`,
+              ...(badSecret ? { totp_secret_enc: null } : {}),
+            })
+            .eq("id", row.id);
+        }
+        results.push({ id: row.id, user_id: row.user_id, ok: false, error: msg });
       }
     }
+    // A refreshed data-feed session changes what serves every user's prices.
+    if (results.some((r) => r.ok)) invalidateSystemFeedCache();
     return jsonResponse(req, { ok: true, refreshed: results });
+
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);
   }

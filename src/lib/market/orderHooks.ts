@@ -54,6 +54,13 @@ export interface BrokerTrade {
   trade_id: string; order_id: string; symbol: string; exchange: string; side: "BUY" | "SELL";
   quantity: number; price: number; trade_time: string;
 }
+export interface BrokerBookResponse<T> {
+  source: string;
+  reconnect_required?: boolean;
+  reason?: string;
+  orders?: T[];
+  trades?: T[];
+}
 
 export interface PlaceOrderInput {
   symbol: string; exchange: "NSE" | "BSE"; side: "BUY" | "SELL";
@@ -101,7 +108,7 @@ export function useFunds() {
 export function useBrokerOrders() {
   return useQuery({
     queryKey: ["market", "broker-orders"],
-    queryFn: () => callMarketFn<{ orders: BrokerOrder[]; source: string }>("market-orders"),
+    queryFn: () => callMarketFn<{ orders: BrokerOrder[]; source: string; reconnect_required?: boolean; reason?: string }>("market-orders"),
     // Function form: `marketOpen()` evaluated at mount froze the cadence for
     // the whole session (open the page pre-open and it never refreshed again).
     refetchInterval: liveInterval(10_000, false, 30_000),
@@ -111,7 +118,7 @@ export function useBrokerOrders() {
 export function useBrokerTrades() {
   return useQuery({
     queryKey: ["market", "broker-trades"],
-    queryFn: () => callMarketFn<{ trades: BrokerTrade[]; source: string }>("market-trades"),
+    queryFn: () => callMarketFn<{ trades: BrokerTrade[]; source: string; reconnect_required?: boolean; reason?: string }>("market-trades"),
     refetchInterval: liveInterval(15_000, false, 30_000),
   });
 }

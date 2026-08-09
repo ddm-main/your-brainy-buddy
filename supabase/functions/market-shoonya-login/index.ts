@@ -13,6 +13,7 @@ import {
   shoonyaLoginWithCode,
   type ShoonyaSettings,
 } from "../_shared/market/shoonyaClient.ts";
+import { invalidateSystemFeedCache } from "../_shared/market/provider.ts";
 
 const encrypt = async (v: string) => JSON.stringify(await encryptStatementPassword(v));
 
@@ -22,10 +23,11 @@ async function loginForUser(
   code?: string,
   redirectUrl?: string,
   state?: string,
+  purpose: "account" | "data" = "account",
 ): Promise<{ ok: boolean; detail: string; greeting_name?: string | null; authorize_url?: string }> {
   const { data, error } = await svc.from("market_api_settings")
     .select(SHOONYA_SETTINGS_COLS)
-    .eq("user_id", userId).eq("active_provider", "shoonya");
+    .eq("user_id", userId).eq("active_provider", "shoonya").eq("purpose", purpose);
   if (error) throw new ShoonyaError(error.message, 500);
   const rows = (data ?? []) as unknown as ShoonyaSettings[];
   const s = rows.find((r) => !!r.api_secret_enc) ?? rows[0];
@@ -47,6 +49,7 @@ async function loginForUser(
   try {
     const sess = await shoonyaLoginWithCode(s, code);
     await persistShoonyaSession(svc, s, sess, encrypt);
+    if (purpose === "data") invalidateSystemFeedCache();
     return { ok: true, detail: `Connected as ${sess.greetingName ?? sess.uid}`, greeting_name: sess.greetingName };
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
@@ -84,7 +87,8 @@ Deno.serve(async (req) => {
     const code = typeof body?.code === "string" && body.code.trim() ? body.code.trim() : undefined;
     const redirectUrl = trustedShoonyaRedirect(body?.redirect_url);
     const state = trustedShoonyaState(body?.state);
-    const r = await loginForUser(svcClient(), auth.userId, code, redirectUrl, state);
+    const purpose = String((body as any)?.purpose ?? "account") === "data" ? "data" : "account";
+    const r = await loginForUser(svcClient(), auth.userId, code, redirectUrl, state, purpose);
     // Returning the authorization URL is the successful first stage of the
     // flow, not an HTTP error; the browser must be able to read and open it.
     return jsonResponse(req, r, r.ok || r.authorize_url ? 200 : 400);

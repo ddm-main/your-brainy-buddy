@@ -6,7 +6,7 @@
 // Only service-role code (this module) can decrypt them; the browser never
 // receives the plaintext.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.57.4";
-import { decryptStatementPassword, type StatementPasswordRule } from "../crypto.ts";
+import { decryptStatementPassword, encFailureKind, ENC_KEY_MISSING, type StatementPasswordRule } from "../crypto.ts";
 
 export type KeyedProvider = "fmp" | "alpha_vantage";
 
@@ -35,17 +35,35 @@ export async function getProviderKey(provider: KeyedProvider, options: ProviderK
 
   let value: string | null = null;
   try {
-    const { data } = await svc()
+    const client = svc();
+    const { data } = await client
       .from("market_provider_credentials")
       .select("api_key_enc,key_set")
       .eq("provider", provider)
       .maybeSingle();
     if (data?.key_set && data.api_key_enc) {
-      value = await decryptStatementPassword(data.api_key_enc as unknown as StatementPasswordRule);
+      try {
+        value = await decryptStatementPassword(data.api_key_enc as unknown as StatementPasswordRule);
+      } catch (e) {
+        const kind = encFailureKind(e);
+        if (kind) {
+          // Surface it in Market Config instead of failing silently every run:
+          // the stored ciphertext is unrecoverable and must be re-entered.
+          await client.from("market_provider_credentials").update({
+            last_tested_at: new Date().toISOString(),
+            last_test_ok: false,
+            last_test_detail: kind === ENC_KEY_MISSING
+              ? "Server encryption key missing — contact support"
+              : "Saved key can no longer be decrypted — re-enter the API key",
+          }).eq("provider", provider);
+        }
+        throw e;
+      }
     }
   } catch (e) {
     console.error(`[providerKeys] ${provider} lookup failed:`, e instanceof Error ? e.message : e);
   }
+
 
   if (!value) value = Deno.env.get(ENV_NAME[provider]) ?? null;
   cache.set(provider, { value, at: Date.now() });

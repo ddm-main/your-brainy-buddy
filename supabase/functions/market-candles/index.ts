@@ -13,6 +13,24 @@ import { isTradingHoliday } from "../_shared/market/cron.ts";
 import { getSettlement, isPersistableDate } from "../_shared/market/settlement.ts";
 
 import { recordFeedHeartbeat } from "../_shared/market/heartbeat.ts";
+
+/**
+ * A candle response is labelled by the code path that produced it
+ * ("cache", "quote", "quote_delayed", "mixed", "none"), which is NOT a
+ * provider. Writing those into the heartbeat's provider column made the Feed
+ * Routing page unable to match the answer against the chain, so healthy
+ * candle feeds rendered FALLBACK. Split them.
+ */
+function heartbeatIdentity(name: string, fallbackProvider: string): { provider: string; path: string } {
+  switch (name) {
+    case "cache": return { provider: fallbackProvider, path: "cache" };
+    case "quote": return { provider: fallbackProvider, path: "quote" };
+    case "quote_delayed": return { provider: fallbackProvider, path: "quote_delayed" };
+    case "mixed": return { provider: fallbackProvider, path: "mixed" };
+    case "none": return { provider: fallbackProvider, path: "none" };
+    default: return { provider: name, path: "live" };
+  }
+}
 import { decumulateBars, classifyVolumeSeries, looksCumulative } from "../_shared/market/volume.ts";
 
 
@@ -448,7 +466,7 @@ async function loadDaily(
     const range = wantDeep ? "max" : "30d";
     if (wantDeep) deepTried.set(deepKey, Date.now());
     try {
-      const { provider } = await getReadProvider(svc, userId);
+      const { provider } = await getReadProvider(svc, userId, "candles_1d");
       const meta: OhlcvMeta = {};
       let candles;
       try {
@@ -560,7 +578,7 @@ Deno.serve(async (req) => {
       let lastBarSource: "kotak_neo" | "shoonya" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none" = daily.provider;
       if (session === "open" || session === "post_close") {
         try {
-          const { provider } = await getReadProvider(svc, auth.userId);
+          const { provider } = await getReadProvider(svc, auth.userId, "ltp");
           const dq = await fetchDayQuote(provider, symbol, exchange);
           if (dq && dq.close > 0) {
             const today = istDateString();
@@ -594,7 +612,7 @@ Deno.serve(async (req) => {
       if (timeframe !== "1D" && candles.length < 12) {
         const cfg = INTRADAY[timeframe];
         try {
-          const { provider } = await getReadProvider(svc, auth.userId);
+          const { provider } = await getReadProvider(svc, auth.userId, "candles_1d");
           const meta: OhlcvMeta = {};
           const raw = await provider.getOHLCV(symbol, exchange, cfg.range, cfg.interval, meta);
           if (raw.length > candles.length) {
@@ -620,7 +638,7 @@ Deno.serve(async (req) => {
 
       recordFeedHeartbeat(svc, {
         feedId: "candles_daily",
-        provider: providerName,
+        ...heartbeatIdentity(providerName, "yahoo"),
         ok: candles.length > 0,
         symbols: candles.length,
         detail: reason ?? null,
@@ -675,7 +693,7 @@ Deno.serve(async (req) => {
     const brokerDownForMs = routeOpenForMs(KOTAK_CANDLES_ROUTE);
     const autoDelayed = brokerDownForMs >= 60_000;
 
-    const { provider } = await getReadProvider(svc, auth.userId);
+    const { provider } = await getReadProvider(svc, auth.userId, "candles_intraday");
     const meta: OhlcvMeta = {};
     let providerName: IntradayProviderName = "none";
     let degraded = false;
@@ -917,7 +935,7 @@ Deno.serve(async (req) => {
     const stillCumulative = looksCumulative(candles);
     recordFeedHeartbeat(svc, {
       feedId: timeframe.toLowerCase() === "1d" ? "candles_daily" : "candles_intraday",
-      provider: providerName,
+      ...heartbeatIdentity(providerName, provider.name),
       ok: candles.length > 0 && !stillCumulative,
       symbols: candles.length,
       detail: stillCumulative ? `cumulative_volume_detected:${reason ?? providerName}` : (reason ?? null),

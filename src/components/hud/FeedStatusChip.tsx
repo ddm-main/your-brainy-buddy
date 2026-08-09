@@ -49,7 +49,7 @@ export default function FeedStatusChip() {
     <button
       className="focus-outline"
       title={title}
-      onClick={() => nav("/config/system-data")}
+      onClick={() => nav("/config/feeds")}
       style={{
         display: "flex", alignItems: "center", gap: 6,
         padding: "4px 8px", border: "1px solid var(--edge)", borderRadius: 2,

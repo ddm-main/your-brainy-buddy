@@ -13,7 +13,7 @@
 //      { code, checksum: sha256(clientId + secret + code), uid }
 //   4. use the returned `access_token` as the bearer/jKey for all calls.
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
-import { decryptStatementPassword, type StatementPasswordRule } from "../crypto.ts";
+import { decryptStatementPassword, encFailureKind, ENC_KEY_MISSING, ENC_KEY_MISMATCH, type StatementPasswordRule } from "../crypto.ts";
 import type { Candle } from "./indicators.ts";
 
 export const SHOONYA_HOST = "https://api.shoonya.com";
@@ -102,8 +102,20 @@ export function isShoonyaSessionError(message: string): boolean {
 
 async function dec(encJson: string | null): Promise<string | null> {
   if (!encJson) return null;
-  return decryptStatementPassword(JSON.parse(encJson) as StatementPasswordRule);
+  try {
+    return await decryptStatementPassword(JSON.parse(encJson) as StatementPasswordRule);
+  } catch (e) {
+    const kind = encFailureKind(e);
+    if (kind === ENC_KEY_MISSING) {
+      throw new ShoonyaError("Server encryption key is not configured — Shoonya credentials cannot be read", 500);
+    }
+    if (kind === ENC_KEY_MISMATCH) {
+      throw new ShoonyaError("Saved Shoonya credentials can no longer be decrypted — re-enter them in Market Config → Providers", 401);
+    }
+    throw e;
+  }
 }
+
 
 export async function sha256Hex(input: string): Promise<string> {
   const bytes = new TextEncoder().encode(input);

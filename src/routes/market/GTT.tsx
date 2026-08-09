@@ -9,7 +9,7 @@ import { useMarketSettings } from "@/lib/market/hooks";
 import { useGttMutations, useGttOrders, type GttOrder, type PlaceGttInput } from "@/lib/market/gttHooks";
 import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
-import { relTime } from "@/lib/db";
+import { relTime } from "@/lib/relTime";
 import { Plus, Trash2, X } from "lucide-react";
 
 const emptyDraft: PlaceGttInput = {

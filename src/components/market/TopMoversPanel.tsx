@@ -33,9 +33,28 @@ export function TopMoversPanel() {
   const liveTicks = useLiveTickStore.getState().ticks;
   void _ticksRev_liveTicks; // re-render on any tick flush; read fresh map above
 
+  // Freshness: EOD rows carry the session they were computed for. If any row
+  // is ticking from the relay the panel is live; otherwise show which session
+  // the numbers belong to so a stale pipeline is never mistaken for live data.
+  const anyLive = rows.some((r) => isFreshTick(liveTicks[`${r.exchange}:${r.symbol}`]));
+  const tradeDate = rows.find((r) => r.trade_date)?.trade_date ?? null;
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const stale = !anyLive && !!tradeDate && tradeDate < todayIso;
+  const chipLabel = anyLive ? "live" : tradeDate ? `EOD ${tradeDate}` : "no session";
+  const chipColor = anyLive ? "var(--ok, #35d67a)" : stale ? "var(--warn, #e0b23a)" : "var(--text-dim)";
+
   return (
     <HudPanel flow title="Top Movers" actions={
-      <div style={{ display: "flex", gap: 4 }}>
+      <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+        <span
+          className="hud-label"
+          title={anyLive ? "Streaming push ticks" : `Latest completed session: ${tradeDate ?? "unknown"}`}
+          style={{
+            fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase",
+            color: chipColor, border: `1px solid ${chipColor}`, borderRadius: 2,
+            padding: "2px 6px", marginRight: 2, whiteSpace: "nowrap",
+          }}
+        >{chipLabel}</span>
         {(["gain", "lose"] as const).map((d) => (
           <button
             key={d}
@@ -52,6 +71,7 @@ export function TopMoversPanel() {
         ))}
       </div>
     }>
+
       {rows.length === 0 ? (
         <div className="hud-label" style={{ color: "var(--text-dim)", fontSize: 11 }}>
           {isFetching ? "loading…" : "no data yet — waiting on pipeline"}

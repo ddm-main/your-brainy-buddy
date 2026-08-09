@@ -3,7 +3,7 @@
 // with an encrypted TOTP secret + MPIN stored we can re-login unattended.
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
-import { decryptStatementPassword, type StatementPasswordRule } from "../crypto.ts";
+import { decryptStatementPassword, encFailureKind, ENC_KEY_MISSING, ENC_KEY_MISMATCH, type StatementPasswordRule } from "../crypto.ts";
 import { isKotakSessionFailure } from "./kotakErrorClassifier.ts";
 import { totp } from "./totp.ts";
 import { isRouteOpen, noteRouteFailure, noteRouteSuccess, routeOpenReason } from "./routeBreaker.ts";
@@ -35,8 +35,21 @@ export const KOTAK_SETTINGS_COLS =
 
 async function dec(encJson: string | null): Promise<string | null> {
   if (!encJson) return null;
-  return decryptStatementPassword(JSON.parse(encJson) as StatementPasswordRule);
+  try {
+    return await decryptStatementPassword(JSON.parse(encJson) as StatementPasswordRule);
+  } catch (e) {
+    const kind = encFailureKind(e);
+    if (kind === ENC_KEY_MISSING) {
+      throw new KotakError("Server encryption key is not configured — Kotak credentials cannot be read", 500);
+    }
+    if (kind === ENC_KEY_MISMATCH) {
+      // Ciphertext predates the current key: unrecoverable, needs one re-entry.
+      throw new KotakError("Saved Kotak credentials can no longer be decrypted — re-enter them in Market Config → Providers", 401);
+    }
+    throw e;
+  }
 }
+
 
 function apiBase(s: KotakSettings): string {
   const b = (s.base_url ?? "").replace(/\/+$/, "");
@@ -109,6 +122,41 @@ export class KotakError extends Error {
   constructor(message: string, public status: number, public body?: string) {
     super(message);
   }
+}
+
+export function isUnreadableKotakCredentialsError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /can no longer be decrypted|cannot be decrypted with the current key|no longer readable/i.test(message);
+}
+
+export async function clearUnreadableKotakCredentials(
+  svc: SupabaseClient,
+  s: KotakSettings,
+): Promise<void> {
+  const lastError = "Re-enter mobile number, MPIN and TOTP secret once — the previous encrypted values are no longer readable.";
+  await svc.from("market_api_settings").update({
+    mobile_number_enc: null,
+    mpin_enc: null,
+    totp_secret_enc: null,
+    view_token_enc: null,
+    session_token_enc: null,
+    sid: null,
+    hs_server_id: null,
+    token_expires_at: null,
+    connection_status: "disconnected",
+    last_error: lastError,
+  }).eq("id", s.id);
+
+  // Prevent this invocation from retrying values that have just been retired.
+  s.mobile_number_enc = null;
+  s.mpin_enc = null;
+  s.totp_secret_enc = null;
+  s.view_token_enc = null;
+  s.session_token_enc = null;
+  s.sid = null;
+  s.hs_server_id = null;
+  s.token_expires_at = null;
+  s.connection_status = "disconnected";
 }
 
 // Thrown by withKotakSession(..., { retryOnAuthError: false }) when a 401/403
@@ -193,9 +241,15 @@ export async function kotakLogin(
 ): Promise<KotakSession> {
   if (!s.consumer_key) throw new KotakError("Consumer key not configured", 400);
   const mobile = await dec(s.mobile_number_enc);
-  const mpin = await dec(s.mpin_enc);
+  // Kotak rejects anything longer than 6 chars for Mpin, so strip stray
+  // whitespace/formatting the stored value may carry before sending it.
+  const mpin = (await dec(s.mpin_enc))?.replace(/\D/g, "") ?? "";
   if (!mobile) throw new KotakError("Mobile number not configured", 400);
   if (!mpin) throw new KotakError("MPIN not configured", 400);
+  if (mpin.length > 6) {
+    throw new KotakError("Saved MPIN is longer than 6 digits — re-enter your 6-digit Kotak MPIN in Broker config.", 400);
+  }
+
   if (!s.ucc) throw new KotakError("UCC not configured", 400);
 
   // A stored number may already carry the country code ("91XXXXXXXXXX") — the
@@ -1008,6 +1062,13 @@ export async function withKotakSession<T>(
   try {
     return await fn(s);
   } catch (e) {
+    if (isUnreadableKotakCredentialsError(e)) {
+      await clearUnreadableKotakCredentials(svc, s);
+      throw new KotakError(
+        "Saved Kotak credentials are no longer readable. Re-enter mobile number, MPIN and TOTP secret in Market Config → Providers.",
+        409,
+      );
+    }
     if (!(e instanceof KotakError) || !isKotakSessionError(e)) throw e;
     if (retryOnAuthError && s.totp_secret_enc) {
       const fresh: KotakSettings = await withReloginLock(s.id, async () => {

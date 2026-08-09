@@ -1,5 +1,6 @@
 // Orders — today's broker order book + trades. Cancel/modify pending orders.
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { HudModal } from "@/components/hud/HudModal";
@@ -41,6 +42,7 @@ export default function Orders() {
   const orders = ordersData?.orders ?? [];
   const trades = tradesData?.trades ?? [];
   const source = ordersData?.source ?? tradesData?.source ?? "";
+  const reconnectRequired = ordersData?.reconnect_required || tradesData?.reconnect_required || source === "reconnect_required";
 
   const { pending, done } = useMemo(() => {
     const p: BrokerOrder[] = [], d: BrokerOrder[] = [];
@@ -57,6 +59,17 @@ export default function Orders() {
     try { await cancel.mutateAsync(id); push("Cancel requested", "ok"); }
     catch (e) { push(toSafeError(e, "Cancel failed").message, "err"); }
   };
+
+  if (reconnectRequired) {
+    return <HudPanel flow title="Kotak reconnect required" index="MK.OR">
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div className="hud-label" style={{ color: "var(--danger)" }}>
+          Saved Kotak credentials are no longer readable. Re-enter mobile number, MPIN and TOTP secret once.
+        </div>
+        <Link to="/market/settings"><Btn variant="primary" size="sm">Open provider settings</Btn></Link>
+      </div>
+    </HudPanel>;
+  }
 
   if (source === "unavailable") {
     return <HudPanel flow title="Broker orders" index="MK.OR">

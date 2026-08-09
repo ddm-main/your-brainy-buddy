@@ -15,7 +15,9 @@ import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 
 const limiter = createMarketLimiter(60, 60_000);
 
-const STATUS_COLS = "id,user_id,active_provider,connection_status,ucc,greeting_name,last_sync_at,last_error,token_expires_at,updated_at,is_system";
+const STATUS_COLS = "id,user_id,active_provider,connection_status,ucc,greeting_name,last_sync_at,last_error,token_expires_at,updated_at,is_system,purpose";
+
+const BROKERS = ["kotak_neo", "shoonya"];
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
@@ -32,15 +34,38 @@ Deno.serve(async (req) => {
       .from("user_roles").select("role").eq("user_id", auth.userId).eq("role", "admin").maybeSingle()
       .then((r) => !!r.data, () => false);
 
+    // Create (or return) a data-feed connection row for a broker. Data feeds
+    // are app-wide plumbing — owned by the admin who created them, but never
+    // mixed with that admin's personal trading connection.
+    if (action === "create_data_feed") {
+      if (!isAdmin) return errorResponse(req, "admin_only", 403);
+      const provider = String((body as any)?.provider ?? "");
+      if (!BROKERS.includes(provider)) return errorResponse(req, "unsupported provider");
+      const { data: existing } = await svc
+        .from("market_api_settings").select("id")
+        .eq("user_id", auth.userId).eq("active_provider", provider).eq("purpose", "data").maybeSingle();
+      if (!existing) {
+        const { error: insErr } = await svc.from("market_api_settings").insert({
+          user_id: auth.userId,
+          active_provider: provider,
+          purpose: "data",
+          connection_status: "disconnected",
+        });
+        if (insErr) throw insErr;
+      }
+      invalidateSystemFeedCache();
+    }
+
     if (action === "designate") {
       if (!isAdmin) return errorResponse(req, "admin_only", 403);
       const id = String((body as any)?.id ?? "");
       if (!id) return errorResponse(req, "id required");
       const { data: target, error: tErr } = await svc
-        .from("market_api_settings").select("id,active_provider").eq("id", id).maybeSingle();
+        .from("market_api_settings").select("id,active_provider,purpose").eq("id", id).maybeSingle();
       if (tErr) throw tErr;
       if (!target) return errorResponse(req, "connection not found", 404);
-      if (target.active_provider !== "kotak_neo") return errorResponse(req, "only a Kotak Neo connection can be the system feed");
+      if (target.purpose !== "data") return errorResponse(req, "only a data-feed connection can serve market data");
+      if (!BROKERS.includes(target.active_provider)) return errorResponse(req, "unsupported provider for the data feed");
       // Unique partial index allows exactly one system row — clear first.
       const { error: clearErr } = await svc.from("market_api_settings").update({ is_system: false }).eq("is_system", true);
       if (clearErr) throw clearErr;
@@ -49,20 +74,15 @@ Deno.serve(async (req) => {
       invalidateSystemFeedCache();
     }
 
-    // Status — designated row first, else the legacy "newest connected" pick
-    // the resolver would use, so the UI shows what actually serves prices.
+    // Status — the designated data feed, and nothing else. If no admin feed is
+    // designated, prices come from public vendors; we say so honestly instead
+    // of pointing at some user's broker session.
     const { data: designated } = await svc
       .from("market_api_settings").select(STATUS_COLS)
-      .eq("active_provider", "kotak_neo").eq("is_system", true).limit(1);
-    let row = (designated ?? [])[0] ?? null;
-    let designatedFlag = !!row;
-    if (!row) {
-      const { data } = await svc
-        .from("market_api_settings").select(STATUS_COLS)
-        .eq("active_provider", "kotak_neo")
-        .order("updated_at", { ascending: false }).limit(5);
-      row = (data ?? []).find((r: any) => r.connection_status === "connected") ?? null;
-    }
+      .eq("is_system", true).eq("purpose", "data").limit(1);
+    const row = (designated ?? [])[0] ?? null;
+    const designatedFlag = !!row;
+
 
     const owned = !!row && row.user_id === auth.userId;
     return jsonResponse(req, {
@@ -77,8 +97,10 @@ Deno.serve(async (req) => {
       // Identity of the feed account only for admins / its owner.
       id: isAdmin ? (row?.id ?? null) : null,
       ucc: isAdmin || owned ? (row?.ucc ?? null) : null,
+      provider: row?.active_provider ?? null,
       is_owner: owned,
       is_admin: isAdmin,
+
     });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);

@@ -18,20 +18,28 @@ export type SurfaceProbe = {
   checked_at: string;
   /** Did the feed's default primary answer, or a fallback? */
   is_primary_path?: boolean | null;
+  /** 'data' = shared market feed, 'account' = one broker account's surfaces. */
+  plane?: ProbePlane | null;
 };
+
+/** Which plane of probes to read. Shared feed status must never mix with a
+ *  personal broker account's health. */
+export type ProbePlane = "data" | "account";
 
 export const SELFTEST_QUERY_KEY = ["market", "surface-probes"] as const;
 export const FRESHNESS_QUERY_KEY = ["market", "feed-freshness"] as const;
 export const PROVIDER_STATS_KEY = ["market", "provider-stats-24h"] as const;
 
-/** Latest stored probe per surface, best (most healthy, then newest) first. */
-export function useSurfaceProbes() {
+/** Latest stored probe per surface, best (most healthy, then newest) first.
+ *  Defaults to the shared data plane — the app-wide feed everyone reads. */
+export function useSurfaceProbes(plane: ProbePlane = "data") {
   return useQuery({
-    queryKey: SELFTEST_QUERY_KEY,
+    queryKey: [...SELFTEST_QUERY_KEY, plane],
     queryFn: async () => {
       const { data, error } = await supabase
         .from("market_surface_probes")
-        .select("surface, provider, ok, state, detail, latency_ms, checked_at, is_primary_path")
+        .select("surface, provider, ok, state, detail, latency_ms, checked_at, is_primary_path, plane")
+        .eq("plane", plane)
         .order("checked_at", { ascending: false });
       if (error) throw error;
       return (data ?? []) as SurfaceProbe[];
@@ -80,6 +88,21 @@ const RANK: Record<SurfaceState, number> = { ok: 0, degraded: 1, failed: 2, not_
 /** Probe rows older than this are ignored: a surface that stopped being probed
  *  must decay to "unknown" instead of holding yesterday's healthy verdict. */
 export const PROBE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How long a probe verdict stays *current*. Beyond this the row is evidence of
+ * the past, not of now: rendering yesterday's red FAILED chip as today's status
+ * is a lie, so callers show "not checked" instead. Tighter while the market is
+ * open, where a stale verdict is most misleading.
+ */
+export const probeFreshMs = (sessionOpen: boolean) => (sessionOpen ? 60 : 6 * 60) * 60_000;
+
+export function isProbeStale(checkedAt: string | null | undefined, sessionOpen: boolean): boolean {
+  if (!checkedAt) return true;
+  const t = new Date(checkedAt).getTime();
+  if (Number.isNaN(t)) return true;
+  return Date.now() - t > probeFreshMs(sessionOpen);
+}
 
 /** Collapse multi-provider rows to one row per surface — the healthiest wins,
  *  because a feed served by its fallback is still a working feed. The primary's
@@ -134,6 +157,17 @@ export function useProviderStats24h() {
   return useQuery({
     queryKey: PROVIDER_STATS_KEY,
     queryFn: async () => {
+      // Server-side aggregate first: the client pull was capped at 2 000 rows,
+      // so with ~5 000 health rows a day the "success rate" was computed from
+      // an arbitrary slice of the log rather than the whole 24 h.
+      const rpc = await (supabase as any).rpc("market_provider_stats_24h");
+      if (!rpc.error && Array.isArray(rpc.data)) {
+        const out: Record<string, ProviderStats> = {};
+        for (const r of rpc.data as Array<{ provider: string; attempts: number; ok_rate: number; p50_ms: number | null }>) {
+          out[r.provider] = { attempts: Number(r.attempts), okRate: Math.round(Number(r.ok_rate)), p50: r.p50_ms == null ? null : Number(r.p50_ms) };
+        }
+        return out;
+      }
       const since = new Date(Date.now() - 86_400_000).toISOString();
       const { data, error } = await (supabase as any)
         .from("market_provider_health")

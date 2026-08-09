@@ -9,8 +9,10 @@ import { ArrowLeft, KeyRound, Settings2, TestTube2 } from "lucide-react";
 import { PROVIDERS, type ProviderId, type Feed } from "./feedCatalog";
 import { ago, clean, type CredRow, type HealthRow } from "./providerUtils";
 import {
-  useFeedFreshness, useSurfaceProbes, canonicalProviderId, freshKey, type SurfaceProbe,
+  useFeedFreshness, useSurfaceProbes, canonicalProviderId, freshKey, isProbeStale,
+  type SurfaceProbe,
 } from "@/lib/market/selftest";
+import { nseClockOpen, useMarketHoliday } from "@/lib/market/feedStatus";
 import HealthSparkline from "./HealthSparkline";
 
 
@@ -74,7 +76,9 @@ export default function ProviderDetail({
   // Stored probe results for THIS provider. Probing on mount used to fire a
   // live broker call per page view and reset on reload; the self-test (button
   // + cron) is the single writer now, so the page is instant and consistent.
-  const { data: probeRows = [], isFetching: probing } = useSurfaceProbes();
+  const { data: probeRows = [], isFetching: probing } = useSurfaceProbes("data");
+  const { data: holiday = false } = useMarketHoliday();
+  const sessionOpen = nseClockOpen() && !holiday;
   const surfaces = useMemo(() => {
     const mine: Record<string, SurfaceProbe> = {};
     for (const r of probeRows) {
@@ -103,6 +107,13 @@ export default function ProviderDetail({
       note = clean(probe.detail ?? undefined);
       source = meta.name;
       const state = probe.state ?? (probe.ok ? "ok" : "failed");
+      // A verdict that nobody refreshed is history, not status. Rendering a
+      // day-old red "failed" chip as current health was pure misinformation.
+      if (state !== "not_configured" && isProbeStale(probe.checked_at, sessionOpen)) {
+        tone = "neutral"; label = "not checked";
+        note = `last verdict ${probe.ok ? "ok" : state}${note ? ` · ${note}` : ""}`;
+        return { f, tone, label, source, note, fresh, checkedAt };
+      }
       if (state === "ok") { tone = "ok"; label = "live"; }
       else if (state === "degraded") { tone = "warn"; label = probe.ok ? "degraded" : "busy — retry"; }
       // A provider nobody connected has no health to report — showing it as a
@@ -122,7 +133,9 @@ export default function ProviderDetail({
   };
 
 
-  const rows = meta.feeds.map(rowFor);
+  // Admin Config shows only the shared data feed. Account surfaces live on the
+  // user's own broker screen, where a session problem is actionable.
+  const rows = meta.feeds.filter((f) => (f.scope ?? "data") === "data").map(rowFor);
   const bad = rows.some((r) => r.tone === "err");
   const warn = rows.some((r) => r.tone === "warn");
 

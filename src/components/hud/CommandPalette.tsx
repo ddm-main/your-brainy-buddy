@@ -2,14 +2,12 @@ import { useEffect, useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { useUi } from "@/store/uiStore";
-import { authFetch } from "@/lib/authFetch";
-import { runMorningBriefing } from "@/lib/briefing";
-import { Command as CmdIcon, Wallet, Home, ListChecks, Scan, Sparkles, SlidersHorizontal, CheckSquare, FileText } from "lucide-react";
+import { Command as CmdIcon, LineChart, SlidersHorizontal } from "lucide-react";
 
 type Cmd = { id: string; label: string; hint?: string; icon: any; run: () => void };
 
 export default function CommandPalette() {
-  const { paletteOpen, setPalette, push } = useUi();
+  const { paletteOpen, setPalette } = useUi();
   const nav = useNavigate();
   const [q, setQ] = useState("");
 
@@ -29,34 +27,11 @@ export default function CommandPalette() {
   useEffect(() => { if (paletteOpen) setQ(""); }, [paletteOpen]);
 
   const commands: Cmd[] = useMemo(() => [
-    { id: "home", label: "Open HUD", hint: "home", icon: Home, run: () => nav("/") },
-    { id: "tasks", label: "Open Tasks", hint: "quick capture, focus", icon: CheckSquare, run: () => nav("/workspace") },
-    { id: "notes", label: "Open Notes", hint: "scratchpad", icon: FileText, run: () => { window.location.hash = "notes"; nav("/workspace"); } },
-    { id: "finance", label: "Open Finance", hint: "accounts, transactions, statements", icon: Wallet, run: () => nav("/finance") },
-    { id: "projects", label: "Open Projects", hint: "active work", icon: ListChecks, run: () => nav("/projects") },
-    { id: "config", label: "Open Config", hint: "connections, entities, memory", icon: SlidersHorizontal, run: () => nav("/config") },
-    {
-      id: "scan", label: "Scan bank mail now", hint: "finance ingestion", icon: Scan,
-      run: async () => {
-        push("Scanning bank mail…", "info");
-        try {
-          const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/finance-extract`;
-          const r = await authFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ since_days: 90, limit: 500 }) });
-          const j = await r.json();
-          if (!r.ok) throw new Error(j?.error ?? r.statusText);
-          push(`Extracted ${j.transactions ?? 0} txn, ${j.statements ?? 0} stmt`, "ok");
-        } catch (e: any) { push(e?.message ?? "scan failed", "err"); }
-      },
-    },
-    {
-      id: "brief", label: "Brief me", hint: "run a fresh briefing", icon: Sparkles,
-      run: async () => {
-        push("Briefing…", "info");
-        try { await runMorningBriefing(true); nav("/"); }
-        catch (e: any) { push(e?.message ?? "briefing failed", "err"); }
-      },
-    },
-  ], [nav, push]);
+    { id: "market", label: "Open Market", hint: "quotes, screener, portfolio", icon: LineChart, run: () => nav("/market") },
+    { id: "market-settings", label: "Market Settings", hint: "brokers, feeds", icon: SlidersHorizontal, run: () => nav("/market/settings") },
+    { id: "config", label: "Open Config", hint: "market config, admin", icon: SlidersHorizontal, run: () => nav("/config") },
+  ], [nav]);
+
 
   const filtered = q
     ? commands.filter((c) => (c.label + " " + (c.hint ?? "")).toLowerCase().includes(q.toLowerCase()))

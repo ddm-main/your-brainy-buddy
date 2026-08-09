@@ -20,6 +20,9 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     const requested = String(body?.provider ?? "active");
+    // Which plane is being probed: the app-wide data feed (default — this is
+    // what Feed Routing reports on) or the caller's own account connection.
+    const probePurpose = String(body?.purpose ?? "data") === "account" ? "account" : "data";
     const svc = svcClient();
 
     // Surface-level end-to-end audit for one provider.
@@ -45,13 +48,17 @@ Deno.serve(async (req) => {
             checked_at,
           };
         }
-        await recordSurfaceProbes(svc, surfaces, Date.now() - started);
+        await recordSurfaceProbes(svc, surfaces, Date.now() - started, "data");
         return jsonResponse(req, { ok: r.ok, mode: "surfaces", provider: requested, surfaces });
       }
       const which = requested === "kotak_neo" || requested === "shoonya" || requested === "yahoo" ? requested : "active";
-      const report = await surfaceReport(svc, auth.userId, which);
-      await recordSurfaceProbes(svc, report);
+      // A data-feed test probes only the shared feed surfaces; an account test
+      // probes only the caller's account surfaces. Never both from one row.
+      const scope = probePurpose === "account" ? "account" : "data";
+      const report = await surfaceReport(svc, auth.userId, which, probePurpose, scope);
+      await recordSurfaceProbes(svc, report, undefined, scope);
       return jsonResponse(req, { ok: true, mode: "surfaces", provider: which, surfaces: report });
+
     }
 
 
@@ -75,13 +82,17 @@ Deno.serve(async (req) => {
       // active — a working Kotak session must not report "not configured"
       // just because the user is reading through Yahoo right now.
       const { data, error } = await svc.from("market_api_settings")
-        .select(KOTAK_SETTINGS_COLS)
-        .eq("user_id", auth.userId);
+        .select(KOTAK_SETTINGS_COLS + ",purpose")
+        .eq("user_id", auth.userId)
+        .eq("active_provider", "kotak_neo")
+        .eq("purpose", probePurpose);
       if (error) return errorResponse(req, error.message, 500);
-      const candidates = (data ?? []) as KotakSettings[];
-      const row = candidates.find((r) => !!r.session_token_enc && !!r.sid)
-        ?? candidates.find((r) => !!r.totp_secret_enc)
-        ?? candidates[0];
+      const all = (data ?? []) as Array<KotakSettings & { purpose?: string }>;
+      // Account and data-feed credentials are separate security planes. A
+      // probe must never borrow the other plane merely because it is usable.
+      const row = all.find((r) => !!r.session_token_enc && !!r.sid)
+        ?? all.find((r) => !!r.totp_secret_enc)
+        ?? all[0];
       if (!row) return jsonResponse(req, { ok: false, provider: "kotak_neo", detail: "Kotak Neo is not configured yet" });
       const kotak = row;
 
@@ -95,13 +106,14 @@ Deno.serve(async (req) => {
       // active provider is, so a live Shoonya session never reports
       // "not configured" just because reads route elsewhere.
       const { data, error } = await svc.from("market_api_settings")
-        .select(SHOONYA_SETTINGS_COLS)
-        .eq("user_id", auth.userId).eq("active_provider", "shoonya");
+        .select(SHOONYA_SETTINGS_COLS + ",purpose")
+        .eq("user_id", auth.userId).eq("active_provider", "shoonya")
+        .eq("purpose", probePurpose);
       if (error) return errorResponse(req, error.message, 500);
-      const candidates = (data ?? []) as unknown as ShoonyaSettings[];
-      const row = candidates.find((r) => !!r.session_token_enc)
-        ?? candidates.find((r) => !!r.vendor_code && !!r.api_secret_enc)
-        ?? candidates[0];
+      const allSh = (data ?? []) as unknown as Array<ShoonyaSettings & { purpose?: string }>;
+      const row = allSh.find((r) => !!r.session_token_enc)
+        ?? allSh.find((r) => !!r.vendor_code && !!r.api_secret_enc)
+        ?? allSh[0];
       if (!row) return jsonResponse(req, { ok: false, provider: "shoonya", detail: "Shoonya is not configured yet" });
       if (!row.session_token_enc) {
         return jsonResponse(req, { ok: false, provider: "shoonya", detail: "Shoonya authorization is required — authorize in Brokers and paste the returned code" });

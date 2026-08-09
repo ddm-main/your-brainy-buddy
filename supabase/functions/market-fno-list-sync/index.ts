@@ -3,6 +3,7 @@
 // `fno_enabled` on market_stocks. Weekly cron; also runnable from MarketConfig.
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../_shared/cors.ts";
+import { requireCronSecret } from "../_shared/market/cron.ts";
 import { nseFetch } from "../_shared/market/nseClient.ts";
 
 // NSE moved archives to nsearchives.* in 2025; the legacy /archives.* URL
@@ -40,10 +41,12 @@ Deno.serve(async (req) => {
     const svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(url, svc, { auth: { persistSession: false } });
 
-    const cronSecret = Deno.env.get("CRON_SECRET");
-    const hdr = req.headers.get("x-cron-secret");
+    // Cron callers are verified against the Vault-held secret (requireCronSecret
+    // returns null on a match); authenticated users can also trigger this.
     const authHdr = req.headers.get("authorization");
-    const isCron = cronSecret && hdr && hdr === cronSecret;
+    const isCron = req.headers.get("x-cron-secret")
+      ? (await requireCronSecret(req)) === null
+      : false;
     if (!isCron && !authHdr) {
       return new Response(JSON.stringify({ error: "unauthorized" }), {
         status: 401, headers: { ...cors, "Content-Type": "application/json" },

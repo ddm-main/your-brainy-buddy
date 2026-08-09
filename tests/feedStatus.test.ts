@@ -9,6 +9,9 @@ const row = (id: string, status: Status, perUser = false): FeedRow => ({
   servedBy: "",
   health: "",
   primaryProbe: null,
+  chainHealth: [],
+  autoSwitched: false,
+  checkedAt: null,
 });
 
 describe("feed health tallies", () => {

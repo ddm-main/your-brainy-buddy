@@ -79,38 +79,51 @@ export function bytesToText(u: Uint8Array): string {
 }
 
 /** Constant-time CRON secret verification for edge functions that run with
- * service-role privileges and no JWT gate. Accepts either `CRON_SECRET` or
- * the project's existing `SYNC_HOOK_SECRET` env var (whichever is set), and
- * matches against either `x-cron-secret` or `x-sync-hook-secret` on the
- * request — pg_cron jobs and manual triggers can use whichever pair is
- * configured. Fails closed on misconfiguration. */
+ * service-role privileges and no JWT gate. Matches `x-cron-secret` /
+ * `x-sync-hook-secret` against `CRON_SECRET` / `SYNC_HOOK_SECRET` when those
+ * env vars are set, and otherwise falls back to the Vault-held
+ * `market_cron_secret` via a service-role RPC — pg_cron sends the Vault value,
+ * so the Vault entry is the single source of truth and no env copy has to be
+ * kept in sync with it. Fails closed. */
 export async function verifyCronSecret(req: Request): Promise<Response | null> {
-  const secrets = [
-    Deno.env.get("CRON_SECRET"),
-    Deno.env.get("SYNC_HOOK_SECRET"),
-  ].filter((v): v is string => typeof v === "string" && v.length > 0);
-  if (secrets.length === 0) {
-    return new Response(JSON.stringify({ error: "misconfigured — CRON_SECRET / SYNC_HOOK_SECRET not set" }), {
-      status: 500, headers: { "Content-Type": "application/json" },
+  const forbidden = () =>
+    new Response(JSON.stringify({ error: "forbidden" }), {
+      status: 403, headers: { "Content-Type": "application/json" },
     });
-  }
+
   const provided =
     req.headers.get("x-cron-secret") ??
     req.headers.get("x-sync-hook-secret") ??
     "";
+  if (!provided) return forbidden();
+
+  const secrets = [
+    Deno.env.get("CRON_SECRET"),
+    Deno.env.get("SYNC_HOOK_SECRET"),
+    Deno.env.get("MARKET_CRON_SECRET"),
+  ].filter((v): v is string => typeof v === "string" && v.length > 0);
+
   const enc = new TextEncoder();
   const providedDigest = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(provided)));
-  let match = false;
   for (const s of secrets) {
     const d = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(s)));
     let diff = providedDigest.length ^ d.length;
     for (let i = 0; i < providedDigest.length; i++) diff |= providedDigest[i] ^ d[i];
-    if (diff === 0) { match = true; break; }
+    if (diff === 0) return null;
   }
-  if (!match) {
-    return new Response(JSON.stringify({ error: "forbidden" }), {
-      status: 403, headers: { "Content-Type": "application/json" },
+
+  // Vault fallback (pg_cron's own value).
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!supabaseUrl || !serviceKey) {
+    return new Response(JSON.stringify({ error: "misconfigured — no cron secret source available" }), {
+      status: 500, headers: { "Content-Type": "application/json" },
     });
   }
+  const { createClient } = await import("npm:@supabase/supabase-js@2");
+  const svc = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false } });
+  const { data, error } = await svc.rpc("verify_market_cron_secret", { _secret: provided });
+  if (error || data !== true) return forbidden();
   return null;
 }
+

@@ -36,28 +36,35 @@ export default function FeedRoutingPanel() {
   const push = useUi((s) => s.push);
   const selfTest = useRunSelfTest();
 
-  const { rows, tally, accountTally, prefs, sessionOpen, holiday } = useFeedStatus();
+  // Account-plane surfaces (funds / holdings / positions / orders) are a
+  // per-user broker concern and live on Market → Config → Account feed health.
+  // This admin panel is platform data feeds only, so a personal session
+  // problem can never read as a platform outage.
+  const { rows: allRows, tally, prefs, sessionOpen, holiday } = useFeedStatus();
+  const rows = useMemo(() => allRows.filter((r) => r.f.group !== "account"), [allRows]);
   const { data: providerStats = {} } = useProviderStats24h();
 
   const prefFor = (feedId: string) => prefs.find((p) => p.feed_id === feedId);
 
+  // Routing is app-wide (scope='system', user_id null) — that is the only
+  // scope the edge resolver reads. Writing per-user rows here silently did
+  // nothing to the actual data pipeline.
   const save = useMutation({
     mutationFn: async ({ feedId, primary, fallback }: { feedId: string; primary: string; fallback: string }) => {
       const uid = await currentUserId();
       if (!uid) throw new Error("Not signed in");
-      if (primary === "auto" && fallback === "auto") {
-        const { error } = await supabase.from("market_feed_prefs")
-          .delete().eq("feed_id", feedId).eq("user_id", uid);
-        if (error) throw error;
-        return;
-      }
-      const { error } = await supabase.from("market_feed_prefs").upsert(
+      // Replace rather than upsert: the only unique index is partial
+      // (feed_id WHERE scope='system'), which PostgREST cannot infer.
+      const { error: delErr } = await supabase.from("market_feed_prefs")
+        .delete().eq("feed_id", feedId).eq("scope", "system");
+      if (delErr) throw delErr;
+      if (primary === "auto" && fallback === "auto") return;
+      const { error } = await supabase.from("market_feed_prefs").insert(
         {
-          user_id: uid, feed_id: feedId,
+          scope: "system", user_id: null, feed_id: feedId,
           provider: primary,
           fallback_provider: fallback === "auto" ? null : fallback,
         } as never,
-        { onConflict: "user_id,feed_id" },
       );
       if (error) throw error;
     },
@@ -75,7 +82,12 @@ export default function FeedRoutingPanel() {
   const retryKey = useMemo(() => {
     const set = new Set<string>();
     for (const r of rows) {
-      if (r.status !== "FALLBACK" && r.status !== "DELAYED") continue;
+      // Only genuine recovery cases. A DELAYED on-demand or cache-backed feed
+      // is working as designed, and probing it every 30 s burned quota while
+      // never changing the verdict.
+      const recoverable = r.status === "DOWN" || (r.status === "FALLBACK" && !r.f.onDemand);
+      if (!recoverable) continue;
+      if (r.f.sessionOnly && !sessionOpen) continue;
       const primary = (prefFor(r.f.id)?.provider as RoutedProvider | undefined) ?? r.f.chain[0];
       if (primary === "kotak") set.add("kotak_neo");
       else if (primary === "alpha") set.add("alpha_vantage");
@@ -127,21 +139,17 @@ export default function FeedRoutingPanel() {
   const counts: Record<Status, number> = {
     LIVE: tally.live, DELAYED: tally.delayed, FALLBACK: tally.fallback,
     DOWN: tally.down, IDLE: tally.idle, "NOT SET": tally.notSet,
-  };
-  const accountCounts: Record<Status, number> = {
-    LIVE: accountTally.live, DELAYED: accountTally.delayed, FALLBACK: accountTally.fallback,
-    DOWN: accountTally.down, IDLE: accountTally.idle, "NOT SET": accountTally.notSet,
+    "NOT CHECKED": tally.notChecked,
   };
   const overridden = prefs.length;
 
-
-  const groups: FeedGroup[] = ["live", "history", "account", "reference"];
+  const groups: FeedGroup[] = ["live", "history", "reference"];
 
   return (
     <HudPanel
       title="Feed Routing"
       index="RTE"
-      live={counts.DOWN + accountCounts.DOWN > 0 ? "err" : counts.FALLBACK + counts.DELAYED + accountCounts.DELAYED > 0 ? "warn" : "ok"}
+      live={counts.DOWN > 0 ? "err" : counts.FALLBACK + counts.DELAYED > 0 ? "warn" : "ok"}
       bodyClass="overflow-visible"
       // The same self-test the Providers panel runs, surfaced here too — this
       // is the table people are staring at when they want to re-check.
@@ -163,32 +171,22 @@ export default function FeedRoutingPanel() {
         </Btn>
       }
     >
-
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
           <span style={{ fontSize: 10, color: "var(--text-dim)", textTransform: "uppercase" }}>Platform · {tally.ok}/{tally.total} healthy</span>
-          {(["LIVE", "DELAYED", "FALLBACK", "DOWN", "IDLE", "NOT SET"] as Status[]).map((s) => (
-            <Chip key={s} tone={STATUS_TONE[s] as never}>{counts[s]} {s.toLowerCase()}</Chip>
-          ))}
-          <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-            {holiday ? "NSE holiday" : sessionOpen ? "session open" : "session closed"} · idle feeds count as healthy
-          </span>
-          {overridden > 0 && (
-            <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-              {overridden} routed manually (per-user override)
-            </span>
-          )}
+          {(["LIVE", "DELAYED", "FALLBACK", "DOWN", "IDLE", "NOT SET"] as Status[])
+            .filter((s) => counts[s] > 0)
+            .map((s) => (
+              <Chip key={s} tone={STATUS_TONE[s] as never}>{counts[s]} {s.toLowerCase()}</Chip>
+            ))}
+          <Chip tone={holiday ? "neutral" : sessionOpen ? "ok" : "neutral"}>
+            {holiday ? "NSE holiday" : sessionOpen ? "session open" : "session closed"}
+          </Chip>
+          {overridden > 0 && <Chip tone="accent">{overridden} routed manually</Chip>}
           {anyRetrying && (
-            <span style={{ fontSize: 10, color: "var(--text-muted)", marginLeft: "auto" }}>
-              auto-probing primary in background…
-            </span>
+            <span style={{ fontSize: 10, color: "var(--text-muted)", marginLeft: "auto" }}>auto-probing…</span>
           )}
         </div>
-
-
-
-
-
 
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
@@ -211,25 +209,11 @@ export default function FeedRoutingPanel() {
                       <td colSpan={5} style={{ ...head, background: "var(--panel, transparent)", color: "var(--accent)" }}>
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                           <span>{FEED_GROUP_LABEL[g]}</span>
-                          {g === "account" && (
-                            <>
-                              <span style={{ color: "var(--text-dim)" }}>
-                                your broker account · {accountTally.ok}/{accountTally.total} healthy
-                              </span>
-                              {(["LIVE", "DELAYED", "FALLBACK", "DOWN", "IDLE", "NOT SET"] as Status[])
-                                .filter((s) => accountCounts[s] > 0)
-                                .map((s) => (
-                                  <Chip key={`account-${s}`} tone={STATUS_TONE[s] as never}>
-                                    {accountCounts[s]} {s.toLowerCase()}
-                                  </Chip>
-                                ))}
-                            </>
-                          )}
                         </div>
                       </td>
                     </tr>
 
-                    {groupRows.map(({ f, status, detail, servedBy, health, primaryProbe }) => {
+                    {groupRows.map(({ f, status, detail, servedBy, health, primaryProbe, chainHealth, autoSwitched }) => {
                       const pref = prefFor(f.id);
                       const primary = (pref?.provider ?? "auto") as RoutedProvider | "auto";
                       const fallback = (pref?.fallback_provider ?? "auto") as RoutedProvider | "auto";
@@ -256,9 +240,33 @@ export default function FeedRoutingPanel() {
                               )}
                             </div>
                             <div style={{ fontSize: 10, color: "var(--text-muted)" }}>{chainLabel}</div>
+                            {/* Per-provider health of the chain: a dead fallback
+                                stays visible even while the feed itself is green. */}
+                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 3 }}>
+                              {chainHealth.map((c) => (
+                                <span
+                                  key={c.provider}
+                                  title={`${c.label}: ${c.state}${c.detail ? ` — ${c.detail}` : ""}${c.checkedAt ? ` (${new Date(c.checkedAt).toLocaleString()})` : ""}`}
+                                  style={{
+                                    fontSize: 9, padding: "0 4px", borderRadius: 3, cursor: "help",
+                                    border: "1px solid var(--border)",
+                                    color:
+                                      c.state === "ok" ? "var(--ok, #3fbf7f)"
+                                      : c.state === "failed" ? "var(--danger, #ff5f5f)"
+                                      : c.state === "degraded" ? "var(--warn, #e0a13a)"
+                                      : "var(--text-muted)",
+                                  }}
+                                >
+                                  {c.label}
+                                </span>
+                              ))}
+                            </div>
                           </td>
                           <td style={cell}>
                             <Chip tone={STATUS_TONE[status] as never}>{status}</Chip>
+                            {autoSwitched && status !== "DOWN" && (
+                              <Chip tone="warn">auto-switched</Chip>
+                            )}
                             <div style={{ fontSize: 10, color: "var(--text-muted)", maxWidth: 260 }}>{detail}</div>
                             {primaryProbe && (
                               <div style={{ fontSize: 10, color: "var(--text-muted)", maxWidth: 260, opacity: 0.85 }}>
@@ -294,7 +302,7 @@ export default function FeedRoutingPanel() {
                                 {(primary !== "auto" || fallback !== "auto") && (
                                   <button
                                     className="focus-outline"
-                                    title="Your manual override for this feed — click to reset to the default chain"
+                                    title="App-wide override for this feed — click to reset to the default chain"
                                     disabled={save.isPending}
                                     onClick={() => save.mutate({ feedId: f.id, primary: "auto", fallback: "auto" })}
                                     style={{
@@ -304,7 +312,7 @@ export default function FeedRoutingPanel() {
                                       padding: "2px 5px", cursor: "pointer", whiteSpace: "nowrap",
                                     }}
                                   >
-                                    yours · reset
+                                    reset
                                   </button>
                                 )}
                               </div>

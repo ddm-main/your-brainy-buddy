@@ -132,6 +132,14 @@ export async function recordProviderProbe(
   }
 }
 
+/** Surfaces that describe ONE broker account, not the shared market-data feed.
+ *  They are probed against the user's `purpose='account'` connection and stored
+ *  under plane='account' so a personal broker problem never reads as a
+ *  platform-wide feed outage (and never shows up on the admin feed page). */
+export const ACCOUNT_SURFACES = ["funds", "holdings", "positions"];
+export type ProbePlane = "data" | "account";
+export const isAccountSurface = (s: string) => ACCOUNT_SURFACES.includes(s);
+
 /** Persist surface probe results so status survives a reload / a closed tab.
  *  `is_primary_path` records whether the feed's default primary answered, so
  *  the UI can tell "the feed works" apart from "my chosen route works". */
@@ -139,6 +147,7 @@ export async function recordSurfaceProbes(
   svc: Svc,
   surfaces: Record<string, SurfaceResult>,
   latencyMs?: number,
+  plane: ProbePlane = "data",
 ) {
   const rows = Object.entries(surfaces)
     .filter(([surface, r]) => supportsSurface(r.provider_used, surface))
@@ -147,6 +156,10 @@ export async function recordSurfaceProbes(
       return {
         surface,
         provider,
+        // Account surfaces are always account-plane, whatever the caller says —
+        // one mislabelled write is enough to put a broker failure back on the
+        // shared feed health tally.
+        plane: isAccountSurface(surface) ? "account" : plane,
         ok: r.ok,
         state: r.state,
         detail: r.detail?.slice(0, 500) ?? null,
@@ -163,9 +176,10 @@ export async function recordSurfaceProbes(
     });
   if (rows.length === 0) return;
   const { error } = await svc.from("market_surface_probes")
-    .upsert(rows, { onConflict: "surface,provider" });
+    .upsert(rows, { onConflict: "surface,provider,plane" });
   if (error) console.error("surface probe write failed", error);
 }
+
 
 export async function probeService(provider: string): Promise<{ ok: boolean; detail: string | null }> {
   switch (provider) {
@@ -310,7 +324,12 @@ export async function surfaceReport(
   svc: Svc,
   userId: string,
   which: "active" | "kotak_neo" | "shoonya" | "yahoo" = "active",
+  purpose: "account" | "data" = "account",
+  /** Which plane of surfaces to probe: shared market data, the broker account,
+   *  or both. Account surfaces must only ever be probed on an account row. */
+  scope: "data" | "account" | "all" = "all",
 ): Promise<Record<string, SurfaceResult>> {
+
   let provider;
   // Tracked so the funds probe can write a real snapshot through the shared
   // funds helper (cooldown bookkeeping lives on this settings row).
@@ -319,7 +338,7 @@ export async function surfaceReport(
     provider = yahooProvider(svc);
   } else if (which === "kotak_neo") {
     const { data } = await svc.from("market_api_settings").select(KOTAK_SETTINGS_COLS)
-      .eq("user_id", userId);
+      .eq("user_id", userId).eq("active_provider", "kotak_neo").eq("purpose", purpose);
     const candidates = (data ?? []) as KotakSettings[];
     const row = candidates.find((r) => !!r.session_token_enc && !!r.sid)
       ?? candidates.find((r) => !!r.totp_secret_enc)
@@ -328,7 +347,7 @@ export async function surfaceReport(
     provider = row ? kotakProvider(svc, row) : yahooProvider(svc);
   } else if (which === "shoonya") {
     const { data } = await svc.from("market_api_settings").select(SHOONYA_SETTINGS_COLS)
-      .eq("user_id", userId).eq("active_provider", "shoonya");
+      .eq("user_id", userId).eq("active_provider", "shoonya").eq("purpose", purpose);
     const candidates = (data ?? []) as ShoonyaSettings[];
     const row = candidates.find((r) => !!r.session_token_enc)
       ?? candidates.find((r) => !!r.ucc && !!r.vendor_code && !!r.api_secret_enc)
@@ -459,7 +478,13 @@ export async function surfaceReport(
     },
   };
 
-  const keys = Object.keys(probes).filter((s) => supportsSurface(owner, s));
+  const keys = Object.keys(probes).filter((s) => {
+    if (!supportsSurface(owner, s)) return false;
+    if (scope === "data") return !isAccountSurface(s);
+    if (scope === "account") return isAccountSurface(s);
+    return true;
+  });
+
   const results = await Promise.all(keys.map((k) => wrap(probes[k])));
   return Object.fromEntries(keys.map((k, i) => [k, results[i]]));
 }
@@ -519,8 +544,13 @@ export async function runSelfTest(
   const brokerRun = (async () => {
     // Sequential, not concurrent: the merge below decides which provider owns
     // a surface, and a race made that order (and therefore the UI) random.
+    // DATA plane — the designated system feed row (purpose='data'). Account
+    // surfaces are deliberately excluded: the shared feed never serves funds,
+    // holdings or positions, so probing them here produced permanent red rows
+    // on the admin feed page.
     const kStart = Date.now();
-    const kotak = await surfaceReport(svc, userId, "kotak_neo").catch(() => ({} as Record<string, SurfaceResult>));
+    const kotak = await surfaceReport(svc, userId, "kotak_neo", "data", "data")
+      .catch(() => ({} as Record<string, SurfaceResult>));
     const kLatency = Date.now() - kStart;
     const kKeys = Object.keys(kotak);
     const kOkCount = kKeys.filter((k) => kotak[k].ok).length;
@@ -528,17 +558,29 @@ export async function runSelfTest(
     const kDetail = kKeys.length ? `${kOkCount}/${kKeys.length} surfaces answered` : "Kotak Neo probe returned nothing";
     providers["kotak_neo"] = { ok: kOk, detail: kDetail, latency_ms: kLatency };
     await recordProviderProbe(svc, "kotak_neo", kOk, kDetail, kLatency);
-    await recordSurfaceProbes(svc, kotak, kLatency);
+    await recordSurfaceProbes(svc, kotak, kLatency, "data");
     Object.assign(surfaces, kotak);
+
+    // ACCOUNT plane — the caller's own broker connection (purpose='account'),
+    // probed only when such a row exists. Stored under plane='account'.
+    const { data: kotakAcct } = await svc.from("market_api_settings")
+      .select("id").eq("user_id", userId).eq("active_provider", "kotak_neo").eq("purpose", "account").limit(1);
+    if ((kotakAcct ?? []).length > 0) {
+      const aStart = Date.now();
+      const acct = await surfaceReport(svc, userId, "kotak_neo", "account", "account")
+        .catch(() => ({} as Record<string, SurfaceResult>));
+      await recordSurfaceProbes(svc, acct, Date.now() - aStart, "account");
+    }
 
     // Shoonya is only probed when a Shoonya connection actually exists —
     // otherwise the provider page would show a wall of failures for a broker
     // nobody connected.
     const { data: shoonyaRows } = await svc.from("market_api_settings")
-      .select("id").eq("active_provider", "shoonya").limit(1);
+      .select("id").eq("active_provider", "shoonya").eq("purpose", "data").limit(1);
     if ((shoonyaRows ?? []).length > 0) {
       const sStart = Date.now();
-      const shoonya = await surfaceReport(svc, userId, "shoonya").catch(() => ({} as Record<string, SurfaceResult>));
+      const shoonya = await surfaceReport(svc, userId, "shoonya", "data", "data")
+        .catch(() => ({} as Record<string, SurfaceResult>));
       const sLatency = Date.now() - sStart;
       const sKeys = Object.keys(shoonya);
       const sOkCount = sKeys.filter((k) => shoonya[k].ok).length;
@@ -546,20 +588,33 @@ export async function runSelfTest(
       const sDetail = sKeys.length ? `${sOkCount}/${sKeys.length} surfaces answered` : "Shoonya probe returned nothing";
       providers["shoonya"] = { ok: sOk, detail: sDetail, latency_ms: sLatency };
       await recordProviderProbe(svc, "shoonya", sOk, sDetail, sLatency);
-      await recordSurfaceProbes(svc, shoonya, sLatency);
+      await recordSurfaceProbes(svc, shoonya, sLatency, "data");
       for (const [k, v] of Object.entries(shoonya)) if (!surfaces[k]?.ok) surfaces[k] = v;
     }
 
+    const { data: shoonyaAcct } = await svc.from("market_api_settings")
+      .select("id").eq("user_id", userId).eq("active_provider", "shoonya").eq("purpose", "account").limit(1);
+    if ((shoonyaAcct ?? []).length > 0) {
+      const aStart = Date.now();
+      const acct = await surfaceReport(svc, userId, "shoonya", "account", "account")
+        .catch(() => ({} as Record<string, SurfaceResult>));
+      await recordSurfaceProbes(svc, acct, Date.now() - aStart, "account");
+    }
+
+
+
 
     const yStart = Date.now();
-    const yahoo = await surfaceReport(svc, userId, "yahoo").catch(() => ({} as Record<string, SurfaceResult>));
+    const yahoo = await surfaceReport(svc, userId, "yahoo", "data", "data")
+      .catch(() => ({} as Record<string, SurfaceResult>));
     const yLatency = Date.now() - yStart;
     const yKeys = Object.keys(yahoo);
     const yOkCount = yKeys.filter((k) => yahoo[k].ok).length;
     const yOk = yOkCount > 0;
     providers["yahoo"] = { ok: yOk, detail: `${yOkCount}/${yKeys.length} surfaces answered`, latency_ms: yLatency };
     await recordProviderProbe(svc, "yahoo", yOk, yOk ? null : "Yahoo probe returned nothing", yLatency);
-    await recordSurfaceProbes(svc, yahoo, yLatency);
+    await recordSurfaceProbes(svc, yahoo, yLatency, "data");
+
     // Yahoo only fills surfaces the primary could not answer.
     for (const [k, v] of Object.entries(yahoo)) if (!surfaces[k]?.ok) surfaces[k] = v;
   })();

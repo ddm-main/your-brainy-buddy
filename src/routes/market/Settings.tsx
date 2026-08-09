@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { LineChart } from "lucide-react";
 import BrokerConnectPanel from "@/components/market/BrokerConnectPanel";
 import SystemFeedPanel from "@/components/market/SystemFeedPanel";
+import AccountHealthPanel from "@/components/market/AccountHealthPanel";
 
 import { useAccessStore } from "@/store/accessStore";
 
@@ -26,6 +27,7 @@ export default function MarketSettings() {
       )}
       <SystemFeedPanel />
       <BrokerConnectPanel />
+      <AccountHealthPanel />
 
     </div>
   );

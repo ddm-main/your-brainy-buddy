@@ -18,6 +18,24 @@ import { getServiceProvider } from "../_shared/market/provider.ts";
 
 const CHUNK = 100;
 const CONCURRENCY = 3;
+// A symbol upstream simply has no data for (Yahoo 404, unknown scrip, a
+// brand-new listing with no history) is not a pipeline failure. Flag it and
+// keep it out of the candidate pool for this long instead of retrying it
+// every single run — an all-404 batch used to abort the whole daily chain.
+const PERMANENT_UNAVAILABLE_DAYS = 30;
+
+function isPermanentlyUnavailable(detail: string): boolean {
+  const d = detail.toLowerCase();
+  return d.includes("404")
+    || d.includes("not found")
+    || d.includes("no data")
+    || d.includes("unknown scrip")
+    || d.includes("unknown symbol")
+    || d.includes("delisted")
+    || d.includes("insufficient candles")
+    || d.includes("snapshot failed");
+}
+
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
@@ -85,11 +103,16 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Symbols upstream has no data for are parked for a month rather than
+    // consuming a slot in every chunk (and dragging the batch to all-failed).
+    const unavailableCutoff = new Date(Date.now() - PERMANENT_UNAVAILABLE_DAYS * 86_400_000).toISOString();
+
     const { data: stocks, error } = await svc.from("market_stocks")
       .select("symbol,exchange,yahoo_symbol,sector,market_cap,last_price_sync_at,price_sync_attempts,price_sync_attempts_day")
       .eq("is_active", true)
       .eq("exchange", "NSE")
       .or(`last_price_sync_at.is.null,last_price_sync_at.lt.${cutoff}`)
+      .or(`price_data_missing_at.is.null,price_data_missing_at.lt.${unavailableCutoff}`)
       // Cap same-day retries at 3 per symbol so a permanently-broken symbol
       // (renamed, delisted, thin Yahoo data) can't wedge the chunk — but a
       // transient 429/timeout no longer permanently freezes the row on
@@ -98,6 +121,7 @@ Deno.serve(async (req) => {
       .order("last_price_sync_at", { ascending: true, nullsFirst: true })
       .limit(CHUNK);
     if (error) return errorResponse(req, error.message, 500);
+
 
     const candidates = [...(stocks ?? [])];
     const have = new Set(candidates.map((s) => `${s.symbol}|${s.exchange}`));
@@ -159,6 +183,8 @@ Deno.serve(async (req) => {
 
     let okCount = 0;
     let failCount = 0;
+    let permanentCount = 0;
+
     // market-pipeline-aggregates is the authoritative score writer: it is the
     // only pass that knows sector strength, breadth regime and relative
     // strength. This chunked pass keeps draining for hours afterwards on cron
@@ -190,12 +216,87 @@ Deno.serve(async (req) => {
     // disk. Collect them and write ONE summary row for the run instead.
     const symbolErrors: string[] = [];
 
+    // Egress/round-trip diet: this loop used to issue FOUR PostgREST writes per
+    // symbol (daily prices, scores, indicator overlays, sync stamp). At ~5k
+    // symbols/day that was ~20k requests, each carrying its own headers — the
+    // single largest contributor to PostgREST egress. Buffer the rows and flush
+    // them in chunks instead; same data, ~1/50th the requests.
+    const priceBuf: Record<string, unknown>[] = [];
+    const scoreBuf: Record<string, unknown>[] = [];
+    const indBuf: Record<string, unknown>[] = [];
+    const okStamp: { symbol: string; exchange: string }[] = [];
+    const failStamp = new Map<string, { symbol: string; exchange: string }[]>();
+
+    async function flushWrites(force = false) {
+      if (force || priceBuf.length >= 1500) {
+        const rows = priceBuf.splice(0, priceBuf.length);
+        for (let i = 0; i < rows.length; i += 1000) {
+          const { error } = await svc.from("market_daily_prices")
+            .upsert(rows.slice(i, i + 1000), { onConflict: "symbol,exchange,trade_date" });
+          if (error && symbolErrors.length < 50) symbolErrors.push(`daily_prices batch: ${error.message}`);
+        }
+      }
+      if (force || scoreBuf.length >= 60) {
+        const rows = scoreBuf.splice(0, scoreBuf.length);
+        for (let i = 0; i < rows.length; i += 60) {
+          const { error } = await svc.from("market_stock_scores")
+            .upsert(rows.slice(i, i + 60), { onConflict: "symbol,exchange" });
+          if (error && symbolErrors.length < 50) symbolErrors.push(`stock_scores batch: ${error.message}`);
+        }
+      }
+      if (force || indBuf.length >= 180) {
+        const rows = indBuf.splice(0, indBuf.length);
+        for (let i = 0; i < rows.length; i += 300) {
+          const { error } = await svc.from("market_indicators_cache")
+            .upsert(rows.slice(i, i + 300), { onConflict: "symbol,exchange,timeframe,indicator" });
+          if (error && symbolErrors.length < 50) symbolErrors.push(`indicators batch: ${error.message}`);
+        }
+      }
+      if (force) {
+        // Sync stamps: one update per (exchange, outcome) group instead of one
+        // per symbol — every symbol in a group gets identical column values.
+        const byExchange = new Map<string, string[]>();
+        for (const s of okStamp.splice(0, okStamp.length)) {
+          const list = byExchange.get(s.exchange) ?? [];
+          list.push(s.symbol);
+          byExchange.set(s.exchange, list);
+        }
+        for (const [exchange, syms] of byExchange) {
+          for (let i = 0; i < syms.length; i += 500) {
+            await svc.from("market_stocks").update({
+              last_price_sync_at: new Date().toISOString(),
+              price_sync_attempts: 0,
+              price_sync_attempts_day: today,
+              price_data_missing_at: null,
+            }).eq("exchange", exchange).in("symbol", syms.slice(i, i + 500));
+          }
+        }
+        for (const [key, list] of failStamp) {
+          failStamp.delete(key);
+          const [exchange, attemptsRaw, permanentRaw] = key.split("|");
+          const patch: Record<string, unknown> = {
+            price_sync_attempts: Number(attemptsRaw),
+            price_sync_attempts_day: today,
+          };
+          if (permanentRaw === "1") patch.price_data_missing_at = new Date().toISOString();
+          const syms = list.map((s) => s.symbol);
+          for (let i = 0; i < syms.length; i += 500) {
+            await svc.from("market_stocks").update(patch)
+              .eq("exchange", exchange).in("symbol", syms.slice(i, i + 500));
+          }
+        }
+      }
+    }
+
     const work = [...candidates];
+
     const workers = Array.from({ length: CONCURRENCY }, async () => {
       while (work.length > 0) {
         const stock = work.shift();
         if (!stock) break;
         let success = false;
+        let permanent = false;
+
         try {
           const rawCandles = await provider.getOHLCV(stock.symbol, stock.exchange ?? "NSE", "2y", "1d");
           // Never let today's forming (or not-yet-reconciled) bar into the
@@ -231,9 +332,8 @@ Deno.serve(async (req) => {
             close: c.close,
             volume: c.volume,
           }));
-          const { error: priceErr } = await svc.from("market_daily_prices")
-            .upsert(priceRows, { onConflict: "symbol,exchange,trade_date" });
-          if (priceErr) throw priceErr;
+          priceBuf.push(...priceRows);
+
 
           // v3 — weekly confirmation (resampled from the same 2y daily candles
           // already fetched, no new data source) + advanced signals
@@ -317,7 +417,7 @@ Deno.serve(async (req) => {
           };
 
 
-          const { error: scoreErr } = await svc.from("market_stock_scores").upsert({
+          scoreBuf.push({
             symbol: stock.symbol,
             exchange: stock.exchange,
             trade_date: nseTradeDate,
@@ -418,20 +518,19 @@ Deno.serve(async (req) => {
             is_stale: false,
             ...scoreFields,
             computed_at: new Date().toISOString(),
-          }, { onConflict: "symbol,exchange" });
-          if (scoreErr) throw scoreErr;
+          });
 
           // Chart overlays: last 250 points of EMA series
           const tail = candles.slice(-250);
           const offset = candles.length - tail.length;
           const overlay = (series: (number | null)[]) =>
             tail.map((c, i) => ({ t: c.time, v: series[offset + i] }));
-          const { error: indicatorErr } = await svc.from("market_indicators_cache").upsert([
+          indBuf.push(
             { symbol: stock.symbol, exchange: stock.exchange, timeframe: "1D", indicator: "ema20", value: overlay(snap.ema20Series), computed_at: new Date().toISOString() },
             { symbol: stock.symbol, exchange: stock.exchange, timeframe: "1D", indicator: "ema50", value: overlay(snap.ema50Series), computed_at: new Date().toISOString() },
             { symbol: stock.symbol, exchange: stock.exchange, timeframe: "1D", indicator: "ema200", value: overlay(snap.ema200Series), computed_at: new Date().toISOString() },
-          ], { onConflict: "symbol,exchange,timeframe,indicator" });
-          if (indicatorErr) throw indicatorErr;
+          );
+          await flushWrites();
 
           okCount++;
           success = true;
@@ -447,68 +546,69 @@ Deno.serve(async (req) => {
               ? [(err as any).message, (err as any).details, (err as any).hint, (err as any).code]
                 .filter(Boolean).join(" | ") || JSON.stringify(err).slice(0, 300)
               : String(err));
+          permanent = isPermanentlyUnavailable(detail);
+          if (permanent) permanentCount++;
           if (symbolErrors.length < 50) symbolErrors.push(`${stock.symbol}: ${detail}`);
         } finally {
           // Success: mark sync fresh and reset the attempt counter.
           // Failure: bump attempts (capped by the outer picker at 3/day) but
           //          DO NOT advance last_price_sync_at, so the next chunk
           //          re-selects this symbol instead of freezing yesterday's row.
+          const exchange = stock.exchange ?? "NSE";
           if (success) {
-            await svc.from("market_stocks")
-              .update({
-                last_price_sync_at: new Date().toISOString(),
-                price_sync_attempts: 0,
-                price_sync_attempts_day: today,
-              })
-              .eq("symbol", stock.symbol)
-              .eq("exchange", stock.exchange);
+            okStamp.push({ symbol: stock.symbol, exchange });
           } else {
             const nextAttempts = stock.price_sync_attempts_day === today
               ? (stock.price_sync_attempts ?? 0) + 1
               : 1;
-            await svc.from("market_stocks")
-              .update({
-                price_sync_attempts: nextAttempts,
-                price_sync_attempts_day: today,
-              })
-              .eq("symbol", stock.symbol)
-              .eq("exchange", stock.exchange);
+            const key = `${exchange}|${nextAttempts}|${permanent ? "1" : "0"}`;
+            const list = failStamp.get(key) ?? [];
+            list.push({ symbol: stock.symbol, exchange });
+            failStamp.set(key, list);
           }
         }
       }
     });
     await Promise.all(workers);
+    await flushWrites(true);
+
 
     // One row for the whole run, attributed to the pipeline (not the broker).
     // Schema drift (PGRST204 — a column the code writes doesn't exist in the
     // DB) is called out explicitly: that failure mode silently no-opped the
     // entire technicals pass for two sessions.
     const schemaDrift = symbolErrors.some((e) => e.includes("PGRST204") || e.includes("schema cache"));
-    if (symbolErrors.length > 0) {
+    const realFailures = failCount - permanentCount;
+    if (symbolErrors.length > 0 && (realFailures > 0 || schemaDrift)) {
       await svc.from("market_provider_health").insert({
         provider: "pipeline",
         endpoint: schemaDrift ? "market-pipeline-eod:schema_drift" : "market-pipeline-eod",
         ok: false,
-        error: `${failCount} of ${candidates.length} symbols failed — ${symbolErrors.slice(0, 10).join(" ; ")}`.slice(0, 500),
+        error: `${realFailures} of ${candidates.length} symbols failed (${permanentCount} skipped as upstream-unavailable) — ${symbolErrors.slice(0, 10).join(" ; ")}`.slice(0, 500),
       });
     }
 
-    // A chunk where every symbol failed must NOT report ok/drained — that is
-    // how a broken pipeline masqueraded as a healthy one in the orchestrator.
-    if (okCount === 0 && failCount > 0) {
+    // A chunk where every symbol failed for a REAL reason (network, schema,
+    // auth) must not report ok — that is how a broken pipeline masqueraded as
+    // a healthy one. A batch that is entirely newly-listed/delisted scrips
+    // upstream has no data for is a skip, not a failure, and must not abort
+    // the daily chain.
+    if (okCount === 0 && realFailures > 0) {
       return errorResponse(
         req,
-        `all ${failCount} symbols failed${schemaDrift ? " (schema drift: market_stock_scores is missing columns the pipeline writes)" : ""} — ${symbolErrors.slice(0, 3).join(" ; ")}`.slice(0, 500),
+        `all ${realFailures} symbols failed${schemaDrift ? " (schema drift: market_stock_scores is missing columns the pipeline writes)" : ""} — ${symbolErrors.slice(0, 3).join(" ; ")}`.slice(0, 500),
         500,
       );
     }
 
     return jsonResponse(req, {
-      ok: true, processed: candidates.length, succeeded: okCount, failed: failCount,
+      ok: true, processed: candidates.length, succeeded: okCount, failed: realFailures,
+      skipped_unavailable: permanentCount,
       symbol_errors: symbolErrors.slice(0, 20), context_preserved: contextPreserved,
       local_rescored: localRescored, score_stale_remaining: scoreStaleRemaining,
       drained: candidates.length < CHUNK,
     });
+
 
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 500);

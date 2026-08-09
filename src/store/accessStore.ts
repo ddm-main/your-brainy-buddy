@@ -1,8 +1,8 @@
 import { create } from "zustand";
 import { supabase } from "@/integrations/supabase/client";
 
-export type AppSection = "hud" | "market" | "finance" | "tasks" | "projects" | "inbox" | "config";
-export const ALL_SECTIONS: AppSection[] = ["hud", "market", "finance", "tasks", "projects", "inbox", "config"];
+export type AppSection = "market" | "config";
+export const ALL_SECTIONS: AppSection[] = ["market", "config"];
 
 type State = {
   ready: boolean;

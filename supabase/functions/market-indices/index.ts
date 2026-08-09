@@ -7,7 +7,8 @@
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { getReadProvider, isLiveOnlyNseIndex } from "../_shared/market/provider.ts";
 import { indexExchangeFor, resolveIndexQuotes } from "../_shared/market/indexQuotes.ts";
-import { recordFeedHeartbeat } from "../_shared/market/heartbeat.ts";
+import { recordFeedHeartbeat, dominantProvider } from "../_shared/market/heartbeat.ts";
+import { getFeedRoute } from "../_shared/market/feedRoute.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 
 const limiter = createMarketLimiter(300, 60_000);
@@ -67,17 +68,23 @@ Deno.serve(async (req) => {
     // Resolve through the full index chain: broker first, then NSE's own
     // (undelayed) allIndices feed, then Yahoo, then the last stored close.
     // Sensex is a BSE index — asking for it as "NSE:^BSESN" never resolved.
-    const { provider } = await getReadProvider(svc, auth.userId);
+    const route = await getFeedRoute(svc, "indices");
+    const { provider } = await getReadProvider(svc, auth.userId, "indices");
+    // Indices are Yahoo-first by design (Kotak has no index tokens); a pin to
+    // a public vendor therefore skips the broker attempt entirely.
+    const skipBroker = route.primary === "yahoo" || route.primary === "nse";
     const reqs = source.map((r) => {
       const exchange = indexExchangeFor(r.symbol);
       return { key: `${exchange}:${r.symbol}`, exchange, symbol: r.symbol };
     });
     const idxT0 = Date.now();
     let brokerRows: Awaited<ReturnType<typeof provider.getQuotes>> = [];
-    try {
-      brokerRows = await provider.getQuotes(reqs.map((r) => r.key), { allowFallback: false });
-    } catch (e) {
-      console.error("[market-indices] broker quotes failed:", e instanceof Error ? e.message : String(e));
+    if (!skipBroker) {
+      try {
+        brokerRows = await provider.getQuotes(reqs.map((r) => r.key), { allowFallback: false });
+      } catch (e) {
+        console.error("[market-indices] broker quotes failed:", e instanceof Error ? e.message : String(e));
+      }
     }
     const quoteRows = await resolveIndexQuotes(svc, reqs, brokerRows);
     const byKey = new Map(quoteRows.map((q) => [q.key, q]));
@@ -143,13 +150,19 @@ Deno.serve(async (req) => {
 
     const missing = out.filter((q) => q.price == null).map((q) => q.symbol);
     const priced = out.length - missing.length;
+    // Indices are resolved per symbol, so the batch has a *dominant* provider,
+    // not a single one. Stamping the row "mixed" made it unmatchable against
+    // the routing chain and painted a healthy feed FALLBACK.
+    const dom = dominantProvider(out.filter((q) => q.price != null).map((q) => q.source ?? "unknown"));
     recordFeedHeartbeat(svc, {
       feedId: "indices",
-      provider: providerSummary === "none" ? provider.name : providerSummary,
+      provider: dom.provider === "unknown" ? provider.name : dom.provider,
+      path: providers.size > 1 ? "mixed" : "live",
       ok: priced > 0,
       latencyMs: Date.now() - idxT0,
       symbols: priced,
-      detail: missing.length > 0 ? `no source could price: ${missing.join(",")}` : null,
+      detail: [dom.mix, missing.length > 0 ? `no source could price: ${missing.join(",")}` : null]
+        .filter(Boolean).join(" · ") || null,
     });
 
     return jsonResponse(req, { quotes: out, breadth: breadthRes.data ?? null, source: provider.name, provider: providerSummary });

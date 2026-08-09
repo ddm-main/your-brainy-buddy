@@ -2,7 +2,7 @@
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { getActiveProvider } from "../_shared/market/provider.ts";
 import { BROKER_PROVIDERS } from "../_shared/market/provider.ts";
-import { KOTAK_SETTINGS_COLS, type KotakSettings, kotakOrders, withKotakSession } from "../_shared/market/kotakClient.ts";
+import { KOTAK_SETTINGS_COLS, type KotakSettings, isUnreadableKotakCredentialsError, kotakOrders, withKotakSession } from "../_shared/market/kotakClient.ts";
 import { encryptValue } from "../_shared/market/provider.ts";
 
 Deno.serve(async (req) => {
@@ -30,6 +30,17 @@ Deno.serve(async (req) => {
     })).filter((o: any) => o.symbol);
     return jsonResponse(req, { orders, source: "kotak" });
   } catch (e) {
+    if (isUnreadableKotakCredentialsError(e)) {
+      // This is an expected recovery state, not an Edge Function crash. A 200
+      // lets the Orders screen render its reconnect action without the runtime
+      // error overlay while the shared client has already retired stale data.
+      return jsonResponse(req, {
+        orders: [],
+        source: "reconnect_required",
+        reconnect_required: true,
+        reason: "Saved Kotak credentials are no longer readable. Re-enter them in Market Config → Providers.",
+      });
+    }
     return errorResponse(req, e instanceof Error ? e.message : String(e), 502);
   }
 });

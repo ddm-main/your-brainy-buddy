@@ -16,6 +16,9 @@ const pending = new Map<string, Row>();
 const HEADER_OVERHEAD = 220;
 const FLUSH_AFTER_REQUESTS = 25;
 const FLUSH_AFTER_MS = 10_000;
+// Any single server-side read over this is a missing filter, not a big table.
+// Tag it in the route label so `system_egress_daily` names the offender.
+const OVERSIZE_BYTES = 400 * 1024;
 
 let installed = false;
 let originalFetch: typeof fetch | null = null;
@@ -36,6 +39,10 @@ function classify(url: string): { source: string; route: string } | null {
 }
 
 function bump(key: string, bytes: number) {
+  if (bytes >= OVERSIZE_BYTES) {
+    key = `${key} !OVER`;
+    console.warn(`[egress] BUDGET: ${key} → ${Math.round(bytes / 1024)} KB in one response`);
+  }
   const row = pending.get(key) ?? { bytes: 0, requests: 0 };
   row.bytes += bytes;
   row.requests += 1;

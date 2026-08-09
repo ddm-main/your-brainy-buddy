@@ -24,8 +24,11 @@ export const MARKET_GROUPS: MarketGroup[] = [
     key: "breakout",
     label: "Breakout",
     to: "/market/breakout",
-    match: (p) => /^\/market\/(breakout|score)/.test(p),
+    // Backtesting and the trade planner are part of the same research loop —
+    // they were reachable only by typing the URL before this.
+    match: (p) => /^\/market\/(breakout|score|backtesting|planner)/.test(p),
   },
+
   {
     key: "portfolio",
     label: "Portfolio",
@@ -48,6 +51,11 @@ export const MARKET_GROUPS: MarketGroup[] = [
 
 export type MarketSub = { to: string; label: string };
 export const MARKET_SUBS: Record<string, MarketSub[]> = {
+  breakout: [
+    { to: "/market/breakout", label: "Breakout" },
+    { to: "/market/backtesting", label: "Backtesting" },
+    { to: "/market/planner", label: "Planner" },
+  ],
   portfolio: [
     { to: "/market/portfolio", label: "Overview" },
     { to: "/market/holdings", label: "Holdings" },
@@ -56,3 +64,4 @@ export const MARKET_SUBS: Record<string, MarketSub[]> = {
     { to: "/market/gtt", label: "GTT" },
   ],
 };
+

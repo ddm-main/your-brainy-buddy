@@ -1,0 +1,1 @@
+DROP FUNCTION IF EXISTS public.increment_jarvis_usage(uuid, integer, bigint, text);

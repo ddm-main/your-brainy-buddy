@@ -1,5 +1,5 @@
-// Broker connect panel — per-user broker connection (Kotak Neo enabled;
-// Zerodha / Upstox listed as coming soon). Shared UI extracted from the
+// Broker connect panel — per-user broker connection (Kotak Neo and Shoonya
+// enabled; add future brokers to the BROKERS list below). Shared UI from the
 // former /config/broker route so it can live under Market → Config.
 import { useCallback, useEffect, useState } from "react";
 import HudPanel from "@/components/hud/HudPanel";
@@ -43,11 +43,11 @@ type ShoonyaSettings = {
   imei: string | null;
 };
 
+// Add future brokers here: append an entry with `enabled: false` and a blurb
+// until its connect flow ships.
 const BROKERS: { id: BrokerId; name: string; enabled: boolean; blurb: string }[] = [
-  { id: "kotak_neo", name: "Kotak Neo", enabled: true,  blurb: "Trade API — orders, holdings, positions, live LTP" },
+  { id: "kotak_neo", name: "Kotak Neo", enabled: true,  blurb: "Trade API — account services or operator market data" },
   { id: "shoonya",   name: "Shoonya (Finvasia)", enabled: true, blurb: "Noren API — orders, holdings, native candles, live LTP" },
-  { id: "zerodha",   name: "Zerodha",   enabled: false, blurb: "Kite Connect — coming soon" },
-  { id: "upstox",    name: "Upstox",    enabled: false, blurb: "Upstox API v2 — coming soon" },
 ];
 // Registered in Shoonya PRISM → API Key. Keep this URL stable; the current app
 // origin rides in OAuth `state`, not in the PRISM-registered URL.
@@ -91,8 +91,11 @@ async function callFn(name: string, body: Record<string, unknown>) {
   return j;
 }
 
-export default function BrokerConnectPanel() {
+export default function BrokerConnectPanel({ purpose = "account" }: { purpose?: "account" | "data" } = {}) {
   const push = useUi((s) => s.push);
+  // Two planes share this form: the user's own trading account, and (for
+  // admins, from Market Config) the app-wide market-data feed connection.
+  const isData = purpose === "data";
   const [selected, setSelected] = useState<BrokerId>("kotak_neo");
   const [kotak, setKotak] = useState<Settings | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -121,7 +124,7 @@ export default function BrokerConnectPanel() {
   const load = useCallback(async () => {
     const { data, error } = await supabase.from("market_api_settings")
       .select("id,active_provider,consumer_key,connection_status,token_expires_at,last_error,ucc,greeting_name,totp_secret_enc,mobile_number_enc,mpin_enc")
-      .eq("active_provider", "kotak_neo").maybeSingle();
+      .eq("active_provider", "kotak_neo").eq("purpose", purpose).maybeSingle();
 
     if (error) { push(error.message, "err"); return; }
     const k = data as Settings | null;
@@ -132,17 +135,17 @@ export default function BrokerConnectPanel() {
       // shown as a masked hint only (matching MPIN/TOTP), not decrypted here.
       setMobile("");
     }
-  }, [push]);
+  }, [push, purpose]);
 
   const loadShoonya = useCallback(async () => {
     const { data, error } = await supabase.from("market_api_settings")
       .select("id,connection_status,token_expires_at,last_error,greeting_name,ucc,vendor_code,api_secret_enc,password_enc,totp_secret_enc,imei")
-      .eq("active_provider", "shoonya").maybeSingle();
+      .eq("active_provider", "shoonya").eq("purpose", purpose).maybeSingle();
     if (error) { push(error.message, "err"); return; }
     const sh = data as unknown as ShoonyaSettings | null;
     setShoonya(sh);
     if (sh) { setShUid(sh.ucc ?? ""); setShVendor(sh.vendor_code ?? ""); setShImei(sh.imei ?? ""); }
-  }, [push]);
+  }, [push, purpose]);
 
   useEffect(() => { void load(); void loadShoonya(); }, [load, loadShoonya]);
 
@@ -151,6 +154,7 @@ export default function BrokerConnectPanel() {
     try {
       await callFn("market-config-save", {
         provider: "shoonya",
+        purpose,
         ucc: shUid || undefined,
         vendor_code: shVendor || undefined,
         api_secret: shSecret || undefined,
@@ -167,7 +171,7 @@ export default function BrokerConnectPanel() {
     setBusy("sh-login");
     setShCodeError(null);
     try {
-      const r = await callFn("market-shoonya-login", code ? { code } : { redirect_url: shoonyaRedirectUrl, state: shoonyaOriginToken });
+      const r = await callFn("market-shoonya-login", code ? { code, purpose } : { redirect_url: shoonyaRedirectUrl, state: shoonyaOriginToken, purpose });
       if (r?.authorize_url) {
         setShAuthUrl(r.authorize_url as string);
         try { window.localStorage.setItem(SHOONYA_AUTH_STARTED_KEY, String(Date.now())); } catch { /* non-critical */ }
@@ -245,7 +249,7 @@ export default function BrokerConnectPanel() {
   const testShoonya = async () => {
     setBusy("sh-test");
     try {
-      const r = await callFn("market-test-connection", { provider: "shoonya" });
+      const r = await callFn("market-test-connection", { provider: "shoonya", purpose });
       push(r?.ok ? `Shoonya OK (${r?.provider ?? "shoonya"})` : `Shoonya failed${r?.detail ? `: ${r.detail}` : ""}`, r?.ok ? "ok" : "err");
       await loadShoonya();
     } catch (e) { push(toSafeError(e, "Test failed").message, "err"); }
@@ -257,6 +261,7 @@ export default function BrokerConnectPanel() {
     try {
       await callFn("market-config-save", {
         provider: "kotak_neo",
+        purpose,
         consumer_key: consumerKey || null,
         mobile_number: mobile || null,
         mpin: mpin || null,
@@ -276,6 +281,7 @@ export default function BrokerConnectPanel() {
     try {
       await callFn("market-config-save", {
         provider: "kotak_neo",
+        purpose,
         consumer_key: consumerKey || undefined,
         mobile_number: mobile || undefined,
         mpin: mpin || undefined,
@@ -283,7 +289,7 @@ export default function BrokerConnectPanel() {
         ucc: ucc || undefined,
       });
       setMpin(""); setMobile(""); setTotpSecret("");
-      const r = await callFn("market-kotak-login-start", {});
+      const r = await callFn("market-kotak-login-start", { purpose });
       if (r?.auto) push(`Connected as ${r?.greeting_name ?? "Kotak user"} (auto TOTP)`, "ok");
       else if (r?.needs_totp) push(r?.message ?? "Enter the 6-digit TOTP below", "warn");
       else push(r?.message ?? "Login started", "ok");
@@ -295,8 +301,8 @@ export default function BrokerConnectPanel() {
   const refreshSession = async () => {
     setBusy("refresh");
     try {
-      const r = await callFn("market-kotak-refresh", {});
-      const me = r?.refreshed?.[0];
+      const r = await callFn("market-kotak-refresh", { purpose });
+      const me = r?.refreshed?.find((row: { id?: string }) => row.id === kotak?.id) ?? r?.refreshed?.[0];
       if (me?.ok) push(`Session refreshed — ${me.greeting_name ?? "connected"}`, "ok");
       else push(me?.error ?? "Refresh failed (is the TOTP secret saved?)", "err");
       await load();
@@ -309,7 +315,7 @@ export default function BrokerConnectPanel() {
     setBusy("otp");
     setOtpError(null);
     const trimmed = otp.trim();
-    const attempt = () => callFn("market-kotak-login-otp", { otp: trimmed });
+    const attempt = () => callFn("market-kotak-login-otp", { otp: trimmed, purpose });
     try {
       let r: any;
       try { r = await attempt(); }
@@ -330,7 +336,7 @@ export default function BrokerConnectPanel() {
   const testConnection = async () => {
     setBusy("test");
     try {
-      const r = await callFn("market-test-connection", { provider: "kotak_neo" });
+      const r = await callFn("market-test-connection", { provider: "kotak_neo", purpose });
       push(r?.ok ? `Broker OK (${r?.provider})` : `Broker failed${r?.detail ? `: ${r.detail}` : ""}`, r?.ok ? "ok" : "err");
       await load();
     } catch (e) { push(toSafeError(e, "Test failed").message, "err"); }
@@ -343,6 +349,9 @@ export default function BrokerConnectPanel() {
   const kotakBroken = kotakConfigured && ["expired", "error"].includes(kotakStatus);
   const autoLoginEnabled = !!kotak?.totp_secret_enc;
   const needsBasics = !consumerKey.trim() || !ucc.trim();
+  const credentialsUnreadable = /can no longer be decrypted|no longer readable|re-enter/i.test(kotak?.last_error ?? "");
+  const needsCredentialReentry = credentialsUnreadable || !kotak?.mobile_number_enc || !kotak?.mpin_enc;
+  const missingReentryValues = needsCredentialReentry && (!mobile.trim() || !mpin.trim() || !totpSecret.trim());
   const showForm = editing || kotak?.connection_status === "pending_otp";
 
   const shStatus = shoonya?.connection_status ?? "not configured";
@@ -356,10 +365,11 @@ export default function BrokerConnectPanel() {
 
 
   return (
-    <HudPanel title="My Broker" index="BRK" live={kotakConnected ? "ok" : "idle"} bodyClass="overflow-visible">
+    <HudPanel title={isData ? "Data Feed Connection" : "Broker account"} index={isData ? "DF" : "BRK"} live={kotakConnected ? "ok" : "idle"} bodyClass="overflow-visible">
       <div style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 10 }}>
-        Connect your broker account so orders, holdings, positions and funds are yours — not shared.
-        Credentials are encrypted at rest and never sent back to the browser.
+        {isData
+          ? "Connect a broker as the app-wide market-data feed. It serves quotes, depth and indices to every user; no user's personal broker session is ever used for market data."
+          : "Connect your broker account so orders, holdings, positions and funds are yours — not shared. Credentials are encrypted at rest and never sent back to the browser."}
       </div>
 
       <div className="hud-label" style={{ color: "var(--accent)", fontSize: 11, marginBottom: 6 }}>Choose broker</div>
@@ -398,7 +408,7 @@ export default function BrokerConnectPanel() {
             <Chip tone={kotakConnected ? "ok" : kotakStatus === "pending_otp" ? "warn" : kotak?.last_error ? "err" : "neutral"}>{kotakStatus}</Chip>
             {kotakConfigured && <Chip tone={autoLoginEnabled ? "ok" : "warn"}>{autoLoginEnabled ? "auto-login on" : "auto-login off"}</Chip>}
             <span style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {kotakBroken && !editing && (
+              {kotakBroken && !editing && !needsCredentialReentry && (
                 <Btn size="sm" variant="primary" onClick={startLogin} disabled={busy !== null}>
                   {busy === "login" ? "reconnecting…" : "Re-login"}
                 </Btn>
@@ -412,7 +422,7 @@ export default function BrokerConnectPanel() {
             </span>
           </div>
           <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)" }}>
-            Holdings · Positions · Orders · Live LTP · Broker session
+            {isData ? "Live LTP · Quotes · Depth · Operator feed session" : "Holdings · Positions · Orders · Funds · Personal broker session"}
           </div>
           {kotakConnected && kotak?.greeting_name && (
             <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>
@@ -433,6 +443,11 @@ export default function BrokerConnectPanel() {
                   <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
                     Encrypted at rest, never sent back. <span style={{ color: "var(--ok)" }}>✓ saved</span> = blank keeps the existing value.
                   </div>
+                  {needsCredentialReentry && (
+                    <div style={{ fontSize: 11, color: "var(--warn)", lineHeight: 1.5 }}>
+                      Enter mobile number, MPIN and TOTP secret together. The previous encrypted values cannot be reused.
+                    </div>
+                  )}
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                     <Field label="Consumer Key" value={consumerKey} setValue={setConsumerKey} placeholder="From Kotak Neo → Trade API" saved={!!kotak?.consumer_key} />
                     <Field label="UCC (Client Code)" value={ucc} setValue={setUcc} placeholder="e.g. ABC123" saved={!!kotak?.ucc} />
@@ -444,11 +459,11 @@ export default function BrokerConnectPanel() {
                     <Btn onClick={saveConfig} disabled={busy !== null} variant="primary">
                       <LockKeyhole size={11} style={{ marginRight: 4 }} />{busy === "save" ? "saving…" : "Save"}
                     </Btn>
-                    <Btn onClick={startLogin} disabled={busy !== null || needsBasics}
-                      title={needsBasics ? "Save Consumer Key and UCC first" : undefined}>
+                    <Btn onClick={startLogin} disabled={busy !== null || needsBasics || missingReentryValues}
+                      title={needsBasics ? "Save Consumer Key and UCC first" : missingReentryValues ? "Enter mobile number, MPIN and TOTP secret" : undefined}>
                       {busy === "login" ? "logging in…" : "Login to Kotak"}
                     </Btn>
-                    <Btn onClick={refreshSession} disabled={busy !== null}>
+                    <Btn onClick={refreshSession} disabled={busy !== null || !autoLoginEnabled} title={!autoLoginEnabled ? "Save a TOTP secret first" : undefined}>
                       {busy === "refresh" ? "refreshing…" : "Refresh session"}
                     </Btn>
                   </div>

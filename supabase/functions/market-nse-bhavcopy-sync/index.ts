@@ -11,6 +11,7 @@
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../_shared/cors.ts";
+import { requireCronSecret } from "../_shared/market/cron.ts";
 import { nseFetch } from "../_shared/market/nseClient.ts";
 
 const NSE_HEADERS = {
@@ -138,10 +139,12 @@ Deno.serve(async (req) => {
     const supabase = createClient(url, svc, { auth: { persistSession: false } });
 
     // Auth: allow cron secret OR any authenticated user (Config page trigger)
-    const cronSecret = Deno.env.get("CRON_SECRET");
-    const hdr = req.headers.get("x-cron-secret");
+    // Cron callers are verified against the Vault-held secret (requireCronSecret
+    // returns null on a match); authenticated users can also trigger this.
     const authHdr = req.headers.get("authorization");
-    const isCron = cronSecret && hdr && hdr === cronSecret;
+    const isCron = req.headers.get("x-cron-secret")
+      ? (await requireCronSecret(req)) === null
+      : false;
     if (!isCron && !authHdr) {
       return new Response(JSON.stringify({ error: "unauthorized" }), {
         status: 401, headers: { ...cors, "Content-Type": "application/json" },

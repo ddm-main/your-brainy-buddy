@@ -49,6 +49,8 @@ Deno.test("getActiveProvider — Kotak row with live session → kotak_neo", asy
     active_provider: "kotak_neo",
     session_token_enc: "enc",
     sid: "sess",
+    base_url: "https://e41.kotaksecurities.com",
+    connection_status: "connected",
     totp_secret_enc: "totp",
     consumer_key_enc: "ck",
     consumer_secret_enc: "cs",

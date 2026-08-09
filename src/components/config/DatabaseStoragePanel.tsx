@@ -298,7 +298,10 @@ export default function DatabaseStoragePanel() {
               ? egressSplit.map(([k, v]) => <span key={k}>{k} {human(v)}</span>)
               : <span>no per-type split reported</span>}
             {egressReported != null ? <span>Supabase reports {human(egressReported)}</span> : null}
-            <span style={{ marginLeft: "auto" }}>synced {new Date(egressSyncedAt).toLocaleString()}</span>
+            <span style={{ marginLeft: "auto", color: Date.now() - new Date(egressSyncedAt).getTime() > 12 * 3_600_000 ? "var(--warn, #d19a30)" : undefined }}>
+              synced {new Date(egressSyncedAt).toLocaleString()}
+              {Date.now() - new Date(egressSyncedAt).getTime() > 12 * 3_600_000 ? " · stale" : ""}
+            </span>
           </div>
           {egressSources.length ? (
             <div style={{ marginBottom: 8, display: "flex", flexDirection: "column", gap: 1 }}>

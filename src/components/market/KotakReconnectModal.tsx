@@ -88,6 +88,8 @@ export function KotakReconnectModal() {
     } finally { setBusy(false); }
   };
 
+  const needsReentry = /can no longer be decrypted|no longer readable|re-enter/i.test(`${msg ?? ""} ${kotak?.last_error ?? ""}`);
+
   if (role !== "admin") return null;
   if (!broken || dismissed) return null;
 
@@ -108,7 +110,17 @@ export function KotakReconnectModal() {
           Your Kotak Neo session isn't connected — live prices, holdings sync, and AutoTrade all depend on it.
         </div>
 
-        {!needsOtp ? (
+        {needsReentry ? (
+          <>
+            <div style={{ fontSize: 12, color: "var(--danger)", lineHeight: 1.5 }}>
+              Your saved Kotak credentials were encrypted with a previous server key and can't be read anymore.
+              Re-enter mobile number, MPIN and TOTP secret once in Market Config → Providers — reconnect works normally after that.
+            </div>
+            <Link to="/market/settings" onClick={() => setDismissed(true)}>
+              <Btn variant="primary">Re-enter Kotak credentials</Btn>
+            </Link>
+          </>
+        ) : !needsOtp ? (
           <Btn variant="primary" onClick={reconnect} disabled={busy}>{busy ? "reconnecting…" : "Reconnect now"}</Btn>
         ) : (
           <>
@@ -122,11 +134,12 @@ export function KotakReconnectModal() {
             <Btn variant="primary" onClick={submitOtp} disabled={busy || !otp.trim()}>{busy ? "connecting…" : "Complete login"}</Btn>
           </>
         )}
-        {msg && !needsOtp && <div style={{ fontSize: 11, color: "var(--danger)" }}>{msg}</div>}
+        {msg && !needsOtp && !needsReentry && <div style={{ fontSize: 11, color: "var(--danger)" }}>{msg}</div>}
 
         <Link to="/market/settings" onClick={() => setDismissed(true)} style={{ fontSize: 11, color: "var(--accent)", textDecoration: "none" }}>
           Open full Kotak settings →
         </Link>
+
       </div>
     </div>
   );

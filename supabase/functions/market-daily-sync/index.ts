@@ -71,7 +71,10 @@ Deno.serve(async (req) => {
   }
 
   const svc = svcClient();
+  // Forwarded to every chained step. Prefer the verified inbound cron header
+  // (pg_cron's Vault value) so the chain works without an env-var copy of it.
   const cronSecret =
+    req.headers.get("x-cron-secret") ??
     Deno.env.get("CRON_SECRET") ??
     Deno.env.get("SYNC_HOOK_SECRET") ??
     Deno.env.get("MARKET_CRON_SECRET") ??
@@ -84,8 +87,38 @@ Deno.serve(async (req) => {
     iterations: number; last_response: unknown; error?: string; duration_ms: number;
   }> = [];
 
+  // The Screener reads a precomputed snapshot table, not the multi-join view.
+  // If this never runs, the screener sits a whole session behind the scores —
+  // so it is invoked from a `finally`, not inline in the happy path.
+  let snapshotDone = false;
+  const refreshScreenerSnapshot = async () => {
+    if (snapshotDone) return;
+    snapshotDone = true;
+    const snapStart = Date.now();
+    const { data: rows, error: snapErr } = await svc.rpc("refresh_market_screener_snapshot");
+    summary.push({
+      fn: "market-screener-snapshot" as StepFn,
+      label: "Screener snapshot",
+      status: snapErr ? "failed" : "ok",
+      iterations: 1,
+      last_response: { rows: rows ?? null },
+      error: snapErr?.message,
+      duration_ms: Date.now() - snapStart,
+    });
+    await svc.from("market_ingestion_runs").insert({
+      source: "daily_sync_orchestrator",
+      stage: "market-screener-snapshot",
+      status: snapErr ? "failed" : "ok",
+      rows_ingested: typeof rows === "number" ? rows : 0,
+      duration_ms: Date.now() - snapStart,
+      metadata: { error: snapErr?.message ?? null },
+      finished_at: new Date().toISOString(),
+    });
+  };
+
   const runChain = async () => {
    try {
+
     for (const step of CHAIN) {
       const stepStart = Date.now();
       let iterations = 0;
@@ -171,31 +204,11 @@ Deno.serve(async (req) => {
       // must still run so the app has fresh scores; the failure is recorded above.
     }
 
-    // Final step: rebuild the screener snapshot table. The Screener reads a
-    // precomputed table, not the multi-join view — otherwise the query blows
-    // past the 8s statement timeout and the UI shows "Results · 0".
-    {
-      const snapStart = Date.now();
-      const { data: rows, error: snapErr } = await svc.rpc("refresh_market_screener_snapshot");
-      summary.push({
-        fn: "market-screener-snapshot" as StepFn,
-        label: "Screener snapshot",
-        status: snapErr ? "failed" : "ok",
-        iterations: 1,
-        last_response: { rows: rows ?? null },
-        error: snapErr?.message,
-        duration_ms: Date.now() - snapStart,
-      });
-      await svc.from("market_ingestion_runs").insert({
-        source: "daily_sync_orchestrator",
-        stage: "market-screener-snapshot",
-        status: snapErr ? "failed" : "ok",
-        rows_ingested: typeof rows === "number" ? rows : 0,
-        duration_ms: Date.now() - snapStart,
-        metadata: { error: snapErr?.message ?? null },
-        finished_at: new Date().toISOString(),
-      });
-    }
+    // Rebuild the screener snapshot before the freshness assertion. It also
+    // runs from the `finally` below, so an earlier throw can never leave the
+    // screener a session behind the scores.
+    await refreshScreenerSnapshot();
+
 
 
 
@@ -283,7 +296,12 @@ Deno.serve(async (req) => {
        metadata: { error: e instanceof Error ? e.message : String(e), steps: summary },
        finished_at: new Date().toISOString(),
      });
+   } finally {
+     // The screener snapshot must never be skipped because an earlier step
+     // blew up — that is exactly how the UI ended up a session behind.
+     try { await refreshScreenerSnapshot(); } catch { /* recorded above */ }
    }
+
   };
 
   // Run the chain in the background — the orchestrator's total wall time

@@ -29,6 +29,7 @@ import {
   withKotakSession,
 } from "./kotakClient.ts";
 import { isRouteOpen } from "./routeBreaker.ts";
+import { getFeedRoute, toProviderName } from "./feedRoute.ts";
 import {
   SHOONYA_SETTINGS_COLS,
   SHOONYA_WS,
@@ -237,17 +238,21 @@ const ALL_SETTINGS_COLS = Array.from(new Set(
 const settingsCache = new Map<string, { rows: SettingsRow[]; expiresAt: number }>();
 const SETTINGS_TTL_MS = 10 * 60_000; // EGRESS: settings change by hand, not by the minute.
 
-async function getSettingsRows(svc: SupabaseClient, userId: string): Promise<SettingsRow[]> {
-  const cached = settingsCache.get(userId);
+async function getSettingsRows(svc: SupabaseClient, userId: string, useCache = true): Promise<SettingsRow[]> {
+  const cached = useCache ? settingsCache.get(userId) : null;
   if (cached && cached.expiresAt > Date.now()) return cached.rows;
   const { data } = await svc
     .from("market_api_settings")
-    .select(ALL_SETTINGS_COLS)
-    .eq("user_id", userId);
+    .select(ALL_SETTINGS_COLS + ",purpose")
+    .eq("user_id", userId)
+    // Account-bound reads only ever use the caller's own trading connection;
+    // a data-feed row belongs to the market-data plane, never to a user.
+    .eq("purpose", "account");
   const rows = (data ?? []) as unknown as SettingsRow[];
   settingsCache.set(userId, { rows, expiresAt: Date.now() + SETTINGS_TTL_MS });
   return rows;
 }
+
 
 async function getFreshSettingsRow(
   svc: SupabaseClient,
@@ -881,14 +886,15 @@ export function kotakProvider(svc: SupabaseClient, s: KotakSettings): MarketProv
       const token = entry?.token;
       const seg = entry?.segment || defaultSeg;
       if (!token) {
-        // Not a failure — Kotak's scrip master simply has no token for this
-        // symbol (mostly indices and new listings), and Yahoo covers it. This
-        // used to write one health row per tokenless symbol per pipeline run,
-        // which is pure, permanent noise. Log it once per isolate so the gap
-        // is still visible without flooding the table.
+        // NOT a provider failure. Kotak Neo publishes no candle API at all, so
+        // history is Yahoo/NSE-served by design; a missing scrip-master token
+        // is a routing fact, not an outage. Logging it as `ok: false` wrote
+        // ~5,300 fake failures a day and dragged Kotak's 24 h success rate to
+        // 2% while its quote path was perfectly healthy. Keep the console
+        // breadcrumb; keep it out of market_provider_health.
         if (!loggedTokenGap.has(`${exchange}:${symbol}`)) {
           loggedTokenGap.add(`${exchange}:${symbol}`);
-          logProviderHealth(svc, "kotak_neo", "getOHLCV", false, 0, `no token for ${exchange}:${symbol} — using yahoo`);
+          console.log(`[kotak] no candle token for ${exchange}:${symbol} — routed to yahoo`);
         }
         // Coverage gap Kotak's scrip master doesn't fill (mostly indices).
         // Yahoo is allowed here regardless of market state — it's the only
@@ -1610,8 +1616,13 @@ export const BROKER_PROVIDERS = ["kotak_neo", "shoonya"] as const as readonly st
 const shoonyaUsable = (r: SettingsRow): boolean =>
   r.connection_status === "connected" || (!!r.ucc && !!r.vendor_code && !!r.api_secret_enc);
 
-const kotakUsable = (r: SettingsRow): boolean =>
-  r.connection_status === "connected" || !!r.totp_secret_enc;
+const kotakUsable = (r: SettingsRow): boolean => {
+  const completeSession = r.connection_status === "connected"
+    && !!r.session_token_enc && !!r.sid && !!r.base_url;
+  const completeAutoLogin = !!r.consumer_key && !!r.mobile_number_enc
+    && !!r.mpin_enc && !!r.totp_secret_enc && !!r.ucc;
+  return completeSession || completeAutoLogin;
+};
 
 function providerForRow(svc: SupabaseClient, row: SettingsRow): MarketProvider | null {
   if (row.active_provider === "kotak_neo") return kotakProvider(svc, row);
@@ -1626,7 +1637,11 @@ export async function getActiveProvider(
   svc: SupabaseClient,
   userId: string,
 ): Promise<ActiveProvider> {
-  const rows = await getSettingsRows(svc, userId);
+  // Account-bound reads and mutations must never reuse a cached credential or
+  // session row. A reconnect/key-recovery can clear or replace encrypted
+  // values in another isolate; using the old row for ten minutes caused
+  // Orders/Trades to keep attempting decryption after recovery had completed.
+  const rows = await getSettingsRows(svc, userId, false);
   // Connected rows win; a credentialed-but-idle row is next (it can log in on
   // demand). Order within each tier follows the row's own provider, so a user
   // with both brokers keeps whichever is actually live.
@@ -1662,21 +1677,16 @@ export function invalidateSystemFeedCache(): void {
 
 async function getSystemFeedRow(svc: SupabaseClient): Promise<SettingsRow | null> {
   if (systemFeedCache && systemFeedCache.expiresAt > Date.now()) return systemFeedCache.row;
-  const cols = ALL_SETTINGS_COLS + ",is_system";
-  // 1) Explicitly designated system feed.
+  const cols = ALL_SETTINGS_COLS + ",is_system,purpose";
+  // Only an explicitly designated data-purpose connection may serve market
+  // data. There is deliberately NO "newest connected row" fallback: a user
+  // connecting their broker for their portfolio must never silently become
+  // the app's price feed.
   const { data: designated } = await svc
     .from("market_api_settings").select(cols)
-    .eq("is_system", true).in("active_provider", BROKER_PROVIDERS as string[]).limit(1);
-  let row: SettingsRow | null = ((designated ?? []) as unknown as SettingsRow[])[0] ?? null;
-  // 2) Legacy fallback — no designation yet: newest usable broker row.
-  if (!row) {
-    const { data } = await svc
-      .from("market_api_settings").select(cols)
-      .in("active_provider", BROKER_PROVIDERS as string[])
-      .order("updated_at", { ascending: false }).limit(8);
-    const rows = (data ?? []) as unknown as SettingsRow[];
-    row = rows.find((r) => r.connection_status === "connected") ?? rows.find((r) => usableSession(r)) ?? null;
-  }
+    .eq("is_system", true).eq("purpose", "data")
+    .in("active_provider", BROKER_PROVIDERS as string[]).limit(1);
+  const row: SettingsRow | null = ((designated ?? []) as unknown as SettingsRow[])[0] ?? null;
   systemFeedCache = { row, expiresAt: Date.now() + SYSTEM_FEED_TTL_MS };
   return row;
 }
@@ -1684,28 +1694,54 @@ async function getSystemFeedRow(svc: SupabaseClient): Promise<SettingsRow | null
 const usableSession = (r: SettingsRow | null | undefined): boolean =>
   !!r && (r.active_provider === "shoonya" ? shoonyaUsable(r) : kotakUsable(r));
 
-// Read-only market-data provider. System Kotak feed first (so every signed-in
-// user gets real-time prices without connecting a broker), the caller's own
-// Kotak next, Yahoo last. Never use this for account-bound calls.
+// Read-only market-data provider: the admin-designated data feed, else public
+// vendors (Yahoo/NSE). A user's own broker session is NEVER used for market
+// data — that plane is account-bound only.
 export async function getReadProvider(
   svc: SupabaseClient,
-  userId: string,
+  _userId: string,
+  /** Routed feed id ("ltp", "indices", "candles_1d", ...) — honours the
+   *  operator's Primary/Fallback choice for that feed. */
+  feedId?: string,
 ): Promise<ActiveProvider> {
   try {
+    // Operator routing first: a feed pinned to a public vendor must not be
+    // served by the broker just because a broker session exists.
+    if (feedId) {
+      const route = await getFeedRoute(svc, feedId);
+      const primary = route.primary;
+      if (primary === "yahoo" || primary === "nse") {
+        return { provider: yahooProvider(svc), settings: null };
+      }
+      if (primary === "kotak" || primary === "shoonya") {
+        const want = toProviderName(primary);
+        const sys = await getSystemFeedRow(svc);
+        if (sys && sys.active_provider === want && usableSession(sys)) {
+          const p = providerForRow(svc, sys);
+          if (p) return { provider: p, settings: sys };
+        }
+        // Pinned broker is not the designated feed (or not usable) — fall
+        // through to the configured fallback rather than going dark.
+        if (route.fallback === "yahoo" || route.fallback === "nse") {
+          return { provider: yahooProvider(svc), settings: null };
+        }
+      }
+    }
     const sys = await getSystemFeedRow(svc);
     if (usableSession(sys)) {
-      const p = providerForRow(svc, sys!);
+      const p = sys ? providerForRow(svc, sys) : null;
       if (p) return { provider: p, settings: sys };
     }
-  } catch { /* fall through to the caller's own connection */ }
-  return getActiveProvider(svc, userId);
+  } catch { /* fall through to public vendors */ }
+  return { provider: yahooProvider(svc), settings: null };
 }
+
 
 // Service-level provider for cron jobs (no user context) — same system feed.
 export async function getServiceProvider(svc: SupabaseClient): Promise<ActiveProvider> {
   const row = await getSystemFeedRow(svc);
   if (usableSession(row)) {
-    const p = providerForRow(svc, row!);
+    const p = row ? providerForRow(svc, row) : null;
     if (p) return { provider: p, settings: row };
   }
   return { provider: yahooProvider(svc), settings: null };

@@ -25,6 +25,12 @@ export type Feed = {
   usedBy: UsedBy[];
   /** Shown when there is no probe and no table (e.g. write paths). */
   note?: string;
+  /**
+   * "account" feeds belong to one user's own broker login (funds, holdings,
+   * positions, order placement). They are NOT part of the shared data feed, so
+   * they never appear in Admin Config and never colour the app-wide status.
+   */
+  scope?: "data" | "account";
 };
 
 export type ProviderMeta = {
@@ -94,22 +100,22 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
       },
 
       {
-        id: "funds", label: "Funds / margin", desc: "Available and used margin",
+        id: "funds", scope: "account", label: "Funds / margin", desc: "Available and used margin",
         surface: "funds", table: { name: "market_funds", column: "synced_at" },
         usedBy: [PORTFOLIO, ORDERS],
       },
       {
-        id: "holdings", label: "Holdings", desc: "Demat holdings with average cost",
+        id: "holdings", scope: "account", label: "Holdings", desc: "Demat holdings with average cost",
         surface: "holdings", table: { name: "market_holdings", column: "updated_at" },
         usedBy: [HOLDINGS, PORTFOLIO, INVESTMENTS],
       },
       {
-        id: "positions", label: "Positions", desc: "Intraday / carry-forward open positions",
+        id: "positions", scope: "account", label: "Positions", desc: "Intraday / carry-forward open positions",
         surface: "positions", table: { name: "market_positions", column: "updated_at" },
         usedBy: [POSITIONS, PORTFOLIO],
       },
       {
-        id: "orders", label: "Order placement", desc: "Place / modify / cancel, GTT and auto-trade execution",
+        id: "orders", scope: "account", label: "Order placement", desc: "Place / modify / cancel, GTT and auto-trade execution",
         usedBy: [ORDERS, GTT, AUTOTRADE],
         note: "Write path — not probed (no test order is ever placed).",
       },
@@ -147,22 +153,22 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
         usedBy: [MARKET_OVERVIEW, PLANNER, AUTOTRADE],
       },
       {
-        id: "funds", label: "Funds / margin", desc: "Available and used margin",
+        id: "funds", scope: "account", label: "Funds / margin", desc: "Available and used margin",
         surface: "funds", table: { name: "market_funds", column: "synced_at" },
         usedBy: [PORTFOLIO, ORDERS],
       },
       {
-        id: "holdings", label: "Holdings", desc: "Demat holdings with average cost",
+        id: "holdings", scope: "account", label: "Holdings", desc: "Demat holdings with average cost",
         surface: "holdings", table: { name: "market_holdings", column: "updated_at" },
         usedBy: [HOLDINGS, PORTFOLIO, INVESTMENTS],
       },
       {
-        id: "positions", label: "Positions", desc: "Intraday / carry-forward open positions",
+        id: "positions", scope: "account", label: "Positions", desc: "Intraday / carry-forward open positions",
         surface: "positions", table: { name: "market_positions", column: "updated_at" },
         usedBy: [POSITIONS, PORTFOLIO],
       },
       {
-        id: "orders", label: "Order placement", desc: "Place / modify / cancel via Noren",
+        id: "orders", scope: "account", label: "Order placement", desc: "Place / modify / cancel via Noren",
         usedBy: [ORDERS, GTT, AUTOTRADE],
         note: "Write path — not probed (no test order is ever placed).",
       },

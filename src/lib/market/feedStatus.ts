@@ -14,20 +14,35 @@ import {
   type RoutedFeed, type RoutedProvider,
 } from "@/components/config/providers/feedCatalog";
 import {
-  bestBySurface, canonicalProviderId, freshKey, useFeedFreshness, useSurfaceProbes,
+  bestBySurface, canonicalProviderId, freshKey, isProbeStale, useFeedFreshness, useSurfaceProbes,
   type Freshness, type SurfaceHealth, type SurfaceProbe,
 } from "./selftest";
 
-export type Status = "LIVE" | "DELAYED" | "FALLBACK" | "DOWN" | "IDLE" | "NOT SET";
+export type Status = "LIVE" | "DELAYED" | "FALLBACK" | "DOWN" | "IDLE" | "NOT SET" | "NOT CHECKED";
 
 export const STATUS_TONE: Record<Status, "ok" | "warn" | "err" | "neutral" | "accent"> = {
-  LIVE: "ok", DELAYED: "warn", FALLBACK: "accent", DOWN: "err", IDLE: "neutral", "NOT SET": "neutral",
+  LIVE: "ok", DELAYED: "warn", FALLBACK: "accent", DOWN: "err", IDLE: "neutral",
+  "NOT SET": "neutral",
+  // A verdict too old to be current is not a failure — it is an unknown.
+  "NOT CHECKED": "neutral",
 };
 
 export type PrefRow = { feed_id: string; provider: string | null; fallback_provider: string | null };
 export type Heartbeat = {
   feed_id: string; provider: string; ok: boolean; latency_ms: number | null;
   detail: string | null; symbols: number | null; observed_at: string;
+  /** Code path that served it ("live", "cache", "quote", "mixed") — NOT a provider. */
+  path?: string | null;
+};
+
+/** One chip per provider in a feed's chain, coloured by its own last probe. */
+export type ChainHealth = {
+  provider: RoutedProvider;
+  label: string;
+  /** "ok" | "degraded" | "failed" | "not set" | "not checked" */
+  state: "ok" | "degraded" | "failed" | "not set" | "not checked";
+  detail: string | null;
+  checkedAt: string | null;
 };
 
 export type FeedRow = {
@@ -37,6 +52,13 @@ export type FeedRow = {
   servedBy: string;
   health: string;
   primaryProbe: string | null;
+  /** Per-provider health of the whole chain — a failing fallback stays visible
+   *  while the feed itself is still green. */
+  chainHealth: ChainHealth[];
+  /** The feed is being served by someone other than the configured primary. */
+  autoSwitched: boolean;
+  /** When this feed's own evidence was last refreshed. */
+  checkedAt: string | null;
 };
 
 /** IST calendar date (YYYY-MM-DD) — the key used for holiday lookups. */
@@ -75,12 +97,17 @@ export function useMarketHoliday() {
   });
 }
 
+/**
+ * App-wide routing overrides. Feed routing is an operator decision, so only
+ * `scope = 'system'` rows count — that is exactly what the edge resolver reads.
+ */
 export function useFeedPrefs() {
   return useQuery({
     queryKey: ["market", "feed-prefs"],
     queryFn: async () => {
       const { data, error } = await supabase
-        .from("market_feed_prefs").select("feed_id, provider, fallback_provider");
+        .from("market_feed_prefs").select("feed_id, provider, fallback_provider")
+        .eq("scope", "system");
       if (error) throw error;
       return (data ?? []) as PrefRow[];
     },
@@ -94,7 +121,7 @@ export function useFeedHeartbeats() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from("market_feed_heartbeat")
-        .select("feed_id, provider, ok, latency_ms, detail, symbols, observed_at");
+        .select("feed_id, provider, ok, latency_ms, detail, symbols, observed_at, path");
       if (error) throw error;
       return Object.fromEntries(((data ?? []) as Heartbeat[]).map((h) => [h.feed_id, h]));
     },
@@ -173,7 +200,9 @@ function chainProbe(
   return null;
 }
 
-export function statusForFeed(f: RoutedFeed, i: StatusInputs): FeedRow {
+type BaseRow = Omit<FeedRow, "chainHealth" | "autoSwitched" | "checkedAt">;
+
+function baseStatusForFeed(f: RoutedFeed, i: StatusInputs): BaseRow {
   const pref = i.prefs.find((p) => p.feed_id === f.id);
   const pinned = pref?.provider && pref.provider !== "auto" ? (pref.provider as RoutedProvider) : undefined;
   const primary = pinned ?? f.chain[0];
@@ -222,6 +251,16 @@ export function statusForFeed(f: RoutedFeed, i: StatusInputs): FeedRow {
       f, status: "LIVE",
       detail: `${label} served ${hb.symbols ?? 0} symbol(s) ${agoLabel(hb.observed_at)} — real-time, no cache in the path.`,
       servedBy: label, health, primaryProbe: null,
+      ...(hb.path && hb.path !== "live"
+        // The provider is in-chain, so this is not a fallback; it is the same
+        // provider answering through a slower path. Say which one.
+        ? {
+            status: hb.path === "mixed" ? ("LIVE" as Status) : ("DELAYED" as Status),
+            detail: hb.path === "mixed"
+              ? `${label} served most of the batch ${agoLabel(hb.observed_at)}${hb.detail ? ` (${hb.detail})` : ""}.`
+              : `Served from the ${hb.path} path ${agoLabel(hb.observed_at)} — not a fresh ${label} tick.`,
+          }
+        : {}),
     };
   }
 
@@ -230,6 +269,21 @@ export function statusForFeed(f: RoutedFeed, i: StatusInputs): FeedRow {
     const answered = probe.provider || "unknown";
     const providerLabel = providerLabelFromProbe(answered);
     const health = `probe ${probe.state} · ${agoLabel(probe.checked_at)}${probe.latency_ms != null ? ` · ${probe.latency_ms}ms` : ""}`;
+    // A verdict nobody refreshed is not today's status. Showing a day-old red
+    // FAILED chip as current is the single most misleading thing this panel did.
+    if (isProbeStale(probe.checked_at, open) && probe.state !== "not_configured") {
+      if (f.sessionOnly && !open) {
+        return { f, status: "IDLE", detail: `Market closed — ${seen}.`, servedBy: providerLabel, health, primaryProbe: null };
+      }
+      if (ts && !stale) {
+        return { f, status: "LIVE", detail: `${seen} — probe not re-run since ${agoLabel(probe.checked_at)}.`, servedBy: providerLabel, health, primaryProbe: null };
+      }
+      return {
+        f, status: "NOT CHECKED",
+        detail: `Not re-checked since ${agoLabel(probe.checked_at)} — last verdict ${probe.ok ? "ok" : probe.state}${probe.detail ? ` (${probe.detail})` : ""}.`,
+        servedBy: providerLabel, health, primaryProbe: null,
+      };
+    }
     if (probe.state === "not_configured") {
       return { f, status: "NOT SET", detail: probe.detail || `${providerLabel} needs to be connected first`, servedBy: providerLabel, health, primaryProbe: null };
     }
@@ -279,6 +333,54 @@ export function statusForFeed(f: RoutedFeed, i: StatusInputs): FeedRow {
     : { f, status: "LIVE", detail: seen, servedBy: ROUTED_PROVIDER_LABEL[primary], health: `cache · ${agoLabel(ts)}`, primaryProbe: null };
 }
 
+/** Health of every provider in a feed's chain, fresh or not. A stale probe is
+ *  reported as "not checked" rather than silently dropped — Shoonya looked
+ *  absent from the panel when its last probe simply aged past 24 h. */
+function chainHealthFor(f: RoutedFeed, chain: RoutedProvider[], i: StatusInputs): ChainHealth[] {
+  return chain.map((p) => {
+    const probe = f.surface ? i.bySurfaceProvider[`${f.surface}|${canonicalProviderId(p)}`] : undefined;
+    const state: ChainHealth["state"] = !probe
+      ? "not checked"
+      : probe.state === "not_configured"
+      ? "not set"
+      : isProbeStale(probe.checked_at, i.sessionOpen)
+      ? "not checked"
+      : probe.ok
+      ? "ok"
+      : probe.state === "degraded"
+      ? "degraded"
+      : "failed";
+    return {
+      provider: p,
+      label: ROUTED_PROVIDER_LABEL[p],
+      state,
+      detail: probe?.detail ?? null,
+      checkedAt: probe?.checked_at ?? null,
+    };
+  });
+}
+
+export function statusForFeed(f: RoutedFeed, i: StatusInputs): FeedRow {
+  const base = baseStatusForFeed(f, i);
+  const pref = i.prefs.find((p) => p.feed_id === f.id);
+  const pinned = pref?.provider && pref.provider !== "auto" ? (pref.provider as RoutedProvider) : undefined;
+  const primary = pinned ?? f.chain[0];
+  const chain = [pinned, pref?.fallback_provider as RoutedProvider | undefined, ...f.chain]
+    .filter((p): p is RoutedProvider => Boolean(p))
+    .filter((p, idx, a) => a.indexOf(p) === idx);
+  const hb = f.heartbeat ? i.heartbeats[f.heartbeat] : undefined;
+  const probe = f.surface ? i.surfaces[f.surface] : undefined;
+  const ts = f.table ? i.freshness[freshKey(f.table)] : undefined;
+  const answered = hb?.provider ?? probe?.provider ?? null;
+  return {
+    ...base,
+    chainHealth: chainHealthFor(f, chain, i),
+    // Auto-switch is only meaningful when something actually answered.
+    autoSwitched: !!answered && !sameProvider(primary, answered),
+    checkedAt: hb?.observed_at ?? probe?.checked_at ?? ts ?? null,
+  };
+}
+
 export function computeFeedRows(i: StatusInputs): FeedRow[] {
   return ROUTED_FEEDS.map((f) => statusForFeed(f, i));
 }
@@ -293,6 +395,7 @@ export type FeedTally = {
   down: number;
   idle: number;
   notSet: number;
+  notChecked: number;
   affected: string[];
 };
 
@@ -312,6 +415,7 @@ export function tallyRows(rows: FeedRow[], scope: "platform" | "account" = "plat
     down: count("DOWN"),
     idle,
     notSet: count("NOT SET"),
+    notChecked: count("NOT CHECKED"),
     affected: scoped.filter((r) => r.status === "DOWN" || r.status === "DELAYED" || r.status === "FALLBACK")
       .map((r) => r.f.label),
   };

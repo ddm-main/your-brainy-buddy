@@ -2,7 +2,7 @@
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { getActiveProvider, encryptValue } from "../_shared/market/provider.ts";
 import { BROKER_PROVIDERS } from "../_shared/market/provider.ts";
-import { kotakTrades, withKotakSession } from "../_shared/market/kotakClient.ts";
+import { isUnreadableKotakCredentialsError, kotakTrades, withKotakSession } from "../_shared/market/kotakClient.ts";
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
@@ -28,6 +28,14 @@ Deno.serve(async (req) => {
     })).filter((t: any) => t.symbol);
     return jsonResponse(req, { trades, source: "kotak" });
   } catch (e) {
+    if (isUnreadableKotakCredentialsError(e)) {
+      return jsonResponse(req, {
+        trades: [],
+        source: "reconnect_required",
+        reconnect_required: true,
+        reason: "Saved Kotak credentials are no longer readable. Re-enter them in Market Config → Providers.",
+      });
+    }
     return errorResponse(req, e instanceof Error ? e.message : String(e), 502);
   }
 });

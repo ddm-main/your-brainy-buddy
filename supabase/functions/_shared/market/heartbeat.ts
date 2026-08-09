@@ -22,7 +22,26 @@ export type HeartbeatInput = {
   latencyMs?: number | null;
   detail?: string | null;
   symbols?: number | null;
+  /**
+   * The code path that served the request — "live", "cache", "quote",
+   * "mixed". This used to be written into `provider`, so the UI could not
+   * match it against the routing chain and painted healthy feeds FALLBACK.
+   */
+  path?: string | null;
 };
+
+/** One provider spelling everywhere — mirrors the client's canonicalProviderId. */
+export function canonicalProvider(name: string): string {
+  const n = (name || "").toLowerCase();
+  if (n.includes("kotak")) return "kotak_neo";
+  if (n.includes("shoonya") || n.includes("noren") || n.includes("finvasia")) return "shoonya";
+  if (n.includes("yahoo")) return "yahoo";
+  if (n.includes("alpha")) return "alpha_vantage";
+  if (n.includes("fmp") || n.includes("modeling")) return "fmp";
+  if (n.includes("nse")) return "nse";
+  if (n.includes("bse")) return "bse";
+  return n || "unknown";
+}
 
 /** Fire-and-forget: never let heartbeat bookkeeping fail or slow a data path. */
 export function recordFeedHeartbeat(svc: SupabaseClient, hb: HeartbeatInput): void {
@@ -34,7 +53,8 @@ export function recordFeedHeartbeat(svc: SupabaseClient, hb: HeartbeatInput): vo
     lastWrite.set(hb.feedId, now);
     svc.from("market_feed_heartbeat").upsert({
       feed_id: hb.feedId,
-      provider: hb.provider,
+      provider: canonicalProvider(hb.provider),
+      path: hb.path ?? null,
       ok: hb.ok,
       latency_ms: hb.latencyMs ?? null,
       detail: hb.detail ?? null,
@@ -42,4 +62,24 @@ export function recordFeedHeartbeat(svc: SupabaseClient, hb: HeartbeatInput): vo
       observed_at: new Date(now).toISOString(),
     }, { onConflict: "feed_id" }).then(() => {}, () => {});
   } catch { /* never throw from telemetry */ }
+}
+
+/**
+ * Dominant provider of a multi-provider batch plus a human mix string, e.g.
+ * { provider: "yahoo", mix: "Yahoo 4/5, Kotak 1/5" }. Indices are resolved
+ * per symbol, and stamping the batch "mixed" made a healthy feed unmatchable.
+ */
+export function dominantProvider(sources: string[]): { provider: string; mix: string | null } {
+  const counts = new Map<string, number>();
+  for (const s of sources) {
+    const c = canonicalProvider(s);
+    counts.set(c, (counts.get(c) ?? 0) + 1);
+  }
+  if (counts.size === 0) return { provider: "unknown", mix: null };
+  const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const total = sources.length;
+  return {
+    provider: ranked[0][0],
+    mix: ranked.length > 1 ? ranked.map(([p, n]) => `${p} ${n}/${total}`).join(", ") : null,
+  };
 }

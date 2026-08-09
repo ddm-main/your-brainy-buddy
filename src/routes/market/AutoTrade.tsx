@@ -8,7 +8,7 @@ import { HudPanel } from "@/components/hud/HudPanel";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
 import { DataTable, fmtNum } from "@/components/hud/DataTable";
 import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
-import { relTime } from "@/lib/db";
+import { relTime } from "@/lib/relTime";
 import { supabase } from "@/integrations/supabase/client";
 import { useQuery } from "@tanstack/react-query";
 import { useMarketSettings, usePositions } from "@/lib/market/hooks";

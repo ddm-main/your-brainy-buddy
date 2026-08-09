@@ -28,6 +28,7 @@ import { getReadProvider } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 import { getSharedQuotes } from "../_shared/market/quoteCache.ts";
 import { recordFeedHeartbeat } from "../_shared/market/heartbeat.ts";
+import { getFeedRoute } from "../_shared/market/feedRoute.ts";
 
 // This is the hot poll path across several panels at once, so the ceiling is
 // generous — it exists to catch a buggy client or leaked token polling
@@ -78,15 +79,21 @@ Deno.serve(async (req) => {
     }
 
     const svc = svcClient();
-    const { provider } = await getReadProvider(svc, auth.userId);
+    // Honour the operator's Feed Routing choice for the live-price feed.
+    const route = await getFeedRoute(svc, "ltp");
+    const { provider } = await getReadProvider(svc, auth.userId, "ltp");
+    // A deliberately pinned public vendor is a valid answer for this route —
+    // it is only "broker unavailable" when nobody asked for a vendor.
+    const vendorPinned = route.primary === "yahoo" || route.primary === "nse";
 
     // Broker-only: a Yahoo-backed provider cannot serve this route. Tell the
     // client plainly so it can render "kotak session expired — reconnect"
     // instead of silently drawing a delayed price as live.
-    if (!isBroker(provider.name)) {
+    if (!isBroker(provider.name) && !vendorPinned) {
       recordFeedHeartbeat(svc, {
         feedId: "quotes_ltp",
-        provider: "none",
+        provider: "kotak_neo",
+        path: "live",
         ok: false,
         symbols: 0,
         detail: `broker session unavailable (resolved provider: ${provider.name})`,
@@ -157,21 +164,23 @@ Deno.serve(async (req) => {
         day_high: stale || dayUnavailable ? null : (q as any).day_high ?? null,
         day_low: stale || dayUnavailable ? null : (q as any).day_low ?? null,
         source: q.source,
-        provider: "kotak",
+        provider: isBroker(provider.name) ? "kotak" : provider.name,
         as_of: q.as_of ?? null,
         previous_close_as_of: q.previous_close_as_of ?? null,
         stale,
       }];
     });
 
-    const providerSummary: "kotak" | "none" = out.length > 0 ? "kotak" : "none";
+    const servingName = isBroker(provider.name) ? "kotak" : provider.name;
+    const providerSummary = out.length > 0 ? servingName : "none";
 
     // Liveness stamp for the Feed Routing page: who answered, and how fast.
     // recordFeedHeartbeat throttles steady-state writes per isolate and only
     // writes a failure transition immediately.
     recordFeedHeartbeat(svc, {
       feedId: "quotes_ltp",
-      provider: providerSummary === "none" ? "kotak" : providerSummary,
+      provider: providerSummary === "none" ? servingName : providerSummary,
+      path: "live",
       ok: out.length > 0,
       latencyMs: Date.now() - quoteT0,
       symbols: out.length,
@@ -184,8 +193,9 @@ Deno.serve(async (req) => {
       quotes: out,
       source: provider.name,
       provider: providerSummary,
-      broker: "kotak",
-      broker_available: true,
+      broker: isBroker(provider.name) ? "kotak" : provider.name,
+      broker_available: isBroker(provider.name),
+      ...(vendorPinned && !isBroker(provider.name) ? { routed: "vendor_pinned" } : {}),
       ...(out.length === 0 ? { reason: fetchError ? "broker_error" : "no_prices" } : {}),
       ...(fetchError ? { error_detail: fetchError } : {}),
     });

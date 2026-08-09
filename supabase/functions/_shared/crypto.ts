@@ -46,9 +46,24 @@ function readEnv(name: string): string | undefined {
   return undefined;
 }
 
+// Distinguishable failure modes, so the app can tell "the server has no key"
+// apart from "the stored ciphertext was written under a different key and the
+// credential must be entered again".
+export const ENC_KEY_MISSING = "ENC_KEY_MISSING";
+export const ENC_KEY_MISMATCH = "ENC_KEY_MISMATCH";
+
+export function encFailureKind(err: unknown): typeof ENC_KEY_MISSING | typeof ENC_KEY_MISMATCH | null {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  if (msg.includes(ENC_KEY_MISSING)) return ENC_KEY_MISSING;
+  if (msg.includes(ENC_KEY_MISMATCH)) return ENC_KEY_MISMATCH;
+  return null;
+}
+
 async function keyFromSecret(): Promise<CryptoKey> {
   const secret = readEnv("STATEMENT_ENC_SECRET");
-  if (!secret) throw new Error("STATEMENT_ENC_SECRET not configured");
+  if (!secret) {
+    throw new Error(`${ENC_KEY_MISSING}: STATEMENT_ENC_SECRET is not configured on the server`);
+  }
   // Derive a 32-byte AES-256 key from the configured secret via SHA-256.
   const raw = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
   return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
@@ -77,6 +92,13 @@ export async function decryptStatementPassword(rule: StatementPasswordRule): Pro
   const key = await keyFromSecret();
   const iv = fromB64(rule.iv_b64);
   const combined = concatBytes(fromB64(rule.ciphertext_b64), fromB64(rule.auth_tag_b64));
-  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: iv.slice().buffer }, key, combined.slice().buffer);
-  return new TextDecoder().decode(pt);
+  try {
+    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: iv.slice().buffer }, key, combined.slice().buffer);
+    return new TextDecoder().decode(pt);
+  } catch {
+    // Ciphertext written under a previous encryption key (or corrupted). It is
+    // unrecoverable — the credential has to be re-entered once.
+    throw new Error(`${ENC_KEY_MISMATCH}: stored credential cannot be decrypted with the current key — re-enter it in Market Config → Providers`);
+  }
 }
+

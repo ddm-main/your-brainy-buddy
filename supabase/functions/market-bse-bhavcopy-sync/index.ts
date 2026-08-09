@@ -9,6 +9,7 @@
 // market_stocks (exchange='BSE'); NSE dual-listings stay on the NSE row.
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsFor, preflight } from "../_shared/cors.ts";
+import { requireCronSecret } from "../_shared/market/cron.ts";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36";
 const BSE_HOME = "https://www.bseindia.com/";
@@ -107,10 +108,12 @@ Deno.serve(async (req) => {
     const svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(url, svc, { auth: { persistSession: false } });
 
-    const cronSecret = Deno.env.get("CRON_SECRET");
-    const hdr = req.headers.get("x-cron-secret");
+    // Cron callers are verified against the Vault-held secret (requireCronSecret
+    // returns null on a match); authenticated users can also trigger this.
     const authHdr = req.headers.get("authorization");
-    const isCron = cronSecret && hdr && hdr === cronSecret;
+    const isCron = req.headers.get("x-cron-secret")
+      ? (await requireCronSecret(req)) === null
+      : false;
     if (!isCron && !authHdr) {
       return new Response(JSON.stringify({ error: "unauthorized" }), {
         status: 401, headers: { ...cors, "Content-Type": "application/json" },
@@ -135,16 +138,20 @@ Deno.serve(async (req) => {
     }
 
     if (!csv || !tradeDate) {
+      // A drought (holiday stretch, BSE publishing late, upstream layout change)
+      // is not a pipeline failure — returning 502 here aborted the whole daily
+      // chain. Record it as skipped and let the orchestrator continue.
       await supabase.from("market_ingestion_runs").insert({
-        source: "bse_bhavcopy", stage: "fetch", status: "failed",
+        source: "bse_bhavcopy", stage: "fetch", status: "skipped",
         error_message: "no bhavcopy found in last 6 days",
         duration_ms: Date.now() - started,
         finished_at: new Date().toISOString(),
       });
-      return new Response(JSON.stringify({ error: "bhavcopy_not_found" }), {
-        status: 502, headers: { ...cors, "Content-Type": "application/json" },
+      return new Response(JSON.stringify({ ok: true, skipped: true, reason: "bhavcopy_not_found" }), {
+        status: 200, headers: { ...cors, "Content-Type": "application/json" },
       });
     }
+
 
     const rows = parseCsv(csv);
     const tradeDateIso = fmtIsoDate(tradeDate);

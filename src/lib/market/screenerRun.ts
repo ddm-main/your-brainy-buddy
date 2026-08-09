@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import type { UniverseId } from "./screenerCatalog";
+import { safeStorage } from "@/lib/safeStorage";
 import { liveInterval, marketOpen } from "./hooks";
 
 // Shape of a market_data row as consumed by the screener/StockTable — the
@@ -331,6 +332,31 @@ function applyUniverseQuery(q: any, universeSet: Set<string> | "nifty500" | "fno
   return q.eq("instrument_type", "EQ").in("symbol", Array.from(universeSet));
 }
 
+// EGRESS: the statics plane is ~210 KB and only changes after the close, but
+// every reload/new tab re-fetched it because react-query's cache is in memory.
+// Persist it for the session so a day of reloads costs one fetch, not twenty.
+const STATIC_CACHE_PREFIX = "screener.statics.v1:";
+const STATIC_CACHE_TTL_MS = 6 * 3_600_000;
+const STATIC_CACHE_MAX_CHARS = 1_500_000; // stay well inside the 5 MB quota
+
+function readStaticCache(key: string): any[] | null {
+  const raw = safeStorage.get(STATIC_CACHE_PREFIX + key);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as { at: number; rows: any[] };
+    if (!parsed?.at || Date.now() - parsed.at > STATIC_CACHE_TTL_MS) return null;
+    return Array.isArray(parsed.rows) && parsed.rows.length > 0 ? parsed.rows : null;
+  } catch { return null; }
+}
+
+function writeStaticCache(key: string, rows: any[]): void {
+  try {
+    const payload = JSON.stringify({ at: Date.now(), rows });
+    if (payload.length > STATIC_CACHE_MAX_CHARS) return;
+    safeStorage.set(STATIC_CACHE_PREFIX + key, payload);
+  } catch { /* ignore */ }
+}
+
 async function fetchScreenerRows(
   universeSet: Set<string> | "nifty500" | "fno" | "sme" | null,
   columns: string,
@@ -625,10 +651,12 @@ export function useScreenerData(
   const statics = useQuery({
     queryKey: ["market", "screener-static-v2", universe, projection.key],
     queryFn: async () => {
-      const universeSet = await resolveUniverseFilter(universe);
-      const rows = await fetchScreenerRows(universeSet, projection.statics);
+      const cacheKey = `${universe}:${projection.key}`;
+      const cached = readStaticCache(cacheKey);
+      const rows = cached ?? await fetchScreenerRows(await resolveUniverseFilter(universe), projection.statics);
 
       if (rows.length === 0) return { rows, idxSets: EMPTY_IDX };
+      if (!cached) writeStaticCache(cacheKey, rows);
       const idxSets = await fetchIndexMembershipSets(rows.map((s: any) => s.symbol));
       return { rows: rankByV4(rows), idxSets };
     },
@@ -654,7 +682,9 @@ export function useScreenerData(
     gcTime: 30 * 60_000,
     refetchInterval: liveInterval(5 * 60_000, false),
     refetchIntervalInBackground: false,
-    refetchOnWindowFocus: marketOpen() ? "always" : false,
+    // EGRESS: "always" re-shipped the whole live plane on every tab focus.
+    // The 5-minute poll already covers the sweep cadence.
+    refetchOnWindowFocus: false,
     retry: false,
     enabled: enabled && !asOfDate,
   });
