@@ -59,11 +59,15 @@ Deno.serve(async (req) => {
     const cutoff = new Date(Date.now() - 7 * 86400_000).toISOString();
     const { data: stale } = await svc
       .from("market_stock_scores")
-      .select("symbol,exchange,computed_at,high_52w")
+      .select("symbol,exchange,computed_at,high_52w,low_52w")
       .eq("exchange", "NSE")
       .or(`high_52w.is.null,computed_at.lt.${cutoff}`)
       .limit(CHUNK * 4);
-    const work = (stale ?? []).slice(0, CHUNK).map((r: any) => ({ symbol: r.symbol, exchange: r.exchange }));
+    const work = (stale ?? []).slice(0, CHUNK).map((r: any) => ({
+      symbol: r.symbol, exchange: r.exchange,
+      prevHigh: r.high_52w == null ? null : Number(r.high_52w),
+      prevLow: r.low_52w == null ? null : Number(r.low_52w),
+    }));
 
     let updated = 0, failed = 0;
     const started = Date.now();
