@@ -108,7 +108,7 @@ Deno.serve(async (req) => {
     const unavailableCutoff = new Date(Date.now() - PERMANENT_UNAVAILABLE_DAYS * 86_400_000).toISOString();
 
     const { data: stocks, error } = await svc.from("market_stocks")
-      .select("symbol,exchange,yahoo_symbol,sector,market_cap,last_price_sync_at,price_sync_attempts,price_sync_attempts_day")
+      .select("symbol,exchange,yahoo_symbol,sector,market_cap,price_sync_attempts,price_sync_attempts_day")
       .eq("is_active", true)
       .eq("exchange", "NSE")
       .or(`last_price_sync_at.is.null,last_price_sync_at.lt.${cutoff}`)
@@ -129,7 +129,7 @@ Deno.serve(async (req) => {
     const addFromStocks = async (symbols: string[], room: number) => {
       if (room <= 0 || symbols.length === 0) return;
       const { data: rows } = await svc.from("market_stocks")
-        .select("symbol,exchange,yahoo_symbol,sector,market_cap,last_price_sync_at,price_sync_attempts,price_sync_attempts_day")
+        .select("symbol,exchange,yahoo_symbol,sector,market_cap,price_sync_attempts,price_sync_attempts_day")
         .eq("is_active", true)
         .eq("exchange", "NSE")
         .in("symbol", symbols.slice(0, room * 3))

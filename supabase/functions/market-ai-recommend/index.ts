@@ -39,9 +39,17 @@ Deno.serve(async (req) => {
 
   try {
     const svc = svcClient();
+    // EGRESS: this was `select("*")` on a 123-column table — one 3.5 MB
+    // response, the largest single read the meter has ever recorded. Only the
+    // fields the prompt and the score hash read are fetched now.
+    const SCORE_COLS = "symbol,exchange,close,change_pct,atr_pct,rsi14,macd,macd_signal,adx14," +
+      "ema20,ema50,ema200,above_ema200,high_52w,low_52w,pct_from_52w_high,bb_squeeze," +
+      "higher_lows,breakout_score,prebreakout_score";
     const { data: scores } = await svc.from("market_stock_scores")
-      .select("*").order("breakout_score", { ascending: false, nullsFirst: false }).limit(AI_UNIVERSE_CAP);
+      .select(SCORE_COLS).order("breakout_score", { ascending: false, nullsFirst: false }).limit(AI_UNIVERSE_CAP);
     if (!scores?.length) return jsonResponse(req, { ok: true, updated: 0 });
+
+
     const { count: universeCount } = await svc.from("market_stock_scores")
       .select("symbol", { count: "exact", head: true });
     const droppedFromUniverse = Math.max(0, (universeCount ?? 0) - scores.length);
