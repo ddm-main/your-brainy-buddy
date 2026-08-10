@@ -32,6 +32,7 @@ export default function FeedStatusChip() {
     ? "Feed routing & providers — no self-test result yet"
     : `Platform feeds — ${tally.ok}/${tally.total} healthy (${tally.live} active` +
       (tally.fallback ? `, ${tally.fallback} on fallback` : "") +
+      (tally.cached ? `, ${tally.cached} from cache` : "") +
       (tally.idle ? `, ${tally.idle} idle` : "") + ")" +
       (tally.delayed ? `, ${tally.delayed} delayed` : "") +
       (tally.down ? `, ${tally.down} down` : "") +

@@ -74,8 +74,8 @@ function candleTimeToIso(t: string | number): string {
 function withProvenance<T extends { candles: Array<{ time: string | number }> }>(
   payload: T & Record<string, unknown>,
   session: "open" | "closed" | "pre_open" | "post_close" | "holiday" | "weekend",
-  historySource: "kotak_neo" | "shoonya" | "yahoo" | "cache" | "mixed" | "none",
-  lastBarSource: "kotak_neo" | "shoonya" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none",
+  historySource: "kotak_neo" | "yahoo" | "cache" | "mixed" | "none",
+  lastBarSource: "kotak_neo" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none",
 ): T & Record<string, unknown> {
   const now = new Date();
   const last = payload.candles[payload.candles.length - 1];
@@ -148,19 +148,18 @@ const INTRADAY: Record<string, { interval: string; range: string }> = {
 
 interface DailyRow { trade_date: string; open: number; high: number; low: number; close: number; volume: number }
 interface OutCandle { time: string | number; open: number; high: number; low: number; close: number; volume: number }
-type IntradayProviderName = "kotak_neo" | "shoonya" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none";
+type IntradayProviderName = "kotak_neo" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none";
 
-/** Which broker (if any) actually served these bars. Shoonya's Noren API does
- *  publish candles, so it is a first-class history source, not a fallback. */
-function brokerSource(source: string | undefined): "kotak_neo" | "shoonya" | "yahoo" {
+/** Which broker (if any) actually served these bars. */
+
+function brokerSource(source: string | undefined): "kotak_neo" | "yahoo" {
   if (source === "kotak_neo" || source === "kotak") return "kotak_neo";
-  if (source === "shoonya") return "shoonya";
   return "yahoo";
 }
 
 /** Broker-served (live) as opposed to the delayed public fallback. */
 function isBrokerSource(name: string): boolean {
-  return name === "kotak_neo" || name === "shoonya";
+  return name === "kotak_neo";
 }
 
 // Weekly/monthly bars derived from the stored daily series. Kotak's W/M
@@ -404,7 +403,7 @@ function mergeTodayKotakBars(history: OutCandle[], kotakBars: OutCandle[]): OutC
 
 
 
-type SourceName = "kotak_neo" | "shoonya" | "yahoo" | "cache";
+type SourceName = "kotak_neo" | "yahoo" | "cache";
 
 async function loadDaily(
   svc: ReturnType<typeof svcClient>,
@@ -553,11 +552,17 @@ Deno.serve(async (req) => {
   const auth = await requireUserId(req);
   if ("error" in auth) return new Response("unauthorized", { status: 401, headers: corsFor(req) });
   const rl = limiter.guard(req, auth.userId); if (rl) return rl;
+  // Kept outside the try so the failure heartbeat below can say WHICH candle
+  // feed died — an unstamped 502 left the panel judging charts on days-old
+  // evidence from the last successful run.
+  let tf = "1D";
   try {
     const b = await req.json().catch(() => ({}));
     const symbol = String(b?.symbol ?? "").toUpperCase();
     const exchange = String(b?.exchange ?? "NSE").toUpperCase();
     const timeframe = String(b?.timeframe ?? "1D");
+    tf = timeframe;
+
     const since = parseSince(b?.since);
     if (!symbol) return errorResponse(req, "symbol required");
     const svc = svcClient();
@@ -572,6 +577,13 @@ Deno.serve(async (req) => {
       } catch (e) {
         // Broker down and no cached history: report it honestly with a 200 so
         // the chart can render an "unavailable" state instead of a hard 502.
+        // Stamp the heartbeat here too — this used to be the one candle path
+        // that returned without one, so a permanently failing daily feed kept
+        // showing whatever the last successful run had recorded.
+        recordFeedHeartbeat(svc, {
+          feedId: "candles_daily", provider: "yahoo", path: "live", ok: false, symbols: 0,
+          detail: e instanceof Error ? e.message : String(e),
+        });
         return jsonResponse(req, withProvenance({
           candles: [], emas: {}, timeframe, provider: "none", degraded: true,
           reason: e instanceof Error ? e.message : String(e),
@@ -583,7 +595,7 @@ Deno.serve(async (req) => {
       // The intraday path already stitches the broker quote onto its tail; the
       // daily path used to return pure cached rows, so 1D could never agree
       // with the Quote panel during a session. Same quote, same numbers.
-      let lastBarSource: "kotak_neo" | "shoonya" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none" = daily.provider;
+      let lastBarSource: "kotak_neo" | "yahoo" | "cache" | "quote" | "quote_delayed" | "none" = daily.provider;
       if (session === "open" || session === "post_close") {
         try {
           const { provider } = await getReadProvider(svc, auth.userId, "ltp");
@@ -929,7 +941,7 @@ Deno.serve(async (req) => {
     // a quote-seeded single bar, mark history as "cache" (or "none") and only
     // the last bar as "quote"/"quote_delayed" so the UI can say the truth.
     const session = await computeMarketSession(svc, exchange);
-      const historySource: "kotak_neo" | "shoonya" | "yahoo" | "cache" | "mixed" | "none" =
+      const historySource: "kotak_neo" | "yahoo" | "cache" | "mixed" | "none" =
         kotakTickBars.length > 0 && meta.source === "yahoo" ? "mixed" :
       providerName === "quote" || providerName === "quote_delayed"
         ? (candles.length > 1 ? (meta.source === "yahoo" ? "yahoo" : "cache") : "none")
@@ -957,7 +969,18 @@ Deno.serve(async (req) => {
 
 
   } catch (e) {
-    return errorResponse(req, e instanceof Error ? e.message : String(e), 502);
+    const msg = e instanceof Error ? e.message : String(e);
+    // Every response path stamps a heartbeat, failures included — otherwise a
+    // chart feed that has been 502-ing all day still reads LIVE from the last
+    // successful run's row.
+    try {
+      recordFeedHeartbeat(svcClient(), {
+        feedId: tf.toLowerCase() === "1d" || tf === "1W" || tf === "1M" ? "candles_daily" : "candles_intraday",
+        provider: "yahoo", path: "live", ok: false, symbols: 0, detail: msg,
+      });
+    } catch { /* telemetry must never mask the real error */ }
+    return errorResponse(req, msg, 502);
   }
 });
+
 

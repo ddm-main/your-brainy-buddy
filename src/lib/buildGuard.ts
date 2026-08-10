@@ -12,6 +12,25 @@
 const CHECK_MS = 10 * 60_000;
 const RELOAD_FLAG = "buildGuard.reloadedFor";
 
+function signatureFromSources(srcs: string[]): string | null {
+  const normalized = srcs
+    .map((src) => {
+      try { return new URL(src, window.location.origin).pathname; }
+      catch { return src; }
+    })
+    .sort();
+  return normalized.length > 0 ? normalized.join("|") : null;
+}
+
+/** Entry scripts loaded by this document, before a newer index is fetched. */
+function currentEntrySignature(): string | null {
+  return signatureFromSources(
+    [...document.querySelectorAll<HTMLScriptElement>('script[type="module"][src]')]
+      .map((script) => script.getAttribute("src"))
+      .filter((src): src is string => Boolean(src)),
+  );
+}
+
 /** The hashed module scripts referenced by the served index.html. */
 async function fetchEntrySignature(): Promise<string | null> {
   try {
@@ -21,8 +40,7 @@ async function fetchEntrySignature(): Promise<string | null> {
     if (!res.ok) return null;
     const html = await res.text();
     const srcs = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1]);
-    if (srcs.length === 0) return null;
-    return srcs.sort().join("|");
+    return signatureFromSources(srcs);
   } catch {
     return null; // offline or blocked — never reload on a failed check
   }
@@ -37,7 +55,10 @@ export function installBuildGuard() {
   // either never fire or fight the dev server.
   if (import.meta.env.DEV) return;
 
-  let baseline: string | null = null;
+  // Start with what this tab actually loaded. Using the first network response
+  // as the baseline lets an already-stale tab silently adopt the new build and
+  // continue polling with its old JavaScript until another deployment.
+  let baseline = currentEntrySignature();
 
   const check = async () => {
     const sig = await fetchEntrySignature();

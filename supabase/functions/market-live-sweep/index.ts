@@ -17,11 +17,15 @@
 // ET uses), never on an intraday reference.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { istTradeDate, requireCronSecret, isTradingHoliday } from "../_shared/market/cron.ts";
-import { getServiceProvider } from "../_shared/market/provider.ts";
+import { getServiceProvider, primeTokenMap } from "../_shared/market/provider.ts";
 import { getSharedQuotes } from "../_shared/market/quoteCache.ts";
 import { toYahooSymbol, yahooQuote } from "../_shared/market/yahooClient.ts";
+import { buildSweepSnapshot, readSweepChunk, pruneSweepSnapshots } from "../_shared/market/sweepSnapshot.ts";
 
-const CHUNK = 400;          // symbols per invocation
+// Bigger chunks mean fewer chained invocations, and every per-chunk reference
+// read (page meta, settled anchors, broker tokens) is paid once per
+// invocation — so the chunk size is directly proportional to daily egress.
+const CHUNK = 600;          // symbols per invocation
 const QUOTE_CHUNK = 100;    // symbols per upstream quote call
 const YAHOO_CAP = 120;      // bounded gap-filler per invocation
 
@@ -35,27 +39,20 @@ const MAX_SESSION_MOVE_PCT = 21;
 // SME/Emerge board. Quoted for completeness, excluded from mainboard screens.
 const SME_SERIES = new Set(["SM", "ST"]);
 
-// Static reference data per symbol, cached for the trading day inside a warm
-// isolate. Re-reading it on every sweep chunk was the single largest PostgREST
-// route (12.4 MB in half a day).
-type StaticMeta = { yahoo_symbol: string | null; series: string; total_shares_cr: number | null };
-const staticMeta = new Map<string, StaticMeta>();
-const STATIC_META_TTL_MS = 12 * 3_600_000;
-let staticMetaExpiresAt = 0;
-
-// The sorted universe symbol list, cached per isolate so the keyset page is a
-// memory slice rather than a PostgREST read on every sweep chunk.
-let universe: string[] = [];
-const UNIVERSE_TTL_MS = 3_600_000;
-let universeExpiresAt = 0;
-
+// EGRESS: this used to be four reference reads per chunk — the universe page,
+// the Kotak instrument tokens and the settled-anchor RPC —
+// re-issued on every cold chained invocation (~27 MB/day). All of it is now
+// resolved once per sweep into `market_sweep_snapshot`; a chunk reads only its
+// own slice of that row. See _shared/market/sweepSnapshot.ts.
 
 // deno-lint-ignore no-explicit-any
 declare const EdgeRuntime: any;
 
 
 interface Body {
+  /** Legacy keyset cursor; chunk index is authoritative now. */
   cursor?: string | null;
+  chunk?: number;
   limit?: number;
   chain?: boolean;
   force?: boolean;
@@ -83,7 +80,9 @@ Deno.serve(async (req) => {
     const svc = svcClient();
     const body: Body = req.method === "POST" ? await req.json().catch(() => ({})) : {};
     const limit = Math.max(50, Math.min(Number(body.limit) || CHUNK, 600));
-    const cursor = typeof body.cursor === "string" && body.cursor ? body.cursor : null;
+    // Chunk index replaces the old keyset cursor: slices are fixed by the
+    // snapshot, so a chunk is addressed by position, not by last symbol.
+    const chunkIndex = Math.max(0, Number(body.chunk) || 0);
     const chain = body.chain !== false;
     const force = body.force === true;
     const sweepId = body.sweep_id ?? crypto.randomUUID();
@@ -102,7 +101,7 @@ Deno.serve(async (req) => {
 
     // Only the first invocation opens the run. The database advisory lock
     // prevents two five-minute jobs from exposing interleaved sweeps.
-    if (!cursor) {
+    if (chunkIndex === 0) {
       const { data: begun, error: beginError } = await svc.rpc("begin_market_live_sweep", {
         _sweep_id: sweepId,
         _session_date: sessionDate,
@@ -112,79 +111,28 @@ Deno.serve(async (req) => {
       if (begun?.started === false) {
         return jsonResponse(req, { ok: true, skipped: begun.reason ?? "overlap", active_sweep_id: begun.sweep_id });
       }
-    }
-
-    // Keyset batch over the active NSE universe — the exact same universe the
-    // screener screens, so the plane can never be a subset of it.
-    // EGRESS: the universe symbol list itself is now cached per isolate for an
-    // hour, so a warm isolate pages through it in memory instead of re-reading
-    // ~5 KB of symbols on every chunk of every sweep. Static reference columns
-    // (yahoo_symbol/series/total_shares_cr) change on the weekly scrip sync at
-    // most and are cached for the day. This route was 2,160 reads/day at 5.6 KB.
-    if (universeExpiresAt <= Date.now() || universe.length === 0) {
-      const all: string[] = [];
-      let after: string | null = null;
-      for (;;) {
-        let uq = svc.from("market_stocks")
-          .select("symbol")
-          .eq("is_active", true)
-          .eq("exchange", "NSE")
-          .eq("instrument_type", "EQ")
-          // Penny names are purged from every price table by a DB trigger;
-          // fetching them here would only burn quota on ticks that can never
-          // be stored.
-          .not("penny_excluded", "is", true)
-          .order("symbol", { ascending: true })
-          .limit(1000);
-        if (after) uq = uq.gt("symbol", after);
-        const { data: chunk, error: uerr } = await uq;
-        if (uerr) return errorResponse(req, uerr.message, 500);
-        const syms = (chunk ?? []).map((r) => String(r.symbol));
-        all.push(...syms);
-        if (syms.length < 1000) break;
-        after = syms[syms.length - 1];
+      // Resolve the whole universe + anchors + broker tokens ONCE for this
+      // sweep. Every chained chunk below then reads just its own slice.
+      try {
+        await buildSweepSnapshot(svc, sweepId, sessionDate, limit);
+      } catch (e) {
+        return errorResponse(req, `snapshot build failed: ${e instanceof Error ? e.message : String(e)}`, 500);
       }
-      universe = all;
-      universeExpiresAt = Date.now() + UNIVERSE_TTL_MS;
+      pruneSweepSnapshots(svc).catch(() => {});
     }
 
-    const startIdx = cursor ? universe.findIndex((s) => s > cursor) : 0;
-    const pageSymbols = startIdx < 0 ? [] : universe.slice(startIdx, startIdx + limit);
+    // One small read per chunk: this chunk's symbols, their reference columns,
+    // their settled anchors and their broker tokens — all from the snapshot.
+    const snapChunk = await readSweepChunk(svc, sessionDate, chunkIndex);
 
-    if (staticMetaExpiresAt <= Date.now()) {
-      staticMeta.clear();
-      staticMetaExpiresAt = Date.now() + STATIC_META_TTL_MS;
-    }
-    const missingMeta = pageSymbols.filter((s) => !staticMeta.has(s));
-    for (let i = 0; i < missingMeta.length; i += 200) {
-      const { data: metaRows, error: metaErr } = await svc.from("market_stocks")
-        .select("symbol,yahoo_symbol,series,total_shares_cr")
-        .eq("exchange", "NSE")
-        .in("symbol", missingMeta.slice(i, i + 200));
-      if (metaErr) return errorResponse(req, metaErr.message, 500);
-      for (const r of metaRows ?? []) {
-        staticMeta.set(String(r.symbol), {
-          yahoo_symbol: (r.yahoo_symbol as string | null) ?? null,
-          series: String(r.series ?? "EQ"),
-          total_shares_cr: r.total_shares_cr != null ? Number(r.total_shares_cr) : null,
-        });
-      }
-    }
+    const list = (snapChunk?.symbols ?? []).map((r) => ({
+      symbol: String(r.s),
+      exchange: "NSE",
+      yahoo_symbol: r.y ?? null,
+      series: String(r.se ?? "EQ"),
+      total_shares_cr: r.sh != null ? Number(r.sh) : null,
+    }));
 
-
-    const stocks = pageSymbols.map((symbol) => {
-      const m = staticMeta.get(symbol);
-      return {
-        symbol,
-        exchange: "NSE",
-        yahoo_symbol: m?.yahoo_symbol ?? null,
-        series: m?.series ?? "EQ",
-        total_shares_cr: m?.total_shares_cr ?? null,
-      };
-    });
-
-
-    const list = stocks ?? [];
     if (list.length === 0) {
       const { data: promotion, error: promotionError } = await svc.rpc("promote_market_live_sweep", {
         _sweep_id: sweepId,
@@ -198,23 +146,19 @@ Deno.serve(async (req) => {
 
     // Previous SETTLED close per symbol, resolved from authoritative daily
     // history strictly before this live session. A stale/partial score row is
-    // never accepted as a 1D anchor.
-    const anchors = new Map<string, number>();
-    {
-      // EGRESS: the `_lean` variant returns only symbol + prev_close for the
-      // symbols in THIS chunk. The full anchor set was 32 KB a call × 428
-      // calls/day (13.7 MB) for two fields.
-      const { data: settled } = await svc.rpc("market_live_settled_anchors_lean", {
-        _symbols: symbols,
-        _before: sessionDate,
-      });
-      for (const r of settled ?? []) {
-        if (r.prev_close != null && Number(r.prev_close) > 0) anchors.set(String(r.symbol), Number(r.prev_close));
-      }
-    }
+    // never accepted as a 1D anchor. Resolved once per sweep, not per chunk.
+    const anchors = new Map<string, number>(
+      Object.entries(snapChunk?.anchors ?? {}).map(([k, v]) => [k, Number(v)]),
+    );
+
+    // Prime the per-isolate token caches from the snapshot so the quote path
+    // issues no `market_stocks` lookup of its own.
+    if (snapChunk?.kotak && Object.keys(snapChunk.kotak).length > 0) primeTokenMap(snapChunk.kotak);
 
     const { provider } = await getServiceProvider(svc);
     const brokerAvailable = provider.name === "kotak_neo" || provider.name === "kotak";
+
+
 
     interface Priced { ltp: number; volume: number | null; prevFromFeed: number | null; provider: string }
     const priced = new Map<string, Priced>();
@@ -346,6 +290,8 @@ Deno.serve(async (req) => {
     }).eq("sweep_id", sweepId);
 
     const lastSymbol = String(list[list.length - 1].symbol);
+    // A short chunk means the snapshot had nothing more to hand out; the next
+    // index would come back empty anyway.
     const drained = list.length < limit;
 
     if (drained) {
@@ -359,13 +305,17 @@ Deno.serve(async (req) => {
         trade_date: sessionDate, rows_ingested: written,
         metadata: { sweep_id: sweepId, as_of: asOf, broker: brokerAvailable ? "kotak" : "none", promotion },
       });
+      // The snapshot is per SESSION, not per sweep — the next sweep five
+      // minutes from now reuses it instead of re-reading the universe and the
+      // settled anchors. Expiry (and pruneSweepSnapshots) cleans it up.
+
     } else if (chain && isCron) {
       const secret = req.headers.get("x-cron-secret") ?? "";
       const url = `${Deno.env.get("SUPABASE_URL")}/functions/v1/market-live-sweep`;
       const next = fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-cron-secret": secret },
-        body: JSON.stringify({ cursor: lastSymbol, limit, chain: true, force, sweep_id: sweepId, as_of: asOf }),
+        body: JSON.stringify({ chunk: chunkIndex + 1, cursor: lastSymbol, limit, chain: true, force, sweep_id: sweepId, as_of: asOf }),
       }).catch(() => undefined);
       if (typeof EdgeRuntime !== "undefined" && EdgeRuntime?.waitUntil) EdgeRuntime.waitUntil(next);
     }
@@ -374,6 +324,7 @@ Deno.serve(async (req) => {
       ok: true,
       session_date: sessionDate,
       sweep_id: sweepId,
+      chunk: chunkIndex,
       scanned: list.length,
       priced: priced.size,
       written,

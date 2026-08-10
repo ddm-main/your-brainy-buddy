@@ -6,7 +6,7 @@
 // Status derivation itself lives in `@/lib/market/feedStatus` so this panel and
 // the navbar chip can never report different numbers again.
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { useQueryClient, useMutation } from "@tanstack/react-query";
+import { useQueryClient, useMutation, useQuery } from "@tanstack/react-query";
 import HudPanel from "@/components/hud/HudPanel";
 import { Btn, Chip } from "@/components/hud/HudControls";
 import { supabase } from "@/integrations/supabase/client";
@@ -53,20 +53,14 @@ export default function FeedRoutingPanel() {
     mutationFn: async ({ feedId, primary, fallback }: { feedId: string; primary: string; fallback: string }) => {
       const uid = await currentUserId();
       if (!uid) throw new Error("Not signed in");
-      // Replace rather than upsert: the only unique index is partial
-      // (feed_id WHERE scope='system'), which PostgREST cannot infer.
-      const { error: delErr } = await supabase.from("market_feed_prefs")
-        .delete().eq("feed_id", feedId).eq("scope", "system");
-      if (delErr) throw delErr;
-      if (primary === "auto" && fallback === "auto") return;
-      const { error } = await supabase.from("market_feed_prefs").insert(
-        {
-          scope: "system", user_id: null, feed_id: feedId,
-          provider: primary,
-          fallback_provider: fallback === "auto" ? null : fallback,
-        } as never,
-      );
+      // Saved through the edge function, not straight into the table: the
+      // resolver caches routes per isolate, so a browser write left the data
+      // paths serving the previous pin until the TTL expired.
+      const { data, error } = await supabase.functions.invoke("market-feed-routing", {
+        body: { action: "save", feed_id: feedId, provider: primary, fallback_provider: fallback },
+      });
       if (error) throw error;
+      if (data && (data as { error?: string }).error) throw new Error((data as { error: string }).error);
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["market", "feed-prefs"] });
@@ -84,8 +78,10 @@ export default function FeedRoutingPanel() {
     for (const r of rows) {
       // Only genuine recovery cases. A DELAYED on-demand or cache-backed feed
       // is working as designed, and probing it every 30 s burned quota while
-      // never changing the verdict.
-      const recoverable = r.status === "DOWN" || (r.status === "FALLBACK" && !r.f.onDemand);
+      // never changing the verdict. NOT CHECKED counts too: a feed nobody has
+      // probed since the cutoff never self-healed, it just stayed grey.
+      const recoverable = r.status === "DOWN" || r.status === "NOT CHECKED"
+        || (r.status === "FALLBACK" && !r.f.onDemand);
       if (!recoverable) continue;
       if (r.f.sessionOnly && !sessionOpen) continue;
       const primary = (prefFor(r.f.id)?.provider as RoutedProvider | undefined) ?? r.f.chain[0];
@@ -96,6 +92,7 @@ export default function FeedRoutingPanel() {
     return [...set].sort().join(",");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, prefs]);
+
 
   const attemptsRef = useRef(0);
   const [lastRetryAt, setLastRetryAt] = useState(0);
@@ -137,11 +134,27 @@ export default function FeedRoutingPanel() {
   const anyRetrying = !!retryKey && lastRetryAt > 0 && now - lastRetryAt < 90_000;
 
   const counts: Record<Status, number> = {
-    LIVE: tally.live, DELAYED: tally.delayed, FALLBACK: tally.fallback,
+    LIVE: tally.live, CACHED: tally.cached, DELAYED: tally.delayed, FALLBACK: tally.fallback,
     DOWN: tally.down, IDLE: tally.idle, "NOT SET": tally.notSet,
     "NOT CHECKED": tally.notChecked,
   };
   const overridden = prefs.length;
+
+  // Open circuit breakers. A tripped route silently short-circuits every call
+  // to that endpoint, so a feed can read "healthy provider, no data" with no
+  // explanation anywhere on the page. Surface it.
+  const { data: breakers = [] } = useQuery({
+    queryKey: ["market", "route-health"],
+    refetchInterval: 60_000,
+    queryFn: async () => {
+      const { data, error } = await supabase.from("market_route_health")
+        .select("route, open_until, failures, last_error")
+        .gt("open_until", new Date().toISOString());
+      if (error) throw error;
+      return (data ?? []) as Array<{ route: string; open_until: string; failures: number; last_error: string | null }>;
+    },
+  });
+
 
   const groups: FeedGroup[] = ["live", "history", "reference"];
 
@@ -174,7 +187,7 @@ export default function FeedRoutingPanel() {
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
           <span style={{ fontSize: 10, color: "var(--text-dim)", textTransform: "uppercase" }}>Platform · {tally.ok}/{tally.total} healthy</span>
-          {(["LIVE", "DELAYED", "FALLBACK", "DOWN", "IDLE", "NOT SET"] as Status[])
+          {(["LIVE", "CACHED", "DELAYED", "FALLBACK", "DOWN", "IDLE", "NOT SET"] as Status[])
             .filter((s) => counts[s] > 0)
             .map((s) => (
               <Chip key={s} tone={STATUS_TONE[s] as never}>{counts[s]} {s.toLowerCase()}</Chip>
@@ -183,6 +196,13 @@ export default function FeedRoutingPanel() {
             {holiday ? "NSE holiday" : sessionOpen ? "session open" : "session closed"}
           </Chip>
           {overridden > 0 && <Chip tone="accent">{overridden} routed manually</Chip>}
+          {breakers.map((b) => (
+            <Chip key={b.route} tone="err">
+              <span title={`${b.failures} failures · open until ${new Date(b.open_until).toLocaleTimeString()}${b.last_error ? `\n${b.last_error}` : ""}`}>
+                breaker open · {b.route}
+              </span>
+            </Chip>
+          ))}
           {anyRetrying && (
             <span style={{ fontSize: 10, color: "var(--text-muted)", marginLeft: "auto" }}>auto-probing…</span>
           )}

@@ -16,6 +16,7 @@ import {
   useSyncPositions,
   useTodayRealized,
 } from "@/lib/market/hooks";
+import { syncGapMessage } from "@/lib/market/hooks";
 import { holdingPnl, positionPnl, quoteKey, sumNullable } from "@/lib/market/pnl";
 import { mergeLiveQuotes, useLiveTickStore, useTicksRevision} from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks } from "@/lib/market/useRealtimeTicks";
@@ -26,7 +27,9 @@ const inr = (n: number | null) => n == null ? "—" : `₹${new Intl.NumberForma
 const pct = (n: number | null) => n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
 
 const AUTO_SYNC_KEY = "market:portfolio:auto-sync:last";
-const AUTO_SYNC_MIN_MS = 60 * 60 * 1000;
+// Short throttle: a broker position opened minutes ago must show up on the
+// next visit, not an hour later.
+const AUTO_SYNC_MIN_MS = 2 * 60 * 1000;
 
 export default function PortfolioOverview() {
   const { data: holdings = [] } = useHoldings();
@@ -39,9 +42,9 @@ export default function PortfolioOverview() {
   const connected = settings.some((s) => s.active_provider === "kotak_neo" && s.connection_status === "connected");
   const sessionExpired = funds.data?.reason_code === "session_expired";
 
-  // Auto-sync once/hr per tab session — only when broker is connected, and
+  // Auto-sync on open (throttled) — only when broker is connected, and
   // only stamp the key on successful runs so a transient error doesn't
-  // silence retries for an hour.
+  // silence retries.
   useEffect(() => {
     if (!connected) return;
     const last = Number(sessionStorage.getItem(AUTO_SYNC_KEY) || 0);
@@ -104,14 +107,14 @@ export default function PortfolioOverview() {
   // illusion) and adds today's realized intraday to the day figure.
   const pSummary = useMemo(() => {
     const open = positions.filter((p) => !p.closed_at);
-    let unrealized = 0, exposure = 0, unresolved = 0;
+    let unrealized = 0, tradedValue = 0, unresolved = 0;
     const dayPnls: (number | null)[] = [];
     for (const p of open) {
       const q = quotes[quoteKey(p.exchange, p.symbol)];
       const calc = positionPnl({ quantity: p.quantity, entryPrice: p.entry_price, side: p.side, quote: q });
+      tradedValue += calc.tradedValue;
       if (calc.unrealized == null) { unresolved++; continue; }
       unrealized += calc.unrealized;
-      exposure += Math.abs(p.quantity) * (calc.ltp ?? 0);
       dayPnls.push(calc.todayPnl);
     }
     const allUnresolved = open.length > 0 && unresolved === open.length;
@@ -120,33 +123,34 @@ export default function PortfolioOverview() {
     const day = dayOpen == null && realizedDay === 0 ? null : (dayOpen ?? 0) + realizedDay;
     return {
       unrealized: allUnresolved ? null : unrealized,
-      exposure: allUnresolved ? null : exposure,
+      tradedValue,
       count: open.length,
       day,
       realizedToday: realizedDay,
     };
   }, [positions, quotes, realizedToday]);
 
-  // Hero — combine holdings + open positions into a single "book" view like Groww.
+  // Hero — mirrors the broker app: the headline value is the *investments*
+  // book (holdings). Open positions are a separate day book and are surfaced
+  // through today's P&L and their own card, never folded into "current value".
   const hero = useMemo(() => {
-    const investedH = hSummary.invested ?? 0;
-    const currentH = hSummary.current ?? 0;
-    const investedP = 0; // positions don't have "invested" the same way (margin-blocked)
-    const totalInvested = investedH + investedP;
-    const totalCurrent = currentH; // + open pos MTM below
-    const openUnrealized = pSummary.unrealized ?? 0;
-    const totalPnl = (hSummary.pnl ?? 0) + openUnrealized;
-    const totalReturns = totalInvested ? (totalPnl / totalInvested) * 100 : null;
-    const dayPnl = (hSummary.dayPnl ?? 0) + (pSummary.day ?? 0);
-    const dayPnlPct = hSummary.dayPnlPct; // holdings-only, since positions have no meaningful "prev value"
-    const anyResolved = hSummary.current != null || pSummary.unrealized != null;
+    const resolved = hSummary.current != null;
+    const totalInvested = hSummary.invested;
+    const totalCurrent = hSummary.current;
+    const totalPnl = hSummary.pnl;
+    const totalReturns = hSummary.pnlPct;
+    const holdingsDay = hSummary.dayPnl;
+    const positionsDay = pSummary.day;
+    const dayPnl = holdingsDay == null && positionsDay == null ? null : (holdingsDay ?? 0) + (positionsDay ?? 0);
+    // Denominator = yesterday's holdings value + today's traded value, so the
+    // % stays comparable with the broker's own day figure.
+    const base = ((hSummary.current ?? 0) - (holdingsDay ?? 0)) + pSummary.tradedValue;
+    const dayPnlPct = dayPnl == null || !base ? null : (dayPnl / base) * 100;
     return {
-      totalInvested: anyResolved ? totalInvested : null,
-      totalCurrent: anyResolved ? totalCurrent + openUnrealized : null,
-      totalPnl: anyResolved ? totalPnl : null,
-      totalReturns,
-      dayPnl: anyResolved ? dayPnl : null,
-      dayPnlPct,
+      totalInvested, totalCurrent, totalPnl, totalReturns,
+      dayPnl, dayPnlPct,
+      positionsPnl: pSummary.unrealized,
+      resolved,
     };
   }, [hSummary, pSummary]);
 
@@ -155,6 +159,8 @@ export default function PortfolioOverview() {
       <RefreshCw size={11} style={{ marginRight: 4 }} /> {syncHoldings.isPending ? "syncing…" : "sync"}
     </Btn>
   );
+  const holdingsGap = syncGapMessage("Holdings", syncHoldings.data);
+  const positionsGap = syncGapMessage("Positions", syncPositions.data);
   const positionsSyncBtn = connected && (
     <Btn size="sm" onClick={() => syncPositions.mutate()} disabled={syncPositions.isPending}>
       <RefreshCw size={11} style={{ marginRight: 4 }} /> {syncPositions.isPending ? "syncing…" : "sync"}
@@ -196,6 +202,9 @@ export default function PortfolioOverview() {
               <MiniStat label="Returns"
                 value={pct(hero.totalReturns)}
                 tone={hero.totalReturns == null ? undefined : hero.totalReturns >= 0 ? "ok" : "err"} />
+              <MiniStat label="Positions P&L"
+                value={inr(hero.positionsPnl)}
+                tone={hero.positionsPnl == null ? undefined : hero.positionsPnl >= 0 ? "ok" : "err"} />
             </div>
           </div>
           <div style={{ borderLeft: "1px solid var(--edge)", paddingLeft: 16 }}>
@@ -228,6 +237,9 @@ export default function PortfolioOverview() {
               Holdings sync failed — {(syncHoldings.error as Error)?.message ?? "unknown error"}
             </div>
           )}
+          {holdingsGap && (
+            <div className="hud-label" style={{ color: "var(--danger)", marginBottom: 8 }}>{holdingsGap}</div>
+          )}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 8 }}>
             <Stat label="Invested" value={inr(hSummary.invested)} />
             <Stat label="Current" value={inr(hSummary.current)} />
@@ -247,11 +259,14 @@ export default function PortfolioOverview() {
               Positions sync failed — {(syncPositions.error as Error)?.message ?? "unknown error"}
             </div>
           )}
+          {positionsGap && (
+            <div className="hud-label" style={{ color: "var(--danger)", marginBottom: 8 }}>{positionsGap}</div>
+          )}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 8 }}>
             <Stat label="Open" value={String(pSummary.count)} />
-            <Stat label="Exposure" value={inr(pSummary.exposure)} />
+            <Stat label="Net traded value" value={inr(pSummary.tradedValue)} />
             <Stat label="Unrealized" value={inr(pSummary.unrealized)} tone={pSummary.unrealized == null ? undefined : pSummary.unrealized >= 0 ? "ok" : "err"} />
-            <Stat label="Today realized" value={inr(pSummary.realizedToday)} tone={pSummary.realizedToday === 0 ? undefined : pSummary.realizedToday > 0 ? "ok" : "err"} />
+            <Stat label="Realized (today)" value={inr(pSummary.realizedToday)} tone={pSummary.realizedToday === 0 ? undefined : pSummary.realizedToday > 0 ? "ok" : "err"} />
           </div>
         </HudPanel>
       </div>

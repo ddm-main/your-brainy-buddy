@@ -79,10 +79,12 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Keyset batch over the active NSE universe.
-    let q = svc.from("market_stocks")
+    // Keyset batch over the tradable NSE universe. `market_universe` is the
+    // one definition of that universe (active AND non-penny) — penny names are
+    // purged from every price table by trigger, so snapshotting them here only
+    // burns quota on rows that can never be stored.
+    let q = svc.from("market_universe")
       .select("symbol,exchange,yahoo_symbol")
-      .eq("is_active", true)
       .eq("exchange", "NSE")
       .order("symbol", { ascending: true })
       .limit(limit);

@@ -3,6 +3,9 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 interface Props { children: ReactNode; }
 interface State { error: Error | null; }
 
+const CHUNK_RELOAD_FLAG = "jarvis.chunkReloadAttempted";
+const CHUNK_RELOAD_RESET_MS = 15_000;
+
 // React.lazy() caches a REJECTED dynamic-import promise for the life of
 // that module reference — after a real chunk-load failure (stale-deploy
 // hash, network blip), retrying via setState({error:null}) just re-renders
@@ -17,15 +20,36 @@ function isChunkLoadError(error: Error): boolean {
 export default class ErrorBoundary extends Component<Props, State> {
   state: State = { error: null };
 
+  private reloadResetTimer: number | null = null;
+
+  componentDidMount() {
+    // Keep the marker long enough for an immediately failing replacement
+    // build to hit the visible fallback instead of entering a reload loop.
+    // A stable app load clears it so a later deploy can recover the same way.
+    this.reloadResetTimer = window.setTimeout(() => {
+      sessionStorage.removeItem(CHUNK_RELOAD_FLAG);
+    }, CHUNK_RELOAD_RESET_MS);
+  }
+
+  componentWillUnmount() {
+    if (this.reloadResetTimer != null) window.clearTimeout(this.reloadResetTimer);
+  }
+
   static getDerivedStateFromError(error: Error): State {
     return { error };
   }
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error("[JARVIS] uncaught:", error, info);
+    if (!isChunkLoadError(error)) return;
+    if (sessionStorage.getItem(CHUNK_RELOAD_FLAG) === "1") return;
+
+    sessionStorage.setItem(CHUNK_RELOAD_FLAG, "1");
+    window.location.reload();
   }
 
   reboot = () => {
     if (this.state.error && isChunkLoadError(this.state.error)) {
+      sessionStorage.setItem(CHUNK_RELOAD_FLAG, "1");
       window.location.reload();
       return;
     }

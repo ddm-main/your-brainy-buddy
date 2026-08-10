@@ -111,6 +111,10 @@ Deno.serve(async (req) => {
       .select("symbol,exchange,yahoo_symbol,sector,market_cap,price_sync_attempts,price_sync_attempts_day")
       .eq("is_active", true)
       .eq("exchange", "NSE")
+      // Same penny rule as `market_universe` (this query needs sync-bookkeeping
+      // columns the view doesn't expose). Penny bars are rejected by trigger,
+      // so pricing them is pure wasted quota.
+      .not("penny_excluded", "is", true)
       .or(`last_price_sync_at.is.null,last_price_sync_at.lt.${cutoff}`)
       .or(`price_data_missing_at.is.null,price_data_missing_at.lt.${unavailableCutoff}`)
       // Cap same-day retries at 3 per symbol so a permanently-broken symbol
@@ -132,6 +136,7 @@ Deno.serve(async (req) => {
         .select("symbol,exchange,yahoo_symbol,sector,market_cap,price_sync_attempts,price_sync_attempts_day")
         .eq("is_active", true)
         .eq("exchange", "NSE")
+        .not("penny_excluded", "is", true)
         .in("symbol", symbols.slice(0, room * 3))
         .or(`price_sync_attempts_day.neq.${today},price_sync_attempts.lt.3`);
       for (const r of rows ?? []) {

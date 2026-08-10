@@ -17,7 +17,7 @@ const limiter = createMarketLimiter(60, 60_000);
 
 const STATUS_COLS = "id,user_id,active_provider,connection_status,ucc,greeting_name,last_sync_at,last_error,token_expires_at,updated_at,is_system,purpose";
 
-const BROKERS = ["kotak_neo", "shoonya"];
+const BROKERS = ["kotak_neo"];
 
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;

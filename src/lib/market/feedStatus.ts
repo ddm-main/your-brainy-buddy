@@ -18,10 +18,15 @@ import {
   type Freshness, type SurfaceHealth, type SurfaceProbe,
 } from "./selftest";
 
-export type Status = "LIVE" | "DELAYED" | "FALLBACK" | "DOWN" | "IDLE" | "NOT SET" | "NOT CHECKED";
+export type Status = "LIVE" | "CACHED" | "DELAYED" | "FALLBACK" | "DOWN" | "IDLE" | "NOT SET" | "NOT CHECKED";
 
 export const STATUS_TONE: Record<Status, "ok" | "warn" | "err" | "neutral" | "accent"> = {
-  LIVE: "ok", DELAYED: "warn", FALLBACK: "accent", DOWN: "err", IDLE: "neutral",
+  LIVE: "ok",
+  // Served, in-chain, inside its freshness window — just not a fresh tick.
+  // This used to borrow DELAYED, which made "instant cache hit" and "nobody
+  // has answered in an hour" wear the same badge.
+  CACHED: "accent",
+  DELAYED: "warn", FALLBACK: "accent", DOWN: "err", IDLE: "neutral",
   "NOT SET": "neutral",
   // A verdict too old to be current is not a failure — it is an unknown.
   "NOT CHECKED": "neutral",
@@ -158,13 +163,42 @@ export function providerLabelFromProbe(used: string): string {
   return used || "provider";
 }
 
+/** Age of a timestamp in minutes; null when there is no timestamp. */
+export function ageMinutes(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return null;
+  return Math.max(0, (Date.now() - t) / 60_000);
+}
+
+/**
+ * The one staleness rule. Freshness was derived inline in three places with
+ * subtly different windows, so the same evidence could read LIVE in the row
+ * and stale in the chain chips. Everything asks this instead.
+ *
+ * A session-only feed outside market hours gets a widened window — the last
+ * tick of the session is the honest current state, not an outage.
+ */
+export function feedFreshness(
+  f: Pick<RoutedFeed, "freshMins" | "sessionOnly">,
+  iso: string | null | undefined,
+  sessionOpen: boolean,
+): { ageMin: number | null; window: number; fresh: boolean } {
+  const window = f.sessionOnly && !sessionOpen ? 60 * 24 * 4 : (f.freshMins ?? 30);
+  const ageMin = ageMinutes(iso);
+  return { ageMin, window, fresh: ageMin == null ? false : ageMin <= window };
+}
+
 export const agoLabel = (iso: string): string => {
-  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60_000));
+  const mins = ageMinutes(iso) ?? 0;
   if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
+  if (mins < 60) return `${Math.round(mins)}m ago`;
   if (mins < 60 * 24) return `${Math.round(mins / 60)}h ago`;
   return `${Math.round(mins / 1440)}d ago`;
 };
+
+
+
 
 export type StatusInputs = {
   surfaces: Record<string, SurfaceHealth>;
@@ -213,8 +247,8 @@ function baseStatusForFeed(f: RoutedFeed, i: StatusInputs): BaseRow {
   const probe = f.surface ? i.surfaces[f.surface] : undefined;
   const hb = f.heartbeat ? i.heartbeats[f.heartbeat] : undefined;
   const ts = f.table ? i.freshness[freshKey(f.table)] : undefined;
-  const ageMin = ts ? (Date.now() - new Date(ts).getTime()) / 60_000 : null;
-  const stale = ageMin != null && f.freshMins != null && ageMin > f.freshMins;
+  const tableAge = feedFreshness(f, ts, i.sessionOpen);
+  const stale = tableAge.ageMin != null && !tableAge.fresh;
   const seen = ts ? `last data ${new Date(ts).toLocaleString()}` : "no cached rows";
   const open = i.sessionOpen;
   const inSelectedChain = (answered: string) => chain.some((p) => sameProvider(p, answered));
@@ -230,15 +264,14 @@ function baseStatusForFeed(f: RoutedFeed, i: StatusInputs): BaseRow {
 
   // 1) Heartbeat — who really answered the last live request.
   if (hb) {
-    const hbAge = (Date.now() - new Date(hb.observed_at).getTime()) / 60_000;
     const label = providerLabelFromProbe(hb.provider);
     const health = `${label} · ${agoLabel(hb.observed_at)}${hb.latency_ms != null ? ` · ${hb.latency_ms}ms` : ""}`;
-    const fresh = hbAge <= (f.sessionOnly && !open ? 60 * 24 * 4 : (f.freshMins ?? 30));
+    const { fresh, window } = feedFreshness(f, hb.observed_at, open);
     if (!hb.ok) return { f, status: "DOWN", detail: hb.detail || `${label} returned nothing`, servedBy: label, health, primaryProbe };
     if (!fresh) {
       return f.sessionOnly && !open
         ? { f, status: "IDLE", detail: `Market closed — last served by ${label} ${agoLabel(hb.observed_at)}.`, servedBy: label, health, primaryProbe: null }
-        : { f, status: "DELAYED", detail: `Last served ${agoLabel(hb.observed_at)} — older than this feed's ${f.freshMins}m window.`, servedBy: label, health, primaryProbe };
+        : { f, status: "DELAYED", detail: `Last served ${agoLabel(hb.observed_at)} — older than this feed's ${window}m window.`, servedBy: label, health, primaryProbe };
     }
     if (!sameProvider(primary, hb.provider) && !inSelectedChain(hb.provider)) {
       return {
@@ -247,20 +280,22 @@ function baseStatusForFeed(f: RoutedFeed, i: StatusInputs): BaseRow {
         servedBy: label, health, primaryProbe,
       };
     }
+    // In-chain and inside the freshness window. The only remaining question is
+    // WHICH path answered: a real tick (LIVE), most of a batch (LIVE), or the
+    // cache / quote short-circuit (CACHED — fine, but not a tick).
+    if (hb.path && hb.path !== "live" && hb.path !== "mixed") {
+      return {
+        f, status: "CACHED",
+        detail: `Served from the ${hb.path} path ${agoLabel(hb.observed_at)} — inside the ${window}m window, but not a fresh ${label} tick.`,
+        servedBy: label, health, primaryProbe: null,
+      };
+    }
     return {
       f, status: "LIVE",
-      detail: `${label} served ${hb.symbols ?? 0} symbol(s) ${agoLabel(hb.observed_at)} — real-time, no cache in the path.`,
+      detail: hb.path === "mixed"
+        ? `${label} served most of the batch ${agoLabel(hb.observed_at)}${hb.detail ? ` (${hb.detail})` : ""}.`
+        : `${label} served ${hb.symbols ?? 0} symbol(s) ${agoLabel(hb.observed_at)} — real-time, no cache in the path.`,
       servedBy: label, health, primaryProbe: null,
-      ...(hb.path && hb.path !== "live"
-        // The provider is in-chain, so this is not a fallback; it is the same
-        // provider answering through a slower path. Say which one.
-        ? {
-            status: hb.path === "mixed" ? ("LIVE" as Status) : ("DELAYED" as Status),
-            detail: hb.path === "mixed"
-              ? `${label} served most of the batch ${agoLabel(hb.observed_at)}${hb.detail ? ` (${hb.detail})` : ""}.`
-              : `Served from the ${hb.path} path ${agoLabel(hb.observed_at)} — not a fresh ${label} tick.`,
-          }
-        : {}),
     };
   }
 
@@ -334,7 +369,7 @@ function baseStatusForFeed(f: RoutedFeed, i: StatusInputs): BaseRow {
 }
 
 /** Health of every provider in a feed's chain, fresh or not. A stale probe is
- *  reported as "not checked" rather than silently dropped — Shoonya looked
+ *  reported as "not checked" rather than silently dropped — a broker looked
  *  absent from the panel when its last probe simply aged past 24 h. */
 function chainHealthFor(f: RoutedFeed, chain: RoutedProvider[], i: StatusInputs): ChainHealth[] {
   return chain.map((p) => {
@@ -387,9 +422,10 @@ export function computeFeedRows(i: StatusInputs): FeedRow[] {
 
 export type FeedTally = {
   total: number;
-  /** Available feeds: LIVE + FALLBACK + intentional IDLE. */
+  /** Available feeds: LIVE + CACHED + FALLBACK + intentional IDLE. */
   ok: number;
   live: number;
+  cached: number;
   delayed: number;
   fallback: number;
   down: number;
@@ -404,12 +440,15 @@ export function tallyRows(rows: FeedRow[], scope: "platform" | "account" = "plat
   const scoped = rows.filter((r) => scope === "account" ? r.f.perUser : !r.f.perUser);
   const count = (s: Status) => scoped.filter((r) => r.status === s).length;
   const live = count("LIVE");
+  const cached = count("CACHED");
   const fallback = count("FALLBACK");
   const idle = count("IDLE");
   return {
     total: scoped.length,
-    ok: live + fallback + idle,
+    // CACHED is a served feed inside its freshness window — healthy.
+    ok: live + cached + fallback + idle,
     live,
+    cached,
     delayed: count("DELAYED"),
     fallback,
     down: count("DOWN"),

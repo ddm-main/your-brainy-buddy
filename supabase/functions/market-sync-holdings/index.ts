@@ -34,11 +34,17 @@ Deno.serve(async (req) => {
 
     let inserted = 0;
     let updated = 0;
+    const writeErrors: string[] = [];
+    const noteError = (symbol: string, err: any) => {
+      const msg = `${symbol}: ${err?.code ?? ""} ${err?.message ?? String(err)}`.trim();
+      writeErrors.push(msg);
+      console.error("[market-sync-holdings] write failed", msg);
+    };
     for (const h of holdings) {
       const key = `${h.exchange}:${h.symbol}`;
       const existingRow: any = brokerRows.get(key);
       if (existingRow) {
-        await svc.from("market_holdings")
+        const { error: updErr } = await svc.from("market_holdings")
           .update({
             quantity: h.quantity,
             avg_price: h.avg_price,
@@ -50,7 +56,7 @@ Deno.serve(async (req) => {
           })
           .eq("id", existingRow.id);
         brokerRows.delete(key);
-        updated++;
+        if (updErr) noteError(h.symbol, updErr); else updated++;
       } else {
         const { error: insErr } = await svc.from("market_holdings").insert({
           user_id: auth.userId,
@@ -72,17 +78,20 @@ Deno.serve(async (req) => {
             .select("id").eq("user_id", auth.userId).eq("symbol", h.symbol)
             .eq("exchange", h.exchange).eq("source", "kotak_sync").maybeSingle();
           if (race) {
-            await svc.from("market_holdings").update({
+            const { error: raceErr } = await svc.from("market_holdings").update({
               quantity: h.quantity, avg_price: h.avg_price,
               settled_qty: h.settled_qty ?? null, t1_qty: h.t1_qty ?? null, pledged_qty: h.pledged_qty ?? null,
             }).eq("id", race.id);
-            updated++;
+            if (raceErr) noteError(h.symbol, raceErr); else updated++;
           }
+        } else if (insErr) {
+          noteError(h.symbol, insErr);
         } else {
           inserted++;
         }
       }
     }
+
 
     // Deletion safeguard: only remove missing rows if the broker response
     // was well-formed. If Kotak returned garbage (empty body while we had
@@ -117,7 +126,15 @@ Deno.serve(async (req) => {
       console.warn("[market-sync-holdings] post-sync funds refresh failed:", fundsErr instanceof Error ? fundsErr.message : String(fundsErr));
     }
 
-    return jsonResponse(req, { ok: true, inserted, updated, removed, total: holdings.length, complete: detailed.complete });
+    if (writeErrors.length > 0 && inserted + updated === 0 && holdings.length > 0) {
+      return errorResponse(req, `Holdings sync could not write any rows — ${writeErrors[0]}`, 500);
+    }
+
+    return jsonResponse(req, {
+      ok: true, inserted, updated, removed, total: holdings.length,
+      complete: detailed.complete,
+      errors: writeErrors.length ? writeErrors.slice(0, 5) : undefined,
+    });
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 502);
   }

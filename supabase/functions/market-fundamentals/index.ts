@@ -1,12 +1,16 @@
 // Kotak Neo has no coverage for this data (fundamentals / news / reference / option-chain) — vendor-specific by design; do not re-route to getActiveProvider.
-// market-fundamentals — per-symbol company fundamentals via Yahoo quoteSummary.
+// market-fundamentals — per-symbol company fundamentals over the routed
+// `fundamentals` chain (fmp → yahoo by default, reorderable in Feed Routing).
 // Cached in market_fundamentals for 24h per user.
-// Yahoo-only: Kotak Neo returns quotes / depth / holdings / orders, not
-// P&L, balance sheet, ratios or ownership — so there's no broker-first path.
+// No broker path: Kotak Neo returns quotes / depth / holdings / orders, not
+// P&L, balance sheet, ratios or ownership.
 
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { toYahooSymbol } from "../_shared/market/yahooClient.ts";
 import { yahooQuoteSummary } from "../_shared/market/yahooCrumb.ts";
+import { fmpFundamentals } from "../_shared/market/fmpClient.ts";
+import { chainFor, LATENCY_BUDGET_MS, resolveFeedRoute, withLatencyBudget } from "../_shared/market/feedRoute.ts";
+
 
 const MODULES = [
   "summaryDetail",
@@ -160,6 +164,88 @@ async function fetchYahooFundamentals(symbol: string, exchange: string): Promise
   return normalize(symbol, exchange, result);
 }
 
+/**
+ * FMP mapped onto the same unit contract as the Yahoo path: ratios/margins as
+ * decimal fractions, market cap and revenue in absolute rupees, ownership in
+ * percent. FMP's own client returns ₹ Cr and percents, so convert exactly once.
+ */
+function normalizeFmp(symbol: string, exchange: string, f: Awaited<ReturnType<typeof fmpFundamentals>>): Fundamentals {
+  const p = f.profile, r = f.ratios, i = f.income, b = f.balance, c = f.cashFlow, g = f.growth;
+  const cr = (v: number | null | undefined): number | null => (v == null ? null : v * 1e7);
+  return {
+    symbol, exchange,
+    name: p?.company_name ?? null,
+    sector: p?.sector ?? null,
+    industry: p?.industry ?? null,
+    market_cap: cr(p?.market_cap),
+    pe_ttm: r?.pe ?? null,
+    pe_forward: null,
+    peg: r?.peg ?? null,
+    eps_ttm: i?.eps ?? null,
+    eps_forward: null,
+    book_value: b?.book_value ?? null,
+    price_to_book: r?.pb ?? null,
+    dividend_yield: pctToRatio(r?.dividend_yield ?? null),
+    roe: pctToRatio(r?.roe ?? null),
+    roce: pctToRatio(r?.roce ?? null),
+    roa: pctToRatio(r?.roa ?? null),
+    profit_margin: pctToRatio(i?.net_margin ?? null),
+    operating_margin: pctToRatio(i?.operating_margin ?? null),
+    debt_to_equity: r?.debt_equity ?? null,
+    current_ratio: r?.current_ratio ?? null,
+    quick_ratio: r?.quick_ratio ?? null,
+    revenue_growth: pctToRatio(g?.sales_growth ?? null),
+    earnings_growth: pctToRatio(g?.profit_growth ?? null),
+    revenue_ttm: cr(i?.sales),
+    gross_profit: null,
+    ebitda: null,
+    free_cash_flow: cr(c?.free_cash_flow),
+    beta: p?.beta ?? null,
+    fifty_two_week_high: p?.high_52w ?? null,
+    fifty_two_week_low: p?.low_52w ?? null,
+    shares_outstanding: cr(p?.shares_outstanding),
+    promoter_holding: null, promoter_pledge: null, fii_holding: null, dii_holding: null,
+    next_earnings_at: null, last_dividend_at: null,
+    data_as_of: new Date().toISOString(),
+    summary: null,
+    website: null,
+    employees: null,
+  };
+}
+
+async function fetchFmpFundamentals(symbol: string, exchange: string): Promise<Fundamentals> {
+  const f = await fmpFundamentals(symbol, exchange);
+  // Every FMP sub-call swallows its own error and returns null, so "all null"
+  // is what an outage looks like here — treat it as a failure and fall through.
+  if (!f.profile && !f.ratios && !f.income) throw new Error("FMP returned nothing for " + symbol);
+  return normalizeFmp(symbol, exchange, f);
+}
+
+/**
+ * fmp → yahoo, in whatever order the operator pinned for the `fundamentals`
+ * feed. Each attempt gets the feed's latency budget so a hanging vendor
+ * advances the chain instead of holding the request open.
+ */
+async function fetchFundamentals(
+  svc: ReturnType<typeof svcClient>, symbol: string, exchange: string,
+): Promise<{ fundamentals: Fundamentals; source: string }> {
+  const chain = await resolveFeedRoute(svc, "fundamentals", chainFor("fundamentals"));
+  const budget = LATENCY_BUDGET_MS.fundamentals;
+  const errors: string[] = [];
+  for (const p of chain) {
+    if (p !== "fmp" && p !== "yahoo") continue;
+    try {
+      const fn = p === "fmp" ? fetchFmpFundamentals : fetchYahooFundamentals;
+      const out = await withLatencyBudget(fn(symbol, exchange), budget, `${p} fundamentals`);
+      return { fundamentals: out, source: p };
+    } catch (e) {
+      errors.push(`${p}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  throw new Error(errors.join(" · ") || "no fundamentals provider available");
+}
+
+
 Deno.serve(async (req) => {
   const pf = preflight(req); if (pf) return pf;
   const auth = await requireUserId(req);
@@ -246,12 +332,13 @@ Deno.serve(async (req) => {
       }
     }
 
-    const fundamentals = await fetchYahooFundamentals(symbol, exchange);
+    const { fundamentals, source } = await fetchFundamentals(svc, symbol, exchange);
     await svc.from("market_fundamentals").upsert({
       user_id: auth.userId, symbol, exchange, payload: fundamentals, fetched_at: new Date().toISOString(),
     }, { onConflict: "user_id,symbol,exchange" });
 
-    return jsonResponse(req, { fundamentals, cached: false, fetched_at: new Date().toISOString() });
+    return jsonResponse(req, { fundamentals, cached: false, fetched_at: new Date().toISOString(), source });
+
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 502);
   }

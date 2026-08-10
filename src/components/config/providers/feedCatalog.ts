@@ -1,7 +1,7 @@
 // Provider feed catalog — the single place that declares, per data provider,
 // which feeds it supplies, which surface probe proves the feed, which table it
 // lands in (for a freshness read) and which app screens consume it.
-export type ProviderId = "kotak_neo" | "shoonya" | "yahoo" | "fmp" | "alpha_vantage" | "nse" | "bse";
+export type ProviderId = "kotak_neo" | "yahoo" | "fmp" | "alpha_vantage" | "nse" | "bse";
 export type EditKind = "kotak" | "broker" | "key" | "info";
 
 /** Keys returned by market-test-connection `mode: "surfaces"`. */
@@ -122,58 +122,6 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
     ],
   },
 
-  shoonya: {
-    id: "shoonya",
-    name: "Shoonya (Finvasia)",
-    role: "Broker quotes / candles / trading",
-    edit: "broker",
-    docs: "https://shoonya.com/api-documentation",
-    summary:
-      "Noren API broker session. Unlike Kotak Neo it publishes a native candle feed (TPSeries intraday + EOD), so when Shoonya is the active provider charts are broker-sourced instead of falling back to Yahoo. Also serves quotes, depth and the account surfaces. Sessions are day-scoped and re-minted with a stored TOTP seed.",
-    feeds: [
-      {
-        id: "ltp", label: "Live LTP / quotes", desc: "Last traded price, day OHLC, change %, volume",
-        surface: "quotes", table: { name: "market_quotes", column: "fetched_at" },
-        usedBy: [MARKET_OVERVIEW, SCREENER, HOLDINGS, POSITIONS, INTEL],
-      },
-      {
-        id: "depth", label: "Market depth", desc: "5-level bid / ask ladder",
-        surface: "depth",
-        usedBy: [ORDERS, { label: "Stock Analysis", to: "/market/screener" }],
-        note: "Live-only — never persisted.",
-      },
-      {
-        id: "candles_1d", label: "Daily candles", desc: "Native EOD series from Noren (no Yahoo needed)",
-        surface: "candles_1d", table: { name: "market_daily_prices", column: "created_at" },
-        usedBy: [SCREENER, BREAKOUT, BACKTEST],
-      },
-      {
-        id: "candles_intraday", label: "Intraday candles", desc: "Native TPSeries bars (1/3/5/15/30/60m)",
-        surface: "candles_intraday", table: { name: "market_intraday_prices", column: "fetched_at" },
-        usedBy: [MARKET_OVERVIEW, PLANNER, AUTOTRADE],
-      },
-      {
-        id: "funds", scope: "account", label: "Funds / margin", desc: "Available and used margin",
-        surface: "funds", table: { name: "market_funds", column: "synced_at" },
-        usedBy: [PORTFOLIO, ORDERS],
-      },
-      {
-        id: "holdings", scope: "account", label: "Holdings", desc: "Demat holdings with average cost",
-        surface: "holdings", table: { name: "market_holdings", column: "updated_at" },
-        usedBy: [HOLDINGS, PORTFOLIO, INVESTMENTS],
-      },
-      {
-        id: "positions", scope: "account", label: "Positions", desc: "Intraday / carry-forward open positions",
-        surface: "positions", table: { name: "market_positions", column: "updated_at" },
-        usedBy: [POSITIONS, PORTFOLIO],
-      },
-      {
-        id: "orders", scope: "account", label: "Order placement", desc: "Place / modify / cancel via Noren",
-        usedBy: [ORDERS, GTT, AUTOTRADE],
-        note: "Write path — not probed (no test order is ever placed).",
-      },
-    ],
-  },
 
   yahoo: {
     id: "yahoo",
@@ -339,7 +287,7 @@ export const PROVIDERS: Record<ProviderId, ProviderMeta> = {
   },
 };
 
-export const PROVIDER_ORDER: ProviderId[] = ["kotak_neo", "shoonya", "yahoo", "fmp", "alpha_vantage", "nse", "bse"];
+export const PROVIDER_ORDER: ProviderId[] = ["kotak_neo", "yahoo", "fmp", "alpha_vantage", "nse", "bse"];
 
 /** Unique {table, column} pairs across the whole catalog — one freshness query. */
 export function allFreshnessTargets(): { name: string; column: string }[] {
@@ -356,11 +304,10 @@ export function allFreshnessTargets(): { name: string; column: string }[] {
 // Mirrors resolver.ts's PRIORITY_CHAINS / FEED_FIELDS. `chain` is the built-in
 // order; pinning a provider in the UI only moves it to the front — the rest
 // stay as fallbacks so a pinned-but-down vendor degrades instead of going dark.
-export type RoutedProvider = "kotak" | "shoonya" | "yahoo" | "nse" | "fmp" | "alpha" | "computed";
+export type RoutedProvider = "kotak" | "yahoo" | "nse" | "fmp" | "alpha" | "computed";
 
 export const ROUTED_PROVIDER_LABEL: Record<RoutedProvider, string> = {
   kotak: "Kotak Neo",
-  shoonya: "Shoonya",
   yahoo: "Yahoo Finance",
   nse: "NSE",
   fmp: "Fin. Modeling Prep",
@@ -423,12 +370,16 @@ export const ROUTED_FEEDS: RoutedFeed[] = [
   { id: "ltp", label: "Live price", desc: "LTP, change, volume", group: "live",
     chain: ["kotak", "yahoo"], surface: "quotes",
     heartbeat: "quotes_ltp", freshMins: 15, sessionOnly: true },
+  // Both are fields of the live quote payload, not feeds of their own: they
+  // follow whatever Live price is routed to, so they carry no selector.
   { id: "previous_close", label: "Previous close", desc: "Prior settlement close (from live quote)", group: "live",
-    chain: ["kotak", "yahoo"], surface: "quotes" },
+    chain: ["kotak", "yahoo"], surface: "quotes", routable: false,
+    note: "Field of the Live price payload — follows its routing." },
   { id: "range_52w", label: "52-week range", desc: "52w high / low (from live quote)", group: "live",
-    chain: ["kotak", "yahoo", "nse", "fmp"], surface: "quotes" },
+    chain: ["kotak", "yahoo"], surface: "quotes", routable: false,
+    note: "Field of the Live price payload — follows its routing." },
   { id: "depth", label: "Market depth", desc: "5-level bid / ask ladder", group: "live",
-    chain: ["kotak", "shoonya"], surface: "depth", routable: false, sessionOnly: true,
+    chain: ["kotak"], surface: "depth", sessionOnly: true,
     note: "Broker-only, live — never persisted. Empty ladder outside market hours is normal." },
   // Kotak Neo's quote API has no index instruments (NSE:^NSEI always returns
   // empty), so indices are Yahoo-first by design — Kotak stays in the chain
@@ -461,33 +412,40 @@ export const ROUTED_FEEDS: RoutedFeed[] = [
   // Account rows describe the signed-in user's own broker connection, so they
   // are marked perUser and stay out of the app-wide feed tally.
   { id: "funds", label: "Funds / margin", desc: "Available and used margin", group: "account",
-    chain: ["kotak", "shoonya"], surface: "funds", routable: false, perUser: true, onDemand: true,
+    chain: ["kotak"], surface: "funds", routable: false, perUser: true, onDemand: true,
     table: { name: "market_funds", column: "synced_at" }, freshMins: 60 * 24 },
   { id: "holdings", label: "Holdings", desc: "Demat holdings with average cost", group: "account",
-    chain: ["kotak", "shoonya"], surface: "holdings", routable: false, perUser: true, onDemand: true,
+    chain: ["kotak"], surface: "holdings", routable: false, perUser: true, onDemand: true,
     table: { name: "market_holdings", column: "updated_at" }, freshMins: 60 * 24 },
   { id: "positions", label: "Positions", desc: "Intraday / carry-forward open positions", group: "account",
-    chain: ["kotak", "shoonya"], surface: "positions", routable: false, perUser: true, onDemand: true,
+    chain: ["kotak"], surface: "positions", routable: false, perUser: true, onDemand: true,
     table: { name: "market_positions", column: "updated_at" }, freshMins: 60 * 24 },
   { id: "orders_read", label: "Orders / GTT (read)", desc: "Order book, trade book, GTT list", group: "account",
-    chain: ["kotak", "shoonya"], routable: false, perUser: true, onDemand: true,
+    chain: ["kotak"], routable: false, perUser: true, onDemand: true,
     note: "Read live from the broker on demand — not cached." },
   { id: "orders_write", label: "Order placement", desc: "Place / modify / cancel, GTT, auto-trade", group: "account",
-    chain: ["kotak", "shoonya"], routable: false, perUser: true,
+    chain: ["kotak"], routable: false, perUser: true,
     note: "Write path — never probed (no test order is placed)." },
 
   // ---- Reference ---------------------------------------------------------
+  // Reference feeds are not served through the live routing chain: on-demand
+  // reads go to Yahoo quoteSummary and the vendor sync jobs fill the rest.
+  // They are marked unroutable rather than showing a selector that does nothing.
   { id: "fundamentals", label: "Fundamentals", desc: "PE, PB, ROE, growth, margins", group: "reference",
-    chain: ["fmp", "yahoo", "nse"], surface: "fundamentals",
+    chain: ["yahoo", "fmp"], surface: "fundamentals", routable: false,
+    note: "On-demand reads use Yahoo quoteSummary; FMP fills the nightly universe sync.",
     table: { name: "market_fundamentals_global", column: "updated_at" }, freshMins: 60 * 48 },
   { id: "company_info", label: "Company info", desc: "Name, sector, industry", group: "reference",
-    chain: ["fmp", "yahoo", "nse"], surface: "company_info",
+    chain: ["yahoo", "fmp"], surface: "company_info", routable: false,
+    note: "On-demand reads use Yahoo quoteSummary; FMP fills the nightly universe sync.",
     table: { name: "market_fundamentals_global", column: "updated_at" }, freshMins: 60 * 24 * 14 },
   { id: "shares", label: "Shares outstanding", desc: "Float used for market-cap maths", group: "reference",
-    chain: ["fmp", "yahoo"], surface: "shares",
+    chain: ["fmp", "yahoo"], surface: "shares", routable: false,
+    note: "Filled by the nightly shares-outstanding sync (FMP, Yahoo fallback).",
     table: { name: "market_shares_outstanding", column: "updated_at" }, freshMins: 60 * 24 * 30 },
   { id: "indicators", label: "Technical indicators", desc: "RSI, MACD, ADX, moving averages", group: "reference",
-    chain: ["alpha", "computed"], surface: "indicators",
+    chain: ["computed"], routable: false, surface: "indicators",
+    note: "Computed in-database from daily candles — no vendor call on this path.",
     table: { name: "market_indicators_cache", column: "computed_at" }, freshMins: 60 * 24 },
   { id: "ownership", label: "Shareholding", desc: "Promoter / FII / DII holding", group: "reference",
     chain: ["yahoo"], routable: false },

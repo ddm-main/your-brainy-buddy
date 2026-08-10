@@ -11,7 +11,7 @@ import { canonicalProviderId, isProbeStale, useSurfaceProbes, type SurfaceProbe 
 import { agoLabel, nseClockOpen, useMarketHoliday } from "@/lib/market/feedStatus";
 import { clean } from "@/components/config/providers/providerUtils";
 
-const BROKERS: ProviderId[] = ["kotak_neo", "shoonya"];
+const BROKERS: ProviderId[] = ["kotak_neo"];
 
 const cell: React.CSSProperties = { padding: "5px 8px", verticalAlign: "top", borderBottom: "1px solid var(--edge)" };
 const head: React.CSSProperties = {

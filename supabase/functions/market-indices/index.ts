@@ -8,7 +8,6 @@ import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClie
 import { getReadProvider, isLiveOnlyNseIndex } from "../_shared/market/provider.ts";
 import { indexExchangeFor, resolveIndexQuotes } from "../_shared/market/indexQuotes.ts";
 import { recordFeedHeartbeat, dominantProvider } from "../_shared/market/heartbeat.ts";
-import { getFeedRoute } from "../_shared/market/feedRoute.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 
 const limiter = createMarketLimiter(300, 60_000);
@@ -68,8 +67,7 @@ Deno.serve(async (req) => {
     // Resolve through the full index chain: broker first, then NSE's own
     // (undelayed) allIndices feed, then Yahoo, then the last stored close.
     // Sensex is a BSE index — asking for it as "NSE:^BSESN" never resolved.
-    const route = await getFeedRoute(svc, "indices");
-    const { provider } = await getReadProvider(svc, auth.userId, "indices");
+    const { provider, route = {} } = await getReadProvider(svc, auth.userId, "indices");
     // Indices are Yahoo-first by design (Kotak has no index tokens); a pin to
     // a public vendor therefore skips the broker attempt entirely.
     const skipBroker = route.primary === "yahoo" || route.primary === "nse";

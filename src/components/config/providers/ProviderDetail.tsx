@@ -39,7 +39,6 @@ function sourceFrom(detail: string | undefined, fallback: string): string {
 function isOwnSource(id: ProviderId, source: string): boolean {
   const s = source.toLowerCase();
   if (id === "kotak_neo") return s === "kotak" || s === "kotak_neo";
-  if (id === "shoonya") return s === "shoonya" || s === "noren" || s === "finvasia";
   return s === id;
 }
 
@@ -67,7 +66,7 @@ export default function ProviderDetail({
   liveDetail: { ok: boolean; detail: string | null; at: string } | null;
 }) {
   const meta = PROVIDERS[id];
-  const probeable = id === "kotak_neo" || id === "shoonya" || id === "yahoo";
+  const probeable = id === "kotak_neo" || id === "yahoo";
 
   // Freshness of every table this catalog references — one RPC, and the same
   // shared query key/shape Feed Routing uses so neither can poison the other.

@@ -25,10 +25,10 @@
 // off-session views; it just never masquerades as a live quote here.
 import { corsFor, preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { getReadProvider } from "../_shared/market/provider.ts";
+import { LATENCY_BUDGET_MS, withLatencyBudget } from "../_shared/market/feedRoute.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
 import { getSharedQuotes } from "../_shared/market/quoteCache.ts";
 import { recordFeedHeartbeat } from "../_shared/market/heartbeat.ts";
-import { getFeedRoute } from "../_shared/market/feedRoute.ts";
 
 // This is the hot poll path across several panels at once, so the ceiling is
 // generous — it exists to catch a buggy client or leaked token polling
@@ -80,8 +80,9 @@ Deno.serve(async (req) => {
 
     const svc = svcClient();
     // Honour the operator's Feed Routing choice for the live-price feed.
-    const route = await getFeedRoute(svc, "ltp");
-    const { provider } = await getReadProvider(svc, auth.userId, "ltp");
+    // getReadProvider resolves primary → fallback → chain and hands back the
+    // route it used, so this route is never looked up twice.
+    const { provider, route = {} } = await getReadProvider(svc, auth.userId, "ltp");
     // A deliberately pinned public vendor is a valid answer for this route —
     // it is only "broker unavailable" when nobody asked for a vendor.
     const vendorPinned = route.primary === "yahoo" || route.primary === "nse";
@@ -113,8 +114,13 @@ Deno.serve(async (req) => {
     // session, so identical symbol requests must coalesce upstream.
     let rows: Awaited<ReturnType<typeof getSharedQuotes>> = [];
     let fetchError: string | null = null;
+    // Latency budget: a connected-but-crawling broker session used to hang the
+    // whole poll, because a fallback only ever happened on an exception. A
+    // breach is a failure like any other — it is what turns a slow feed into a
+    // fast one. Scaled by batch size (one round trip prices many symbols).
+    const budgetMs = Math.min(5_000, LATENCY_BUDGET_MS.ltp + symbols.length * 20);
     try {
-      rows = await getSharedQuotes(provider, symbols);
+      rows = await withLatencyBudget(getSharedQuotes(provider, symbols), budgetMs, `${provider.name} quotes`);
     } catch (e) {
       fetchError = e instanceof Error ? e.message : String(e);
     }

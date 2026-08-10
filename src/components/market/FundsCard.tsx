@@ -15,7 +15,7 @@ import { useEffect, useState } from "react";
 import { useFunds, type FundsReasonCode } from "@/lib/market/orderHooks";
 
 const inr = (n: number | null | undefined) =>
-  n == null ? "—" : `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(n)}`;
+  n == null ? "—" : `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 2 }).format(n)}`;
 
 function formatSyncedAt(iso: string | null | undefined): string | null {
   if (!iso) return null;
@@ -105,7 +105,9 @@ export function FundsCard({ compact = false }: { compact?: boolean }) {
     { label: "Margin from shares", value: funds?.collateral },
     { label: "Used margin", value: funds?.used_margin, tone: "warn" as const },
     { label: "Available margin", value: funds?.available_margin, tone: "ok" as const },
-    { label: "Available for options", value: funds?.payin_amount ?? funds?.payout_amount },
+    // Mirrors the broker app: buying-options headroom is the available
+    // margin, not the pay-in amount (that made the tile read ₹50,000).
+    { label: "Available for options", value: funds?.available_margin },
     { label: "SPAN", value: funds?.span_margin, mute: true },
     { label: "Exposure", value: funds?.exposure_margin, mute: true },
     { label: "Realized (today)", value: funds?.realized_mtm, tone: (funds?.realized_mtm ?? 0) >= 0 ? "ok" as const : "err" as const },

@@ -18,6 +18,11 @@ Deno.serve(async (req) => {
   if ("error" in auth) return new Response("unauthorized", { status: 401, headers: corsFor(req) });
   try {
     const svc = svcClient();
+    // `{ debug: true }` echoes the raw broker → mapped → written counts so a
+    // "broker shows 4, table shows 0" divergence is one call away from an
+    // answer instead of a log hunt.
+    const body = await req.json().catch(() => ({} as Record<string, unknown>));
+    const debug = body?.debug === true;
     const { provider, settings } = await getActiveProvider(svc, auth.userId);
     if (!BROKER_PROVIDERS.includes(provider.name) || !provider.getPositionsDetailed) {
       return errorResponse(req, "Positions sync needs a connected broker (Kotak Neo). Connect it in Settings.", 400);
@@ -35,6 +40,12 @@ Deno.serve(async (req) => {
 
     let inserted = 0;
     let updated = 0;
+    const writeErrors: string[] = [];
+    const noteError = (symbol: string, err: any) => {
+      const msg = `${symbol}: ${err?.code ?? ""} ${err?.message ?? String(err)}`.trim();
+      writeErrors.push(msg);
+      console.error("[market-sync-positions] write failed", msg);
+    };
     for (const p of positions) {
       const key = `${p.exchange}:${p.symbol}:${p.side}`;
       const current: any = existingByKey.get(key);
@@ -42,7 +53,7 @@ Deno.serve(async (req) => {
         const { error } = await svc.from("market_positions")
           .update({ quantity: p.quantity, entry_price: p.entry_price, product: p.product, journal_notes: SYNC_MARK })
           .eq("id", current.id);
-        if (!error) updated++;
+        if (error) noteError(p.symbol, error); else updated++;
         existingByKey.delete(key);
       } else {
         const { error } = await svc.from("market_positions").insert({
@@ -65,16 +76,19 @@ Deno.serve(async (req) => {
             .eq("exchange", p.exchange).eq("side", p.side)
             .eq("is_broker_synced", true).is("closed_at", null).maybeSingle();
           if (race) {
-            await svc.from("market_positions")
+            const { error: upErr } = await svc.from("market_positions")
               .update({ quantity: p.quantity, entry_price: p.entry_price, product: p.product, journal_notes: SYNC_MARK })
               .eq("id", race.id);
-            updated++;
+            if (upErr) noteError(p.symbol, upErr); else updated++;
           }
-        } else if (!error) {
+        } else if (error) {
+          noteError(p.symbol, error);
+        } else {
           inserted++;
         }
       }
     }
+
 
     let removed = 0;
     const staleIds = [...existingByKey.values()].map((r: any) => r.id);
@@ -103,7 +117,7 @@ Deno.serve(async (req) => {
           realized: r.realized,
           source: "kotak_sync",
         }, { onConflict: "user_id,day,symbol,exchange" });
-        if (!error) realizedRows++;
+        if (error) noteError(r.symbol, error); else realizedRows++;
       }
     }
 
@@ -114,7 +128,27 @@ Deno.serve(async (req) => {
       console.warn("[market-sync-positions] post-sync funds refresh failed:", fundsErr instanceof Error ? fundsErr.message : String(fundsErr));
     }
 
-    return jsonResponse(req, { ok: true, inserted, updated, removed, total: positions.length, realized: realizedRows, complete: detailed.complete });
+    // Never report a silent success: if the broker returned rows but nothing
+    // could be written, surface the database error to the caller.
+    if (writeErrors.length > 0 && inserted + updated === 0 && positions.length > 0) {
+      return errorResponse(req, `Positions sync could not write any rows — ${writeErrors[0]}`, 500);
+    }
+
+    return jsonResponse(req, {
+      ok: true, inserted, updated, removed, total: positions.length,
+      realized: realizedRows, complete: detailed.complete,
+      errors: writeErrors.length ? writeErrors.slice(0, 5) : undefined,
+      debug: debug ? {
+        provider: provider.name,
+        broker_rows: positions.length,
+        realized_rows: realized.length,
+        existing_open_synced: (existing ?? []).length,
+        stale_removed: staleIds.length,
+        write_errors: writeErrors,
+        symbols: positions.map((p) => `${p.exchange}:${p.symbol}:${p.side}:${p.quantity}`),
+      } : undefined,
+    });
+
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 502);
   }

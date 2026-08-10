@@ -39,7 +39,7 @@ Deno.serve(async (req) => {
     // Route through the active provider (Kotak-first) so the brief uses the
     // same fast path as every other price call. Index tokens are mapped to
     // Kotak's index segments, with Yahoo only used as the configured fallback.
-    const { provider } = await getReadProvider(svc, auth.userId);
+    const { provider } = await getReadProvider(svc, auth.userId, "ltp");
     const indexKeys = ["NSE:^NSEI", "BSE:^BSESN", "NSE:^NSEBANK", "NSE:^INDIAVIX"];
     // Previously a bare `.catch(() => [])` — the model was still asked for
     // "market tone" off an empty context with nothing in the response

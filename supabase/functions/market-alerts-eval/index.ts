@@ -42,7 +42,7 @@ Deno.serve(async (req) => {
     for (const [userId, userAlerts] of byUser) {
       const keys = [...new Set(userAlerts.map((a) => `${a.exchange}:${a.symbol}`))];
       try {
-        const { provider } = await getReadProvider(svc, userId);
+        const { provider } = await getReadProvider(svc, userId, "ltp");
         const rows = await provider.getQuotes(keys);
         for (const r of rows) {
           const [exchange, symbol] = r.key.split(":");

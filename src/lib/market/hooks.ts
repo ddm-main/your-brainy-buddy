@@ -7,6 +7,7 @@ import { nseOpenNow } from "./liveTickStore";
 import { useLiveDepthStore, isFreshDepth } from "./liveDepthStore";
 import { TF_FETCH_RANGE } from "./chartWindows";
 import { safeStorage } from "@/lib/safeStorage";
+import { useUi } from "@/store/uiStore";
 
 
 import type {
@@ -94,7 +95,7 @@ export interface SystemFeedStatus {
   configured: boolean;
   designated: boolean;
   status: string;
-  /** Broker behind the designated data feed (kotak_neo | shoonya), if any. */
+  /** Broker behind the designated data feed (kotak_neo), if any. */
   provider?: string | null;
 
   healthy: boolean;
@@ -365,16 +366,45 @@ export function useTodayRealized() {
   });
 }
 
+export type SyncResult = { ok: boolean; inserted?: number; updated?: number; removed?: number; total?: number; errors?: string[] };
+
+/** Broker reported rows but nothing landed in our tables → say so, loudly.
+ *  Returns null when the sync was genuinely fine. */
+export function syncGapMessage(label: string, r: SyncResult | undefined): string | null {
+  if (!r) return null;
+  const written = (r.inserted ?? 0) + (r.updated ?? 0);
+  if (r.errors?.length) return `${label} sync partially failed — ${r.errors[0]}`;
+  if ((r.total ?? 0) > 0 && written === 0 && (r.removed ?? 0) === 0) {
+    return `Broker reported ${r.total} ${label.toLowerCase()} but none could be saved — check the broker connection.`;
+  }
+  return null;
+}
+
+// A sync that writes nothing while the broker reported rows is a failure the
+// user must see — the edge function used to swallow row-level DB errors.
+function reportSyncOutcome(label: string, r: SyncResult) {
+  const written = (r.inserted ?? 0) + (r.updated ?? 0);
+  if (r.errors?.length) {
+    useUi.getState().push(`${label} sync partially failed: ${r.errors[0]}`, "warn");
+  } else if ((r.total ?? 0) > 0 && written === 0 && (r.removed ?? 0) === 0) {
+    useUi.getState().push(`${label} sync wrote no rows — check broker connection`, "warn");
+  }
+}
+
 export function useSyncPositions() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => callMarketFn("market-sync-positions"),
-    onSuccess: () => {
+    mutationFn: () => callMarketFn<SyncResult>("market-sync-positions"),
+    onSuccess: (res) => {
+      reportSyncOutcome("Positions", res);
       for (const key of [
         ["market", "positions"], ["market", "funds"], ["market", "realized-daily"],
         ["market", "holdings"], ["market", "portfolio-last-sync"],
         ["market", "feed-freshness"], ["market", "surface-probes"],
       ]) qc.invalidateQueries({ queryKey: key });
+    },
+    onError: (e: unknown) => {
+      useUi.getState().push(`Positions sync failed: ${e instanceof Error ? e.message : String(e)}`, "err");
     },
   });
 }
@@ -382,16 +412,21 @@ export function useSyncPositions() {
 export function useSyncHoldings() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => callMarketFn<{ ok: boolean; inserted?: number; updated?: number; removed?: number }>("market-sync-holdings"),
-    onSuccess: () => {
+    mutationFn: () => callMarketFn<SyncResult>("market-sync-holdings"),
+    onSuccess: (res) => {
+      reportSyncOutcome("Holdings", res);
       for (const key of [
         ["market", "holdings"], ["market", "funds"], ["market", "settings"],
         ["market", "portfolio-last-sync"], ["market", "feed-freshness"],
         ["market", "surface-probes"],
       ]) qc.invalidateQueries({ queryKey: key });
     },
+    onError: (e: unknown) => {
+      useUi.getState().push(`Holdings sync failed: ${e instanceof Error ? e.message : String(e)}`, "err");
+    },
   });
 }
+
 
 // PGRST filter-string escaping (commas/parens/backslash are structural in .or())
 function escapePgrst(v: string): string {

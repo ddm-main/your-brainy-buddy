@@ -62,18 +62,3 @@ Deno.test("getActiveProvider — Kotak row with live session → kotak_neo", asy
   assertEquals(provider.name, "kotak_neo");
 });
 
-Deno.test("getActiveProvider — configured Shoonya does not require a stored TOTP seed", async () => {
-  const svc = fakeSvc([{
-    id: "shoonya-1",
-    user_id: "user-1",
-    active_provider: "shoonya",
-    connection_status: "disconnected",
-    session_token_enc: null,
-    ucc: "FA000001",
-    vendor_code: "FA000001_U",
-    api_secret_enc: "enc-secret",
-    totp_secret_enc: null,
-  }]);
-  const { provider } = await getActiveProvider(svc, "user-shoonya-configured");
-  assertEquals(provider.name, "shoonya");
-});

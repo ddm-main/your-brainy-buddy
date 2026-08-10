@@ -1163,13 +1163,20 @@ function ScreenerInner() {
                 })()}
                 {healthSummary && (
                   <button type="button" onClick={() => setHealthOpen(true)}
-                    title={`Pipeline: Fund ${healthSummary.fundPct}% · Sector ${healthSummary.sectorPct}% · Tech ${healthSummary.techPct}% — click for details`}
+                    title={`Pipeline: Fund ${healthSummary.fundPct}% · Sector ${healthSummary.sectorPct}% · Tech ${healthSummary.techPct}%`
+                      + (liveMode && !asOfDate
+                        ? (plane
+                          ? ` — sweep ${plane.coverage_pct != null ? `${plane.coverage_pct.toFixed(1)}%` : "—"}`
+                            + (planeAge != null ? ` · ${planeAge}m ago` : "")
+                          : " — no promoted sweep yet")
+                        : "")
+                      + " — click for details"}
                     aria-label="Data health details"
                     style={{
-                      display: "inline-flex", alignItems: "center", gap: 6,
-                      padding: "3px 8px", border: "1px solid var(--edge)", background: "transparent",
+                      display: "inline-flex", alignItems: "center", gap: 5,
+                      padding: "3px 7px", border: "1px solid var(--edge)", background: "transparent",
                       color: "var(--text-muted)", cursor: "pointer",
-                      fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
+                      fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
                       borderRadius: 2,
                     }}>
                     <span style={{
@@ -1179,53 +1186,28 @@ function ScreenerInner() {
                         : "var(--danger, #ff6a6a)",
                     }} />
                     {liveMode && !asOfDate
-                      ? `LIVE ${latestTradeDate ?? "—"} · sweep-matched values`
-                      : `EOD ${healthSummary.eod ?? "—"} · same-session values`}
-
+                      ? `LIVE ${latestTradeDate ?? "—"}`
+                      : `EOD ${healthSummary.eod ?? "—"}`}
                   </button>
                 )}
                 <button type="button" onClick={() => setLiveMode((v) => !v)}
                   title={liveMode
-                    ? "Live mode: every row is priced by the latest promoted sweep — the whole universe, not a capped sample. Click for settled EOD parity."
+                    ? "Live mode: every row is priced by the latest promoted sweep. Click for settled EOD parity."
                     : "EOD mode: filters and columns use the last settled session (Tickertape parity). Click to use live sweep values instead."}
                   aria-label="Toggle live filtering"
                   aria-pressed={liveMode}
                   disabled={!!asOfDate}
                   style={{
-                    display: "inline-flex", alignItems: "center", gap: 6,
-                    padding: "3px 8px", border: "1px solid var(--edge)",
+                    display: "inline-flex", alignItems: "center", gap: 5,
+                    padding: "3px 7px", border: "1px solid var(--edge)",
                     background: liveMode && !asOfDate ? "var(--accent-dim, rgba(255,184,77,0.12))" : "transparent",
                     color: liveMode && !asOfDate ? "var(--accent)" : "var(--text-muted)",
                     cursor: asOfDate ? "not-allowed" : "pointer", opacity: asOfDate ? 0.5 : 1,
-                    fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
+                    fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
                     borderRadius: 2,
                   }}>
-                  {liveMode && !asOfDate ? "Filters · live" : "Filters · EOD"}
+                  {liveMode && !asOfDate ? "Live" : "EOD"}
                 </button>
-                {/* Plane freshness — one honest chip for the whole screen,
-                    driven by the last promoted sweep rather than per-row guesses. */}
-                {liveMode && !asOfDate && (
-                  <span
-                    title={plane
-                      ? `Sweep ${plane.sweep_id.slice(0, 8)} · session ${plane.session_date} · ${plane.priced_count ?? "—"} of ${plane.expected_count ?? "—"} priced`
-                        + (plane.kotak_count != null ? ` · kotak ${plane.kotak_count}` : "")
-                        + (plane.yahoo_count != null ? ` · yahoo ${plane.yahoo_count}` : "")
-                        + (planeAge != null ? ` · ${planeAge} min ago` : "")
-                      : "No promoted sweep yet — rows fall back to the settled session."}
-                    style={{
-                      display: "inline-flex", alignItems: "center", gap: 6,
-                      padding: "3px 8px", border: "1px solid var(--edge)",
-                      color: !plane ? "var(--text-muted)"
-                        : planeAge != null && planeAge > 20 ? "var(--warn, #d29a2b)"
-                        : "var(--ok, #4ade80)",
-                      fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
-                      borderRadius: 2,
-                    }}>
-                    {!plane ? <><AlertTriangle size={11} /> no sweep</>
-                      : <>sweep {plane.coverage_pct != null ? `${plane.coverage_pct.toFixed(1)}%` : "—"}
-                        {planeAge != null ? ` · ${planeAge}m` : ""}</>}
-                  </span>
-                )}
 
                 {/* Intraday honesty: EOD mode while the market is open means
                     every price on screen is yesterday's close. Say so. */}
@@ -1233,13 +1215,13 @@ function ScreenerInner() {
                   <button type="button" onClick={() => setLiveMode(true)}
                     title="The market is open but this screen is filtering on the last settled session. Click to switch to live sweep values."
                     style={{
-                      display: "inline-flex", alignItems: "center", gap: 6,
-                      padding: "3px 8px", border: "1px solid var(--warn, #d29a2b)",
+                      display: "inline-flex", alignItems: "center", gap: 5,
+                      padding: "3px 7px", border: "1px solid var(--warn, #d29a2b)",
                       background: "rgba(255,176,32,0.08)", color: "var(--warn, #d29a2b)",
                       cursor: "pointer", fontFamily: "var(--font-hud)", fontSize: 10,
-                      letterSpacing: "0.14em", textTransform: "uppercase", borderRadius: 2,
+                      letterSpacing: "0.12em", textTransform: "uppercase", borderRadius: 2,
                     }}>
-                    <AlertTriangle size={11} /> market open · switch to live
+                    <AlertTriangle size={11} /> go live
                   </button>
                 )}
 
@@ -1248,77 +1230,57 @@ function ScreenerInner() {
                   <button type="button" onClick={() => setVolBasis((v) => (v === "raw" ? "paced" : "raw"))}
                     title={volBasis === "raw"
                       ? "Volume > 30D Avg compares cumulative session volume against the full-day 30-day average (Economic Times parity). Click for pace-adjusted."
-                      : "Volume > 30D Avg compares session volume against the 30-day average pro-rated to the elapsed session. Click for raw ET-parity comparison."}
+                      : "Volume > 30D Avg compares session volume against the 30-day average pro-rated to the elapsed session. Click for raw ET-parity comparison."
+                      + (volUnknownCount > 0 ? ` · ${volUnknownCount} stocks have no 30D average yet` : "")}
                     aria-label="Toggle volume comparison basis"
                     style={{
-                      display: "inline-flex", alignItems: "center", gap: 6,
-                      padding: "3px 8px", border: "1px solid var(--edge)", background: "transparent",
+                      display: "inline-flex", alignItems: "center", gap: 5,
+                      padding: "3px 7px", border: "1px solid var(--edge)", background: "transparent",
                       color: "var(--text-muted)", cursor: "pointer",
-                      fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
+                      fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
                       borderRadius: 2,
                     }}>
                     vol · {volBasis === "raw" ? "raw" : "paced"}
                   </button>
                 )}
 
-                {volUnknownCount > 0 && (
-                  <span
-                    title="These stocks have no 30-day average volume yet, so the volume filter cannot judge them — they are unknown, not excluded for failing."
-                    style={{
-                      display: "inline-flex", alignItems: "center", gap: 6,
-                      padding: "3px 8px", border: "1px solid var(--edge)",
-                      color: "var(--text-muted)", fontFamily: "var(--font-hud)", fontSize: 10,
-                      letterSpacing: "0.14em", textTransform: "uppercase", borderRadius: 2,
-                    }}>
-                    {volUnknownCount} no 30d avg
-                  </span>
-                )}
-
-
-                {hiddenByLiquidity > 0 && (
-                  <button type="button" onClick={() => setHideIlliquid(false)}
-                    title="These rows match every active filter but sit below the liquidity floor (penny/SME). Click to show them."
-                    style={{
-                      display: "inline-flex", alignItems: "center", gap: 6,
-                      padding: "3px 8px", border: "1px solid var(--warn, #d29a2b)",
-                      background: "rgba(255,176,32,0.08)", color: "var(--warn, #d29a2b)",
-                      cursor: "pointer", fontFamily: "var(--font-hud)", fontSize: 10,
-                      letterSpacing: "0.14em", textTransform: "uppercase", borderRadius: 2,
-                    }}>
-                    {hiddenByLiquidity} hidden — show
-                  </button>
-                )}
                 <button type="button" onClick={() => setHideIlliquid((v) => !v)}
                   title={hideIlliquid
-                    ? `Hiding ${illiquidCount} penny/illiquid name${illiquidCount === 1 ? "" : "s"} (price/mcap/turnover below the liquidity floor) — click to show them`
+                    ? `Hiding ${illiquidCount} penny/illiquid name${illiquidCount === 1 ? "" : "s"}`
+                      + (hiddenByLiquidity > 0 ? ` (${hiddenByLiquidity} match the active filters)` : "")
+                      + " — click to show them"
                     : "Showing all stocks, including penny/illiquid names — click to hide them again"}
                   aria-label="Toggle penny/illiquid stocks"
                   aria-pressed={hideIlliquid}
                   style={{
-                    display: "inline-flex", alignItems: "center", gap: 6,
-                    padding: "3px 8px", border: "1px solid var(--edge)",
+                    display: "inline-flex", alignItems: "center", gap: 5,
+                    padding: "3px 7px",
+                    border: `1px solid ${hideIlliquid && hiddenByLiquidity > 0 ? "var(--warn, #d29a2b)" : "var(--edge)"}`,
                     background: hideIlliquid ? "transparent" : "var(--accent-dim, rgba(255,184,77,0.12))",
-                    color: hideIlliquid ? "var(--text-muted)" : "var(--accent)",
+                    color: hideIlliquid
+                      ? (hiddenByLiquidity > 0 ? "var(--warn, #d29a2b)" : "var(--text-muted)")
+                      : "var(--accent)",
                     cursor: "pointer",
-                    fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
+                    fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
                     borderRadius: 2,
                   }}>
                   {hideIlliquid ? <Check size={11} /> : <X size={11} />}
-                  {hideIlliquid ? "Liquid only" : "All (incl. penny)"}
+                  {hideIlliquid ? `Liquid${hiddenByLiquidity > 0 ? ` · ${hiddenByLiquidity} hidden` : ""}` : "All"}
                 </button>
                 {partial && (
                   <button type="button" onClick={() => setLoadAllRequested(true)}
                     title="Load the full universe (larger download)"
                     style={{
                       display: "inline-flex", alignItems: "center", gap: 4,
-                      padding: "4px 8px", border: "1px solid var(--edge)",
+                      padding: "3px 7px", border: "1px solid var(--edge)",
                       background: "transparent", color: "var(--text-muted)", cursor: "pointer",
-                      fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em",
+                      fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em",
                       textTransform: "uppercase", borderRadius: 2,
                     }}>
                     Load all{universeCount ? ` (${universeCount})` : ""}
                   </button>
                 )}
+
                 <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}
                   style={{ ...inputStyle, padding: "4px 6px", fontSize: 11 }}
                   title="Rows per page">

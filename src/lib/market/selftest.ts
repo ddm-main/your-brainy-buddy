@@ -226,7 +226,6 @@ export function useRunSelfTest() {
 export function canonicalProviderId(name: string): string {
   const n = (name || "").toLowerCase();
   if (n.includes("kotak")) return "kotak_neo";
-  if (n.includes("shoonya") || n.includes("noren") || n.includes("finvasia")) return "shoonya";
   if (n.includes("yahoo")) return "yahoo";
   if (n.includes("alpha")) return "alpha_vantage";
   if (n.includes("fmp") || n.includes("modeling")) return "fmp";

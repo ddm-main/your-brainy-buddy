@@ -72,14 +72,19 @@ export function positionPnl(input: { quantity: number; entryPrice: number; side:
   const entryPrice = finite(input.entryPrice) ?? 0;
   const quoteLtp = finite(input.quote?.ltp);
   if (quoteLtp == null || quoteLtp <= 0) {
-    return { ltp: null, unrealized: null, unrealizedPct: null, todayPnl: null };
+    return { ltp: null, unrealized: null, unrealizedPct: null, todayPnl: null, tradedValue: Math.abs(entryPrice * quantity) };
   }
   const direction = input.side === "short" ? -1 : 1;
   const unrealized = direction * (quoteLtp - entryPrice) * quantity;
   const unrealizedPct = entryPrice ? direction * ((quoteLtp - entryPrice) / entryPrice) * 100 : null;
-  const dayChange = getTrustedDayChange(input.quote);
-  const todayPnl = dayChange == null ? null : direction * dayChange * quantity;
-  return { ltp: quoteLtp, unrealized, unrealizedPct, todayPnl };
+  // The positions book is a *day* book (today's net trades), exactly like the
+  // broker's Positions tab: its day P&L is the unrealized move against the
+  // entry price, not against yesterday's close. Using previous_close here
+  // inflated "Today's P&L" by thousands for positions opened today.
+  const todayPnl = unrealized;
+  // "Net traded value" in the broker app — cost basis, not LTP exposure.
+  const tradedValue = Math.abs(entryPrice * quantity);
+  return { ltp: quoteLtp, unrealized, unrealizedPct, todayPnl, tradedValue };
 }
 
 export function sumNullable(values: Array<number | null>): number | null {

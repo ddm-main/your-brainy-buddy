@@ -20,6 +20,8 @@ const FLUSH_AFTER_MS = 10_000;
 // Tag it in the route label so `system_egress_daily` names the offender.
 // Mirrors the browser meter's ceiling in src/lib/egressMeter.ts.
 const OVERSIZE_BYTES = 128 * 1024;
+// Absolute ceiling: a server read over a megabyte is an unfiltered query.
+const HARD_CEILING_BYTES = 1024 * 1024;
 
 let installed = false;
 let originalFetch: typeof fetch | null = null;
@@ -69,7 +71,10 @@ function classify(url: string): { source: string; route: string } | null {
 
 
 function bump(key: string, bytes: number) {
-  if (bytes >= OVERSIZE_BYTES) {
+  if (bytes >= HARD_CEILING_BYTES) {
+    key = `${key} !1MB`;
+    console.error(`[egress] CEILING: ${key} → ${Math.round(bytes / 1024)} KB in one response`);
+  } else if (bytes >= OVERSIZE_BYTES) {
     key = `${key} !OVER`;
     console.warn(`[egress] BUDGET: ${key} → ${Math.round(bytes / 1024)} KB in one response`);
   }

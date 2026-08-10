@@ -11,16 +11,13 @@
 import { useLiveTickStore } from "@/lib/market/liveTickStore";
 import { useMarketSettings } from "@/lib/market/hooks";
 
-// The app supports more than one broker now — hardcoding "kotak" told a
-// Shoonya user their prices came from a broker they never connected.
 function useConnectedBrokerLabel(): string {
   const { data } = useMarketSettings();
   const rows = data ?? [];
   const connected = rows.find(
     (r: any) => r.connection_status === "connected" &&
-      (r.active_provider === "kotak_neo" || r.active_provider === "shoonya"),
+      r.active_provider === "kotak_neo",
   ) as any;
-  if (connected?.active_provider === "shoonya") return "shoonya";
   if (connected?.active_provider === "kotak_neo") return "kotak";
   return "broker";
 }

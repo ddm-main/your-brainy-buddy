@@ -243,7 +243,7 @@ Deno.serve(async (req) => {
     // Route through the active provider (Kotak Neo when connected — falls
     // back to Yahoo automatically when the symbol has no instrument token or
     // Kotak returns empty).
-    const { provider } = await getReadProvider(svc, auth.userId);
+    const { provider } = await getReadProvider(svc, auth.userId, "candles_1d");
     const allCandles = await provider.getOHLCV(symbol, exchange, range, "1d");
     const cutoff = Math.floor(Date.now() / 1000 - years * 365.25 * 86_400);
     const candles = allCandles.filter((c) => c.time >= cutoff);

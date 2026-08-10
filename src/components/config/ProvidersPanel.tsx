@@ -154,7 +154,7 @@ export default function ProvidersPanel() {
   };
 
   const openEdit = (p: ProviderId) => {
-    // Broker sessions (Kotak, Shoonya) are established in Market Settings —
+    // Broker sessions (Kotak) are established in Market Settings —
     // they need far more than a single API-key field.
     if (PROVIDERS[p].edit === "kotak" || PROVIDERS[p].edit === "broker") { nav("/market/settings"); return; }
     setKeyInput("");
@@ -192,7 +192,7 @@ export default function ProvidersPanel() {
     } else {
       tone = "neutral"; label = "untested";
     }
-    if ((p === "kotak_neo" || p === "shoonya") && hp && !hp.ok) label = "degraded → yahoo";
+    if (p === "kotak_neo" && hp && !hp.ok) label = "degraded → yahoo";
 
     return { p, meta, cred, tone, label, detail, at };
   });

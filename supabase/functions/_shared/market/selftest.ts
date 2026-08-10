@@ -2,9 +2,8 @@
 // provider, on demand) and market-selftest (all providers, on demand or from
 // pg_cron). Everything that writes status lives here so the UI reads one
 // consistent story no matter who ran the probe.
-import { getActiveProvider, kotakProvider, shoonyaProvider, yahooProvider, type OhlcvMeta } from "./provider.ts";
+import { getActiveProvider, kotakProvider, yahooProvider, type OhlcvMeta } from "./provider.ts";
 import { KOTAK_SETTINGS_COLS, type KotakSettings } from "./kotakClient.ts";
-import { SHOONYA_SETTINGS_COLS, type ShoonyaSettings } from "./shoonyaClient.ts";
 import { fmpValidateKey, fmpProfile, fmpRatios } from "./fmpClient.ts";
 import { alphaValidateKey, alphaRSI } from "./alphaVantageClient.ts";
 import { nseMarketStatus, nseCorporateActions, nseEquityMeta } from "./nseClient.ts";
@@ -17,7 +16,7 @@ type Svc = any;
 
 // "not_configured" is NOT a failure: a broker with no credentials, or a key
 // provider with no key, has nothing to be healthy about. Counting it as an
-// outage is what made Shoonya show a wall of red for a broker nobody
+// outage is what made the page show a wall of red for a broker nobody
 // authorized.
 export type SurfaceState = "ok" | "degraded" | "failed" | "not_configured";
 export interface SurfaceResult {
@@ -42,14 +41,15 @@ export const SERVICE_SURFACES: Record<string, string[]> = {
  * probed for it — a permanent, meaningless failure (Yahoo has no funds
  * endpoint) is worse than no row at all: it poisons the health tally.
  */
+/** A session worth spending a probe on: anything but a dead/absent one. */
+export const probeableSession = (status: string | null | undefined): boolean =>
+  status !== "expired" && status !== "disconnected" && status !== "error" && status !== null;
+
 export const PROVIDER_SURFACES: Record<string, string[]> = {
   // Kotak Neo has no index instrument in its quote API (NSE:^NSEI always comes
   // back empty) and no candle API — both are Yahoo-served by design, so they
   // are not probed here. Probing them produced a permanent "IDX DOWN".
   kotak_neo: ["quotes", "depth", "funds", "holdings", "positions"],
-  // Noren DOES publish candles (TPSeries / EODChartData), so Shoonya is
-  // judged on the history surfaces too — unlike Kotak.
-  shoonya: ["quotes", "index_quotes", "depth", "candles_1d", "candles_intraday", "funds", "holdings", "positions"],
   yahoo: ["quotes", "index_quotes", "candles_1d", "candles_index_1d", "candles_intraday"],
 };
 
@@ -86,7 +86,6 @@ export const PRIMARY_BY_SURFACE: Record<string, string> = {
 export function canonicalProvider(name: string): string {
   const n = (name || "").toLowerCase();
   if (n.includes("kotak")) return "kotak_neo";
-  if (n.includes("shoonya") || n.includes("noren") || n.includes("finvasia")) return "shoonya";
   if (n.includes("yahoo")) return "yahoo";
   if (n.includes("alpha")) return "alpha_vantage";
   if (n.includes("fmp") || n.includes("modeling")) return "fmp";
@@ -323,7 +322,7 @@ export async function probeServiceSurfaces(
 export async function surfaceReport(
   svc: Svc,
   userId: string,
-  which: "active" | "kotak_neo" | "shoonya" | "yahoo" = "active",
+  which: "active" | "kotak_neo" | "yahoo" = "active",
   purpose: "account" | "data" = "account",
   /** Which plane of surfaces to probe: shared market data, the broker account,
    *  or both. Account surfaces must only ever be probed on an account row. */
@@ -345,15 +344,6 @@ export async function surfaceReport(
       ?? candidates[0];
     settingsId = row?.id ?? null;
     provider = row ? kotakProvider(svc, row) : yahooProvider(svc);
-  } else if (which === "shoonya") {
-    const { data } = await svc.from("market_api_settings").select(SHOONYA_SETTINGS_COLS)
-      .eq("user_id", userId).eq("active_provider", "shoonya").eq("purpose", purpose);
-    const candidates = (data ?? []) as ShoonyaSettings[];
-    const row = candidates.find((r) => !!r.session_token_enc)
-      ?? candidates.find((r) => !!r.ucc && !!r.vendor_code && !!r.api_secret_enc)
-      ?? candidates[0];
-    settingsId = (row as unknown as { id?: string })?.id ?? null;
-    provider = row ? shoonyaProvider(svc, row) : yahooProvider(svc);
   } else {
     const active = await getActiveProvider(svc, userId);
     provider = active.provider;
@@ -408,11 +398,15 @@ export async function surfaceReport(
     quotes: async () => {
       const rows = await provider.getQuotes(["NSE:RELIANCE"], { allowFallback: which === "active" || which === "yahoo" });
       if (!rows.length) throw new Error("no rows");
+      // A zero price is not a quote. This used to be stored as ok, so an
+      // unauthorised session could sit on the page looking healthy.
+      if (!(Number(rows[0].price) > 0)) throw new Error("provider returned ltp=0");
       return { detail: `ltp=${rows[0].price}`, source: rows[0].source };
     },
     index_quotes: async () => {
       const rows = await provider.getQuotes(["NSE:^NSEI"], { allowFallback: which === "active" || which === "yahoo" });
       if (!rows.length) throw new Error("no index rows");
+      if (!(Number(rows[0].price) > 0)) throw new Error("provider returned ltp=0 for Nifty 50");
       return { detail: `Nifty 50 ltp=${rows[0].price}`, source: rows[0].source };
     },
     depth: async () => {
@@ -572,34 +566,6 @@ export async function runSelfTest(
       await recordSurfaceProbes(svc, acct, Date.now() - aStart, "account");
     }
 
-    // Shoonya is only probed when a Shoonya connection actually exists —
-    // otherwise the provider page would show a wall of failures for a broker
-    // nobody connected.
-    const { data: shoonyaRows } = await svc.from("market_api_settings")
-      .select("id").eq("active_provider", "shoonya").eq("purpose", "data").limit(1);
-    if ((shoonyaRows ?? []).length > 0) {
-      const sStart = Date.now();
-      const shoonya = await surfaceReport(svc, userId, "shoonya", "data", "data")
-        .catch(() => ({} as Record<string, SurfaceResult>));
-      const sLatency = Date.now() - sStart;
-      const sKeys = Object.keys(shoonya);
-      const sOkCount = sKeys.filter((k) => shoonya[k].ok).length;
-      const sOk = sOkCount > 0;
-      const sDetail = sKeys.length ? `${sOkCount}/${sKeys.length} surfaces answered` : "Shoonya probe returned nothing";
-      providers["shoonya"] = { ok: sOk, detail: sDetail, latency_ms: sLatency };
-      await recordProviderProbe(svc, "shoonya", sOk, sDetail, sLatency);
-      await recordSurfaceProbes(svc, shoonya, sLatency, "data");
-      for (const [k, v] of Object.entries(shoonya)) if (!surfaces[k]?.ok) surfaces[k] = v;
-    }
-
-    const { data: shoonyaAcct } = await svc.from("market_api_settings")
-      .select("id").eq("user_id", userId).eq("active_provider", "shoonya").eq("purpose", "account").limit(1);
-    if ((shoonyaAcct ?? []).length > 0) {
-      const aStart = Date.now();
-      const acct = await surfaceReport(svc, userId, "shoonya", "account", "account")
-        .catch(() => ({} as Record<string, SurfaceResult>));
-      await recordSurfaceProbes(svc, acct, Date.now() - aStart, "account");
-    }
 
 
 

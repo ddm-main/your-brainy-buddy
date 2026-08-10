@@ -1,5 +1,5 @@
-// Broker connect panel — per-user broker connection (Kotak Neo and Shoonya
-// enabled; add future brokers to the BROKERS list below). Shared UI from the
+// Broker connect panel — per-user broker connection (Kotak Neo enabled;
+// add future brokers to the BROKERS list below). Shared UI from the
 // former /config/broker route so it can live under Market → Config.
 import { useCallback, useEffect, useState } from "react";
 import HudPanel from "@/components/hud/HudPanel";
@@ -11,7 +11,7 @@ import { useUi } from "@/store/uiStore";
 import { toSafeError } from "@/lib/errors";
 import { LockKeyhole, Pencil, TestTube2 } from "lucide-react";
 
-type BrokerId = "kotak_neo" | "shoonya" | "zerodha" | "upstox";
+type BrokerId = "kotak_neo" | "zerodha" | "upstox";
 type Settings = {
   id?: string;
   active_provider: string;
@@ -29,58 +29,12 @@ type Settings = {
 const KOTAK_DEFAULT_BASE = "https://gw-napi.kotaksecurities.com";
 const KOTAK_DEFAULT_WS = "wss://mlhsm.kotaksecurities.com";
 
-type ShoonyaSettings = {
-  id?: string;
-  connection_status: string;
-  token_expires_at: string | null;
-  last_error: string | null;
-  greeting_name: string | null;
-  ucc: string | null;
-  vendor_code: string | null;
-  api_secret_enc: string | null;
-  password_enc: string | null;
-  totp_secret_enc: string | null;
-  imei: string | null;
-};
 
 // Add future brokers here: append an entry with `enabled: false` and a blurb
 // until its connect flow ships.
 const BROKERS: { id: BrokerId; name: string; enabled: boolean; blurb: string }[] = [
   { id: "kotak_neo", name: "Kotak Neo", enabled: true,  blurb: "Trade API — account services or operator market data" },
-  { id: "shoonya",   name: "Shoonya (Finvasia)", enabled: true, blurb: "Noren API — orders, holdings, native candles, live LTP" },
 ];
-// Registered in Shoonya PRISM → API Key. Keep this URL stable; the current app
-// origin rides in OAuth `state`, not in the PRISM-registered URL.
-const shoonyaAppOrigin = typeof window !== "undefined" ? window.location.origin : "";
-const shoonyaOriginToken = shoonyaAppOrigin ? encodeURIComponent(btoa(shoonyaAppOrigin)) : "";
-const shoonyaRedirectUrl = `${SAFE_SUPABASE_URL}/functions/v1/shoonya-oauth-callback`;
-const SHOONYA_AUTH_STARTED_KEY = "jarvis:shoonya-auth-started-at";
-
-function mergedShoonyaParams(search: string, hash: string): URLSearchParams {
-  const params = new URLSearchParams(search);
-  const fragment = hash.startsWith("#") ? hash.slice(1) : hash;
-  const hashParams = new URLSearchParams(fragment.startsWith("?") ? fragment.slice(1) : fragment);
-  hashParams.forEach((value, key) => { if (!params.has(key)) params.set(key, value); });
-  return params;
-}
-
-function extractShoonyaCodeInput(value: string): { code?: string; error?: string } {
-  const raw = value.trim();
-  if (!raw) return {};
-  try {
-    const u = new URL(raw);
-    const params = mergedShoonyaParams(u.search, u.hash);
-    const code = params.get("shoonya_code") ?? params.get("code") ?? params.get("request_token");
-    if (code?.trim()) return { code: code.trim() };
-    const err = params.get("shoonya_error") ?? params.get("error_description") ?? params.get("error");
-    if (err?.trim()) return { error: `Shoonya did not issue a code: ${err}. Recheck the clean Redirect URL and static IP in PRISM, then authorize again.` };
-    if (/\/market\/settings/i.test(u.pathname) || /shoonya-oauth-callback/i.test(u.pathname)) {
-      return { error: "That URL has no Shoonya authorization code. Use the clean Redirect URL shown here in PRISM, then authorize again." };
-    }
-  } catch { /* bare code */ }
-  if (/^shoonya_error=/i.test(raw)) return { error: "Shoonya did not issue an authorization code. Recheck PRISM setup, then authorize again." };
-  return { code: raw };
-}
 
 
 async function callFn(name: string, body: Record<string, unknown>) {
@@ -109,17 +63,6 @@ export default function BrokerConnectPanel({ purpose = "account" }: { purpose?: 
   const [otp, setOtp] = useState("");
   const [otpError, setOtpError] = useState<string | null>(null);
 
-  // Shoonya OAuth: TOTP is entered only on Shoonya's page. This app receives
-  // the separate authorization code from the resulting redirect.
-  const [shoonya, setShoonya] = useState<ShoonyaSettings | null>(null);
-  const [shEditing, setShEditing] = useState(false);
-  const [shUid, setShUid] = useState("");
-  const [shVendor, setShVendor] = useState("");
-  const [shSecret, setShSecret] = useState("");
-  const [shImei, setShImei] = useState("");
-  const [shCode, setShCode] = useState("");
-  const [shCodeError, setShCodeError] = useState<string | null>(null);
-  const [shAuthUrl, setShAuthUrl] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const { data, error } = await supabase.from("market_api_settings")
@@ -137,124 +80,6 @@ export default function BrokerConnectPanel({ purpose = "account" }: { purpose?: 
     }
   }, [push, purpose]);
 
-  const loadShoonya = useCallback(async () => {
-    const { data, error } = await supabase.from("market_api_settings")
-      .select("id,connection_status,token_expires_at,last_error,greeting_name,ucc,vendor_code,api_secret_enc,password_enc,totp_secret_enc,imei")
-      .eq("active_provider", "shoonya").eq("purpose", purpose).maybeSingle();
-    if (error) { push(error.message, "err"); return; }
-    const sh = data as unknown as ShoonyaSettings | null;
-    setShoonya(sh);
-    if (sh) { setShUid(sh.ucc ?? ""); setShVendor(sh.vendor_code ?? ""); setShImei(sh.imei ?? ""); }
-  }, [push, purpose]);
-
-  useEffect(() => { void load(); void loadShoonya(); }, [load, loadShoonya]);
-
-  const saveShoonya = async () => {
-    setBusy("sh-save");
-    try {
-      await callFn("market-config-save", {
-        provider: "shoonya",
-        purpose,
-        ucc: shUid || undefined,
-        vendor_code: shVendor || undefined,
-        api_secret: shSecret || undefined,
-        imei: shImei || undefined,
-      });
-      setShSecret("");
-      push("Shoonya credentials saved", "ok");
-      await loadShoonya();
-    } catch (e) { push(toSafeError(e, "Save failed").message, "err"); }
-    finally { setBusy(null); }
-  };
-
-  const exchangeShoonyaCode = useCallback(async (code: string) => {
-    setBusy("sh-login");
-    setShCodeError(null);
-    try {
-      const r = await callFn("market-shoonya-login", code ? { code, purpose } : { redirect_url: shoonyaRedirectUrl, state: shoonyaOriginToken, purpose });
-      if (r?.authorize_url) {
-        setShAuthUrl(r.authorize_url as string);
-        try { window.localStorage.setItem(SHOONYA_AUTH_STARTED_KEY, String(Date.now())); } catch { /* non-critical */ }
-        window.open(r.authorize_url as string, "_blank", "noopener");
-        push("Log in on Shoonya — you'll be sent straight back here when it's done", "ok");
-      } else {
-        push(r?.detail ?? "Connected to Shoonya", r?.ok ? "ok" : "err");
-        if (r?.ok) setShCode("");
-        else setShCodeError(r?.detail ?? null);
-      }
-      await loadShoonya();
-    } catch (e) {
-      const msg = toSafeError(e, "Shoonya login failed").message;
-      setShCodeError(msg);
-      push(msg, "err");
-    }
-    finally { setBusy(null); }
-  }, [loadShoonya, push]);
-
-  const loginShoonya = async () => {
-    const parsed = extractShoonyaCodeInput(shCode);
-    if (parsed.error) {
-      setShCodeError(parsed.error);
-      push(parsed.error, "err");
-      return;
-    }
-    const code = (parsed.code ?? "").trim();
-    if (/^\d{6}$/.test(code)) {
-      const message = "This looks like a TOTP. Enter it on Shoonya's page — the authorization code comes back automatically.";
-      setShCodeError(message);
-      push(message, "warn");
-      return;
-    }
-    await exchangeShoonyaCode(code);
-  };
-
-  // Shoonya redirected the browser back through shoonya-oauth-callback, which
-  // forwards the single-use code as ?shoonya_code. Exchange it immediately
-  // (codes expire in minutes) and scrub it from the address bar so a refresh
-  // can't replay a spent code.
-  useEffect(() => {
-    const params = mergedShoonyaParams(window.location.search, window.location.hash);
-    const code = params.get("shoonya_code") ?? params.get("code") ?? params.get("request_token");
-    const err = params.get("shoonya_error") ?? params.get("error_description") ?? params.get("error");
-    if (!code && !err) {
-      const startedRaw = (() => { try { return window.localStorage.getItem(SHOONYA_AUTH_STARTED_KEY); } catch { return null; } })();
-      const startedAt = startedRaw ? Number(startedRaw) : NaN;
-      if (Number.isFinite(startedAt) && Date.now() - startedAt < 10 * 60_000 && /\/market\/settings/i.test(window.location.pathname)) {
-        try { window.localStorage.removeItem(SHOONYA_AUTH_STARTED_KEY); } catch { /* non-critical */ }
-        const message = "Shoonya returned to JARVIS without an authorization code. In PRISM → API Key, set the Redirect URL exactly to the value shown here, save it, then authorize again.";
-        setSelected("shoonya");
-        setShEditing(true);
-        setShCodeError(message);
-        push(message, "err");
-      }
-      return;
-    }
-    try { window.localStorage.removeItem(SHOONYA_AUTH_STARTED_KEY); } catch { /* non-critical */ }
-    params.delete("shoonya_code");
-    params.delete("code");
-    params.delete("request_token");
-    params.delete("shoonya_error");
-    params.delete("error_description");
-    params.delete("error");
-    params.delete("state");
-    const qs = params.toString();
-    window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
-    setSelected("shoonya");
-    setShEditing(true);
-    if (err) { setShCodeError(err); push(err, "err"); return; }
-    if (code) { setShCode(code); void exchangeShoonyaCode(code); }
-  }, [exchangeShoonyaCode, push]);
-
-
-  const testShoonya = async () => {
-    setBusy("sh-test");
-    try {
-      const r = await callFn("market-test-connection", { provider: "shoonya", purpose });
-      push(r?.ok ? `Shoonya OK (${r?.provider ?? "shoonya"})` : `Shoonya failed${r?.detail ? `: ${r.detail}` : ""}`, r?.ok ? "ok" : "err");
-      await loadShoonya();
-    } catch (e) { push(toSafeError(e, "Test failed").message, "err"); }
-    finally { setBusy(null); }
-  };
 
   const saveConfig = async () => {
     setBusy("save");
@@ -354,15 +179,6 @@ export default function BrokerConnectPanel({ purpose = "account" }: { purpose?: 
   const missingReentryValues = needsCredentialReentry && (!mobile.trim() || !mpin.trim() || !totpSecret.trim());
   const showForm = editing || kotak?.connection_status === "pending_otp";
 
-  const shStatus = shoonya?.connection_status ?? "not configured";
-  const shConnected = shStatus === "connected";
-  const shConfigured = !!shoonya?.api_secret_enc;
-  // OAuth needs only the user id, client id and secret code — the broker
-  // retired password/TOTP login, so those fields no longer gate anything.
-  const shNeedsBasics = !(shoonya?.ucc || shUid.trim())
-    || !(shoonya?.vendor_code || shVendor.trim())
-    || !(shoonya?.api_secret_enc || shSecret.trim());
-
 
   return (
     <HudPanel title={isData ? "Data Feed Connection" : "Broker account"} index={isData ? "DF" : "BRK"} live={kotakConnected ? "ok" : "idle"} bodyClass="overflow-visible">
@@ -393,7 +209,6 @@ export default function BrokerConnectPanel({ purpose = "account" }: { purpose?: 
                 <span style={{ fontFamily: "var(--font-hud)", fontSize: 13, color: "var(--text)" }}>{b.name}</span>
                 {!b.enabled && <Chip tone="warn">coming soon</Chip>}
                 {b.id === "kotak_neo" && kotakConnected && <Chip tone="ok">connected</Chip>}
-                {b.id === "shoonya" && shoonya?.connection_status === "connected" && <Chip tone="ok">connected</Chip>}
               </div>
               <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)", lineHeight: 1.4 }}>{b.blurb}</div>
             </button>
@@ -488,90 +303,6 @@ export default function BrokerConnectPanel({ purpose = "account" }: { purpose?: 
         </div>
       )}
 
-      {selected === "shoonya" && (
-        <div style={{ border: "1px solid var(--edge)", borderRadius: 4, padding: "10px 12px", background: "rgba(255,255,255,0.015)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <span style={{ fontFamily: "var(--font-hud)", fontSize: 14 }}>Shoonya (Finvasia)</span>
-            <Chip tone={shConnected ? "ok" : shoonya?.last_error ? "err" : "neutral"}>{shStatus}</Chip>
-            {shConfigured && <Chip tone="neutral">OAuth</Chip>}
-            <span style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap" }}>
-              <Btn size="sm" onClick={testShoonya} disabled={busy !== null}>
-                <TestTube2 size={11} style={{ marginRight: 4 }} />Test
-              </Btn>
-              <Btn size="sm" variant={shEditing ? "primary" : "ghost"} onClick={() => setShEditing((v) => !v)}>
-                <Pencil size={11} style={{ marginRight: 4 }} />{shEditing ? "Close" : shConfigured ? "Edit" : "Add credentials"}
-              </Btn>
-            </span>
-          </div>
-          <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)" }}>
-            Holdings · Positions · Orders · Live LTP · Native intraday &amp; daily candles
-          </div>
-          {shConnected && (
-            <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>
-              Connected as <b style={{ color: "var(--accent)" }}>{shoonya?.greeting_name ?? shoonya?.ucc}</b>
-              {shoonya?.token_expires_at && (
-                <> · session valid today ({new Date(shoonya.token_expires_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })})</>
-              )}
-            </div>
-          )}
-          {shoonya?.last_error && <div style={{ marginTop: 4, fontSize: 11, color: "var(--danger)" }}>Last error: {shoonya.last_error}</div>}
-
-          {shEditing && (
-            <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--edge)", display: "flex", flexDirection: "column", gap: 8 }}>
-              <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.6 }}>
-                <b style={{ color: "var(--accent)" }}>One-time setup in Shoonya PRISM → API Key:</b>
-                <div>1. Paste the Redirect URL below into the app's <i>Redirect URL</i> field exactly and save.</div>
-                <div>2. Whitelist the static Shoonya proxy server IP in the same screen; Supabase Edge IPs rotate and should not be copied one by one.</div>
-                <div>3. Copy Client ID + Secret Code here, Save, then click Authorize.</div>
-              </div>
-              <div>
-                  <div style={labelStyle}>Redirect URL (register exactly in Shoonya)</div>
-                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <input readOnly value={shoonyaRedirectUrl} onFocus={(e) => e.currentTarget.select()}
-                    style={{ ...inputStyle, width: "100%", fontSize: 11 }} />
-                  <Btn size="sm" onClick={() => { void navigator.clipboard?.writeText(shoonyaRedirectUrl); push("Redirect URL copied", "ok"); }}>Copy</Btn>
-                </div>
-              </div>
-              <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
-                Credentials are encrypted at rest and never sent back.
-                <span style={{ color: "var(--ok)" }}> ✓ saved</span> = blank keeps the existing value.
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <Field label="User ID" value={shUid} setValue={setShUid} placeholder="e.g. FA207868" saved={!!shoonya?.ucc} />
-                <Field label="Client ID" value={shVendor} setValue={setShVendor} placeholder="e.g. FA207868_U" saved={!!shoonya?.vendor_code} />
-                <Field label="Secret Code" value={shSecret} setValue={setShSecret} placeholder="OAuth secret code from Shoonya" type="password" saved={!!shoonya?.api_secret_enc} />
-                <Field label="IMEI / device id" value={shImei} setValue={setShImei} placeholder="any stable string" saved={!!shoonya?.imei} />
-              </div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
-                <Btn onClick={saveShoonya} disabled={busy !== null} variant="primary">
-                  <LockKeyhole size={11} style={{ marginRight: 4 }} />{busy === "sh-save" ? "saving…" : "Save"}
-                </Btn>
-                <Btn onClick={loginShoonya} disabled={busy !== null || shNeedsBasics}
-                  title={shNeedsBasics ? "Save User ID, Client ID and Secret Code first" : undefined}>
-                  {busy === "sh-login" ? "working…" : shCode.trim() ? "Complete connection" : "Authorize with Shoonya"}
-                </Btn>
-                <div style={{ flex: 1, minWidth: 240 }}>
-                  <div style={labelStyle}>Authorization code (only if the redirect didn't come back)</div>
-                  <input value={shCode} onChange={(e) => { setShCode(e.target.value); setShCodeError(null); }}
-                    placeholder="paste code=… or the full redirect URL" style={{ ...inputStyle, width: "100%" }} />
-                  <div style={{ marginTop: 4, fontSize: 11, color: shCodeError ? "var(--danger)" : "var(--text-dim)", lineHeight: 1.4 }}>
-                    {shCodeError ?? "Normally you never touch this — the 6-digit TOTP goes on Shoonya's page, and the code returns here automatically."}
-                  </div>
-                </div>
-              </div>
-              {shAuthUrl && (
-                <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
-                  If the tab did not open, use{" "}
-                  <a href={shAuthUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>this Shoonya login link</a>.
-                  {" "}It expects the Redirect URL shown above to be saved in PRISM.
-                </div>
-              )}
-
-            </div>
-
-          )}
-        </div>
-      )}
     </HudPanel>
   );
 }

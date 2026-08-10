@@ -5,9 +5,8 @@
 // The probe implementations themselves live in _shared/market/selftest.ts so
 // market-selftest (the "test everything" / cron path) writes identical status.
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
-import { getActiveProvider, kotakProvider, shoonyaProvider, yahooProvider } from "../_shared/market/provider.ts";
+import { getActiveProvider, kotakProvider, yahooProvider } from "../_shared/market/provider.ts";
 import { KOTAK_SETTINGS_COLS, type KotakSettings } from "../_shared/market/kotakClient.ts";
-import { SHOONYA_SETTINGS_COLS, type ShoonyaSettings } from "../_shared/market/shoonyaClient.ts";
 import {
   probeService, recordProviderProbe, recordSurfaceProbes, surfaceReport,
   SERVICE_SURFACES, type SurfaceResult,
@@ -51,7 +50,7 @@ Deno.serve(async (req) => {
         await recordSurfaceProbes(svc, surfaces, Date.now() - started, "data");
         return jsonResponse(req, { ok: r.ok, mode: "surfaces", provider: requested, surfaces });
       }
-      const which = requested === "kotak_neo" || requested === "shoonya" || requested === "yahoo" ? requested : "active";
+      const which = requested === "kotak_neo" || requested === "yahoo" ? requested : "active";
       // A data-feed test probes only the shared feed surfaces; an account test
       // probes only the caller's account surfaces. Never both from one row.
       const scope = probePurpose === "account" ? "account" : "data";
@@ -101,26 +100,7 @@ Deno.serve(async (req) => {
       if (!hasAutoLogin && !hasSession) return jsonResponse(req, { ok: false, provider: "kotak_neo", detail: "Login to Kotak first" });
       provider = kotakProvider(svc, kotak);
       settings = kotak;
-    } else if (requested === "shoonya") {
-      // Same reasoning as Kotak: find the Shoonya row whatever the currently
-      // active provider is, so a live Shoonya session never reports
-      // "not configured" just because reads route elsewhere.
-      const { data, error } = await svc.from("market_api_settings")
-        .select(SHOONYA_SETTINGS_COLS + ",purpose")
-        .eq("user_id", auth.userId).eq("active_provider", "shoonya")
-        .eq("purpose", probePurpose);
-      if (error) return errorResponse(req, error.message, 500);
-      const allSh = (data ?? []) as unknown as Array<ShoonyaSettings & { purpose?: string }>;
-      const row = allSh.find((r) => !!r.session_token_enc)
-        ?? allSh.find((r) => !!r.vendor_code && !!r.api_secret_enc)
-        ?? allSh[0];
-      if (!row) return jsonResponse(req, { ok: false, provider: "shoonya", detail: "Shoonya is not configured yet" });
-      if (!row.session_token_enc) {
-        return jsonResponse(req, { ok: false, provider: "shoonya", detail: "Shoonya authorization is required — authorize in Brokers and paste the returned code" });
-      }
-      provider = shoonyaProvider(svc, row);
-      settings = row as unknown as typeof settings;
-    } else if (!["active", "kotak_neo", "shoonya", "yahoo"].includes(requested)) {
+    } else if (!["active", "kotak_neo", "yahoo"].includes(requested)) {
       return jsonResponse(req, { ok: false, provider: requested, detail: "Provider connector is not enabled" });
     }
     const result = await provider.testAuth().catch((e) => ({
@@ -132,7 +112,7 @@ Deno.serve(async (req) => {
         .update({ connection_status: "connected", last_error: null })
         .eq("id", settings.id);
     } else if (settings && !result.ok) {
-      // Previously only Shoonya persisted a failure, so a failed Kotak test
+      // A failed Kotak test must persist, otherwise the config page keeps
       // left the stored status at "connected" and the config page kept
       // claiming a healthy session right after a test that just failed.
       // A session-shaped failure is "expired"; anything else is "error".
@@ -147,7 +127,7 @@ Deno.serve(async (req) => {
     // Yahoo so the UI can distinguish "Kotak down → Yahoo reachable" from
     // "everything down". Kept lightweight; never blocks a Kotak-success path.
     let fallback: { provider: string; ok: boolean; detail: string | null } | null = null;
-    if (!result.ok && (requested === "active" || requested === "kotak_neo" || requested === "shoonya")) {
+    if (!result.ok && (requested === "active" || requested === "kotak_neo")) {
       const yahoo = yahooProvider(svc);
       const yr = await yahoo.testAuth().catch((e) => ({ ok: false, detail: e instanceof Error ? e.message : String(e) }));
       fallback = { provider: yahoo.name, ok: yr.ok, detail: yr.detail ?? null };

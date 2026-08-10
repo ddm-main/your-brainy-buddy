@@ -474,6 +474,49 @@ export async function kotakPositionsEnvelope(s: KotakSettings): Promise<{ rows: 
 }
 
 
+function limitsSignal(j: any): number {
+  // Count non-zero numeric fields. Kotak answers `stCode:200` with an
+  // all-zero payload when the seg/exch/prod combo doesn't match the account's
+  // active segment, so "first non-empty" is not good enough — we must pick the
+  // combo that actually carries balances.
+  if (!j || typeof j !== "object") return 0;
+  let n = 0;
+  const META = new Set(["TimeStamp", "stCode", "BoardLotLimit", "MarginWarningPrcntPrsnt", "MtomWarningPrcntPrsnt", "MtomSquareOffWarningPrcntPrsnt", "AdhocLimitMult", "CollateralValueMult", "RmsCollateralMult", "NationalCashMult"]);
+  for (const [k, v] of Object.entries(j)) {
+    if (META.has(k)) continue;
+    const num = typeof v === "string" ? parseFloat(v) : typeof v === "number" ? v : NaN;
+    if (Number.isFinite(num) && Math.abs(num) > 0) n++;
+  }
+  return n;
+}
+
+export async function kotakLimitsProbe(s: KotakSettings): Promise<Array<{ body: Record<string, string>; payload?: any; error?: string; signal: number }>> {
+  const h = await sessionHeaders(s);
+  const out: Array<{ body: Record<string, string>; payload?: any; error?: string; signal: number }> = [];
+  for (const body of LIMITS_COMBOS) {
+    try {
+      const j = await kotakRouteFetch(s, ["quick/user/limits", "Orders/2.0/quick/user/limits"], {
+        method: "POST",
+        headers: { ...h, "Content-Type": "application/x-www-form-urlencoded" },
+        body: jDataForm(body),
+      });
+      out.push({ body, payload: j, signal: limitsSignal(j) });
+    } catch (e) {
+      out.push({ body, error: e instanceof Error ? e.message : String(e), signal: -1 });
+    }
+  }
+  return out;
+}
+
+const LIMITS_COMBOS: Array<Record<string, string>> = [
+  { seg: "CASH", exch: "NSE", prod: "ALL" },
+  { seg: "ALL", exch: "ALL", prod: "ALL" },
+  { seg: "CASH", exch: "ALL", prod: "ALL" },
+  { seg: "CASH", exch: "NSE", prod: "CNC" },
+  { seg: "CASH", exch: "NSE", prod: "MIS" },
+  { seg: "FO", exch: "NSE", prod: "ALL" },
+];
+
 export async function kotakLimits(s: KotakSettings): Promise<any> {
   requireServerId(s);
   const h = await sessionHeaders(s);
@@ -481,21 +524,21 @@ export async function kotakLimits(s: KotakSettings): Promise<any> {
   // like the order routes. Posting a raw JSON body made the gateway answer
   // "404 page not found" on every combo, which surfaced in the UI as a broken
   // Funds feed even on a perfectly healthy session.
-  const combos: Array<{ seg: string; exch: string; prod: string }> = [
-    { seg: "CASH", exch: "NSE", prod: "ALL" },
-    { seg: "ALL",  exch: "ALL", prod: "ALL" },
-    { seg: "FO",   exch: "NSE", prod: "ALL" },
-  ];
   let lastErr: unknown = null;
-  for (const body of combos) {
+  let best: { payload: any; signal: number } | null = null;
+  for (const body of LIMITS_COMBOS) {
     try {
       const j = await kotakRouteFetch(s, ["quick/user/limits", "Orders/2.0/quick/user/limits"], {
         method: "POST",
         headers: { ...h, "Content-Type": "application/x-www-form-urlencoded" },
         body: jDataForm(body),
       });
-      // Only accept combos that returned a real payload; empty {} → next combo.
-      if (j && typeof j === "object" && Object.keys(j).length > 0) return j;
+      if (!j || typeof j !== "object" || Object.keys(j).length === 0) continue;
+      const signal = limitsSignal(j);
+      // An all-zero payload is a valid "wrong segment" answer — keep it as a
+      // fallback but keep probing for a combo that carries real balances.
+      if (!best || signal > best.signal) best = { payload: j, signal };
+      if (signal > 0) return j;
     } catch (e) {
       lastErr = e;
       const status = (e as any)?.status;
@@ -505,6 +548,7 @@ export async function kotakLimits(s: KotakSettings): Promise<any> {
       // Everything else (429, 5xx, empty-body) → try the next combo.
     }
   }
+  if (best) return best.payload;
   throw lastErr ?? new KotakError("Kotak limits: no payload from any segment combination", 502);
 }
 
@@ -871,6 +915,7 @@ export function parseKotakLimits(j: any): KotakFundsSnapshot {
   const snap: KotakFundsSnapshot = {
     net_cash: pickNum(["Net", "net", "netCash", "NetCash", "NotionalCash"]),
     available_margin: pickNum([
+      "Net", "net",
       "CashAvailable", "cashAvailable", "AvailableMargin", "availableMargin",
       "MarginAvailable", "marginAvailable", "AvlblCash", "avlblCash",
       "AmtUntilizedPrsnt", "AmtUtilizedPrsnt",
@@ -881,11 +926,13 @@ export function parseKotakLimits(j: any): KotakFundsSnapshot {
       "AmountUtilizedPrsnt", "MarginUsedPrsnt",
     ]),
     collateral: pickNum([
-      "Collateral", "collateral", "CollateralAmount", "collateralAmount",
-      "CollateralValue", "collateralValue", "RmsCollateral",
+      // "Margin from shares" in the Neo app = pledged-share margin
+      // (RmsCollateral). CollateralValue is the MTF scrip value and must not
+      // stand in for it — it made the tile disagree with the broker.
+      "RmsCollateral", "Collateral", "collateral", "CollateralAmount", "collateralAmount",
     ]),
     payin_amount: pickNum(["Payin", "payin", "PayIn", "payIn", "PayinAmount", "payinAmount", "RmsPayInAmt"]),
-    cash_balance: pickNum(["Cash", "cash", "CashBalance", "cashBalance", "OpeningBalance", "openingBalance", "NotionalCash"]),
+    cash_balance: pickNum(["Cash", "cash", "CashBalance", "cashBalance", "OpeningBalance", "openingBalance"]),
     payout_amount: pickNum(["Payout", "payout", "PayOut", "payOut", "PayoutAmount", "payoutAmount", "RmsPayOutAmt"]),
     span_margin: pickNum(["SPAN", "span", "SpanMargin", "spanMargin", "SpanMarginPrsnt"]),
     exposure_margin: pickNum(["Exposure", "exposure", "ExposureMargin", "exposureMargin", "ExposureMarginPrsnt"]),
@@ -893,6 +940,11 @@ export function parseKotakLimits(j: any): KotakFundsSnapshot {
     unrealized_mtm: pickNum(["Unrealized", "unrealized", "UnrealisedMtoM", "unrealisedMtoM", "UnrealisedPnL", "unrealisedPnL", "MtoM", "mtoM", "UnrealizedMtomPrsnt"]),
     raw: d,
   };
+  // Neo's app shows "Cash balance" = available + already-blocked margin. The
+  // limits payload has no single field for it, so derive it when missing.
+  if (snap.cash_balance == null && snap.available_margin != null) {
+    snap.cash_balance = snap.available_margin + (snap.used_margin ?? 0) - (snap.collateral ?? 0);
+  }
   // Kotak omits any explicit "available" key for cash-only accounts. Derive it
   // from what it does report instead of reporting null — a real zero balance
   // must read as "₹0 available", not as a broken feed.

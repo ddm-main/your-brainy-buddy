@@ -1,8 +1,5 @@
 project_id = "olwxfgrnbxkpoeofyfcm"
 
-[functions.shoonya-oauth-callback]
-verify_jwt = false
-
 [functions.market-live-sweep]
 verify_jwt = false
 

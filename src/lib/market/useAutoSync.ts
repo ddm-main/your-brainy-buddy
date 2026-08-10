@@ -6,7 +6,7 @@
 // hook only fires when today has no `daily_sync_orchestrator/summary` row in
 // `market_ingestion_runs` — i.e. the daily run hasn't landed yet — so tabbing
 // through the app after 09:00 doesn't re-storm the gateway.
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -57,4 +57,23 @@ export function useMarketAutoSync(): void {
     const iv = setInterval(() => { void run(); }, 30 * 60_000);
     return () => { cancelled = true; clearTimeout(t); clearInterval(iv); };
   }, [qc]);
+}
+
+/** Fire a sync on mount, throttled per tab session.
+ *  Used by Positions / Portfolio so a freshly opened page reflects the broker
+ *  without the user having to hunt for the sync button. Only successful runs
+ *  stamp the throttle key, so a transient failure retries on the next visit. */
+export function useMountSync(enabled: boolean, key: string, minMs: number, run: () => Promise<unknown>): void {
+  const ran = useRef(false);
+  useEffect(() => {
+    if (!enabled || ran.current) return;
+    const last = Number(sessionStorage.getItem(key) || 0);
+    if (Date.now() - last < minMs) return;
+    ran.current = true;
+    run().then(
+      () => sessionStorage.setItem(key, String(Date.now())),
+      () => { ran.current = false; },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, key, minMs]);
 }

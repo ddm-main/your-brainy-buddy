@@ -8,9 +8,9 @@ const read = (path: string) => readFileSync(
 );
 
 describe("Kotak account/data purpose isolation", () => {
-  it("connection tests filter Kotak and Shoonya by the requested purpose", () => {
+  it("connection tests filter Kotak by the requested purpose", () => {
     const src = read("../supabase/functions/market-test-connection/index.ts");
-    expect(src.match(/\.eq\("purpose", probePurpose\)/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(src.match(/\.eq\("purpose", probePurpose\)/g)?.length).toBeGreaterThanOrEqual(1);
     expect(src).not.toContain("fall back to the other");
     expect(src).toContain("surfaceReport(svc, auth.userId, which, probePurpose, scope)");
   });

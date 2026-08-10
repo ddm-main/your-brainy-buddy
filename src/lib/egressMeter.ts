@@ -20,6 +20,10 @@ const WARN_BYTES = 64 * 1024; // one read shipping 64 KB is worth a look
 // environment (not just DEV) and tagged in the route label so
 // `system_egress_daily` shows which read broke the budget.
 const OVERSIZE_BYTES = 128 * 1024;
+// Absolute per-response ceiling. Nothing this app renders needs a megabyte in
+// one read; a response this big is an unfiltered query and is labelled so it
+// is impossible to miss in `system_egress_daily`.
+const HARD_CEILING_BYTES = 1024 * 1024;
 const FLUSH_MS = 60_000;
 
 
@@ -154,7 +158,8 @@ export function installEgressMeter() {
       // Over-budget reads are tagged so they are identifiable in
       // `system_egress_daily` without having to correlate byte totals by hand.
       const oversize = bytes >= OVERSIZE_BYTES;
-      const route = oversize ? `${hit.route} !OVER` : hit.route;
+      const overHard = bytes >= HARD_CEILING_BYTES;
+      const route = overHard ? `${hit.route} !1MB` : oversize ? `${hit.route} !OVER` : hit.route;
       bump(pending, `${hit.source}|${route}`, bytes);
       bump(session, route, bytes);
       if (oversize) {

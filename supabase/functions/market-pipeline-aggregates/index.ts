@@ -23,9 +23,9 @@ import { getServiceProvider } from "../_shared/market/provider.ts";
 
 // EGRESS: every column the aggregate pass below actually reads off a score row.
 // `market_stock_scores` has 123 columns (~8.5 KB of JSON a row); this list is
-// ~55 and drops the jsonb blobs the pass never touches (`score_components`,
+// ~76 and drops the jsonb blobs the pass never touches (`score_components`,
 // `data_provenance`, coverage maps), cutting a full pass from ~25 MB to ~2 MB.
-const SCORE_AGG_COLUMNS = [
+const SCORE_AGG_COLUMN_LIST = [
   "symbol", "exchange", "trade_date", "sector", "close", "change_pct", "volume",
   "high_52w", "low_52w", "pct_from_52w_high", "bars_available",
   "ema20", "ema50", "ema100", "ema200", "above_ema200",
@@ -44,7 +44,23 @@ const SCORE_AGG_COLUMNS = [
   "breakout_state", "breakout_state_days", "breakout_freshness_days", "breakout_level_cleared",
   "pattern_flags",
   "weekly_bars", "weekly_close", "weekly_ema20", "weekly_rsi14", "weekly_trend_up", "weekly_higher_lows",
-].join(",");
+];
+
+// EGRESS: PostgREST repeats every column NAME in every row of the JSON body.
+// With 76 long snake_case keys that is ~1.4 KB of key text per row — about half
+// the payload of a pass over the whole universe. Asking for short aliases
+// (`k0:symbol,k1:exchange,...`) and rehydrating them here is byte-identical in
+// meaning and cuts a full pass roughly in half. The alias list is derived from
+// the column list, so the two can never drift.
+const SCORE_AGG_COLUMNS = SCORE_AGG_COLUMN_LIST.map((c, i) => `k${i}:${c}`).join(",");
+
+/** Turn one aliased score row back into a normal `{ column: value }` row. */
+function rehydrateScoreRow(d: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (let i = 0; i < SCORE_AGG_COLUMN_LIST.length; i++) out[SCORE_AGG_COLUMN_LIST[i]] = d[`k${i}`] ?? null;
+  return out;
+}
+
 
 // v2 fix: `atrContracting` and `macdHistRising` used to be read from yesterday's
 // `score_components`, which is circular (score → components → tomorrow's score).
@@ -265,13 +281,16 @@ Deno.serve(async (req) => {
     // wire (~2 MB a run).
     const stockMeta = new Map<string, { sector: string | null; is_active: boolean; market_cap: number | null }>();
     for (let from = 0; ; from += 1000) {
-      const { data, error } = await svc.from("market_stocks")
-        .select("symbol,exchange,sector,is_active,market_cap")
-        .eq("is_active", true)
+      // EGRESS: `market_universe` is the single definition of the tradable
+      // universe (active AND non-penny). Reading `market_stocks` here shipped
+      // 1 011 penny rows — 36% of the response — that every consumer below
+      // discards anyway.
+      const { data, error } = await svc.from("market_universe")
+        .select("symbol,exchange,sector,market_cap")
         .range(from, from + 999);
       if (error) return errorResponse(req, error.message, 500);
       for (const d of data ?? []) {
-        stockMeta.set(`${d.symbol}|${d.exchange}`, { sector: d.sector ?? null, is_active: !!d.is_active, market_cap: d.market_cap != null ? Number(d.market_cap) : null });
+        stockMeta.set(`${d.symbol}|${d.exchange}`, { sector: d.sector ?? null, is_active: true, market_cap: d.market_cap != null ? Number(d.market_cap) : null });
       }
       if (!data || data.length < 1000) break;
     }
@@ -295,18 +314,26 @@ Deno.serve(async (req) => {
     const staleSkipped = staleCount ?? 0;
 
     const rows: any[] = [];
-    for (let from = 0; ; from += 1000) {
+    // EGRESS: a 1 000-row page of this projection is ~3.4 MB on the wire —
+    // the only route in the project that broke the 1 MB-per-response ceiling.
+    // Same total bytes, but no single response over budget, and a failed page
+    // costs a quarter as much to retry.
+    const SCORE_PAGE = 250;
+    for (let from = 0; ; from += SCORE_PAGE) {
       const { data, error } = await svc.from("market_stock_scores")
         .select(SCORE_AGG_COLUMNS)
         .eq("trade_date", latestTradeDate)
-        .range(from, from + 999);
+        .order("symbol", { ascending: true })
+        .range(from, from + SCORE_PAGE - 1);
       if (error) return errorResponse(req, error.message, 500);
-      for (const d of data ?? []) {
+      for (const aliased of data ?? []) {
+        const d = rehydrateScoreRow(aliased as Record<string, unknown>);
         const meta = stockMeta.get(`${d.symbol}|${d.exchange}`);
         if (!meta || !meta.is_active) continue;
         rows.push({ ...d, sector: d.sector ?? meta.sector ?? null, market_cap: meta.market_cap });
       }
-      if (!data || data.length < 1000) break;
+
+      if (!data || data.length < SCORE_PAGE) break;
     }
     if (rows.length === 0) return jsonResponse(req, { ok: true, note: "no rows for the latest trade date", stale_skipped: staleSkipped });
 

@@ -2096,6 +2096,7 @@ export type Database = {
           journal_notes: string | null
           opened_at: string
           pnl: number | null
+          product: string | null
           quantity: number
           side: Database["public"]["Enums"]["market_position_side"]
           stop_loss: number | null
@@ -2117,6 +2118,7 @@ export type Database = {
           journal_notes?: string | null
           opened_at?: string
           pnl?: number | null
+          product?: string | null
           quantity: number
           side?: Database["public"]["Enums"]["market_position_side"]
           stop_loss?: number | null
@@ -2138,6 +2140,7 @@ export type Database = {
           journal_notes?: string | null
           opened_at?: string
           pnl?: number | null
+          product?: string | null
           quantity?: number
           side?: Database["public"]["Enums"]["market_position_side"]
           stop_loss?: number | null
@@ -3648,7 +3651,6 @@ export type Database = {
           shares_source: string | null
           shares_sync_attempted_at: string | null
           shares_sync_attempts: number
-          shoonya_token: string | null
           sub_sector: string | null
           sub_sector_source: string | null
           symbol: string
@@ -3701,7 +3703,6 @@ export type Database = {
           shares_source?: string | null
           shares_sync_attempted_at?: string | null
           shares_sync_attempts?: number
-          shoonya_token?: string | null
           sub_sector?: string | null
           sub_sector_source?: string | null
           symbol: string
@@ -3754,7 +3755,6 @@ export type Database = {
           shares_source?: string | null
           shares_sync_attempted_at?: string | null
           shares_sync_attempts?: number
-          shoonya_token?: string | null
           sub_sector?: string | null
           sub_sector_source?: string | null
           symbol?: string
@@ -3814,6 +3814,39 @@ export type Database = {
           supported?: boolean
           surface?: string
           updated_at?: string
+        }
+        Relationships: []
+      }
+      market_sweep_snapshot: {
+        Row: {
+          chunk_count: number
+          chunk_size: number
+          created_at: string
+          expires_at: string
+          payload: Json
+          session_date: string
+          sweep_id: string
+          symbol_count: number
+        }
+        Insert: {
+          chunk_count?: number
+          chunk_size?: number
+          created_at?: string
+          expires_at?: string
+          payload?: Json
+          session_date: string
+          sweep_id: string
+          symbol_count?: number
+        }
+        Update: {
+          chunk_count?: number
+          chunk_size?: number
+          created_at?: string
+          expires_at?: string
+          payload?: Json
+          session_date?: string
+          sweep_id?: string
+          symbol_count?: number
         }
         Relationships: []
       }
@@ -4667,6 +4700,165 @@ export type Database = {
         }
         Relationships: []
       }
+      market_universe: {
+        Row: {
+          company_name: string | null
+          created_at: string | null
+          exchange: string | null
+          face_value: number | null
+          fno_enabled: boolean | null
+          free_float_cr: number | null
+          history_backfill_attempted_at: string | null
+          history_backfill_attempts: number | null
+          history_backfill_error: string | null
+          id: string | null
+          in_universe: boolean | null
+          industry: string | null
+          instrument_type: string | null
+          is_active: boolean | null
+          is_nifty500: boolean | null
+          isin: string | null
+          kotak_segment: string | null
+          last_fundamentals_sync_at: string | null
+          last_price_sync_at: string | null
+          lot_size: number | null
+          market_cap: number | null
+          market_cap_as_of: string | null
+          market_cap_calc_at: string | null
+          market_cap_source: string | null
+          next_earnings_at: string | null
+          pe_ttm: number | null
+          penny_checked_at: string | null
+          penny_excluded: boolean | null
+          penny_reason: string | null
+          price_data_missing_at: string | null
+          price_sync_attempts: number | null
+          price_sync_attempts_day: string | null
+          roe: number | null
+          sector: string | null
+          series: string | null
+          shares_as_of: string | null
+          shares_source: string | null
+          shares_sync_attempted_at: string | null
+          shares_sync_attempts: number | null
+          sub_sector: string | null
+          sub_sector_source: string | null
+          symbol: string | null
+          tick_size: number | null
+          tickertape_sid: string | null
+          tickertape_sid_as_of: string | null
+          token: string | null
+          token_missing_at: string | null
+          total_shares_cr: number | null
+          updated_at: string | null
+          yahoo_symbol: string | null
+        }
+        Insert: {
+          company_name?: string | null
+          created_at?: string | null
+          exchange?: string | null
+          face_value?: number | null
+          fno_enabled?: boolean | null
+          free_float_cr?: number | null
+          history_backfill_attempted_at?: string | null
+          history_backfill_attempts?: number | null
+          history_backfill_error?: string | null
+          id?: string | null
+          in_universe?: boolean | null
+          industry?: string | null
+          instrument_type?: string | null
+          is_active?: boolean | null
+          is_nifty500?: boolean | null
+          isin?: string | null
+          kotak_segment?: string | null
+          last_fundamentals_sync_at?: string | null
+          last_price_sync_at?: string | null
+          lot_size?: number | null
+          market_cap?: number | null
+          market_cap_as_of?: string | null
+          market_cap_calc_at?: string | null
+          market_cap_source?: string | null
+          next_earnings_at?: string | null
+          pe_ttm?: number | null
+          penny_checked_at?: string | null
+          penny_excluded?: boolean | null
+          penny_reason?: string | null
+          price_data_missing_at?: string | null
+          price_sync_attempts?: number | null
+          price_sync_attempts_day?: string | null
+          roe?: number | null
+          sector?: string | null
+          series?: string | null
+          shares_as_of?: string | null
+          shares_source?: string | null
+          shares_sync_attempted_at?: string | null
+          shares_sync_attempts?: number | null
+          sub_sector?: string | null
+          sub_sector_source?: string | null
+          symbol?: string | null
+          tick_size?: number | null
+          tickertape_sid?: string | null
+          tickertape_sid_as_of?: string | null
+          token?: string | null
+          token_missing_at?: string | null
+          total_shares_cr?: number | null
+          updated_at?: string | null
+          yahoo_symbol?: string | null
+        }
+        Update: {
+          company_name?: string | null
+          created_at?: string | null
+          exchange?: string | null
+          face_value?: number | null
+          fno_enabled?: boolean | null
+          free_float_cr?: number | null
+          history_backfill_attempted_at?: string | null
+          history_backfill_attempts?: number | null
+          history_backfill_error?: string | null
+          id?: string | null
+          in_universe?: boolean | null
+          industry?: string | null
+          instrument_type?: string | null
+          is_active?: boolean | null
+          is_nifty500?: boolean | null
+          isin?: string | null
+          kotak_segment?: string | null
+          last_fundamentals_sync_at?: string | null
+          last_price_sync_at?: string | null
+          lot_size?: number | null
+          market_cap?: number | null
+          market_cap_as_of?: string | null
+          market_cap_calc_at?: string | null
+          market_cap_source?: string | null
+          next_earnings_at?: string | null
+          pe_ttm?: number | null
+          penny_checked_at?: string | null
+          penny_excluded?: boolean | null
+          penny_reason?: string | null
+          price_data_missing_at?: string | null
+          price_sync_attempts?: number | null
+          price_sync_attempts_day?: string | null
+          roe?: number | null
+          sector?: string | null
+          series?: string | null
+          shares_as_of?: string | null
+          shares_source?: string | null
+          shares_sync_attempted_at?: string | null
+          shares_sync_attempts?: number | null
+          sub_sector?: string | null
+          sub_sector_source?: string | null
+          symbol?: string | null
+          tick_size?: number | null
+          tickertape_sid?: string | null
+          tickertape_sid_as_of?: string | null
+          token?: string | null
+          token_missing_at?: string | null
+          total_shares_cr?: number | null
+          updated_at?: string | null
+          yahoo_symbol?: string | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
       apply_egress_governor: { Args: never; Returns: Json }
@@ -4796,6 +4988,17 @@ export type Database = {
           ok_count: number
           ok_rate: number
           p50: number
+          provider: string
+        }[]
+      }
+      market_provider_surface_stats_24h: {
+        Args: never
+        Returns: {
+          attempts: number
+          endpoint: string
+          last_at: string
+          ok_rate: number
+          p50_ms: number
           provider: string
         }[]
       }

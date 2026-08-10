@@ -2,6 +2,7 @@
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient, corsFor } from "../_shared/market/common.ts";
 import { getReadProvider } from "../_shared/market/provider.ts";
 import { createMarketLimiter } from "../_shared/market/rateLimit.ts";
+import { LATENCY_BUDGET_MS, withLatencyBudget } from "../_shared/market/feedRoute.ts";
 
 const limiter = createMarketLimiter(180, 60_000);
 
@@ -16,8 +17,12 @@ Deno.serve(async (req) => {
     const exchange = String(b?.exchange ?? "NSE").toUpperCase();
     if (!symbol) return errorResponse(req, "symbol required");
     const svc = svcClient();
-    const { provider } = await getReadProvider(svc, auth.userId);
-    const ladder = await provider.getDepth(symbol, exchange);
+    const { provider } = await getReadProvider(svc, auth.userId, "depth");
+    // Depth is a hot, latency-critical panel: a hanging broker socket must
+    // surface as an error the client can retry, not an open request.
+    const ladder = await withLatencyBudget(
+      provider.getDepth(symbol, exchange), LATENCY_BUDGET_MS.depth, `${provider.name} depth`,
+    );
     return jsonResponse(req, ladder);
   } catch (e) {
     return errorResponse(req, e instanceof Error ? e.message : String(e), 502);

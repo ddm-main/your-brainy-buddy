@@ -9,6 +9,8 @@ import { DataTable, fmtNum, PctCell } from "@/components/hud/DataTable";
 import { SymbolSearchInput } from "@/components/market/SymbolSearchInput";
 import { supabase } from "@/integrations/supabase/client";
 import { useMarketSettings, usePortfolioLastSync, usePositions, useQuotes, useSyncPositions, useTodayRealized } from "@/lib/market/hooks";
+import { syncGapMessage } from "@/lib/market/hooks";
+import { useMountSync } from "@/lib/market/useAutoSync";
 import { useMarketOrderMutations } from "@/lib/market/orderHooks";
 import { useQueryClient } from "@tanstack/react-query";
 import { useUi } from "@/store/uiStore";
@@ -62,6 +64,11 @@ export default function Positions() {
   }, [quotesData, liveTicks]);
 
   const connected = settings.some((s) => s.active_provider === "kotak_neo" && s.connection_status === "connected");
+
+  // Opening the page pulls the broker's current book (throttled per tab), so
+  // positions opened in the broker app show up without a manual sync click.
+  useMountSync(connected, "market:positions:auto-sync:last", 2 * 60 * 1000, () => syncMut.mutateAsync());
+  const syncGap = syncGapMessage("Positions", syncMut.data);
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["market", "positions"] });
 
@@ -139,8 +146,10 @@ export default function Positions() {
     // to the total — matching pnl.ts semantics.
     let unrealized = 0, unresolved = 0;
     const dayPnls: Array<number | null> = [];
+    let tradedValue = 0;
     for (const p of open) {
       const calc = positionPnl({ quantity: p.quantity, entryPrice: p.entry_price, side: p.side, quote: quoteMap.get(quoteKey(p.exchange, p.symbol)) });
+      tradedValue += calc.tradedValue;
       if (calc.unrealized == null) { unresolved++; continue; }
       unrealized += calc.unrealized;
       dayPnls.push(calc.todayPnl);
@@ -152,7 +161,7 @@ export default function Positions() {
     // available (unresolved + no closes), stay null instead of showing "0".
     const day = dayOpen == null && realizedDay === 0 ? null : (dayOpen ?? 0) + realizedDay;
     const realized = closed.reduce((a, p) => a + (p.pnl ?? 0), 0);
-    return { unrealized: allUnresolved ? null : unrealized, day, realized, unresolved, realizedDay };
+    return { unrealized: allUnresolved ? null : unrealized, day, realized, unresolved, realizedDay, tradedValue };
   }, [open, closed, quoteMap, realizedToday]);
 
   const columns = useMemo<ColumnDef<Position, any>[]>(() => [
@@ -270,9 +279,13 @@ export default function Positions() {
             {toSafeError(syncMut.error, "").message.toLowerCase().includes("session") && <Link to="/market/settings" style={{ color: "var(--accent)" }}>Reconnect →</Link>}
           </div>
         )}
+        {syncGap && (
+          <div className="hud-label" style={{ color: "var(--danger)", marginBottom: 8 }}>{syncGap}</div>
+        )}
         {lastSyncAt && <div className="hud-label" style={{ color: "var(--text-dim)", marginBottom: 8 }}>Last synced {new Date(lastSyncAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 8 }}>
           <Stat label="Open Positions" value={String(open.length)} />
+          <Stat label="Net traded value" value={inr(totals.tradedValue)} />
           <Stat label="Unrealized P&L" value={totals.unrealized == null ? "—" : inr(totals.unrealized)} tone={totals.unrealized == null ? undefined : totals.unrealized >= 0 ? "ok" : "err"} />
           <Stat label="Today" value={totals.day == null ? "—" : inr(totals.day)} tone={totals.day == null ? undefined : totals.day >= 0 ? "ok" : "err"} />
           <Stat label="Today realized" value={inr(totals.realizedDay)} tone={totals.realizedDay === 0 ? undefined : totals.realizedDay >= 0 ? "ok" : "err"} />
