@@ -43,6 +43,13 @@ const staticMeta = new Map<string, StaticMeta>();
 const STATIC_META_TTL_MS = 12 * 3_600_000;
 let staticMetaExpiresAt = 0;
 
+// The sorted universe symbol list, cached per isolate so the keyset page is a
+// memory slice rather than a PostgREST read on every sweep chunk.
+let universe: string[] = [];
+const UNIVERSE_TTL_MS = 3_600_000;
+let universeExpiresAt = 0;
+
+
 // deno-lint-ignore no-explicit-any
 declare const EdgeRuntime: any;
 
