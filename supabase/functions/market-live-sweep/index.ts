@@ -109,25 +109,41 @@ Deno.serve(async (req) => {
 
     // Keyset batch over the active NSE universe — the exact same universe the
     // screener screens, so the plane can never be a subset of it.
-    // EGRESS: only the keyset page of symbols is read every sweep. The static
-    // reference columns (yahoo_symbol/series/total_shares_cr) change on the
-    // weekly scrip sync at most, so they are cached per isolate and fetched
-    // only for symbols not seen yet. This route was 2,160 reads/day at 5.6 KB.
-    let q = svc.from("market_stocks")
-      .select("symbol")
-      .eq("is_active", true)
-      .eq("exchange", "NSE")
-      .eq("instrument_type", "EQ")
-      // Penny names are purged from every price table by a DB trigger; fetching
-      // them here would only burn quota on ticks that can never be stored.
-      .not("penny_excluded", "is", true)
-      .order("symbol", { ascending: true })
-      .limit(limit);
-    if (cursor) q = q.gt("symbol", cursor);
-    const { data: page, error } = await q;
-    if (error) return errorResponse(req, error.message, 500);
+    // EGRESS: the universe symbol list itself is now cached per isolate for an
+    // hour, so a warm isolate pages through it in memory instead of re-reading
+    // ~5 KB of symbols on every chunk of every sweep. Static reference columns
+    // (yahoo_symbol/series/total_shares_cr) change on the weekly scrip sync at
+    // most and are cached for the day. This route was 2,160 reads/day at 5.6 KB.
+    if (universeExpiresAt <= Date.now() || universe.length === 0) {
+      const all: string[] = [];
+      let after: string | null = null;
+      for (;;) {
+        let uq = svc.from("market_stocks")
+          .select("symbol")
+          .eq("is_active", true)
+          .eq("exchange", "NSE")
+          .eq("instrument_type", "EQ")
+          // Penny names are purged from every price table by a DB trigger;
+          // fetching them here would only burn quota on ticks that can never
+          // be stored.
+          .not("penny_excluded", "is", true)
+          .order("symbol", { ascending: true })
+          .limit(1000);
+        if (after) uq = uq.gt("symbol", after);
+        const { data: chunk, error: uerr } = await uq;
+        if (uerr) return errorResponse(req, uerr.message, 500);
+        const syms = (chunk ?? []).map((r) => String(r.symbol));
+        all.push(...syms);
+        if (syms.length < 1000) break;
+        after = syms[syms.length - 1];
+      }
+      universe = all;
+      universeExpiresAt = Date.now() + UNIVERSE_TTL_MS;
+    }
 
-    const pageSymbols = (page ?? []).map((r) => String(r.symbol));
+    const startIdx = cursor ? universe.findIndex((s) => s > cursor) : 0;
+    const pageSymbols = startIdx < 0 ? [] : universe.slice(startIdx, startIdx + limit);
+
     if (staticMetaExpiresAt <= Date.now()) {
       staticMeta.clear();
       staticMetaExpiresAt = Date.now() + STATIC_META_TTL_MS;
