@@ -5,9 +5,19 @@
 // Without it, only the market functions (via _shared/market/common.ts) were
 // metered, so cron/finance/gmail PostgREST traffic never showed up in the quota
 // panel — which is how a 5.98 GB cycle looked like 244 MB.
-import { installServerEgressMeter } from "./market/serverEgress.ts";
+import { installServerEgressMeter, setEgressCaller } from "./market/serverEgress.ts";
 
 installServerEgressMeter();
+
+/** "…/functions/v1/market-live-sweep" -> "market-live-sweep" */
+function functionNameOf(req: Request): string {
+  try {
+    const parts = new URL(req.url).pathname.split("/").filter(Boolean);
+    const i = parts.indexOf("v1");
+    return i >= 0 ? (parts[i + 1] ?? "") : (parts[parts.length - 1] ?? "");
+  } catch { return ""; }
+}
+
 
 const ALLOWED_ORIGINS = new Set<string>([
   "http://localhost:8080",
@@ -46,6 +56,10 @@ export function corsFor(req: Request): Record<string, string> {
 }
 
 export function preflight(req: Request): Response | null {
+  // Every function calls this first, so it is the one hook that can tag the
+  // egress meter with the caller's name.
+  setEgressCaller(functionNameOf(req));
   if (req.method !== "OPTIONS") return null;
   return new Response(null, { headers: corsFor(req) });
 }
+

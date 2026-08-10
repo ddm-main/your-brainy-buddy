@@ -173,6 +173,23 @@ Deno.serve(async (req) => {
 
     let yahooHits = 0, nseHits = 0, fmpHits = 0, failed = 0;
     const failedSymbols: string[] = [];
+
+    // EGRESS: the last close used to be read one row at a time inside the loop
+    // (one PostgREST round-trip per symbol). One batched RPC covers the chunk.
+    const closes = new Map<string, number>();
+    {
+      const tomorrow = new Date(Date.now() + 86400_000).toISOString().slice(0, 10);
+      for (const batch of chunked(work.map((w) => w.symbol), 200)) {
+        const { data } = await supabase.rpc("market_live_settled_anchors_lean", {
+          _symbols: batch, _before: tomorrow,
+        });
+        for (const r of (data ?? []) as Array<{ symbol: string; prev_close: number | string }>) {
+          const v = Number(r.prev_close);
+          if (Number.isFinite(v) && v > 0) closes.set(String(r.symbol), v);
+        }
+      }
+    }
+
     const started = Date.now();
     const asOf = new Date().toISOString().slice(0, 10);
     const nowIso = new Date().toISOString();
@@ -226,12 +243,9 @@ Deno.serve(async (req) => {
 
         // Snapshot onto market_stocks so Screener MCap renders instantly.
         const totalCr = totalShares / 1e7;
-        const { data: last } = await supabase
-          .from("market_daily_prices")
-          .select("close").eq("symbol", s.symbol).eq("exchange", "NSE")
-          .order("trade_date", { ascending: false }).limit(1).maybeSingle();
-        const close = last?.close != null ? Number(last.close) : null;
+        const close = closes.get(s.symbol) ?? null;
         const mcap = close != null && Number.isFinite(close) ? close * totalCr : null;
+
         await supabase.from("market_stocks").update({
           total_shares_cr: totalCr,
           shares_source: source,

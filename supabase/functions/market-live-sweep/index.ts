@@ -35,8 +35,17 @@ const MAX_SESSION_MOVE_PCT = 21;
 // SME/Emerge board. Quoted for completeness, excluded from mainboard screens.
 const SME_SERIES = new Set(["SM", "ST"]);
 
+// Static reference data per symbol, cached for the trading day inside a warm
+// isolate. Re-reading it on every sweep chunk was the single largest PostgREST
+// route (12.4 MB in half a day).
+type StaticMeta = { yahoo_symbol: string | null; series: string; total_shares_cr: number | null };
+const staticMeta = new Map<string, StaticMeta>();
+const STATIC_META_TTL_MS = 12 * 3_600_000;
+let staticMetaExpiresAt = 0;
+
 // deno-lint-ignore no-explicit-any
 declare const EdgeRuntime: any;
+
 
 interface Body {
   cursor?: string | null;
@@ -100,8 +109,12 @@ Deno.serve(async (req) => {
 
     // Keyset batch over the active NSE universe — the exact same universe the
     // screener screens, so the plane can never be a subset of it.
+    // EGRESS: only the keyset page of symbols is read every sweep. The static
+    // reference columns (yahoo_symbol/series/total_shares_cr) change on the
+    // weekly scrip sync at most, so they are cached per isolate and fetched
+    // only for symbols not seen yet. This route was 2,160 reads/day at 5.6 KB.
     let q = svc.from("market_stocks")
-      .select("symbol,exchange,yahoo_symbol,series,total_shares_cr")
+      .select("symbol")
       .eq("is_active", true)
       .eq("exchange", "NSE")
       .eq("instrument_type", "EQ")
@@ -111,8 +124,42 @@ Deno.serve(async (req) => {
       .order("symbol", { ascending: true })
       .limit(limit);
     if (cursor) q = q.gt("symbol", cursor);
-    const { data: stocks, error } = await q;
+    const { data: page, error } = await q;
     if (error) return errorResponse(req, error.message, 500);
+
+    const pageSymbols = (page ?? []).map((r) => String(r.symbol));
+    if (staticMetaExpiresAt <= Date.now()) {
+      staticMeta.clear();
+      staticMetaExpiresAt = Date.now() + STATIC_META_TTL_MS;
+    }
+    const missingMeta = pageSymbols.filter((s) => !staticMeta.has(s));
+    for (let i = 0; i < missingMeta.length; i += 200) {
+      const { data: metaRows, error: metaErr } = await svc.from("market_stocks")
+        .select("symbol,yahoo_symbol,series,total_shares_cr")
+        .eq("exchange", "NSE")
+        .in("symbol", missingMeta.slice(i, i + 200));
+      if (metaErr) return errorResponse(req, metaErr.message, 500);
+      for (const r of metaRows ?? []) {
+        staticMeta.set(String(r.symbol), {
+          yahoo_symbol: (r.yahoo_symbol as string | null) ?? null,
+          series: String(r.series ?? "EQ"),
+          total_shares_cr: r.total_shares_cr != null ? Number(r.total_shares_cr) : null,
+        });
+      }
+    }
+
+
+    const stocks = pageSymbols.map((symbol) => {
+      const m = staticMeta.get(symbol);
+      return {
+        symbol,
+        exchange: "NSE",
+        yahoo_symbol: m?.yahoo_symbol ?? null,
+        series: m?.series ?? "EQ",
+        total_shares_cr: m?.total_shares_cr ?? null,
+      };
+    });
+
 
     const list = stocks ?? [];
     if (list.length === 0) {

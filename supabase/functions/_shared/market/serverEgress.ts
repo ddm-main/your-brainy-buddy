@@ -26,18 +26,47 @@ let originalFetch: typeof fetch | null = null;
 let flushTimer: number | undefined;
 let flushing = false;
 
+// Which edge function is currently serving a request. Without this the route
+// label was just the table name, so a table read by ~20 functions could not be
+// attributed to the one that regressed (srv:market_stocks went from 0.5 KB to
+// 5.6 KB per read with no way to name the caller).
+let caller = "";
+
+/** Called from preflight() for every incoming request. */
+export function setEgressCaller(name: string): void {
+  caller = name.slice(0, 40);
+}
+
+/** Number of columns in a PostgREST `select=` list (top level only). */
+function columnCount(select: string | null): number {
+  if (!select || select === "*") return 0;
+  let depth = 0, n = 1;
+  for (const ch of select) {
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    else if (ch === "," && depth === 0) n++;
+  }
+  return n;
+}
+
 function classify(url: string): { source: string; route: string } | null {
   let u: URL;
   try { u = new URL(url); } catch { return null; }
   if (!u.hostname.endsWith(".supabase.co") && !u.hostname.endsWith(".supabase.in")) return null;
   const p = u.pathname;
   const tail = p.split("/").filter(Boolean).slice(2).join("/") || p;
-  if (p.includes("/rest/v1/")) return { source: "postgrest", route: `srv:${tail}` };
-  if (p.includes("/functions/v1/")) return { source: "functions", route: `srv:${tail}` };
-  if (p.includes("/storage/v1/")) return { source: "storage", route: `srv:${tail.split("/").slice(0, 3).join("/")}` };
-  if (p.includes("/auth/v1/")) return { source: "auth", route: `srv:${tail}` };
+  const who = caller ? `${caller} ` : "";
+  if (p.includes("/rest/v1/")) {
+    const cols = columnCount(u.searchParams.get("select"));
+    const shape = cols ? ` (${cols}c)` : "";
+    return { source: "postgrest", route: `srv:${who}${tail}${shape}` };
+  }
+  if (p.includes("/functions/v1/")) return { source: "functions", route: `srv:${who}${tail}` };
+  if (p.includes("/storage/v1/")) return { source: "storage", route: `srv:${who}${tail.split("/").slice(0, 3).join("/")}` };
+  if (p.includes("/auth/v1/")) return { source: "auth", route: `srv:${who}${tail}` };
   return null;
 }
+
 
 function bump(key: string, bytes: number) {
   if (bytes >= OVERSIZE_BYTES) {
