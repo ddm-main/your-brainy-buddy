@@ -85,3 +85,23 @@ export function evaluateGroups(row: Record<string, unknown>, groups: ScreenerGro
     })
   );
 }
+
+// EGRESS: AutoTrade used to read the score row with `select("*")` — 123
+// columns, ~4.5 KB a row, 8 000 reads a day (8.6 MB) to evaluate a handful of
+// user-chosen fields. The conditions themselves say exactly which columns are
+// needed, so build the projection from them. `trade_date` is always included:
+// evaluateGroups refuses a row whose session is stale, and the caller logs it.
+const CONDITION_BASE_COLUMNS = ["symbol", "exchange", "trade_date"];
+
+export function columnsForGroups(...groupSets: Array<ScreenerGroup[] | null | undefined>): string {
+  const cols = new Set(CONDITION_BASE_COLUMNS);
+  for (const groups of groupSets) {
+    for (const g of groups ?? []) {
+      for (const c of g.conditions ?? []) {
+        const col = String(c.column ?? "").replace(/[^a-z0-9_]/g, "");
+        if (col) cols.add(col);
+      }
+    }
+  }
+  return Array.from(cols).join(",");
+}

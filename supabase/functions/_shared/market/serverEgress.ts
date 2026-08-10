@@ -51,7 +51,7 @@ function columnCount(select: string | null): number {
   return n;
 }
 
-function classify(url: string): { source: string; route: string } | null {
+function classify(url: string, method: string): { source: string; route: string } | null {
   let u: URL;
   try { u = new URL(url); } catch { return null; }
   if (!u.hostname.endsWith(".supabase.co") && !u.hostname.endsWith(".supabase.in")) return null;
@@ -59,8 +59,16 @@ function classify(url: string): { source: string; route: string } | null {
   const tail = p.split("/").filter(Boolean).slice(2).join("/") || p;
   const who = caller ? `${caller} ` : "";
   if (p.includes("/rest/v1/")) {
-    const cols = columnCount(u.searchParams.get("select"));
-    const shape = cols ? ` (${cols}c)` : "";
+    // Shape tag: column count for a projected read, `*` for an unprojected
+    // one, and the verb for a write. Without the verb, a `select("*")` read
+    // and a write echoing its row both landed as an untagged route, so 14 000
+    // requests a day (20 MB on market_stocks) could not be attributed.
+    const sel = u.searchParams.get("select");
+    const cols = columnCount(sel);
+    const verb = method.toUpperCase();
+    const shape = verb !== "GET" && verb !== "HEAD"
+      ? ` [${verb}${sel ? "+sel" : ""}]`
+      : cols ? ` (${cols}c)` : " (*)";
     return { source: "postgrest", route: `srv:${who}${tail}${shape}` };
   }
   if (p.includes("/functions/v1/")) return { source: "functions", route: `srv:${who}${tail}` };
@@ -127,12 +135,39 @@ export async function flushServerEgress(): Promise<void> {
   }
 }
 
+/** Patch Deno.serve once so the caller tag never depends on the function
+ *  remembering to call preflight(). Two functions never did, and their reads
+ *  landed in `system_egress_daily` as anonymous `srv:market_stocks` rows —
+ *  20 MB with no way to name the offender. */
+function installCallerTagging(): void {
+  const originalServe = Deno.serve.bind(Deno) as typeof Deno.serve;
+  const patched = ((...args: any[]) => {
+    const wrap = (handler: any) => (req: Request, info: any) => {
+      try {
+        const parts = new URL(req.url).pathname.split("/").filter(Boolean);
+        const i = parts.indexOf("v1");
+        setEgressCaller(i >= 0 ? (parts[i + 1] ?? "") : (parts[parts.length - 1] ?? ""));
+      } catch { /* keep whatever tag we had */ }
+      return handler(req, info);
+    };
+    if (typeof args[0] === "function") return originalServe(wrap(args[0]) as any);
+    if (args.length > 1 && typeof args[1] === "function") return originalServe(args[0], wrap(args[1]) as any);
+    if (args[0] && typeof args[0].handler === "function") {
+      return originalServe({ ...args[0], handler: wrap(args[0].handler) } as any);
+    }
+    return (originalServe as any)(...args);
+  }) as typeof Deno.serve;
+  Deno.serve = patched;
+}
+
 /** Patch fetch once per isolate so every Supabase read is counted. */
 export function installServerEgressMeter(): void {
   if (installed) return;
   installed = true;
+  installCallerTagging();
   originalFetch = globalThis.fetch.bind(globalThis);
   const original = originalFetch;
+
 
   globalThis.fetch = async (input: Request | URL | string, init?: RequestInit) => {
     const res = await original(input as any, init);
@@ -140,7 +175,8 @@ export function installServerEgressMeter(): void {
       const href = typeof input === "string" ? input
         : input instanceof URL ? input.toString()
         : (input as Request).url;
-      const hit = classify(href);
+      const method = (init?.method ?? (typeof input === "object" && "method" in (input as Request) ? (input as Request).method : "GET")) || "GET";
+      const hit = classify(href, method);
       // Never meter the meter.
       if (!hit || hit.route.includes("rpc/record_egress")) return res;
 

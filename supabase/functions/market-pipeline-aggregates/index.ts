@@ -4,7 +4,7 @@
 import { preflight, jsonResponse, errorResponse, requireUserId, svcClient } from "../_shared/market/common.ts";
 import { istTradeDate, requireCronSecret } from "../_shared/market/cron.ts";
 import {
-  classifyRegime, breakoutScore, preBreakoutScore,
+  classifyRegime, breadthScore, breakoutScore, preBreakoutScore,
   evaluateLiquidity, swingScore, intradayScore,
   BREAKOUT_QUALIFY_SCORE, SCORE_TREND_CAP,
   breakoutFollowThroughScore, nextEpisodeStatus, scoreDistribution,
@@ -42,8 +42,21 @@ const SCORE_AGG_COLUMN_LIST = [
   "base_depth_pct", "base_duration_days", "base_tightness", "higher_lows", "near_resistance",
   "resistance_level", "resistance_above", "resistance_fallback", "support_level", "support_fallback",
   "breakout_state", "breakout_state_days", "breakout_freshness_days", "breakout_level_cleared",
-  "pattern_flags",
   "weekly_bars", "weekly_close", "weekly_ema20", "weekly_rsi14", "weekly_trend_up", "weekly_higher_lows",
+];
+
+// EGRESS: `pattern_flags` is a ~70-key jsonb blob (~2.5 KB a row, half the
+// response) but this pass only reads 27 of those keys. PostgREST can project
+// individual jsonb keys, so ask for exactly those as short aliases and rebuild
+// the object here — ~250 B a row instead of 2.5 KB.
+const PATTERN_KEYS = [
+  "bullish_engulfing", "bearish_engulfing", "hammer", "shooting_star", "doji",
+  "cup_and_handle", "cup_and_handle_triggered", "flag", "ascending_triangle",
+  "double_bottom", "inverse_head_shoulders", "falling_wedge",
+  "double_top", "head_shoulders", "rising_wedge", "descending_triangle",
+  "w_cup_and_handle", "w_cup_and_handle_triggered", "w_flag", "w_ascending_triangle",
+  "w_double_bottom", "w_inverse_head_shoulders", "w_falling_wedge",
+  "w_double_top", "w_head_shoulders", "w_rising_wedge", "w_descending_triangle",
 ];
 
 // EGRESS: PostgREST repeats every column NAME in every row of the JSON body.
@@ -52,14 +65,33 @@ const SCORE_AGG_COLUMN_LIST = [
 // (`k0:symbol,k1:exchange,...`) and rehydrating them here is byte-identical in
 // meaning and cuts a full pass roughly in half. The alias list is derived from
 // the column list, so the two can never drift.
-const SCORE_AGG_COLUMNS = SCORE_AGG_COLUMN_LIST.map((c, i) => `k${i}:${c}`).join(",");
+const SCORE_AGG_COLUMNS = [
+  ...SCORE_AGG_COLUMN_LIST.map((c, i) => `k${i}:${c}`),
+  ...PATTERN_KEYS.map((k, i) => `p${i}:pattern_flags->>${k}`),
+].join(",");
+
+/** `->>` returns text, so "false" would be truthy if read naively. */
+function jsonBool(v: unknown): boolean | null {
+  if (v === true || v === "true") return true;
+  if (v === false || v === "false") return false;
+  return null;
+}
 
 /** Turn one aliased score row back into a normal `{ column: value }` row. */
 function rehydrateScoreRow(d: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (let i = 0; i < SCORE_AGG_COLUMN_LIST.length; i++) out[SCORE_AGG_COLUMN_LIST[i]] = d[`k${i}`] ?? null;
+  // Only keys the row actually carries are set: weeklyPatternsFromRow decides
+  // "this row has weekly structures" by looking for any w_* key.
+  const flags: Record<string, boolean> = {};
+  for (let i = 0; i < PATTERN_KEYS.length; i++) {
+    const b = jsonBool(d[`p${i}`]);
+    if (b !== null) flags[PATTERN_KEYS[i]] = b;
+  }
+  out.pattern_flags = Object.keys(flags).length > 0 ? flags : null;
   return out;
 }
+
 
 
 // v2 fix: `atrContracting` and `macdHistRising` used to be read from yesterday's
@@ -314,11 +346,12 @@ Deno.serve(async (req) => {
     const staleSkipped = staleCount ?? 0;
 
     const rows: any[] = [];
-    // EGRESS: a 1 000-row page of this projection is ~3.4 MB on the wire —
-    // the only route in the project that broke the 1 MB-per-response ceiling.
-    // Same total bytes, but no single response over budget, and a failed page
-    // costs a quarter as much to retry.
-    const SCORE_PAGE = 250;
+    // EGRESS: even after the alias + pattern-key projection a row is ~2.3 KB,
+    // so 250 rows still measured 1.2 MB — over the 1 MB-per-response ceiling.
+    // 200 keeps every page well inside budget, and a failed page costs less to
+    // retry. Same total bytes either way.
+    const SCORE_PAGE = 200;
+
     for (let from = 0; ; from += SCORE_PAGE) {
       const { data, error } = await svc.from("market_stock_scores")
         .select(SCORE_AGG_COLUMNS)
@@ -360,6 +393,11 @@ Deno.serve(async (req) => {
     const rsiVals = rows.map((r) => r.rsi14).filter((v: number | null): v is number => v != null);
     const avgRsi = rsiVals.length ? rsiVals.reduce((a: number, b: number) => a + b, 0) / rsiVals.length : null;
     const regime = classifyRegime(pctAboveEma50, avgRsi);
+    // Graded companion to `regime` for the scorer's breadth factor: the
+    // three-state label reads "neutral" on essentially every real session, so
+    // on its own it fed the whole universe an identical 0.5.
+    const breadth01 = breadthScore(pctAboveEma50, avgRsi);
+
 
     // NIFTY context (also used for relative strength).
     // Prefer Kotak Neo daily candles when any user has an active session
@@ -484,10 +522,11 @@ Deno.serve(async (req) => {
     // this pass loaded them; the scorer's coverage map now records whether
     // each was actually available per symbol.
     const fundMap = new Map<string, V4Fundamentals>();
-    for (let from = 0; ; from += 1000) {
+    for (let from = 0; ; from += 500) {
       const { data } = await svc.from("market_fundamentals_global")
         .select("symbol,exchange,revenue_growth_yoy,profit_growth_yoy,roe,debt_to_equity,promoter_holding,pe_ttm")
-        .range(from, from + 999);
+        .range(from, from + 499);
+
       for (const d of data ?? []) {
         fundMap.set(`${d.symbol}|${d.exchange}`, {
           revenueGrowthYoy: d.revenue_growth_yoy != null ? Number(d.revenue_growth_yoy) : null,
@@ -498,7 +537,7 @@ Deno.serve(async (req) => {
           peTtm: d.pe_ttm != null ? Number(d.pe_ttm) : null,
         });
       }
-      if (!data || data.length < 1000) break;
+      if (!data || data.length < 500) break;
     }
 
     // Latest AI verdict per symbol (within a week — an older one is not a view
@@ -637,6 +676,15 @@ Deno.serve(async (req) => {
     let updated = 0;
     let rescoreFailed = 0;
     let rescoreFirstError: string | null = null;
+    // Why a priced row ended the pass without a score. Without this the only
+    // signal was "scored < priced" and the reason had to be dug out of the
+    // table row by row.
+    const refusals: Record<string, number> = {};
+    let scoredRows = 0;
+    // Per-phase outcome. Ranking / calibration / history are additive and must
+    // never fail the run, but a phase that threw used to leave no trace at all,
+    // so a pass that wrote no band cuts still reported ok.
+    const phases: Record<string, { ok: boolean; error: string | null }> = {};
     for (let i = 0; i < rows.length; i += 50) {
       const batch = rows.slice(i, i + 50);
       await Promise.all(batch.map(async (r) => {
@@ -657,7 +705,7 @@ Deno.serve(async (req) => {
         const snap = { ...snapFromRow(r), rsPercentile };
         const key = `${r.symbol}|${r.exchange}`;
         const ctx = {
-          sectorStrength, regime, relStrengthNifty: relStrength,
+          sectorStrength, regime, breadthScore: breadth01, relStrengthNifty: relStrength,
           deliveryPct: r.delivery_pct != null ? Number(r.delivery_pct) : null,
         };
         // Patterns MUST be passed here — omitting them stripped the pattern
@@ -705,6 +753,12 @@ Deno.serve(async (req) => {
             eventInDays: eventMap.get(key) ?? null,
           },
         });
+
+        if (v4.score != null) scoredRows++;
+        else {
+          const why = v4.unavailableReason ?? "unknown";
+          refusals[why] = (refusals[why] ?? 0) + 1;
+        }
 
         const nowIso = new Date().toISOString();
         const { error } = await svc.from("market_stock_scores").update({
@@ -806,7 +860,11 @@ Deno.serve(async (req) => {
           if (!error) ranked++;
         }));
       }
-    } catch { /* ranking is additive — never fail the run */ }
+      phases.ranking = { ok: true, error: null };
+    } catch (e) {
+      // Additive — never fails the run, but no longer invisible.
+      phases.ranking = { ok: false, error: (e instanceof Error ? e.message : String(e)).slice(0, 300) };
+    }
 
     // ---- Stale marking + daily calibration ---------------------------------
     // Any scored row that is not on the latest session is stale by definition:
@@ -822,11 +880,13 @@ Deno.serve(async (req) => {
       staleFlagged = count ?? 0;
     }
 
-    // Persist the day's v4 distribution. The band cut-offs
-    // (strong/moderate/watch_cut) are NOT written here: refresh_score_distribution()
-    // in market-score-evaluate owns those columns and used to overwrite this
-    // pass's values every night with a different definition (p90/p70/p50 vs the
-    // scorer's top 2/10/25%), so two band systems fought over the same row.
+    // Persist the day's v4 distribution *including* the band cut-offs it
+    // actually used. They were previously left to refresh_score_distribution()
+    // in market-score-evaluate — which had not run since 2026-07-31, so every
+    // session since carried NULL cuts and the whole UI silently fell back to
+    // the absolute 70/55/40 while the stored band used percentiles. Both sides
+    // now use the same top-2/10/25% definition, so whichever writes last is
+    // consistent with the other.
     let calibration: Record<string, unknown> | null = null;
     let dayCuts: { strong: number; moderate: number; watch: number } | null = null;
     try {
@@ -835,15 +895,22 @@ Deno.serve(async (req) => {
         const dist = scoreDistribution(v4Scores);
         dayCuts = percentileBandCuts(v4Scores);
         calibration = { ...dist, ...dayCuts };
-        await svc.from("market_score_distribution").upsert({
+        const { error } = await svc.from("market_score_distribution").upsert({
           trade_date: latestTradeDate,
           model: "breakout_v4",
           n: dist.n,
           p50: dist.p50, p70: dist.p70, p90: dist.p90, max: dist.max,
+          strong_cut: dayCuts.strong,
+          moderate_cut: dayCuts.moderate,
+          watch_cut: dayCuts.watch,
           updated_at: new Date().toISOString(),
         }, { onConflict: "trade_date,model" });
+        if (error) throw new Error(error.message);
       }
-    } catch { /* calibration is additive — never fail the run */ }
+      phases.distribution = { ok: true, error: null };
+    } catch (e) {
+      phases.distribution = { ok: false, error: (e instanceof Error ? e.message : String(e)).slice(0, 300) };
+    }
 
     // ---- Score history + forward hit-rate feedback -------------------------
     // Without a record of what was claimed and what happened next, the weights
@@ -942,7 +1009,10 @@ Deno.serve(async (req) => {
         // owns that now via evaluate_score_history_forward() /
         // fit_score_calibration() / refresh_score_distribution().
       }
-    } catch { /* feedback loop is additive — never fail the run */ }
+      phases.score_history = { ok: history.error == null, error: history.error };
+    } catch (e) {
+      phases.score_history = { ok: false, error: (e instanceof Error ? e.message : String(e)).slice(0, 300) };
+    }
 
 
 
@@ -1297,6 +1367,12 @@ Deno.serve(async (req) => {
       sectors: sectorRows.length,
       rescored: updated,
       rescore_failed: rescoreFailed,
+      // Scored vs refused, with the reason breakdown, so a regression like
+      // "285 priced rows carry no score today" is visible the day it happens.
+      v4_scored: scoredRows,
+      v4_refused: Object.values(refusals).reduce((a, b) => a + b, 0),
+      v4_refusals: refusals,
+      phases,
       ranked,
       rescore_error: rescoreFirstError,
       breakout_tracking: tracking,
@@ -1322,8 +1398,11 @@ Deno.serve(async (req) => {
 
     // Same run, on the table the pipeline health strip actually reads. A pass
     // that re-scored nothing is a failure even when it returns 200: that is
-    // exactly the shape the broken deploy had.
-    const rescoreOk = rescoreFailed === 0 && updated > 0;
+    // exactly the shape the broken deploy had. A phase that threw (ranking,
+    // distribution, score history) now also fails the run instead of leaving a
+    // green row behind an empty band-cut column.
+    const failedPhases = Object.entries(phases).filter(([, p]) => !p.ok);
+    const rescoreOk = rescoreFailed === 0 && updated > 0 && failedPhases.length === 0;
     await svc.from("market_ingestion_runs").insert({
       source: "market-pipeline-aggregates",
       stage: "aggregates",
@@ -1333,7 +1412,10 @@ Deno.serve(async (req) => {
       duration_ms: Date.now() - new Date(runStartedAt).getTime(),
       error_message: rescoreOk
         ? null
-        : (rescoreFirstError ?? `re-scored ${updated} rows, ${rescoreFailed} failed`).slice(0, 500),
+        : (rescoreFirstError
+          ?? (failedPhases.length
+            ? failedPhases.map(([k, p]) => `${k}: ${p.error ?? "failed"}`).join(" | ")
+            : `re-scored ${updated} rows, ${rescoreFailed} failed`)).slice(0, 500),
       metadata: payload as unknown as Record<string, unknown>,
       finished_at: new Date().toISOString(),
     }).then(() => {}, () => {});

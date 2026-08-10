@@ -16,8 +16,10 @@ import { useScoreBandStats, useScoreHistory, MIN_BAND_SAMPLE } from "@/lib/marke
 
 import {
   V4_BUCKETS, FUNDAMENTAL_FACTORS, FUNDAMENTAL_MULT_MIN, FUNDAMENTAL_MULT_MAX,
+  SENTIMENT_FACTORS, SENTIMENT_MULT_MIN, SENTIMENT_MULT_MAX,
+
   PENALTY_LABELS, BUCKET_COLORS, buildBucketRows, factorsFor, factorPoints,
-  bucketSentence, verdictOf, bandOf, BUCKET_MIN_COVERAGE,
+  bucketSentence, verdictOf, bandOf, BUCKET_MIN_COVERAGE, TIMEFRAME_NOTE,
 } from "@/lib/market/scoreExplain";
 
 const dim = "var(--text-dim)";
@@ -48,9 +50,17 @@ export default function ScoreExplain() {
   const total = score?.breakout_score_v4 ?? null;
   const earnedSum = rows.reduce((s, r) => s + r.earned, 0);
   const penaltyEntries = Object.entries(penalties ?? {}).filter(([, v]) => Number(v) > 0);
-  const penaltySum = penaltyEntries.reduce((s, [, v]) => s + Number(v || 0), 0);
   const regimeMult = factors?.regime_mult ?? null;
   const fundMult = factors?.fundamental_mult ?? null;
+  const sentMult = factors?.sentiment_mult ?? null;
+  // Penalties are stored in points of a 100-point score; on a thin row the
+  // scorer charges them proportionally to the ceiling it actually used.
+  const penaltyScale = Number(factors?.penalty_scale ?? 1) || 1;
+  const penaltySum = penaltyEntries.reduce(
+    (s, [k, v]) => s + Number(v || 0) * (k === "event_blackout" ? 1 : penaltyScale), 0);
+
+
+
   const dropped = rows.filter((r) => !r.present);
 
   // rank_pct is a percentile: 100 = best in universe. "top 0%" read as a bug.
@@ -82,7 +92,7 @@ export default function ScoreExplain() {
 
 
   return (
-    <div style={{ display: "grid", gap: 8, padding: 10 }}>
+    <div style={{ display: "grid", gap: 6, padding: 8 }}>
       {/* header — identity, score, and every outbound link in one row */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <span className="hud-label" style={{ fontSize: 14, color: "var(--text)" }}>{sym}</span>
@@ -123,6 +133,7 @@ export default function ScoreExplain() {
         </HudPanel>
       ) : (
         <>
+          <Cols>
           {/* ---------- does this band actually work? ---------- */}
           <HudPanel title="Track record of this band">
             {!bandStat ? (
@@ -196,10 +207,9 @@ export default function ScoreExplain() {
               </>
             )}
           </HudPanel>
+          </Cols>
 
-
-
-
+          <Cols>
           {/* ---------- distribution of 100 ---------- */}
           <HudPanel title="Distribution of 100">
             <div style={{ display: "flex", height: 14, background: "var(--edge)", overflow: "hidden" }}>
@@ -221,7 +231,7 @@ export default function ScoreExplain() {
               {rows.map((r) => (
                 <Grid key={r.key}>
                   <span style={{ color: r.present ? dim : muted }}
-                        title={r.present ? undefined : `dropped — only ${Math.round(r.coverage * 100)}% covered, weight redistributed`}>
+                        title={r.present ? undefined : `not scored — only ${Math.round(r.coverage * 100)}% of its sub-factors had data, weight partly redistributed`}>
                     <span style={{ width: 6, height: 6, background: BUCKET_COLORS[r.key], display: "inline-block", marginRight: 5, opacity: r.present ? 1 : 0.3 }} />
                     {r.key}{!r.present && <span style={{ color: "var(--warn)" }}> ·</span>}
                   </span>
@@ -247,34 +257,56 @@ export default function ScoreExplain() {
               </Grid>
             </div>
             <div style={{ fontSize: 9, color: muted, marginTop: 5 }}>
-              Raw weights sum to 100; a dropped bucket's weight is spread over the rest (shown as 22→24.2).
+              Raw weights sum to 100; a bucket that could not be scored has its weight partly spread over the rest (shown as 20→22.4).
             </div>
           </HudPanel>
 
           {/* ---------- buckets, collapsed ---------- */}
           <HudPanel title="Buckets">
+            <div style={{ fontSize: 9, color: muted, marginBottom: 4 }}>{TIMEFRAME_NOTE}</div>
             {V4_BUCKETS.map((spec) => {
               const row = rows.find((r) => r.key === spec.key)!;
               const fr = factorPoints(factorsFor(spec.key, factors), row.earned);
               return <BucketRowView key={spec.key} spec={spec} row={row} fr={fr} />;
             })}
           </HudPanel>
+          </Cols>
 
-          {/* ---------- adjustments & gaps ---------- */}
-          <HudPanel title="Adjustments & gaps">
-            <Sub>Penalties</Sub>
+
+          {/* ---------- penalties and multipliers, separated ---------- */}
+          <Cols>
+          <HudPanel title="Penalties">
+            <div style={{ fontSize: 9, color: muted, marginBottom: 3 }}>
+              Point deductions, subtracted after the multipliers.
+              {penaltyScale < 1 && ` Scaled ×${penaltyScale.toFixed(2)} — this row was scored against a ${Math.round(penaltyScale * 100)}-point ceiling, so a stated penalty costs the same share of what it could actually have earned.`}
+            </div>
             {penaltyEntries.length === 0 ? (
               <div style={{ fontSize: 10, color: muted }}>none applied</div>
             ) : penaltyEntries.map(([k, v]) => {
               const meta = PENALTY_LABELS[k];
+              const charged = k === "event_blackout" ? Number(v) : Number(v) * penaltyScale;
               return (
                 <div key={k} title={meta?.why ?? "charged by the scorer"}
                      style={{ display: "flex", justifyContent: "space-between", fontSize: 10, padding: "1px 0" }}>
                   <span style={{ color: dim }}>{meta?.label ?? k}</span>
-                  <span style={{ color: "var(--danger)", fontVariantNumeric: "tabular-nums" }}>−{Number(v).toFixed(1)}</span>
+                  <span style={{ color: "var(--danger)", fontVariantNumeric: "tabular-nums" }}>−{charged.toFixed(1)}</span>
                 </div>
               );
+
             })}
+            {score.score_coverage != null && (
+              <div style={{ fontSize: 9, color: muted, marginTop: 6 }}>
+                Model coverage {Math.round(Number(score.score_coverage) * 100)}% (below 45% no score is emitted).
+                {dropped.length > 0 && ` Not scored this session: ${dropped.map((r) => r.label).join(", ")}.`}
+              </div>
+            )}
+          </HudPanel>
+
+          <HudPanel title="Multipliers">
+            <Sub>Regime ×{regimeMult ?? 1}</Sub>
+            <div style={{ fontSize: 9, color: muted, marginBottom: 3 }}>
+              The tape the trade sits in: ×1.05 bullish, ×1 neutral, ×0.85 bearish.
+            </div>
 
             <Sub>Fundamentals ×{fundMult ?? 1}</Sub>
             <div style={{ fontSize: 9, color: muted, marginBottom: 3 }}>
@@ -298,25 +330,30 @@ export default function ScoreExplain() {
               })}
             </div>
 
-            <Sub>Missing data</Sub>
-            {dropped.length === 0 ? (
-              <div style={{ fontSize: 10, color: muted }}>every bucket cleared the {Math.round(BUCKET_MIN_COVERAGE * 100)}% coverage floor</div>
-            ) : dropped.map((r) => {
-              const missing = factorsFor(r.key, factors).filter((f) => f.value == null).map((f) => f.spec.label);
-              return (
-                <div key={r.key} title={missing.length ? `missing: ${missing.join(", ")}` : "no sub-factor values recorded"}
-                     style={{ display: "flex", justifyContent: "space-between", fontSize: 10, padding: "1px 0" }}>
-                  <span style={{ color: dim }}>{r.label}</span>
-                  <span style={{ color: "var(--warn)" }}>{Math.round(r.coverage * 100)}% covered · {r.weight} pts redistributed</span>
-                </div>
-              );
-            })}
-            {score.score_coverage != null && (
-              <div style={{ fontSize: 9, color: muted, marginTop: 5 }}>
-                Model coverage {Math.round(Number(score.score_coverage) * 100)}% (below 45% no score is emitted).
-              </div>
-            )}
+            <Sub>Sentiment ×{sentMult ?? 1}</Sub>
+            <div style={{ fontSize: 9, color: muted, marginBottom: 3 }}>
+              Also a multiplier, deliberately narrow (×{SENTIMENT_MULT_MIN}–×{SENTIMENT_MULT_MAX}): news and AI coverage exist for a small minority of names, so having coverage must not be an edge by itself. No news, no AI verdict → ×1.
+            </div>
+            <div style={{ fontSize: 10, fontFamily: "var(--font-hud)" }}>
+              {SENTIMENT_FACTORS.map((s) => {
+                const raw = factors?.[`sentiment.${s.key}`];
+                const val = raw == null ? null : Number(raw);
+                const v = verdictOf(val);
+                return (
+                  <div key={s.key} title={`${s.what} Full credit: ${s.full}`}
+                       style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "1px 0" }}>
+                    <span style={{ color: dim, flex: 1 }}>{s.label}</span>
+                    <span style={{ color: muted }}>{Math.round(s.w * 100)}%</span>
+                    <span style={{ color: toneColor(v.tone), fontVariantNumeric: "tabular-nums", width: 90, textAlign: "right" }}>
+                      {val == null ? "—" : val.toFixed(2)} · {v.word}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           </HudPanel>
+          </Cols>
+
         </>
       )}
 
@@ -344,7 +381,7 @@ function BucketRowView({ spec, row, fr }: {
           <span style={{ display: "block", height: "100%", width: `${Math.min(100, pct)}%`, background: BUCKET_COLORS[spec.key] }} />
         </span>
         <span style={{ fontSize: 10, fontFamily: "var(--font-hud)", color: row.present ? "var(--text)" : muted, fontVariantNumeric: "tabular-nums", width: 96, textAlign: "right" }}>
-          {row.present ? `${row.earned.toFixed(1)} / ${row.ceiling.toFixed(1)}` : "dropped"}
+          {row.present ? `${row.earned.toFixed(1)} / ${row.ceiling.toFixed(1)}` : "not scored"}
         </span>
       </button>
       {open && (
@@ -361,7 +398,7 @@ function BucketRowView({ spec, row, fr }: {
             {fr.map((f) => {
               const v = verdictOf(f.value);
               return (
-                <div key={f.spec.key} title={`${f.spec.what} Full credit: ${f.spec.full}`}>
+                <div key={f.spec.key} title={`${f.spec.tf ? `Timeframe: ${f.spec.tf}. ` : ""}${f.spec.what} Full credit: ${f.spec.full}`}>
                   <FGrid>
                     <span style={{ color: dim, borderBottom: "1px dotted var(--edge)" }}>{f.spec.label}</span>
                     <Num>{Math.round(f.spec.w * 100)}%</Num>
@@ -391,13 +428,15 @@ function HowItWorks() {
       </button>
       {open && (
         <div style={{ padding: "6px 12px 8px", fontSize: 10, color: muted, lineHeight: 1.6 }}>
-          Breakout Intelligence v4 is a coverage-aware 100-point model: seven buckets of 0–1 sub-factors,
+          Breakout Intelligence v4 is a coverage-aware 100-point swing model: five buckets of 0–1 sub-factors,
           raw weights summing to 100. Missing sub-factors renormalise inside their bucket, buckets under{" "}
           {Math.round(BUCKET_MIN_COVERAGE * 100)}% coverage are dropped and their weight partly redistributed
           (capped at 85% coverage, so a thin name is scored against a lower ceiling instead of being scaled up),
           penalties are subtracted in points, then regime and fundamentals multipliers scale the result.
           Under 120 sessions of history or 45% coverage it returns no score at all.
-          Hover any bucket or sub-factor for what it measures and what full credit looks like.
+          Chart patterns no longer contribute: the bucket reported full coverage on every row while paying
+          about a tenth of its weight, so its points went to levels, volume, EMA structure and relative strength.
+          {" "}{TIMEFRAME_NOTE} Hover any bucket or sub-factor for its timeframe, what it measures and what full credit looks like.
         </div>
       )}
     </div>
@@ -407,9 +446,18 @@ function HowItWorks() {
 const GRID = "1.6fr 0.8fr 0.7fr 0.6fr";
 const FGRID = "1.4fr 0.6fr 0.6fr 0.6fr 0.8fr";
 
+/** Two panels per row on wide screens, stacked when narrow. */
+function Cols({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 6, alignItems: "start" }}>
+      {children}
+    </div>
+  );
+}
+
 function Sub({ children }: { children: React.ReactNode }) {
   return (
-    <div className="hud-label" style={{ fontSize: 9, letterSpacing: "0.14em", color: "var(--accent-soft)", margin: "8px 0 3px" }}>
+    <div className="hud-label" style={{ fontSize: 9, letterSpacing: "0.14em", color: "var(--accent-soft)", margin: "6px 0 2px" }}>
       {children}
     </div>
   );
@@ -418,7 +466,7 @@ function Sub({ children }: { children: React.ReactNode }) {
 function Grid({ children, head, foot }: { children: React.ReactNode; head?: boolean; foot?: boolean }) {
   return (
     <div style={{
-      display: "grid", gridTemplateColumns: GRID, gap: 6, padding: "2px 0",
+      display: "grid", gridTemplateColumns: GRID, gap: 6, padding: "1px 0",
       color: head ? muted : dim,
       borderTop: foot ? "1px solid var(--edge)" : undefined,
       borderBottom: head ? "1px solid var(--edge)" : undefined,

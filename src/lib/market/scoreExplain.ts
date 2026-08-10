@@ -18,6 +18,8 @@ export interface FactorSpec {
   /** share of the bucket, 0..1 */
   w: number;
   label: string;
+  /** measurement window — the timeframe this factor is computed on */
+  tf?: string;
   /** what the sub-factor measures */
   what: string;
   /** what a 1.0 looks like */
@@ -32,97 +34,93 @@ export interface BucketSpec {
   factors: FactorSpec[];
 }
 
+/**
+ * Timeframe contract for the whole model — every number below is computed on
+ * daily adjusted bars unless the factor says otherwise, and the one weekly
+ * input is resampled from those same daily bars (minimum 25 weeks).
+ */
+export const TIMEFRAME_NOTE =
+  "All factors are computed on daily adjusted bars. The weekly trend factor resamples those same daily bars and needs at least 25 weekly bars to score at all.";
+
 /** Buckets in fixed raw-weight order — never sorted by points, so rows don't
- *  reshuffle between sessions. Weights sum to 100. */
+ *  reshuffle between sessions. Weights sum to 100.
+ *
+ *  2026-08-10: the chart-pattern bucket was removed from the model (it reported
+ *  full coverage on every row while paying ~1.1 of 12 points) and its weight
+ *  redistributed toward the factors that decide a multi-week swing. */
 export const V4_BUCKETS: BucketSpec[] = [
   {
     key: "levels",
     label: "Levels & trigger",
-    weight: 22,
+    weight: 26,
+
     blurb: "Where price sits against its pivot, and the quality of the base underneath it.",
     factors: [
-      { key: "trigger", w: 0.45, label: "Trigger", what: "How far the close is above the pivot (max of the cluster level and the 20-day high), in ATRs, scaled by how many volume-weighted touches the level has and where the bar closed in its range.", full: "Close a full ATR or more above a well-touched pivot, closing in the top third of the bar. A close below the pivot earns at most 45% partial credit, decaying to nothing 1.5 ATR below." },
-      { key: "freshness", w: 0.10, label: "Freshness", what: "Sessions since the breakout print.", full: "Breakout happened today; zero after 5 sessions, and zero outright when there is no live breakout or the last one failed." },
-      { key: "base_tightness", w: 0.15, label: "Base tightness", what: "Width of the consolidation before the move.", full: "Base range at or under 2% of price; nothing at 8%+." },
-      { key: "base_depth", w: 0.10, label: "Base depth", what: "Peak-to-trough drawdown inside the base.", full: "8% or shallower; nothing at 30%+." },
-      { key: "base_duration", w: 0.10, label: "Base duration", what: "How long the base has been building.", full: "30 sessions or more; nothing under 10." },
-      { key: "support_defence", w: 0.10, label: "Support defence", what: "How close price sits to a real, non-fallback support.", full: "Close within half an ATR of a genuine support level; fades to zero by 3 ATR, and is not scored at all when the only 'support' is the lookback low." },
+      { key: "trigger", w: 0.45, label: "Trigger", tf: "daily · pivot = max(level cluster, 20-day high), levels scanned over 250 sessions; distance in ATR(14)", what: "How far the close is above the pivot, in ATRs, scaled by how many volume-weighted touches the level has and where the bar closed in its range.", full: "Close a full ATR or more above a well-touched pivot, closing in the top third of the bar. A close below the pivot earns at most 45% partial credit, decaying to nothing 1.5 ATR below." },
+      { key: "freshness", w: 0.10, label: "Freshness", tf: "daily · 20-day breakout, 10-session state window", what: "Sessions since the breakout print.", full: "Breakout happened today; zero after 5 sessions, and zero outright when there is no live breakout or the last one failed." },
+      { key: "base_tightness", w: 0.15, label: "Base tightness", tf: "daily · the detected consolidation window", what: "Width of the consolidation before the move.", full: "Base range at or under 2% of price; nothing at 8%+." },
+      { key: "base_depth", w: 0.10, label: "Base depth", tf: "daily · the detected consolidation window", what: "Peak-to-trough drawdown inside the base.", full: "8% or shallower; nothing at 30%+." },
+      { key: "base_duration", w: 0.10, label: "Base duration", tf: "daily · sessions in the base", what: "How long the base has been building.", full: "30 sessions or more; nothing under 10." },
+      { key: "support_defence", w: 0.10, label: "Support defence", tf: "daily · 250-session support scan, distance in ATR(14)", what: "How close price sits to a real, non-fallback support.", full: "Close within half an ATR of a genuine support level; fades to zero by 3 ATR, and is not scored at all when the only 'support' is the lookback low." },
     ],
   },
   {
     key: "volume",
     label: "Volume & participation",
-    weight: 16,
+    weight: 20,
     blurb: "Is real money behind the move, or is it a thin drift?",
     factors: [
-      { key: "rel_volume_30d", w: 0.45, label: "Relative volume", what: "Today's volume against the 30-day median (or the size-tier percentile when available). Scores zero below the turnover floor — 3x volume on an illiquid counter is noise, not conviction.", full: "3x the 30-day median, or the 95th percentile within its market-cap tier." },
-      { key: "obv_slope", w: 0.20, label: "OBV slope", what: "20-session on-balance-volume trend — accumulation vs distribution.", full: "Strongly rising OBV." },
-      { key: "vol_dryup", w: 0.15, label: "Volume dry-up", what: "Volume contraction into the base, measured up to the last pre-breakout bar so the breakout's own expansion doesn't cancel it.", full: "Base volume at 60% of normal or less." },
-      { key: "delivery_pct", w: 0.20, label: "Delivery %", what: "Share of traded quantity actually delivered — intent, not day-trade churn.", full: "65% delivery or higher; nothing at 30%." },
+      { key: "rel_volume_30d", w: 0.55, label: "Relative volume", tf: "daily · today vs the 30-day median (or the size-tier percentile)", what: "Today's volume against its normal. Dropped — not zeroed — when turnover is below the liquidity floor or unknown, because illiquidity is already charged as a penalty.", full: "3x the 30-day median, or the 95th percentile within its market-cap tier." },
+      { key: "obv_slope", w: 0.25, label: "OBV slope", tf: "daily · 20-session slope", what: "On-balance-volume trend — accumulation vs distribution.", full: "Strongly rising OBV." },
+      { key: "vol_dryup", w: 0.20, label: "Volume dry-up", tf: "daily · base window, measured to the last pre-breakout bar", what: "Volume contraction into the base, so the breakout's own expansion doesn't cancel it.", full: "Base volume at 60% of normal or less." },
+    ],
+
+  },
+  {
+    key: "setups",
+    label: "Setups & EMA structure",
+    weight: 20,
+
+    blurb: "Is the trend structure underneath the trade actually intact? This is what a multi-week hold rides.",
+    factors: [
+      { key: "ema_alignment", w: 0.30, label: "EMA alignment", tf: "daily · EMA 20 / 50 / 200", what: "20 > 50 > 200 stacking.", full: "Fully aligned; 0.5 when only 20 > 50." },
+      { key: "above_ema200", w: 0.25, label: "Above 200 EMA", tf: "daily · EMA 200", what: "The long-term regime filter.", full: "Close above the 200 EMA (binary)." },
+      { key: "cross_20_50", w: 0.15, label: "20/50 cross", tf: "daily · cross searched back 60 sessions, decays over 25", what: "Freshness of the 20/50 EMA cross up.", full: "Crossed today; decays to zero over 25 sessions." },
+      { key: "cross_50_200", w: 0.10, label: "50/200 cross", tf: "daily · cross searched back 60 sessions, decays over 25", what: "Freshness of the golden cross.", full: "Crossed today; decays to zero over 25 sessions." },
+      { key: "weekly_trend", w: 0.20, label: "Weekly trend", tf: "weekly (resampled, min 25 bars) · EMA 20W, RSI 14W", what: "Above the 20-week EMA (0.5), weekly trend up (0.3), weekly higher lows (0.2). Not scored at all with under 25 weekly bars.", full: "All three true on the weekly chart." },
+    ],
+  },
+  {
+    key: "strength",
+    label: "Relative strength",
+    weight: 18,
+    blurb: "Is this stock leading the market and its sector, or being carried by them?",
+    factors: [
+      { key: "pos_52w", w: 0.25, label: "Position in 52w range", tf: "daily · 252 sessions", what: "Distance from the 52-week high.", full: "Within 1% of the 52-week high; nothing at −35%." },
+      { key: "rel_strength", w: 0.25, label: "RS vs NIFTY", tf: "daily · 55 sessions vs the index", what: "Outperformance against the index.", full: "+15% or better against NIFTY; nothing at −5%." },
+      { key: "rs_percentile", w: 0.20, label: "RS percentile", tf: "daily · rank of the 55-session RS across the universe", what: "Rank of that relative strength inside the universe.", full: "90th percentile; nothing at the 50th." },
+      { key: "sector_strength", w: 0.20, label: "Sector strength", tf: "daily · sector aggregate for the session", what: "How the stock's sector is performing. Dropped when sector ranking is unavailable rather than assumed average.", full: "Sector at the top of the tape." },
+      { key: "breadth", w: 0.10, label: "Market regime", tf: "daily · universe share above EMA 50 blended with average RSI(14)", what: "Graded reading of the tape. Dropped when breadth is unavailable — it is no longer paid as a flat 0.5 to everyone.", full: "Broad participation (75%+ above the 50 EMA) with average RSI above 62." },
     ],
   },
   {
     key: "indicators",
     label: "Indicators",
     weight: 16,
-    blurb: "Classic momentum and volatility reads, each capped so no single one dominates.",
+
+    blurb: "Momentum and volatility timing reads, each capped so no single one dominates.",
     factors: [
-      { key: "rsi", w: 0.25, label: "RSI (14)", what: "Momentum, scored as a window rather than 'higher is better'.", full: "RSI between 60 and 75. Below 40 and above 85 both score zero." },
-      { key: "macd", w: 0.20, label: "MACD", what: "MACD above signal (0.6) plus a rising histogram (0.4). When histogram history is missing, the cross alone carries the factor instead of being marked down.", full: "Above signal with a rising histogram." },
-      { key: "adx", w: 0.20, label: "ADX (14)", what: "Trend strength.", full: "ADX 30+; nothing at 15 or below." },
-      { key: "atr_pct", w: 0.10, label: "ATR %", what: "Volatility sanity — too quiet cannot travel, too wild cannot be held.", full: "2–6% daily ATR, or mid-range volatility for its size tier." },
-      { key: "percent_b", w: 0.10, label: "Bollinger %B", what: "Position inside the Bollinger band, capped at the upper band — riding beyond it is overextension, charged as a penalty instead.", full: "At the upper band." },
-      { key: "mfi", w: 0.10, label: "MFI (14)", what: "Money-flow index — volume-weighted momentum.", full: "MFI 80+; nothing at 50 or below." },
-      { key: "supertrend", w: 0.05, label: "Supertrend", what: "Supertrend direction.", full: "Direction is up (binary)." },
-    ],
-  },
-  {
-    key: "setups",
-    label: "Setups & EMA structure",
-    weight: 13,
-    blurb: "Is the trend structure underneath the trade actually intact?",
-    factors: [
-      { key: "ema_alignment", w: 0.30, label: "EMA alignment", what: "20 > 50 > 200 stacking.", full: "Fully aligned; 0.5 when only 20 > 50." },
-      { key: "above_ema200", w: 0.25, label: "Above 200 EMA", what: "The long-term regime filter.", full: "Close above the 200 EMA (binary)." },
-      { key: "cross_20_50", w: 0.15, label: "20/50 cross", what: "Freshness of the 20/50 EMA cross up.", full: "Crossed today; decays to zero over 25 sessions." },
-      { key: "cross_50_200", w: 0.10, label: "50/200 cross", what: "Freshness of the golden cross.", full: "Crossed today; decays to zero over 25 sessions." },
-      { key: "weekly_trend", w: 0.20, label: "Weekly trend", what: "Above the 20-week EMA (0.5), weekly trend up (0.3), weekly higher lows (0.2).", full: "All three true on the weekly chart." },
-    ],
-  },
-  {
-    key: "strength",
-    label: "Relative strength",
-    weight: 13,
-    blurb: "Is this stock leading the market and its sector, or being carried by them?",
-    factors: [
-      { key: "pos_52w", w: 0.25, label: "Position in 52w range", what: "Distance from the 52-week high.", full: "Within 1% of the 52-week high; nothing at −35%." },
-      { key: "rel_strength", w: 0.25, label: "RS vs NIFTY", what: "Outperformance against the index.", full: "+15% or better against NIFTY; nothing at −5%." },
-      { key: "rs_percentile", w: 0.20, label: "RS percentile", what: "Rank of that relative strength inside the universe.", full: "90th percentile; nothing at the 50th." },
-      { key: "sector_strength", w: 0.20, label: "Sector strength", what: "How the stock's sector is performing. Dropped when sector ranking is unavailable rather than assumed average.", full: "Sector at the top of the tape." },
-      { key: "breadth", w: 0.10, label: "Market regime", what: "Overall breadth regime.", full: "Bullish regime; 0.5 neutral, 0 bearish." },
-    ],
-  },
-  {
-    key: "patterns",
-    label: "Chart patterns",
-    weight: 11,
-    blurb: "Detected classical formations, netted against bearish ones.",
-    factors: [
-      { key: "pattern_bonus", w: 1, label: "Pattern bonus", what: "Net bullish pattern score (cup-and-handle, flag, triangle, higher lows near resistance…), normalised against a reachable 6-point ceiling. Needs 60+ sessions of history; bearish formations are charged separately as a penalty.", full: "Two or three bullish formations confirmed together at resistance." },
-    ],
-  },
-  {
-    key: "sentiment",
-    label: "Sentiment & events",
-    weight: 9,
-    blurb: "The AI verdict, the news tape, and whether a binary event is about to decide the print.",
-    factors: [
-      { key: "ai_verdict", w: 0.50, label: "AI verdict", what: "The stored AI recommendation, pulled toward neutral by its own confidence.", full: "A high-confidence strong buy." },
-      { key: "news_sentiment", w: 0.30, label: "News sentiment", what: "Average sentiment over the recent news window, shrunk toward neutral when only one or two articles back it. Dropped when there is no news.", full: "Uniformly positive coverage across 5+ articles." },
-      { key: "event_clear", w: 0.20, label: "Event clearance", what: "Sessions until results or an ex-date.", full: "10+ sessions clear of any event. Inside 2 sessions the whole score is hard-capped into the WATCH band." },
+      { key: "rsi", w: 0.25, label: "RSI (14)", tf: "daily · 14 sessions", what: "Momentum, scored as a window rather than 'higher is better'.", full: "RSI between 60 and 75. Below 40 and above 85 both score zero." },
+      { key: "macd", w: 0.20, label: "MACD", tf: "daily · 12-26-9", what: "MACD above signal (0.6) plus a rising histogram (0.4). When histogram history is missing, the cross alone carries the factor instead of being marked down.", full: "Above signal with a rising histogram." },
+      { key: "adx", w: 0.20, label: "ADX (14)", tf: "daily · 14 sessions", what: "Trend strength.", full: "ADX 30+; nothing at 15 or below." },
+      { key: "atr_pct", w: 0.10, label: "ATR %", tf: "daily · ATR(14) as a share of price", what: "Volatility sanity — too quiet cannot travel, too wild cannot be held.", full: "2–6% daily ATR, or mid-range volatility for its size tier." },
+      { key: "percent_b", w: 0.10, label: "Bollinger %B", tf: "daily · 20 sessions, 2 standard deviations", what: "Position inside the Bollinger band, capped at the upper band — riding beyond it is overextension, charged as a penalty instead.", full: "At the upper band." },
+      { key: "mfi", w: 0.10, label: "MFI (14)", tf: "daily · 14 sessions", what: "Money-flow index — volume-weighted momentum.", full: "MFI 80+; nothing at 50 or below." },
+      { key: "supertrend", w: 0.05, label: "Supertrend", tf: "daily · ATR(10), factor 3", what: "Supertrend direction.", full: "Direction is up (binary)." },
     ],
   },
 ];
+
 
 /** Fundamentals are a multiplier (0.90–1.05), never points. */
 export const FUNDAMENTAL_FACTORS: FactorSpec[] = [
@@ -136,6 +134,18 @@ export const FUNDAMENTAL_FACTORS: FactorSpec[] = [
 
 export const FUNDAMENTAL_MULT_MIN = 0.9;
 export const FUNDAMENTAL_MULT_MAX = 1.05;
+
+/** Sentiment is a narrow multiplier (0.95–1.03), never points: news and AI
+ *  coverage exist on a tiny minority of rows, so as a bucket its weight was
+ *  renormalised away — and quietly inflated — on everything else. */
+export const SENTIMENT_FACTORS: FactorSpec[] = [
+  { key: "ai_verdict", w: 0.55, label: "AI verdict", what: "The stored AI recommendation, pulled toward neutral by its own confidence.", full: "A high-confidence strong buy." },
+  { key: "news_sentiment", w: 0.45, label: "News sentiment", what: "Average sentiment over the recent news window, shrunk toward neutral when only one or two articles back it. Dropped when there is no news.", full: "Uniformly positive coverage across 5+ articles." },
+];
+
+export const SENTIMENT_MULT_MIN = 0.95;
+export const SENTIMENT_MULT_MAX = 1.03;
+
 
 export const PENALTY_LABELS: Record<string, { label: string; why: string }> = {
   overextension: { label: "Overextended", why: "Close is 3+ ATR above the 20 EMA — the easy move is already gone and pullback risk dominates." },
@@ -286,6 +296,4 @@ export const BUCKET_COLORS: Record<string, string> = {
   indicators: "#7aa2f7",
   setups: "#c08cf0",
   strength: "#e0af68",
-  patterns: "#e06c9f",
-  sentiment: "#9ece6a",
 };

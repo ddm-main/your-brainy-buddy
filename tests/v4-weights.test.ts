@@ -59,11 +59,11 @@ describe("v4 coverage cannot inflate the ceiling", () => {
   const full = Object.fromEntries(V4_BUCKETS.map((b) => [b.key, 1]));
 
   it("never scales the surviving buckets past the cap", () => {
-    const cov = { ...full, strength: 0, sentiment: 0, patterns: 0 };
+    const cov = { ...full, strength: 0, indicators: 0 };
     const rows = buildBucketRows({}, cov);
     const ceiling = rows.reduce((s, r) => s + r.ceiling, 0);
     expect(ceiling).toBeLessThanOrEqual(100.05);
-    // 78% of the weight survives, so the ceiling must be visibly under 100
+    // 66% of the weight survives, so the ceiling must be visibly under 100
     // rather than scaled back up to it.
     expect(ceiling).toBeLessThan(95);
   });

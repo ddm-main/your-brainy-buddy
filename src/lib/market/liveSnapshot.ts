@@ -153,7 +153,17 @@ export function computeLiveScore(
     snapshot,
     breakout: {
       score: v4.score,
-      components: { ...v4.buckets, ...v4.components, ...v4.penalties },
+      // A bucket with no inputs is stored as null by the scorer ("not scored",
+      // as distinct from "scored zero"); this flat component map is numeric,
+      // so unscored buckets are omitted rather than coerced to 0.
+      components: {
+        ...Object.fromEntries(
+          Object.entries(v4.buckets).filter((e): e is [string, number] => e[1] != null),
+        ),
+        ...v4.components,
+        ...v4.penalties,
+      },
+
     },
     patterns,
   };

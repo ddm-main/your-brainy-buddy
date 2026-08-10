@@ -1915,8 +1915,11 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
         metadata: { steps?: Array<{ fn: string; status: string; error?: string | null }>; failed_count?: number } | null;
       } | null;
     },
-    refetchInterval: 5 * 60_000,
-    staleTime: 60_000,
+    // EGRESS: the orchestrator runs once a day — never poll a hidden tab for it.
+    refetchInterval: () => (document.visibilityState === "visible" ? 15 * 60_000 : false),
+    refetchIntervalInBackground: false,
+    staleTime: 15 * 60_000,
+
   });
   const latestTradeDate = useMemo(() => latestTradeDateOf(rows), [rows]);
 

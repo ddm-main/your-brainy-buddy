@@ -13,7 +13,14 @@ export interface MarketContext {
   // stock return minus NIFTY return over ~55 sessions, in % points; null when unknown
   relStrengthNifty: number | null;
   deliveryPct: number | null;
+  // Graded 0..1 tape reading (see breadthScore). The three-state `regime` is a
+  // step function whose thresholds the market almost never crosses — it read
+  // "neutral" on every session in the live data, making the breadth factor a
+  // constant 0.5 for the entire universe. When this is supplied the breadth
+  // factor uses it instead; `regime` still drives the regime multiplier.
+  breadthScore?: number | null;
 }
+
 
 export interface ScoreResult {
   score: number;
@@ -419,6 +426,27 @@ export function scoreDistribution(scores: number[]): ScoreDistribution {
     pct_at_or_above_moderate: share(SCORE_BAND_MODERATE),
   };
 }
+
+/**
+ * Graded 0..1 reading of the tape, for the v4 strength bucket.
+ *
+ * `classifyRegime` is a three-state step used for the regime multiplier, and
+ * its thresholds are rarely crossed: live data shows "neutral" on every
+ * session for months (64% above the 50 EMA with avg RSI 54 is one point of
+ * RSI short of "bullish"), so the breadth sub-factor was a hard constant 0.5
+ * across the whole universe — a 10%-weight factor carrying no information.
+ * This blends participation and momentum continuously instead, so the tape
+ * actually moves the factor.
+ */
+export function breadthScore(pctAboveEma50: number | null, avgRsi: number | null): number | null {
+  if (pctAboveEma50 == null && avgRsi == null) return null;
+  const parts: number[] = [];
+  if (pctAboveEma50 != null) parts.push(ramp(pctAboveEma50, 25, 75) * 0.6);
+  if (avgRsi != null) parts.push(ramp(avgRsi, 40, 62) * 0.4);
+  const wHave = (pctAboveEma50 != null ? 0.6 : 0) + (avgRsi != null ? 0.4 : 0);
+  return clamp(parts.reduce((a, b) => a + b, 0) / wHave, 0, 1);
+}
+
 
 
 export function classifyRegime(pctAboveEma50: number | null, avgRsi: number | null): string {
@@ -872,6 +900,13 @@ import { V4_WEIGHTS, type V4Bucket } from "./v4Weights.ts";
 export const V4_FUNDAMENTAL_MULT_MIN = 0.90;
 export const V4_FUNDAMENTAL_MULT_MAX = 1.05;
 
+// Sentiment is likewise a multiplier, and a deliberately narrower one: news
+// and AI verdicts exist for a tiny minority of rows, so the adjustment must be
+// small enough that having coverage is not itself an edge in the ranking.
+export const V4_SENTIMENT_MULT_MIN = 0.95;
+export const V4_SENTIMENT_MULT_MAX = 1.03;
+
+
 // Below this many sessions the chart simply cannot be read — no 52w range, no
 // 200 EMA, no base. Returning a low number there is indistinguishable from
 // "bad setup", so the scorer returns null with a reason instead.
@@ -944,7 +979,8 @@ export interface V4Result {
   rawBeforePenalty: number | null;
   unavailableReason: string | null;
   // Points actually contributed by each bucket, after renormalisation.
-  buckets: Record<string, number>;
+  buckets: Record<string, number | null>;
+
   // 0..1 share of each bucket's sub-factors that had data.
   coverage: Record<string, number>;
   components: Record<string, number>;
@@ -981,10 +1017,20 @@ const freshCross = (d: number | null | undefined): number | null =>
   d == null ? null : (d < 0 ? 0 : 1 - ramp(d, 0, 25));
 
 export function breakoutScoreV4(input: V4Input): V4Result {
-  const { s, ctx, patterns, weekly, adv } = input;
+  // `patterns` / `patternsWeekly` are still accepted on the input for callers'
+  // convenience but no longer read: chart patterns were removed from the model.
+  const { s, ctx, weekly, adv } = input;
   const f = input.fundamentals ?? null;
   const sent = input.sentiment ?? null;
-  const liquidity = input.liquidity ?? { ok: true, reasons: [] };
+  // A caller that hands over turnover but no pre-computed gate used to be
+  // treated as fully liquid — the illiquidity penalty then never fired, and the
+  // only thing that priced thin turnover was the volume sub-factor. Derive the
+  // gate from what we were given instead of defaulting to "fine".
+  const liquidity: LiquidityGate = input.liquidity
+    ?? (turnoverLiquid(input.avgTurnoverCr) === false
+      ? { ok: false, reasons: [`avg turnover below ₹${LIQUIDITY_MIN_TURNOVER_CR}Cr/day`] }
+      : { ok: true, reasons: [] });
+
 
   const atr = s.atr14 != null && s.atr14 > 0 ? s.atr14 : null;
   const close = s.close ?? null;
@@ -1027,11 +1073,13 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   const turnoverOk = turnoverLiquid(input.avgTurnoverCr);
   // Prefer the size-tier percentile when the caller computed one: a 2.5× day on
   // a large cap is a far rarer event than on a micro cap.
-  // Known-illiquid is a real 0, not missing data: nulling it renormalised the
-  // 45% weight onto OBV / dry-up / delivery, so a thin counter had its volume
-  // bucket carried by the three soft factors instead of being marked down.
-  // Unknown turnover, by contrast, drops the factor (null) rather than crediting it.
-  const relVolFactor = turnoverOk === false ? 0
+  //
+  // Known-illiquid used to be scored as a hard 0 here. That charged the same
+  // fact three times — the liquidity gate refuses the row, a flat −25 penalty
+  // is deducted below, AND the largest sub-factor of the volume bucket was
+  // zeroed. Illiquidity is now priced once, by the penalty; unknown or thin
+  // turnover simply drops the factor.
+  const relVolFactor = turnoverOk === false ? null
     : turnoverOk == null ? null
     : input.tierRelVolumePct != null ? ramp(input.tierRelVolumePct, 50, 95)
     : rel30 == null ? null : ramp(rel30, 1, 3);
@@ -1040,12 +1088,16 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   // inflates the 5D average and kills the factor exactly when the setup is best
   // (and made rel-volume and dry-up mutually exclusive, capping the bucket).
   const dryUp = s.volDryUpRatioBase ?? s.volDryUpRatio ?? null;
+  // `delivery_pct` was removed as a sub-factor: it is null on 100% of live rows
+  // (no ingest path writes the column), so its 20% share was silently
+  // renormalised onto the other three every single time. The weights below are
+  // the honest restatement of that — 0.45/0.20/0.15 rescaled to sum to 1.
   const volume = rollup([
-    ["rel_volume_30d", 0.45, relVolFactor],
-    ["obv_slope", 0.20, s.obvSlope20 == null ? null : ramp(s.obvSlope20, 0, V4_OBV_SLOPE_FULL)],
-    ["vol_dryup", 0.15, dryUp == null ? null : 1 - ramp(dryUp, 0.6, 1)],
-    ["delivery_pct", 0.20, ctx.deliveryPct == null ? null : ramp(ctx.deliveryPct, 30, 65)],
+    ["rel_volume_30d", 0.55, relVolFactor],
+    ["obv_slope", 0.25, s.obvSlope20 == null ? null : ramp(s.obvSlope20, 0, V4_OBV_SLOPE_FULL)],
+    ["vol_dryup", 0.20, dryUp == null ? null : 1 - ramp(dryUp, 0.6, 1)],
   ]);
+
 
   // ---- 2. Indicators ------------------------------------------------------
   const rsi = s.rsi14;
@@ -1163,7 +1215,6 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   const supportAtrs = supportReal && atr != null && close != null
     ? Math.abs(close - s.support!) / atr
     : null;
-  const atSupport = supportAtrs != null && supportAtrs <= 0.5;
   // Distance-graded, and null (renormalised away) when the "support" is only the
   // lookback low. The old flat 0.3 handed every symbol with any support value a
   // third of the factor for nothing.
@@ -1196,50 +1247,34 @@ export function breakoutScoreV4(input: V4Input): V4Result {
       : 0.9 * ramp(s.pctFrom52wHigh, -35, -3) + 0.1 * ramp(s.pctFrom52wHigh, -3, 0)],
     ["rel_strength", 0.25, ctx.relStrengthNifty == null ? null : ramp(ctx.relStrengthNifty, -5, 15)],
     ["rs_percentile", 0.20, s.rsPercentile == null ? null : ramp(s.rsPercentile, 50, 90)],
-    ["sector_strength", 0.20, ctx.sectorStrength],
-    // Unknown regime is charged as neutral (0.5), not as absent. Dropping the
-    // factor shrank the strength bucket's coverage below its floor on the
-    // neutral-context pass, which erased all 13 of its points; "we don't know
-    // the tape" is exactly what a neutral reading means.
-    ["breadth", 0.10, ctx.regime === "bullish" ? 1 : ctx.regime === "bearish" ? 0 : 0.5],
+    // Sector rank is a 0..1 fraction by contract. A caller that hands over a
+    // 0..100 percentile (the shape `rs_percentile` uses two lines above) would
+    // otherwise pin this factor at 1 for every stock in the market, so the
+    // wrong unit is detected and rescaled rather than silently maxed out.
+    ["sector_strength", 0.20, ctx.sectorStrength == null ? null
+      : clamp(ctx.sectorStrength > 1 ? ctx.sectorStrength / 100 : ctx.sectorStrength, 0, 1)],
+    // Graded tape reading when the caller supplies one. The three-state regime
+    // fallback reads "neutral" on virtually every real session, which made this
+    // factor a universe-wide constant 0.5 carrying no information at all.
+    // Graded tape reading when the caller supplies one. The three-state regime
+    // is only used when it actually says something: "neutral" was previously
+    // paid as 0.5 to the entire universe, a constant that carried no
+    // information and propped the bucket's coverage up. Unknown now drops.
+    ["breadth", 0.10, ctx.breadthScore != null ? clamp(ctx.breadthScore, 0, 1)
+      : ctx.regime === "bullish" ? 1 : ctx.regime === "bearish" ? 0 : null],
+
   ]);
 
-  // ---- 6. Chart patterns --------------------------------------------------
-  const patRaw = breakoutPatternBonus(patterns ?? undefined, s.nearResistance, atSupport, s.higherLows);
-  // ---- Multi-timeframe agreement -----------------------------------------
-  // A daily structure that the weekly chart also shows is a materially better
-  // setup than a daily-only read; a bullish daily under a weekly top is worse.
-  const wk = input.patternsWeekly ?? null;
-  const wkBull = hasBullStructure(wk);
-  const wkBear = !!(wk && (wk.headShoulders || wk.doubleTop || wk.risingWedge || wk.descendingTriangle ||
-    wk.tripleTop || wk.roundedTop || wk.inverseCupAndHandle || wk.bearFlag || wk.bearPennant ||
-    wk.descendingChannel || wk.distribution));
-  const dailyBull = hasBullStructure(patterns);
-  const mtfBonus = dailyBull && wkBull ? 2 : 0;
-  const mtfPenalty = dailyBull && wkBear ? 1.5 : (wkBear ? 1 : 0);
-  const pat = {
-    bonus: clamp(patRaw.bonus + mtfBonus, 0, 10),
-    penalty: clamp(patRaw.penalty + mtfPenalty, 0, 6),
-    labels: mtfBonus > 0 ? [...patRaw.labels, "weekly agreement"] : patRaw.labels,
-  };
-  // Coverage tracks whether the detector had enough history to have an opinion.
-  // Claiming full coverage for an all-false flag set scored "we looked, nothing
-  // there" identically to "we never looked" — and an UNKNOWN bar count used to
-  // count as "enough history", which is the same mistake inverted.
-  const patternBars = input.barsAvailable ?? s.barsAvailable ?? null;
-  const patternsScored = patterns != null && patternBars != null && patternBars >= 60;
+  // ---- Chart patterns: REMOVED from the score (2026-08-10) ----------------
+  // The pattern bucket was 12% of the model and paid an average 1.1 points on
+  // the live universe (raw value 0.095) while reporting full coverage for
+  // every row, so it behaved as a near-constant that only diluted the factors
+  // that do decide a swing trade. The detectors still run and still drive the
+  // chart / pattern panel; they no longer feed the score in either direction
+  // (the bearish-pattern penalty is gone with them). Their 12 points are
+  // redistributed explicitly in v4Weights.ts, not renormalised away.
 
-  const patterns6 = patternsScored
-    ? {
-        // Normalised against the reachable bonus, not the theoretical cap.
-        value: clamp(pat.bonus / V4_PATTERN_BONUS_FULL, 0, 1),
-        coverage: 1,
-        detail: {
-          pattern_bonus: Math.round(clamp(pat.bonus / V4_PATTERN_BONUS_FULL, 0, 1) * 1000) / 1000,
-          pattern_count: pat.labels.length,
-        },
-      }
-    : { value: null, coverage: 0, detail: {} as Record<string, number> };
+
 
   // ---- 7. Fundamentals — a MULTIPLIER, not points -------------------------
   // Applied to the technical total below (0.90–1.05). "Good chart, bad books"
@@ -1256,7 +1291,13 @@ export function breakoutScoreV4(input: V4Input): V4Result {
     ? 1
     : V4_FUNDAMENTAL_MULT_MIN + (V4_FUNDAMENTAL_MULT_MAX - V4_FUNDAMENTAL_MULT_MIN) * fundRoll.value;
 
-  // ---- 8. AI verdict + news / corporate actions ---------------------------
+  // ---- 8. AI verdict + news / corporate actions — a MULTIPLIER ------------
+  // Sentiment used to be a 9-point bucket. It had inputs on ~1% of rows, so on
+  // every other row those 9 points were renormalised onto the technicals: the
+  // universe sat at 0.91 coverage, the renorm cap never engaged, and a 91-point
+  // model was published as if it were a 100-point one. As a bounded multiplier
+  // it can still nudge a name that genuinely has coverage without distorting
+  // the ceiling of the 99% that don't.
   const verdict = (sent?.aiVerdict ?? "").toLowerCase();
   const verdictBase = verdict.includes("strong buy") ? 1
     : verdict.includes("buy") || verdict.includes("accumulate") ? 0.85
@@ -1265,23 +1306,27 @@ export function breakoutScoreV4(input: V4Input): V4Result {
     : verdict.includes("sell") || verdict.includes("avoid") ? 0
     : null;
   const conf = sent?.aiConfidence == null ? null : (sent.aiConfidence > 1 ? sent.aiConfidence / 100 : sent.aiConfidence);
-  const sentiment = rollup([
-    ["ai_verdict", 0.50, verdictBase == null ? null : 0.5 + (verdictBase - 0.5) * clamp(conf ?? 0.6, 0, 1)],
-    ["news_sentiment", 0.30, sent == null || sent.newsCount === 0 || sent.newsSentiment == null
+  const sentRoll = rollup([
+    ["ai_verdict", 0.55, verdictBase == null ? null : 0.5 + (verdictBase - 0.5) * clamp(conf ?? 0.6, 0, 1)],
+    ["news_sentiment", 0.45, sent == null || sent.newsCount === 0 || sent.newsSentiment == null
       // Shrink toward neutral by article count: one stale headline must not
       // carry the same weight as broad, consistent coverage.
       ? null
       : clamp(0.5 + (clamp((sent.newsSentiment + 1) / 2, 0, 1) - 0.5) * ramp(sent.newsCount, 1, 5), 0, 1)],
-    // Ramps over 3→10 sessions only. Inside 2 sessions the hard event-blackout
-    // cap below takes over, and the old 0→5 ramp charged for the same fact twice.
-    ["event_clear", 0.20, sent?.eventInDays == null ? null : ramp(sent.eventInDays, 3, 10)],
+    // `event_clear` moved out entirely: the hard event-blackout cap below
+    // already prices an imminent results date, and scoring it here charged the
+    // same calendar fact twice.
   ]);
+  const sentMult = sentRoll.value == null
+    ? 1
+    : V4_SENTIMENT_MULT_MIN + (V4_SENTIMENT_MULT_MAX - V4_SENTIMENT_MULT_MIN) * sentRoll.value;
 
   // ---- Weight renormalisation --------------------------------------------
   const parts: Array<[V4Bucket, { value: number | null; coverage: number; detail: Record<string, number> }]> = [
     ["volume", volume], ["indicators", indicators], ["setups", setups], ["levels", levels],
-    ["strength", strength], ["patterns", patterns6], ["sentiment", sentiment],
+    ["strength", strength],
   ];
+
   let weightHave = 0, weighted = 0;
   const coverage: Record<string, number> = {};
   const components: Record<string, number> = {};
@@ -1295,9 +1340,15 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   const totalWeight = Object.values(V4_WEIGHTS).reduce((a, b) => a + b, 0);
   const coverShare = weightHave / totalWeight;
 
-  const buckets: Record<string, number> = {};
-  coverage.fundamentals = Math.round(fundRoll.coverage * 100) / 100;
+  // A bucket with no inputs is written as null, never 0: a stored 0 read as
+  // "scored and earned nothing", which is a different claim entirely.
+  const buckets: Record<string, number | null> = {};
+  // `fundamentals` and `sentiment` are multipliers, not buckets. Writing their
+  // coverage into the bucket coverage map made them show up as phantom
+  // (duplicate) buckets in every consumer that iterates it.
+  components.fundamentals_coverage = Math.round(fundRoll.coverage * 100) / 100;
   for (const [k, v] of Object.entries(fundRoll.detail)) components[`fundamentals.${k}`] = v;
+
   if (weightHave <= 0 || coverShare < MIN_TOTAL_COVERAGE) {
     return {
       score: null,
@@ -1315,7 +1366,7 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   // against a genuinely lower ceiling instead of being scaled up to 100.
   const scale = Math.min(totalWeight / weightHave, 1 / V4_FULL_RENORM_COVERAGE);
   for (const [name, part] of parts) {
-    if (part.value == null) { buckets[name] = 0; continue; }
+    if (part.value == null) { buckets[name] = null; continue; }
     buckets[name] = Math.round(part.value * V4_WEIGHTS[name] * scale * 10) / 10;
   }
   // Same scale as the buckets, so the printed breakdown always sums to the
@@ -1347,7 +1398,9 @@ export function breakoutScoreV4(input: V4Input): V4Result {
     const p = ramp(rsi, 80, 95) * 6;
     if (p > 0) { penalties.overbought = Math.round(p * 10) / 10; penalty += p; }
   }
-  if (pat.penalty > 0) { penalties.bearish_pattern = Math.round(pat.penalty * 10) / 10; penalty += pat.penalty; }
+  // (bearish_pattern penalty removed with the pattern bucket — chart patterns
+  // no longer move the score in either direction.)
+
   // Failed breakout: price triggered recently and has since fallen back INTO
   // the base. Freshness decay alone only stops paying points; a failure is
   // strictly worse than never having triggered, and the deeper the re-entry
@@ -1374,8 +1427,15 @@ export function breakoutScoreV4(input: V4Input): V4Result {
   // was multiplied by a 0.9-1.0 coverage haircut for the same gap. Coverage is
   // now metadata only (`components.coverage_share`, surfaced in the explain
   // page) so a thin score reads as thin instead of being silently discounted.
-  const adjusted = clamp(raw * regimeMult * fundMult, 0, 100);
-  let total = clamp(adjusted - penalty, 0, 100);
+  const adjusted = clamp(raw * regimeMult * fundMult * sentMult, 0, ceiling || 100);
+  // Penalties are stated in points of a 100-point score. On a thin row the
+  // score is measured against a lower ceiling, so a flat 25-point deduction was
+  // proportionally far harsher there (25 of a possible 85 = 29%) than on a
+  // fully covered row. Scaling by the ceiling keeps a penalty worth the same
+  // share of what the row could actually have earned.
+  const penaltyScale = ceiling > 0 ? ceiling / 100 : 1;
+  const scaledPenalty = penalty * penaltyScale;
+  let total = clamp(adjusted - scaledPenalty, 0, 100);
 
   // Event blackout: results / ex-date inside two sessions makes the setup
   // un-tradable, not merely weaker — a binary event decides the next print, not
@@ -1386,14 +1446,20 @@ export function breakoutScoreV4(input: V4Input): V4Result {
     total = capped;
   }
 
+  components.sentiment_coverage = Math.round(sentRoll.coverage * 100) / 100;
+  for (const [k, v] of Object.entries(sentRoll.detail)) components[`sentiment.${k}`] = v;
+
   components.regime_mult = Math.round(regimeMult * 100) / 100;
   components.fundamental_mult = Math.round(fundMult * 1000) / 1000;
+  components.sentiment_mult = Math.round(sentMult * 1000) / 1000;
   components.coverage_share = Math.round(coverShare * 100) / 100;
   components.coverage_mult = 1; // retired — kept at 1 so stored rows stay comparable
+  components.penalty_scale = Math.round(penaltyScale * 1000) / 1000;
   // The real ceiling after the capped renormalisation, so a reader can tell
   // "44 out of a possible 87" from "44 out of 100".
   components.score_ceiling = ceiling;
   components.score_before_penalty = Math.round(adjusted * 10) / 10;
+
 
 
   return {
@@ -1427,7 +1493,7 @@ export function percentileBandCuts(scores: number[]): ScoreBandCuts {
 // against post-penalty thresholds. Shared by the live pipeline and the replay
 // backfill: two copies drifted, and the replay wrote none at all.
 export function v4RawDetail(v4: {
-  buckets: Record<string, number>;
+  buckets: Record<string, number | null>;
   coverage: Record<string, number>;
   components: Record<string, number>;
   penalties: Record<string, number>;
@@ -1435,23 +1501,31 @@ export function v4RawDetail(v4: {
   score: number | null;
 }): Record<string, unknown> {
   const coverShare = Number(v4.components?.coverage_share ?? 0);
-  const scale = coverShare > 0 ? 1 / coverShare : 1;
+  // Must mirror the scorer exactly, cap included. Using a plain 1/coverShare
+  // here over-stated the effective weight of every bucket on a thin row, so the
+  // inverted 0..1 values a replay read back were lower than the ones the live
+  // score was built from and re-weighting could never reproduce the score.
+  const scale = coverShare > 0 ? Math.min(1 / coverShare, 1 / V4_FULL_RENORM_COVERAGE) : 1;
   const raw: Record<string, number> = {};
   for (const [name, w] of Object.entries(V4_WEIGHTS)) {
     const pts = Number(v4.buckets?.[name] ?? 0);
     const eff = w * scale;
     raw[name] = eff > 0 ? Math.round(clamp(pts / eff, 0, 1) * 1000) / 1000 : 0;
   }
-  const penaltyTotal = Object.values(v4.penalties ?? {})
-    .reduce((a, b) => a + Number(b ?? 0), 0);
+  const penaltyScale = Number(v4.components?.penalty_scale ?? 1) || 1;
+  const penaltyTotal = Object.entries(v4.penalties ?? {})
+    .reduce((a, [k, b]) => a + Number(b ?? 0) * (k === "event_blackout" ? 1 : penaltyScale), 0);
   return {
     raw,
     penalty_total: Math.round(penaltyTotal * 10) / 10,
     penalties: v4.penalties ?? {},
+    penalty_scale: penaltyScale,
     regime_mult: Number(v4.components?.regime_mult ?? 1),
     fund_mult: Number(v4.components?.fundamental_mult ?? 1),
+    sent_mult: Number(v4.components?.sentiment_mult ?? 1),
     coverage_share: coverShare,
     raw_before_penalty: v4.rawBeforePenalty,
     score: v4.score,
   };
+
 }

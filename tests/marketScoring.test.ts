@@ -5,6 +5,8 @@ import {
   breakoutScoreV4,
   preBreakoutScore,
   classifyRegime,
+  breadthScore,
+  V4_WEIGHTS,
   evaluateLiquidity,
   swingScore,
   intradayScore,
@@ -655,13 +657,18 @@ describe("v4 snapshot round-trip", () => {
 describe("v4 round 3 — bucket fixes", () => {
   const ctx: MarketContext = { regime: "neutral" };
 
-  it("illiquid rel-volume scores zero instead of renormalising its weight away", () => {
+  // Illiquidity is priced ONCE, by the −25 penalty. Zeroing the largest volume
+  // sub-factor as well charged the same fact twice (three times counting the
+  // liquidity gate), so the factor is now dropped rather than scored 0.
+  it("drops rel-volume when turnover is below the floor, and still scores worse than a liquid twin", () => {
     const hot: IndicatorSnapshot = { ...baseSnap, relVolumeMedian30: 3 };
     const thin = breakoutScoreV4({ s: hot, ctx, avgTurnoverCr: 0.1 });
     const liquid = breakoutScoreV4({ s: hot, ctx, avgTurnoverCr: 50 });
-    expect(thin.components["volume.rel_volume_30d"]).toBe(0);
-    expect(thin.buckets.volume).toBeLessThan(liquid.buckets.volume);
+    expect(thin.components["volume.rel_volume_30d"]).toBeUndefined();
+    expect(thin.penalties.illiquid).toBeGreaterThan(0);
+    expect(thin.score!).toBeLessThan(liquid.score!);
   });
+
 
   it("missing MACD histogram does not dock the factor", () => {
     const known = breakoutScoreV4({ s: { ...baseSnap, macdHistRising: true }, ctx });
@@ -739,5 +746,70 @@ describe("v4 round 4 — gate, penalty order, failed-breakout recency", () => {
     expect(old.penalties.failed_breakout).toBeUndefined();
     expect(unknown.penalties.failed_breakout).toBeUndefined();
     expect(recent.score!).toBeLessThan(old.score!);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v4 round 4 — dead-weight removal, graded breadth, proportional penalties.
+describe("v4 round 4 — model math fixes", () => {
+  const ctx: MarketContext = { regime: "neutral", sectorStrength: null, relStrengthNifty: null, deliveryPct: null };
+
+  it("no longer publishes sentiment as a bucket", () => {
+    expect(Object.keys(V4_WEIGHTS)).not.toContain("sentiment");
+    expect(Object.values(V4_WEIGHTS).reduce((a, b) => a + b, 0)).toBe(100);
+  });
+
+  it("applies sentiment as a bounded multiplier instead", () => {
+    const none = breakoutScoreV4({ s: baseSnap, ctx });
+    const good = breakoutScoreV4({
+      s: baseSnap, ctx,
+      sentiment: { aiVerdict: "strong buy", aiConfidence: 0.9, newsSentiment: 0.8, newsCount: 8, eventInDays: null },
+    });
+    const bad = breakoutScoreV4({
+      s: baseSnap, ctx,
+      sentiment: { aiVerdict: "sell", aiConfidence: 0.9, newsSentiment: -0.8, newsCount: 8, eventInDays: null },
+    });
+    expect(none.components.sentiment_mult).toBe(1);
+    expect(good.components.sentiment_mult).toBeGreaterThan(1);
+    expect(good.components.sentiment_mult).toBeLessThanOrEqual(1.03);
+    expect(bad.components.sentiment_mult).toBeLessThan(1);
+    expect(bad.components.sentiment_mult).toBeGreaterThanOrEqual(0.95);
+    // No sentiment must never be treated as bad sentiment.
+    expect(none.score!).toBeGreaterThanOrEqual(bad.score!);
+  });
+
+  it("does not score delivery_pct, which no ingest path populates", () => {
+    const r = breakoutScoreV4({ s: baseSnap, ctx });
+    expect(r.components["volume.delivery_pct"]).toBeUndefined();
+  });
+
+  it("grades breadth continuously instead of pinning the universe at 0.5", () => {
+    expect(breadthScore(20, 38)).toBeLessThan(0.15);
+    expect(breadthScore(80, 65)).toBeGreaterThan(0.95);
+    // The live reading that classifyRegime calls a flat "neutral".
+    const live = breadthScore(64, 54)!;
+    expect(classifyRegime(64, 54)).toBe("neutral");
+    expect(live).toBeGreaterThan(0.5);
+    expect(live).toBeLessThan(0.85);
+    expect(breadthScore(null, null)).toBeNull();
+  });
+
+  it("feeds the graded breadth through to the strength bucket", () => {
+    const weak = breakoutScoreV4({ s: baseSnap, ctx: { ...ctx, breadthScore: 0.1 } });
+    const strong = breakoutScoreV4({ s: baseSnap, ctx: { ...ctx, breadthScore: 0.9 } });
+    expect(strong.components["strength.breadth"]).toBeGreaterThan(weak.components["strength.breadth"]);
+  });
+
+  it("rescales a sector strength handed over as a 0..100 percentile", () => {
+    const frac = breakoutScoreV4({ s: baseSnap, ctx: { ...ctx, sectorStrength: 0.3 } });
+    const pct = breakoutScoreV4({ s: baseSnap, ctx: { ...ctx, sectorStrength: 30 } });
+    expect(pct.components["strength.sector_strength"]).toBeCloseTo(
+      frac.components["strength.sector_strength"], 3);
+  });
+
+  it("charges penalties as a share of the ceiling the row was scored against", () => {
+    const thin = breakoutScoreV4({ s: { ...baseSnap, rsi14: 90 }, ctx });
+    expect(thin.components.penalty_scale).toBeLessThanOrEqual(1);
+    expect(thin.components.penalty_scale).toBeGreaterThan(0.5);
   });
 });

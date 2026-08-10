@@ -14,7 +14,7 @@ import { preflight, jsonResponse, errorResponse, svcClient } from "../_shared/ma
 import { requireCronSecret, istTradeDate, isTradingHoliday } from "../_shared/market/cron.ts";
 import { getActiveProvider, type PlaceOrderInput } from "../_shared/market/provider.ts";
 import { BROKER_PROVIDERS } from "../_shared/market/provider.ts";
-import { evaluateGroups, type ScreenerGroup } from "../_shared/market/conditions.ts";
+import { evaluateGroups, columnsForGroups, type ScreenerGroup } from "../_shared/market/conditions.ts";
 import { reconcileOpenPositions, type OpenPosition } from "../_shared/market/autotradeReconcile.ts";
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2";
 
@@ -282,7 +282,9 @@ Deno.serve(async (req) => {
             const quotes = await provider.getQuotes([`${pos.exchange}:${pos.symbol}`]);
             const ltp = quotes[0]?.price;
             if (ltp == null) continue;
-            const { data: scoreRow } = await svc.from("market_stock_scores").select("*")
+            // EGRESS: only the columns this rule's exit conditions read.
+            const { data: scoreRow } = await svc.from("market_stock_scores")
+              .select(columnsForGroups(rule.exit_conditions))
               .eq("symbol", pos.symbol).eq("exchange", pos.exchange).maybeSingle();
             const changePct = ((ltp - pos.entryPrice) / pos.entryPrice) * 100;
 
@@ -402,7 +404,10 @@ Deno.serve(async (req) => {
             if (scopeSymbols.length === 0) continue;
 
             const symbols = [...new Set(scopeSymbols.map((s) => s.symbol))];
-            const { data: scoreRows } = await svc.from("market_stock_scores").select("*").in("symbol", symbols);
+            // EGRESS: only the columns this rule's entry conditions read.
+            const { data: scoreRows } = await svc.from("market_stock_scores")
+              .select(columnsForGroups(rule.entry_conditions))
+              .in("symbol", symbols);
             const scoreByKey = new Map((scoreRows ?? []).map((s: any) => [`${s.symbol}:${s.exchange}`, s]));
 
             for (const scope of scopeSymbols) {

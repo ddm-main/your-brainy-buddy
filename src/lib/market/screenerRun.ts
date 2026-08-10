@@ -320,6 +320,32 @@ export function planProjection(fields: string[] | null | undefined): Projection 
   return { statics, live, key: `${s.size}:${l.size}:${Array.from(fields).sort().join("|")}` };
 }
 
+// EGRESS: monotonic plan. The screener re-plans on every column toggle, filter
+// edit and export, and each distinct plan was a fresh full fetch of both
+// planes. Widening only — a plane that already contains the requested columns
+// (and enough rows) serves the request straight from cache.
+const planned = { fields: new Set<string>(), full: false, loadAll: false };
+
+export function widenPlan(
+  fields: string[] | null | undefined,
+  loadAll: boolean,
+): { projection: Projection; loadAll: boolean } {
+  if (!fields || fields.length === 0) planned.full = true;
+  else fields.forEach((f) => planned.fields.add(f));
+  if (loadAll) planned.loadAll = true;
+  const projection = planned.full
+    ? planProjection(null)
+    : planProjection(Array.from(planned.fields).sort());
+  return { projection, loadAll: planned.loadAll };
+}
+
+/** Test seam: drop the accumulated plan. */
+export function resetScreenerPlan(): void {
+  planned.fields.clear();
+  planned.full = false;
+  planned.loadAll = false;
+}
+
 
 
 /** Server-side universe narrowing. Fetching all 2 800 rows and filtering in
@@ -620,9 +646,15 @@ export function useScreenerData(
    *  client-side filtering, sorting on a non-server column and CSV export. */
   loadAll = false,
 ) {
-  const projection = useMemo(() => planProjection(fields), [fields?.join("|")]);
-  const cap = loadAll ? null : BOARD_ROWS;
-  const capKey = loadAll ? "all" : String(BOARD_ROWS);
+  // EGRESS: the projection and the row cap used to be part of the query key, so
+  // every column toggle, filter change or "load all" re-shipped both planes
+  // (~190 fetches / 26 MB for a handful of sessions). Both are now monotonic:
+  // the plane only ever widens, and a widened plane already answers every
+  // narrower request, so toggling back and forth costs nothing.
+  const widened = useMemo(() => widenPlan(fields, loadAll), [fields?.join("|"), loadAll]);
+  const projection = widened.projection;
+  const cap = widened.loadAll ? null : BOARD_ROWS;
+  const capKey = widened.loadAll ? "all" : String(BOARD_ROWS);
 
   // ---- Back-date branch: one deterministic edge-function call, cached forever.
   const asof = useQuery({
