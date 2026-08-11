@@ -5007,6 +5007,7 @@ export type Database = {
         }[]
       }
       market_patch_stock_scores: { Args: { _rows: Json }; Returns: number }
+      market_penny_purge: { Args: { _symbols: string[] }; Returns: number }
       market_penny_sweep: {
         Args: { _min_cap_cr?: number; _min_price?: number }
         Returns: Json
