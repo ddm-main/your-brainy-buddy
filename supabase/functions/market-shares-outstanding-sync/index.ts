@@ -22,7 +22,7 @@
 //     were the *only* thing the job ever reported on. Attempts are now
 //     recorded on market_stocks and hard failures are parked for 7 days.
 
-import { createClient } from "npm:@supabase/supabase-js@2";
+import { svcClient } from "../_shared/market/common.ts";
 import { corsFor, preflight } from "../_shared/cors.ts";
 import { requireCronSecret } from "../_shared/market/cron.ts";
 import { nseFetch } from "../_shared/market/nseClient.ts";
@@ -98,7 +98,9 @@ Deno.serve(async (req) => {
   try {
     const url = Deno.env.get("SUPABASE_URL")!;
     const svc = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const supabase = createClient(url, svc, { auth: { persistSession: false } });
+    // EGRESS: the metered service client — labels this function in
+    // system_egress_daily and defaults writes to `return=minimal`.
+    const supabase = svcClient();
 
     // Cron callers are verified against the Vault-held secret (requireCronSecret
     // returns null on a match); authenticated users can also trigger this.

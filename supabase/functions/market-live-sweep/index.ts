@@ -25,7 +25,7 @@ import { buildSweepSnapshot, readSweepChunk, pruneSweepSnapshots } from "../_sha
 // Bigger chunks mean fewer chained invocations, and every per-chunk reference
 // read (page meta, settled anchors, broker tokens) is paid once per
 // invocation — so the chunk size is directly proportional to daily egress.
-const CHUNK = 600;          // symbols per invocation
+const CHUNK = 400;          // symbols per invocation (max slice; ~5 chained calls for the full plane)
 const QUOTE_CHUNK = 100;    // symbols per upstream quote call
 const YAHOO_CAP = 120;      // bounded gap-filler per invocation
 
@@ -79,7 +79,7 @@ Deno.serve(async (req) => {
   try {
     const svc = svcClient();
     const body: Body = req.method === "POST" ? await req.json().catch(() => ({})) : {};
-    const limit = Math.max(50, Math.min(Number(body.limit) || CHUNK, 600));
+    const limit = Math.max(50, Math.min(Number(body.limit) || CHUNK, 400));
     // Chunk index replaces the old keyset cursor: slices are fixed by the
     // snapshot, so a chunk is addressed by position, not by last symbol.
     const chunkIndex = Math.max(0, Number(body.chunk) || 0);
@@ -99,9 +99,15 @@ Deno.serve(async (req) => {
       }
     }
 
+    // How many chunks this session's snapshot holds. Known only on the
+    // building invocation; a chained chunk leaves it at -1 and falls back to
+    // the "short chunk means drained" rule.
+    let chunkCount = -1;
+
     // Only the first invocation opens the run. The database advisory lock
     // prevents two five-minute jobs from exposing interleaved sweeps.
     if (chunkIndex === 0) {
+
       const { data: begun, error: beginError } = await svc.rpc("begin_market_live_sweep", {
         _sweep_id: sweepId,
         _session_date: sessionDate,
@@ -114,12 +120,24 @@ Deno.serve(async (req) => {
       // Resolve the whole universe + anchors + broker tokens ONCE for this
       // sweep. Every chained chunk below then reads just its own slice.
       try {
-        await buildSweepSnapshot(svc, sweepId, sessionDate, limit);
+        const built = await buildSweepSnapshot(svc, sweepId, sessionDate, limit);
+        chunkCount = built.chunkCount;
+        // The DB run and snapshot must use the same authoritative population.
+        // Never hide schema drift by silently replacing the denominator.
+        if (built.symbolCount <= 0 || Number(begun?.expected_count) !== built.symbolCount) {
+          await svc.from("market_live_price_runs").update({
+            status: "failed",
+            completed_at: new Date().toISOString(),
+            error_message: `universe mismatch: run=${Number(begun?.expected_count ?? 0)} snapshot=${built.symbolCount}`,
+          }).eq("sweep_id", sweepId);
+          return errorResponse(req, `universe mismatch: run=${Number(begun?.expected_count ?? 0)} snapshot=${built.symbolCount}`, 500);
+        }
       } catch (e) {
         return errorResponse(req, `snapshot build failed: ${e instanceof Error ? e.message : String(e)}`, 500);
       }
       pruneSweepSnapshots(svc).catch(() => {});
     }
+
 
     // One small read per chunk: this chunk's symbols, their reference columns,
     // their settled anchors and their broker tokens — all from the snapshot.
@@ -167,7 +185,13 @@ Deno.serve(async (req) => {
       for (let i = 0; i < symbols.length; i += QUOTE_CHUNK) {
         const keys = symbols.slice(i, i + QUOTE_CHUNK).map((s) => `NSE:${s}`);
         try {
-          const rows = await getSharedQuotes(provider, keys);
+          // EGRESS + correctness: broker-only. The provider's public chain
+          // ends in a stored-close read (market_daily_prices, ~2 MB/day from
+          // this path alone) that would write yesterday's close into the live
+          // plane as if it were a print. The sweep runs its own bounded Yahoo
+          // gap-filler below instead.
+          const rows = await getSharedQuotes(provider, keys, { allowFallback: false });
+
           for (const r of rows) {
             if (!r.price) continue;
             const sym = r.key.includes(":") ? r.key.split(":")[1] : r.key;
@@ -292,7 +316,15 @@ Deno.serve(async (req) => {
     const lastSymbol = String(list[list.length - 1].symbol);
     // A short chunk means the snapshot had nothing more to hand out; the next
     // index would come back empty anyway.
-    const drained = list.length < limit;
+    //
+    // EGRESS: when the snapshot fits in ONE chunk (the watched universe is
+    // ~170 symbols against a 200-symbol chunk) the sweep is complete after
+    // this pass. Trusting only `list.length < limit` meant a full 200-symbol
+    // chunk chained into a second COLD invocation that re-read the snapshot
+    // and the settings row just to find nothing — 3.6 snapshot reads per
+    // recorded run. The authoritative chunk count ends the sweep instead.
+    const drained = (chunkCount >= 0 && chunkIndex >= chunkCount - 1) || list.length < limit;
+
 
     if (drained) {
       const { data: promotion, error: promotionError } = await svc.rpc("promote_market_live_sweep", {

@@ -119,6 +119,35 @@ serve(async (req) => {
     }
     checks.pe_mismatches = peMismatch;
 
+    // ---- 2b. Reference cap vs fundamentals cap ---------------------------
+    // market_stocks.market_cap is derived (yahoo shares x close). When a split
+    // or bonus lands, the shares count and the close drift apart and the cap
+    // inflates — CUPID showed ~35,000 Cr against a real ~1,100 Cr, which then
+    // silently passed a "market cap > 1000 Cr" screener filter. The
+    // fundamentals plane carries an independently sourced cap, so a wide gap
+    // between the two is the honest signal that one of them is stale.
+    const fundCapByKey = new Map<string, number>();
+    for (const f of funds) {
+      if (f.market_cap_cr == null) continue;
+      const v = Number(f.market_cap_cr);
+      if (Number.isFinite(v) && v > 0) fundCapByKey.set(`${f.exchange}:${f.symbol}`, v);
+    }
+    let capDivergence = 0;
+    for (const s of stocks) {
+      const ref = s.market_cap == null ? null : Number(s.market_cap);
+      const alt = fundCapByKey.get(`${s.exchange}:${s.symbol}`);
+      if (ref == null || !Number.isFinite(ref) || ref <= 0 || alt == null) continue;
+      const ratio = ref / alt;
+      if (ratio > 1.5 || ratio < 1 / 1.5) {
+        capDivergence++;
+        warnings.push(
+          `${s.symbol}: market_cap ${Math.round(ref)} Cr vs fundamentals ${Math.round(alt)} Cr ` +
+          `(${ratio.toFixed(2)}x) — likely stale shares outstanding or unadjusted split`,
+        );
+      }
+    }
+    checks.market_cap_divergences = capDivergence;
+
     // ---- 3. Settled bars --------------------------------------------------
     const { data: latestPriceRow } = await supabase
       .from("market_daily_prices").select("trade_date")

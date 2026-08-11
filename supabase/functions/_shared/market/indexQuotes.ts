@@ -179,25 +179,52 @@ async function fromYahoo(reqs: IndexRequest[]): Promise<QuoteRow[]> {
 
 // ---------- 4. Last stored close ----------
 
+// EGRESS: this fallback fires whenever the live feed misses, which on a quiet
+// day is most calls. Caching by the exact symbol SET meant a different mix of
+// indices missed the cache every time — 1,106 reads/day (2.1 MB) of the same
+// handful of settled closes. Cache PER SYMBOL instead, and for a full session:
+// a settled close is immutable, so only symbols that are not yet cached are
+// ever fetched (usually none).
+type CloseBar = { date: string; close: number };
+const closeCache = new Map<string, { bars: CloseBar[]; expiresAt: number }>();
+const CLOSE_TTL_MS = 6 * 3_600_000;
+
 async function fromStoredClose(svc: SupabaseClient, reqs: IndexRequest[]): Promise<QuoteRow[]> {
   if (reqs.length === 0) return [];
-  const symbols = [...new Set(reqs.map((p) => p.symbol))];
-  const { data, error } = await svc
-    .from("market_daily_prices")
-    .select("symbol,exchange,trade_date,close,close_adjusted")
-    .in("symbol", symbols)
-    .order("trade_date", { ascending: false })
-    .limit(symbols.length * 6);
-  if (error || !data) return [];
-  // symbol -> the two most recent closes (latest first)
-  const bySym = new Map<string, Array<{ date: string; close: number }>>();
-  for (const r of data as any[]) {
-    const close = Number(r.close_adjusted ?? r.close);
-    if (!Number.isFinite(close) || close <= 0) continue;
-    const arr = bySym.get(String(r.symbol)) ?? [];
-    if (arr.length < 2) arr.push({ date: String(r.trade_date), close });
-    bySym.set(String(r.symbol), arr);
+  const symbols = [...new Set(reqs.map((p) => p.symbol))].sort();
+  const now = Date.now();
+  const bySym = new Map<string, CloseBar[]>();
+  const missing: string[] = [];
+  for (const s of symbols) {
+    const hit = closeCache.get(s);
+    if (hit && hit.expiresAt > now) bySym.set(s, hit.bars);
+    else missing.push(s);
   }
+
+  if (missing.length > 0) {
+    const res = await svc
+      .from("market_daily_prices")
+      .select("symbol,trade_date,close,close_adjusted")
+      .in("symbol", missing)
+      .order("trade_date", { ascending: false })
+      .limit(missing.length * 6);
+    if (!res.error && res.data) {
+      const fetched = new Map<string, CloseBar[]>();
+      for (const r of res.data as any[]) {
+        const close = Number(r.close_adjusted ?? r.close);
+        if (!Number.isFinite(close) || close <= 0) continue;
+        const arr = fetched.get(String(r.symbol)) ?? [];
+        if (arr.length < 2) arr.push({ date: String(r.trade_date), close });
+        fetched.set(String(r.symbol), arr);
+      }
+      for (const s of missing) {
+        const bars = fetched.get(s) ?? [];
+        closeCache.set(s, { bars, expiresAt: now + CLOSE_TTL_MS });
+        bySym.set(s, bars);
+      }
+    }
+  }
+
   return reqs.flatMap((p) => {
     const arr = bySym.get(p.symbol);
     if (!arr || arr.length === 0) return [];

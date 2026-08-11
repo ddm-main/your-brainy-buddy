@@ -139,6 +139,52 @@ function installRealtimeMeter() {
   window.WebSocket = Wrapped;
 }
 
+// ---------- 1 MB approval gate ----------
+// A response's size is only known once it has arrived, so the first breach is
+// always paid for. What must not happen is paying it again every poll: a route
+// that ever returned more than a megabyte is remembered for the tab's session,
+// and every later request to it is held until the user approves that transfer
+// (with the route, the size it cost last time and who asked for it).
+const OVERSIZE_KEY = "egress.oversize.v1";
+const oversizeRoutes = new Map<string, number>(readOversize());
+const approvedRoutes = new Set<string>();
+
+function readOversize(): Array<[string, number]> {
+  try { return Object.entries(JSON.parse(sessionStorage.getItem(OVERSIZE_KEY) ?? "{}")) as Array<[string, number]>; }
+  catch { return []; }
+}
+function rememberOversize(route: string, bytes: number) {
+  oversizeRoutes.set(route, bytes);
+  try { sessionStorage.setItem(OVERSIZE_KEY, JSON.stringify(Object.fromEntries(oversizeRoutes))); } catch { /* private mode */ }
+}
+
+export type EgressApproval = {
+  route: string;
+  bytes: number;
+  human: string;
+  approve: (remember: boolean) => void;
+  deny: () => void;
+};
+
+/** Resolves true when the transfer may proceed. Falls back to allowing the
+ *  request if nothing is listening for the prompt (e.g. before mount). */
+function requestApproval(route: string, bytes: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v: boolean) => { if (!settled) { settled = true; resolve(v); } };
+    const detail: EgressApproval = {
+      route,
+      bytes,
+      human: human(bytes),
+      approve: (remember: boolean) => { if (remember) approvedRoutes.add(route); done(true); },
+      deny: () => done(false),
+    };
+    const ev = new CustomEvent("egress:approval", { detail, cancelable: true });
+    const listened = !window.dispatchEvent(ev) || (window as any).__egressPromptMounted === true;
+    if (!listened) done(true);
+  });
+}
+
 export function installEgressMeter() {
   if (typeof window === "undefined") return;
   if ((window as any).__egress) return;
@@ -146,11 +192,24 @@ export function installEgressMeter() {
   const original = window.fetch.bind(window);
 
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-    const res = await original(input as any, init);
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
     const hit = classify(url);
     // Never meter the meter, or the read that renders the meter.
-    if (!hit || hit.route.startsWith("rpc/record_egress")) return res;
+    if (!hit || hit.route.startsWith("rpc/record_egress")) return original(input as any, init);
+
+    const known = oversizeRoutes.get(hit.route);
+    if (known && !approvedRoutes.has(hit.route)) {
+      const ok = await requestApproval(hit.route, known);
+      if (!ok) {
+        return new Response(JSON.stringify({ error: "Transfer declined: this read exceeds the 1 MB egress ceiling." }), {
+          status: 413,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    const res = await original(input as any, init);
+
 
     res.clone().arrayBuffer().then((buf) => {
       const bytes = wireBytes(res, buf.byteLength);
@@ -159,9 +218,11 @@ export function installEgressMeter() {
       // `system_egress_daily` without having to correlate byte totals by hand.
       const oversize = bytes >= OVERSIZE_BYTES;
       const overHard = bytes >= HARD_CEILING_BYTES;
+      if (overHard) rememberOversize(hit.route, bytes);
       const route = overHard ? `${hit.route} !1MB` : oversize ? `${hit.route} !OVER` : hit.route;
       bump(pending, `${hit.source}|${route}`, bytes);
       bump(session, route, bytes);
+
       if (oversize) {
         // eslint-disable-next-line no-console
         console.error(

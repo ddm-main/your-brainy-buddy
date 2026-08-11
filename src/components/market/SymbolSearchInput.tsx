@@ -1,4 +1,4 @@
-// Symbol autocomplete — typeahead against market_stocks (the synced tradable
+// Symbol autocomplete — typeahead against market_universe (active, non-penny
 // universe), matching on symbol prefix or company name. Renders the dropdown
 // via a portal with fixed positioning so ancestor `overflow: hidden` on HUD
 // panels can't clip the suggestion list.
@@ -56,9 +56,8 @@ export function SymbolSearchInput({
     if (!term) { setOptions([]); return; }
     const seq = ++reqSeq.current;
     const t = setTimeout(async () => {
-      let q = supabase.from("market_stocks")
+      let q = supabase.from("market_universe")
         .select("symbol,exchange,company_name")
-        .eq("is_active", true)
         .or(`symbol.ilike.${term}%,company_name.ilike.%${term}%`)
         .limit(50);
       if (exchange) q = q.eq("exchange", exchange);

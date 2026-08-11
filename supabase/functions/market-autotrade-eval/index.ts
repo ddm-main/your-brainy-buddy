@@ -191,7 +191,17 @@ Deno.serve(async (req) => {
         const { data: rules } = await svc.from("market_autotrade_rules")
           .select("*").eq("user_id", userId).order("created_at", { ascending: true });
 
+        // EGRESS: a user with no rules at all has nothing to evaluate, and
+        // resolving the provider re-reads the (fat, token-carrying)
+        // market_api_settings row every minute of every trading day for
+        // nothing. Release the lease and move on.
+        if (!rules?.length) {
+          await svc.from("market_autotrade_settings").update({ eval_lock_at: null }).eq("user_id", userId);
+          continue;
+        }
+
         const { provider, settings: kotakSettings } = await getActiveProvider(svc, userId);
+
         if (!BROKER_PROVIDERS.includes(provider.name) || !kotakSettings || kotakSettings.connection_status !== "connected") {
           if (rules?.length) await log(svc, userId, "skip", "Kotak not connected — AutoTrade paused for this tick");
           continue;

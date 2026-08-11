@@ -3,7 +3,8 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
-import type { UniverseId } from "./screenerCatalog";
+import type { UniverseId, ActiveFilter } from "./screenerCatalog";
+import { FILTER_BY_ID, canonicalFilterId, isOpenEndedMax, isOpenEndedMin } from "./screenerCatalog";
 import { safeStorage } from "@/lib/safeStorage";
 import { liveInterval, marketOpen } from "./hooks";
 
@@ -358,12 +359,83 @@ function applyUniverseQuery(q: any, universeSet: Set<string> | "nifty500" | "fno
   return q.eq("instrument_type", "EQ").in("symbol", Array.from(universeSet));
 }
 
+// EGRESS: server-side filter pushdown.
+//
+// A filtered run used to ship the whole universe (`[egress] BUDGET
+// market_screener_rows -> 183 KB in one response`, ceiling 128 KB) and then
+// evaluate the filters in the browser. The four thresholds a Tickertape/ET-style
+// screen uses (price, market cap, 1D return, volume) are plain numeric bounds,
+// so they can be pushed into the query.
+//
+// CORRECTNESS: the pushdown is deliberately a SUPERSET, never the final answer.
+// A row travels in two planes (live + settled) and the Live/EOD toggle decides
+// which one a filter reads, so a bound is pushed as "matches on the live column
+// OR on the settled column OR the column is null". Client-side `filterMatches`
+// still produces the displayed result, so no threshold, mode or null rule can
+// change — only the number of rows on the wire does.
+const SERVER_FILTER_COLUMNS: Record<string, string[]> = {
+  ltp:        ["close", "eod_close"],
+  market_cap: ["market_cap", "eod_market_cap"],
+  change_pct: ["change_pct_raw", "eod_change_pct_raw"],
+  volume:     ["volume", "eod_volume"],
+};
+
+export interface ServerFilter { cols: string[]; gte?: number; lte?: number }
+
+/** Numeric bounds from the active filters that are safe to push into the query. */
+export function planServerFilters(active: ActiveFilter[] | null | undefined): {
+  filters: ServerFilter[];
+  key: string;
+} {
+  const filters: ServerFilter[] = [];
+  for (const af of active ?? []) {
+    const id = canonicalFilterId(af.id);
+    const cols = SERVER_FILTER_COLUMNS[id];
+    const def = FILTER_BY_ID[id];
+    if (!cols || !def || def.kind !== "number") continue;
+    // `nullMeansZero` filters treat a missing value as 0, which the superset
+    // below cannot express safely — leave those entirely to the client.
+    if (def.nullMeansZero) continue;
+    const rawMin = af.min === undefined || af.min === "" || Number.isNaN(Number(af.min)) ? null : Number(af.min);
+    const rawMax = af.max === undefined || af.max === "" || Number.isNaN(Number(af.max)) ? null : Number(af.max);
+    const gte = isOpenEndedMin(def, rawMin) ? null : rawMin;
+    const lte = isOpenEndedMax(def, rawMax) ? null : rawMax;
+    if (gte == null && lte == null) continue;
+    filters.push({ cols, ...(gte != null ? { gte } : {}), ...(lte != null ? { lte } : {}) });
+  }
+  const key = filters.length === 0
+    ? "none"
+    : filters.map((f) => `${f.cols.join("+")}:${f.gte ?? ""}..${f.lte ?? ""}`).sort().join("|");
+  return { filters, key };
+}
+
+function applyServerFilters(q: any, filters: ServerFilter[]): any {
+  let out = q;
+  for (const f of filters) {
+    const parts: string[] = [];
+    for (const col of f.cols) {
+      // Null is always kept: the client decides what a missing value means.
+      parts.push(`${col}.is.null`);
+      const conds: string[] = [];
+      if (f.gte != null) conds.push(`${col}.gte.${f.gte}`);
+      if (f.lte != null) conds.push(`${col}.lte.${f.lte}`);
+      parts.push(conds.length === 1 ? conds[0] : `and(${conds.join(",")})`);
+    }
+    out = out.or(parts.join(","));
+  }
+  return out;
+}
+
 // EGRESS: the statics plane is ~210 KB and only changes after the close, but
 // every reload/new tab re-fetched it because react-query's cache is in memory.
 // Persist it for the session so a day of reloads costs one fetch, not twenty.
 const STATIC_CACHE_PREFIX = "screener.statics.v1:";
 const STATIC_CACHE_TTL_MS = 6 * 3_600_000;
 const STATIC_CACHE_MAX_CHARS = 1_500_000; // stay well inside the 5 MB quota
+
+function staticSessionKey(): string {
+  return new Date(Date.now() + 5.5 * 3_600_000).toISOString().slice(0, 10);
+}
 
 function readStaticCache(key: string): any[] | null {
   const raw = safeStorage.get(STATIC_CACHE_PREFIX + key);
@@ -395,6 +467,7 @@ async function fetchScreenerRows(
   universeSet: Set<string> | "nifty500" | "fno" | "sme" | null,
   columns: string,
   cap: number | null = null,
+  serverFilters: ServerFilter[] = [],
 ): Promise<any[]> {
   const rows: any[] = [];
   const step = cap ? Math.min(cap, PAGE) : PAGE;
@@ -404,7 +477,7 @@ async function fetchScreenerRows(
       .select(columns)
       .eq("is_active", true)
       .eq("exchange", "NSE");
-    const { data, error } = await applyUniverseQuery(base, universeSet)
+    const { data, error } = await applyServerFilters(applyUniverseQuery(base, universeSet), serverFilters)
       .order("breakout_score", { ascending: false, nullsFirst: false })
       .order("symbol", { ascending: true })
       .range(from, from + step - 1);
@@ -645,6 +718,9 @@ export function useScreenerData(
   /** Fetch the whole universe instead of just the first board page. Required by
    *  client-side filtering, sorting on a non-server column and CSV export. */
   loadAll = false,
+  /** Active filters, used ONLY to narrow rows server-side (superset pushdown).
+   *  The displayed result is still decided client-side by `filterMatches`. */
+  active: ActiveFilter[] | null = null,
 ) {
   // EGRESS: the projection and the row cap used to be part of the query key, so
   // every column toggle, filter change or "load all" re-shipped both planes
@@ -655,6 +731,7 @@ export function useScreenerData(
   const projection = widened.projection;
   const cap = widened.loadAll ? null : BOARD_ROWS;
   const capKey = widened.loadAll ? "all" : String(BOARD_ROWS);
+  const server = useMemo(() => planServerFilters(active), [JSON.stringify(active ?? [])]);
 
   // ---- Back-date branch: one deterministic edge-function call, cached forever.
   const asof = useQuery({
@@ -697,11 +774,14 @@ export function useScreenerData(
   // These only change after the close, so this is fetched once per session and
   // never polled — it is ~3/4 of the payload and 0 % of the intraday movement.
   const statics = useQuery({
-    queryKey: ["market", "screener-static-v3", universe, projection.key, capKey],
+    queryKey: ["market", "screener-static-v3", universe, projection.key, capKey, server.key],
     queryFn: async () => {
-      const cacheKey = `${universe}:${projection.key}:${capKey}`;
+      // Static rows must contain the complete candidate population. Intraday
+      // bounds belong only on the polled live plane; filtering this six-hour
+      // cache prevented later threshold crossers from ever entering the merge.
+      const cacheKey = `${staticSessionKey()}:${universe}:${projection.key}:${capKey}:all`;
       const cached = readStaticCache(cacheKey);
-      const rows = cached ?? await fetchScreenerRows(await resolveUniverseFilter(universe), projection.statics, cap);
+      const rows = cached ?? await fetchScreenerRows(await resolveUniverseFilter(universe), projection.statics, cap, []);
 
       if (rows.length === 0) return { rows, idxSets: EMPTY_IDX };
       if (!cached) writeStaticCache(cacheKey, rows);
@@ -720,13 +800,13 @@ export function useScreenerData(
   // ---- Live plane: the ~30 columns that actually tick. Polled on the server
   // sweep cadence (5 min) and never in a background tab.
   const live = useQuery({
-    queryKey: ["market", "screener-live-v3", universe, projection.key, capKey],
+    queryKey: ["market", "screener-live-v3", universe, projection.key, capKey, server.key],
     queryFn: async () => {
       const universeSet = await resolveUniverseFilter(universe);
-      return await fetchScreenerRows(universeSet, projection.live, cap);
+      return await fetchScreenerRows(universeSet, projection.live, cap, server.filters);
 
     },
-    staleTime: marketOpen() ? 4 * 60_000 : 15 * 60_000,
+    staleTime: marketOpen() ? 5 * 60_000 : 15 * 60_000,
     gcTime: 30 * 60_000,
     refetchInterval: liveInterval(5 * 60_000, false),
     refetchIntervalInBackground: false,
@@ -795,7 +875,7 @@ export type VolumeBasis = "paced" | "raw";
 export function projectRowsForMode(
   rows: ScreenerRow[],
   liveMode: boolean,
-  volBasis: VolumeBasis = "paced",
+  volBasis: VolumeBasis = "raw",
 ): ScreenerRow[] {
   if (liveMode) {
     // Volume basis only means something intraday: pace-adjusted compares the

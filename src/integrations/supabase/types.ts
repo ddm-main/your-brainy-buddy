@@ -3825,8 +3825,10 @@ export type Database = {
           expires_at: string
           payload: Json
           session_date: string
+          snapshot_version: number
           sweep_id: string
           symbol_count: number
+          watch_hash: string | null
         }
         Insert: {
           chunk_count?: number
@@ -3835,8 +3837,10 @@ export type Database = {
           expires_at?: string
           payload?: Json
           session_date: string
+          snapshot_version?: number
           sweep_id: string
           symbol_count?: number
+          watch_hash?: string | null
         }
         Update: {
           chunk_count?: number
@@ -3845,8 +3849,10 @@ export type Database = {
           expires_at?: string
           payload?: Json
           session_date?: string
+          snapshot_version?: number
           sweep_id?: string
           symbol_count?: number
+          watch_hash?: string | null
         }
         Relationships: []
       }
@@ -4126,6 +4132,7 @@ export type Database = {
       }
       system_maintenance_log: {
         Row: {
+          details: Json | null
           duration_ms: number | null
           id: string
           mode: string
@@ -4135,6 +4142,7 @@ export type Database = {
           total_deleted: number
         }
         Insert: {
+          details?: Json | null
           duration_ms?: number | null
           id?: string
           mode?: string
@@ -4144,6 +4152,7 @@ export type Database = {
           total_deleted?: number
         }
         Update: {
+          details?: Json | null
           duration_ms?: number | null
           id?: string
           mode?: string
@@ -4975,6 +4984,28 @@ export type Database = {
           symbol: string
         }[]
       }
+      market_live_sweep_universe: {
+        Args: never
+        Returns: {
+          kotak_segment: string
+          series: string
+          symbol: string
+          token: string
+          total_shares_cr: number
+          yahoo_symbol: string
+        }[]
+      }
+      market_live_watch_universe: {
+        Args: never
+        Returns: {
+          kotak_segment: string
+          series: string
+          symbol: string
+          token: string
+          total_shares_cr: number
+          yahoo_symbol: string
+        }[]
+      }
       market_patch_stock_scores: { Args: { _rows: Json }; Returns: number }
       market_penny_sweep: {
         Args: { _min_cap_cr?: number; _min_price?: number }
@@ -5115,6 +5146,33 @@ export type Database = {
               symbol: string
             }[]
           }
+      market_screener_et_parity: {
+        Args: {
+          _after_symbol?: string
+          _limit?: number
+          _min_change_pct?: number
+          _min_market_cap?: number
+          _min_price?: number
+          _volume_above_avg?: boolean
+        }
+        Returns: {
+          breakout_score_v4: number
+          change_pct: number
+          change_pct_raw: number
+          close: number
+          company_name: string
+          exchange: string
+          is_liquid_tradable: boolean
+          live_as_of: string
+          market_cap: number
+          previous_close: number
+          quote_state: string
+          symbol: string
+          trade_date: string
+          vol_avg30: number
+          volume: number
+        }[]
+      }
       promote_market_eod_session: {
         Args: { _trade_date?: string }
         Returns: {

@@ -78,19 +78,51 @@ function classify(url: string, method: string): { source: string; route: string 
 }
 
 
+// A ceiling breach is worth a durable row, not a console line nobody reads.
+// Once per key per isolate so a loop can't turn one bug into a log flood.
+const ceilingReported = new Set<string>();
+function recordCeiling(key: string, bytes: number, level: "warning" | "error" = "error"): void {
+  if (ceilingReported.has(key)) return;
+  ceilingReported.add(key);
+  const url = Deno.env.get("SUPABASE_URL");
+  const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !svcKey) return;
+  const doFetch = originalFetch ?? fetch;
+  void doFetch(`${url}/rest/v1/system_maintenance_log`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Prefer: "return=minimal",
+      apikey: svcKey,
+      Authorization: `Bearer ${svcKey}`,
+    },
+    body: JSON.stringify({
+      task: level === "error" ? "egress_ceiling" : "egress_budget",
+      status: level,
+      message: `${key} returned ${Math.round(bytes / 1024)} KB in one response (limit ${Math.round((level === "error" ? HARD_CEILING_BYTES : OVERSIZE_BYTES) / 1024)} KB)`,
+      details: { route: key, bytes, limit: level === "error" ? HARD_CEILING_BYTES : OVERSIZE_BYTES, caller },
+    }),
+  }).catch(() => {});
+}
+
 function bump(key: string, bytes: number) {
   if (bytes >= HARD_CEILING_BYTES) {
     key = `${key} !1MB`;
     console.error(`[egress] CEILING: ${key} → ${Math.round(bytes / 1024)} KB in one response`);
+    recordCeiling(key, bytes);
   } else if (bytes >= OVERSIZE_BYTES) {
     key = `${key} !OVER`;
     console.warn(`[egress] BUDGET: ${key} → ${Math.round(bytes / 1024)} KB in one response`);
+    // A 128 KB response is a missing filter too; record it once per isolate so
+    // a regression is visible the same day instead of at the month's meter.
+    recordCeiling(key, bytes, "warning");
   }
   const row = pending.get(key) ?? { bytes: 0, requests: 0 };
   row.bytes += bytes;
   row.requests += 1;
   pending.set(key, row);
 }
+
 
 function pendingRequests(): number {
   let n = 0;

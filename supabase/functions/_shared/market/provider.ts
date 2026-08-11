@@ -7,6 +7,9 @@ import { withPgRetry } from "./paginate.ts";
 
 import {
   KOTAK_SETTINGS_COLS,
+  KOTAK_LEAN_COLS,
+  hydrateKotakCredentials,
+
   type KotakSettings,
   kotakCancelOrder,
   kotakConvertPosition,
@@ -211,8 +214,14 @@ type SettingsRow = KotakSettings & { active_provider: string };
 
 // Union of every provider's column set — one read serves whichever provider
 // the row turns out to be, instead of a second round-trip per provider.
+//
+// EGRESS: this used to be the FULL column set, ciphertext blobs included
+// (~3.7 KB per read, ~475 reads/day across the sweep, quotes, indices, orders
+// and the autotrade cron). Routing only needs to know which provider is
+// active and whether its session is live; the auto-login secrets are
+// hydrated by hydrateKotakCredentials() on the rare re-login path.
 const ALL_SETTINGS_COLS = Array.from(new Set(
-  (KOTAK_SETTINGS_COLS + ",active_provider").split(","),
+  (KOTAK_LEAN_COLS + ",active_provider").split(","),
 )).join(",");
 const settingsCache = new Map<string, { rows: SettingsRow[]; expiresAt: number }>();
 const SETTINGS_TTL_MS = 10 * 60_000; // EGRESS: settings change by hand, not by the minute.
@@ -227,6 +236,7 @@ async function getSettingsRows(svc: SupabaseClient, userId: string, useCache = t
     // Account-bound reads only ever use the caller's own trading connection;
     // a data-feed row belongs to the market-data plane, never to a user.
     .eq("purpose", "account");
+
   const rows = (data ?? []) as unknown as SettingsRow[];
   settingsCache.set(userId, { rows, expiresAt: Date.now() + SETTINGS_TTL_MS });
   return rows;
@@ -1148,10 +1158,21 @@ export const BROKER_PROVIDERS = ["kotak_neo"] as const as readonly string[];
 const kotakUsable = (r: SettingsRow): boolean => {
   const completeSession = r.connection_status === "connected"
     && !!r.session_token_enc && !!r.sid && !!r.base_url;
+  // On a lean row the auto-login secrets are `undefined` (not read), so this
+  // half of the test is unknown until hydrateKotakCredentials() fills them in.
   const completeAutoLogin = !!r.consumer_key && !!r.mobile_number_enc
     && !!r.mpin_enc && !!r.totp_secret_enc && !!r.ucc;
   return completeSession || completeAutoLogin;
 };
+
+/** kotakUsable, but hydrates a lean row's secrets before giving up. */
+async function kotakUsableHydrated(svc: SupabaseClient, r: SettingsRow): Promise<boolean> {
+  if (kotakUsable(r)) return true;
+  if (r.mobile_number_enc !== undefined) return false;
+  await hydrateKotakCredentials(svc, r);
+  return kotakUsable(r);
+}
+
 
 function providerForRow(svc: SupabaseClient, row: SettingsRow): MarketProvider | null {
   if (row.active_provider === "kotak_neo") return kotakProvider(svc, row);
@@ -1175,12 +1196,19 @@ export async function getActiveProvider(
     const p = providerForRow(svc, connected);
     if (p) return { provider: p, settings: connected };
   }
-  const credentialed = rows.find((r) => r.active_provider === "kotak_neo" && kotakUsable(r));
+  const credentialed: SettingsRow | undefined = await (async () => {
+    for (const r of rows) {
+      if (r.active_provider !== "kotak_neo") continue;
+      if (await kotakUsableHydrated(svc, r)) return r;
+    }
+    return undefined;
+  })();
 
   if (credentialed) {
     const p = providerForRow(svc, credentialed);
     if (p) return { provider: p, settings: credentialed };
   }
+
   return { provider: yahooProvider(svc), settings: null };
 }
 
@@ -1211,9 +1239,13 @@ async function getSystemFeedRow(svc: SupabaseClient): Promise<SettingsRow | null
     .eq("is_system", true).eq("purpose", "data")
     .in("active_provider", BROKER_PROVIDERS as string[]).limit(1);
   const row: SettingsRow | null = ((designated ?? []) as unknown as SettingsRow[])[0] ?? null;
+  // Lean read: pull the auto-login secrets only when the live session alone
+  // does not already qualify the feed (i.e. it is expired/disconnected).
+  if (row) await kotakUsableHydrated(svc, row);
   systemFeedCache = { row, expiresAt: Date.now() + SYSTEM_FEED_TTL_MS };
   return row;
 }
+
 
 const usableSession = (r: SettingsRow | null | undefined): boolean => !!r && kotakUsable(r);
 

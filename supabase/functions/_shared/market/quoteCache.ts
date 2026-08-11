@@ -46,7 +46,13 @@ function prune(): void {
 export function getSharedQuotes(
   provider: MarketProvider,
   keys: string[],
+  /** Forwarded to the provider — `allowFallback: false` keeps a caller that
+   *  runs its OWN bounded gap-filler (the live sweep) from triggering the
+   *  provider's public chain, whose last link reads market_daily_prices on
+   *  every cold invocation. */
+  opts?: { allowFallback?: boolean },
 ): Promise<QuoteRow[]> {
+
   const now = Date.now();
   const out: QuoteRow[] = [];
   const missing: string[] = [];
@@ -64,7 +70,7 @@ export function getSharedQuotes(
 
   let fetchPromise: Promise<Map<string, QuoteRow>> | null = null;
   if (missing.length > 0) {
-    fetchPromise = provider.getQuotes(missing)
+    fetchPromise = provider.getQuotes(missing, opts)
       .then((rows) => {
         const expiresAt = Date.now() + ttl();
         const byKey = new Map<string, QuoteRow>();

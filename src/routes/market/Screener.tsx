@@ -237,13 +237,22 @@ function ScreenerInner() {
   });
   useEffect(() => { safeStorage.set("screener.liveMode", liveMode ? "1" : "0"); }, [liveMode]);
 
-  // "Volume > 30D Avg" basis: pace-adjusted (intraday volume vs pro-rated
-  // average — the correct intraday test) or raw (cumulative vs full-day
-  // average, which is what Economic Times and other screeners print).
+  // "Volume > 30D Avg" defaults to the literal, externally comparable rule:
+  // cumulative session volume vs the full-day 30D average. Pace-adjusted is an
+  // explicitly selected intraday signal, never a silent replacement formula.
   const [volBasis, setVolBasis] = useState<"paced" | "raw">(
-    () => (safeStorage.get("screener.volBasis") === "raw" ? "raw" : "paced"),
+    () => (safeStorage.get("screener.volBasis") === "paced" ? "paced" : "raw"),
   );
   useEffect(() => { safeStorage.set("screener.volBasis", volBasis); }, [volBasis]);
+
+  // Volume unit for DISPLAY only. Economic Times prints volume in thousands
+  // ('000) while the app stores and filters raw shares, so a threshold copied
+  // from ET is 1,000x off. The toggle makes the basis explicit; stored values
+  // and filter arithmetic are untouched.
+  const [volUnit, setVolUnit] = useState<"shares" | "k">(
+    () => (safeStorage.get("screener.volUnit") === "k" ? "k" : "shares"),
+  );
+  useEffect(() => { safeStorage.set("screener.volUnit", volUnit); }, [volUnit]);
 
   // EGRESS: only the columns this screen can actually render right now are
   // fetched. Everything the table shows, everything the active filters gate on,
@@ -263,7 +272,10 @@ function ScreenerInner() {
   const loadAll = loadAllRequested || active.length > 0 || !!asOfDate;
   const {
     data: rawRows = [], isFetching, error, universeCount, partial,
-  } = useScreenerData(universe, asOfDate, true, neededFields, loadAll);
+    // EGRESS: the active numeric bounds are pushed into the query as a superset,
+    // so a filtered run fetches the matching rows instead of the whole universe.
+    // The displayed result is still decided by the client-side filter pass below.
+  } = useScreenerData(universe, asOfDate, true, neededFields, loadAll, active);
 
   // A back-dated run has no live plane — it is settled history by definition.
   const rows = useMemo(
@@ -888,14 +900,31 @@ function ScreenerInner() {
         },
       },
       volume: {
-        header: "Volume", accessorKey: "volume", meta: { align: "right" },
+        header: volUnit === "k" ? "Volume ('000)" : "Volume", accessorKey: "volume", meta: { align: "right" },
         cell: ({ getValue }) => {
           const v = getValue() as number | null;
-          return v == null ? "—" : fmtInt(v);
+          if (v == null) return "—";
+          return volUnit === "k" ? fmtInt(Math.round(v / 1000)) : fmtInt(v);
         },
       },
-      vol_avg30: { header: "30D Avg Vol", accessorKey: "vol_avg30", meta: { align: "right" }, cell: ({ getValue }) => fmtInt(getValue() as number | null) },
-      vol_gt_avg30: { header: "Vol > 30D", accessorKey: "vol_gt_avg30", meta: { align: "right" }, cell: ({ getValue }) => getValue() == null ? "—" : getValue() ? "Yes" : "No" },
+      vol_avg30: {
+        header: volUnit === "k" ? "30D Avg Vol ('000)" : "30D Avg Vol", accessorKey: "vol_avg30", meta: { align: "right" },
+        cell: ({ getValue }) => {
+          const v = getValue() as number | null;
+          if (v == null) return "—";
+          return volUnit === "k" ? fmtInt(Math.round(v / 1000)) : fmtInt(v);
+        },
+      },
+      // null is "unknown" (no 30-day average yet, e.g. a recent listing), not
+      // "fails the test" — the row is reported as unjudgeable instead.
+      vol_gt_avg30: {
+        header: "Vol > 30D", accessorKey: "vol_gt_avg30", meta: { align: "right" },
+        cell: ({ getValue }) => (
+          getValue() == null
+            ? <span title="No 30-day average volume yet — this stock can't be judged on the volume test.">n/a</span>
+            : getValue() ? "Yes" : "No"
+        ),
+      },
       rel_volume: { header: "RVol", accessorKey: "rel_volume", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
       pe: { header: "PE", accessorKey: "pe", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
       pb: { header: "PB", accessorKey: "pb", meta: { align: "right" }, cell: ({ getValue }) => fmtNum(getValue() as number | null, 1) },
@@ -986,7 +1015,7 @@ function ScreenerInner() {
       },
     };
     return effectiveCols.map((id) => all[id]).filter(Boolean);
-  }, [effectiveCols, latestTradeDate, liveByKey, liveMode, nav]);
+  }, [effectiveCols, latestTradeDate, liveByKey, liveMode, nav, volUnit]);
 
   const columnsWithActions = useMemo<ColumnDef<ScreenerRow, any>[]>(() => {
     return [
@@ -1225,7 +1254,7 @@ function ScreenerInner() {
                   </button>
                 )}
 
-                {/* Volume comparison basis — pace-adjusted vs ET-style raw. */}
+                {/* Raw ET-parity comparison is the default; paced is explicit. */}
                 {liveMode && !asOfDate && (
                   <button type="button" onClick={() => setVolBasis((v) => (v === "raw" ? "paced" : "raw"))}
                     title={volBasis === "raw"
@@ -1240,8 +1269,44 @@ function ScreenerInner() {
                       fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
                       borderRadius: 2,
                     }}>
-                    vol · {volBasis === "raw" ? "raw" : "paced"}
+                    vol · {volBasis === "raw" ? "raw (ET)" : "paced signal"}
                   </button>
+                )}
+
+                {/* Volume unit — display only, states which basis the numbers are in. */}
+                <button type="button" onClick={() => setVolUnit((u) => (u === "k" ? "shares" : "k"))}
+                  title={volUnit === "k"
+                    ? "Volume columns are shown in thousands ('000), the way Economic Times prints them. Filter thresholds are always entered in raw shares. Click for raw shares."
+                    : "Volume columns are shown in raw shares. Economic Times prints thousands ('000) — click to display '000."}
+                  aria-label="Toggle volume unit"
+                  aria-pressed={volUnit === "k"}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 5,
+                    padding: "3px 7px", border: "1px solid var(--edge)", background: "transparent",
+                    color: "var(--text-muted)", cursor: "pointer",
+                    fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
+                    borderRadius: 2,
+                  }}>
+                  {volUnit === "k" ? "vol · '000" : "vol · shares"}
+                </button>
+
+                {/* Staleness must be impossible to miss: filters running on a
+                    plane that stopped publishing is exactly how this screen
+                    silently disagreed with external screeners. */}
+                {liveMode && !asOfDate && nseOpenNow && (!plane || planeAge == null || planeAge > 10) && (
+                  <span
+                    title={!plane
+                      ? "No promoted sweep yet for this session — prices are settled EOD values, so live filters can't match."
+                      : `The last promoted sweep is ${planeAge ?? "?"} minutes old. Filters are running on prices that old.`}
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: 5,
+                      padding: "3px 7px", border: "1px solid var(--danger, #ff6a6a)",
+                      background: "rgba(255,106,106,0.08)", color: "var(--danger, #ff6a6a)",
+                      fontFamily: "var(--font-hud)", fontSize: 10,
+                      letterSpacing: "0.12em", textTransform: "uppercase", borderRadius: 2,
+                    }}>
+                    <AlertTriangle size={11} /> {plane ? `stale ${planeAge}m` : "no sweep"}
+                  </span>
                 )}
 
                 <button type="button" onClick={() => setHideIlliquid((v) => !v)}

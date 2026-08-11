@@ -20,9 +20,17 @@ export function svcClient(): SupabaseClient {
   return createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-    { auth: { persistSession: false } },
+    {
+      auth: { persistSession: false },
+      // EGRESS: PostgREST echoes every written row back by default, so ~22 000
+      // upserts a day paid full row size for a body nothing reads. Writes now
+      // return 204; any call that genuinely needs the row chains `.select()`,
+      // which overrides this header per request.
+      global: { headers: { Prefer: "return=minimal" } },
+    },
   );
 }
+
 
 
 export function jsonResponse(req: Request, body: unknown, status = 200): Response {

@@ -131,7 +131,7 @@ export const FILTERS: FilterDef[] = [
   { id: "sector",             label: "Sector",            category: "basics",     kind: "enum", scope: "eq" },
   { id: "industry",           label: "Industry",          category: "basics",     kind: "enum", scope: "eq" },
   { id: "ltp",                label: "Price",             category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "tech", live: true },
-  { id: "volume",             label: "Volume (shares)",   category: "basics",     kind: "number", min: 0, max: 100_000_000, step: 100_000, scope: "tech", live: true, hint: "Raw shares traded. Economic Times prints volume in thousands ('000) — multiply an ET figure by 1,000 before using it here." },
+  { id: "volume",             label: "Volume (shares)",   category: "basics",     kind: "number", min: 0, max: 100_000_000, step: 100_000, scope: "tech", live: true, hint: "Always entered in raw shares, even when the results table is switched to '000 — that toggle is display-only. Economic Times prints volume in thousands, so multiply an ET figure by 1,000 before using it here." },
   { id: "pct_from_52w_high",  label: "% from 52w High",   category: "basics",     kind: "number", unit: "%", min: -100, max: 20, step: 1, scope: "tech" },
 
   // Valuation — most require positive earnings to be meaningful.
@@ -180,7 +180,7 @@ export const FILTERS: FilterDef[] = [
   // Momentum & Volume
   { id: "change_pct",         label: "1D Return %",       category: "momentum",   kind: "number", unit: "%", min: -20, max: 20, step: 0.1, scope: "tech", valueKey: "change_pct_raw", live: true },
   { id: "rel_volume",         label: "Rel Volume",        category: "momentum",   kind: "number", unit: "x", min: 0, max: 20, step: 0.1, scope: "tech" },
-  { id: "vol_gt_avg30",       label: "Volume > 30D Avg Volume", category: "momentum", kind: "boolean", scope: "tech", live: true },
+  { id: "vol_gt_avg30",       label: "Raw Volume > 30D Avg", category: "momentum", kind: "boolean", scope: "tech", live: true, hint: "ET-parity rule: cumulative session volume must exceed the full-day 30-session average. Recent listings without an average show n/a." },
   { id: "rel_strength_nifty", label: "RS vs NIFTY",       category: "momentum",   kind: "number", unit: "%", min: -50, max: 50, step: 1, scope: "tech" },
   { id: "sector_strength",    label: "Sector Strength",   category: "momentum",   kind: "number", min: 0, max: 1, step: 0.05, scope: "tech" },
   { id: "ret_5d",             label: "5D Return",         category: "momentum",   kind: "number", unit: "%", min: -50, max: 50, step: 0.5, scope: "tech" },
@@ -434,7 +434,10 @@ export function filterMatches(row: Record<string, any>, af: ActiveFilter, latest
   // untouched so that, e.g., an ETF is not dropped by a PE filter. Technical filters
   // are strict: if a row has no technical row/date, it cannot prove it matches.
   const scope: ApplicabilityScope = def.scope ?? (def.fundamental ? "eq" : "all");
-  if (scope === "tech" && latestTradeDate != null && EXACT_SESSION_FILTERS.has(filterId) && row.trade_date !== latestTradeDate) {
+  // A promoted live quote carries its own authoritative session/freshness.
+  // Its static score row may legitimately still be dated to the prior close.
+  const validLiveQuote = row.quote_state === "live" && row.live_stale !== true;
+  if (scope === "tech" && latestTradeDate != null && EXACT_SESSION_FILTERS.has(filterId) && !validLiveQuote && row.trade_date !== latestTradeDate) {
     return false;
   }
   if (!rowIsApplicable(row, scope, latestTradeDate)) {

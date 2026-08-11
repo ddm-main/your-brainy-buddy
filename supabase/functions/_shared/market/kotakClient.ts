@@ -17,12 +17,16 @@ export interface KotakSettings {
   id: string;
   user_id: string;
   consumer_key: string | null;
-  mobile_number_enc: string | null;
-  mpin_enc: string | null;
-  totp_secret_enc: string | null;
+  // EGRESS: the three auto-login secrets and the view token are large
+  // ciphertext blobs (~2 KB of the row) that only the re-login path ever
+  // reads. Every settings read used to ship them. They are now `undefined`
+  // on a lean read and hydrated on demand — see hydrateKotakCredentials().
+  mobile_number_enc?: string | null;
+  mpin_enc?: string | null;
+  totp_secret_enc?: string | null;
   base_url: string | null;
   ucc: string | null;
-  view_token_enc: string | null;
+  view_token_enc?: string | null;
   session_token_enc: string | null;
   sid: string | null;
   hs_server_id: string | null;
@@ -32,6 +36,32 @@ export interface KotakSettings {
 
 export const KOTAK_SETTINGS_COLS =
   "id,user_id,consumer_key,mobile_number_enc,mpin_enc,totp_secret_enc,base_url,ucc,view_token_enc,session_token_enc,sid,hs_server_id,connection_status,token_expires_at";
+
+/** Everything except the auto-login secrets and the view token: enough to
+ *  route, to know whether a session is live and to sign an API call. */
+export const KOTAK_LEAN_COLS =
+  "id,user_id,consumer_key,base_url,ucc,session_token_enc,sid,hs_server_id,connection_status,token_expires_at";
+
+const CREDENTIAL_COLS = "mobile_number_enc,mpin_enc,totp_secret_enc,view_token_enc";
+
+/** Fill in the auto-login secrets on a row read with KOTAK_LEAN_COLS. No-op
+ *  when they are already present (a full read, or an earlier hydration). */
+export async function hydrateKotakCredentials(
+  svc: { from: (t: string) => any },
+  s: KotakSettings,
+): Promise<KotakSettings> {
+  if (s.mobile_number_enc !== undefined) return s;
+  const { data } = await svc.from("market_api_settings")
+    .select(CREDENTIAL_COLS).eq("id", s.id).maybeSingle();
+  Object.assign(s, {
+    mobile_number_enc: data?.mobile_number_enc ?? null,
+    mpin_enc: data?.mpin_enc ?? null,
+    totp_secret_enc: data?.totp_secret_enc ?? null,
+    view_token_enc: data?.view_token_enc ?? null,
+  });
+  return s;
+}
+
 
 async function dec(encJson: string | null): Promise<string | null> {
   if (!encJson) return null;
@@ -240,10 +270,10 @@ export async function kotakLogin(
   totpCode: string,
 ): Promise<KotakSession> {
   if (!s.consumer_key) throw new KotakError("Consumer key not configured", 400);
-  const mobile = await dec(s.mobile_number_enc);
+  const mobile = await dec(s.mobile_number_enc ?? null);
   // Kotak rejects anything longer than 6 chars for Mpin, so strip stray
   // whitespace/formatting the stored value may carry before sending it.
-  const mpin = (await dec(s.mpin_enc))?.replace(/\D/g, "") ?? "";
+  const mpin = (await dec(s.mpin_enc ?? null))?.replace(/\D/g, "") ?? "";
   if (!mobile) throw new KotakError("Mobile number not configured", 400);
   if (!mpin) throw new KotakError("MPIN not configured", 400);
   if (mpin.length > 6) {
@@ -345,7 +375,7 @@ export function isInvalidOtpAnswer(e: unknown): boolean {
 }
 
 export async function kotakAutoLogin(s: KotakSettings): Promise<KotakSession> {
-  const secret = await dec(s.totp_secret_enc);
+  const secret = await dec(s.totp_secret_enc ?? null);
   if (!secret) throw new KotakError("TOTP secret not configured", 400);
   const now = Date.now();
   let lastErr: unknown;
@@ -1122,8 +1152,11 @@ export async function withKotakSession<T>(
       );
     }
     if (!(e instanceof KotakError) || !isKotakSessionError(e)) throw e;
-    if (retryOnAuthError && s.totp_secret_enc) {
+    // `undefined` means the row was read lean; the secrets are hydrated
+    // inside the lock, so a lean row is still eligible for unattended re-login.
+    if (retryOnAuthError && s.totp_secret_enc !== null) {
       const fresh: KotakSettings = await withReloginLock(s.id, async () => {
+
         // Another concurrent call may have already refreshed the session
         // while we waited on the lock. Re-read; if the persisted token is
         // newer than what we came in with, use it and skip the login.
@@ -1135,8 +1168,11 @@ export async function withKotakSession<T>(
           && firstNonEmpty(latest.hs_server_id, hsServerIdFromBaseUrl(String(latest.base_url ?? "")))) {
           return { ...s, ...latest } as KotakSettings;
         }
+        await hydrateKotakCredentials(svc, s);
+        if (!s.totp_secret_enc) throw e;
         const sess = await kotakAutoLogin(s);
         await persistSession(svc, s, sess, encrypt);
+
         return {
           ...s,
           sid: sess.editSid,
