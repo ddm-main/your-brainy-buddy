@@ -70,7 +70,7 @@ async function persistMembers(svc: ReturnType<typeof svcClient>, slug: string, m
       industry: m.industry,
       yahoo_symbol: `${m.symbol}.NS`,
       is_active: true,
-      in_universe: true,
+      // Universe admission is the sweep's job (needs a known market cap).
       ...(indexKey === "NIFTY500" ? { is_nifty500: true } : {}),
     }));
     await svc.from("market_stocks").upsert(batch, { onConflict: "symbol,exchange" });

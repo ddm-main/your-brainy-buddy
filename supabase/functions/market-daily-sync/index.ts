@@ -91,14 +91,21 @@ Deno.serve(async (req) => {
   // If this never runs, the screener sits a whole session behind the scores —
   // so it is invoked from a `finally`, not inline in the happy path.
   let snapshotDone = false;
-  const refreshScreenerSnapshot = async () => {
-    if (snapshotDone) return;
-    snapshotDone = true;
+  // `reason` distinguishes the interim refresh (right after prices+scores
+  // land) from the final one. The interim refresh is what stops the screener
+  // showing "no quote" for symbols whose bhavcopy price arrived AFTER the last
+  // snapshot rebuild — on 2026-08-11 that was 90 symbols priced at 18:45/19:04
+  // against a snapshot frozen at 18:41.
+  const refreshScreenerSnapshot = async (reason: "interim" | "final" = "final") => {
+    if (reason === "final") {
+      if (snapshotDone) return;
+      snapshotDone = true;
+    }
     const snapStart = Date.now();
     const { data: rows, error: snapErr } = await svc.rpc("refresh_market_screener_snapshot");
     summary.push({
       fn: "market-screener-snapshot" as StepFn,
-      label: "Screener snapshot",
+      label: `Screener snapshot (${reason})`,
       status: snapErr ? "failed" : "ok",
       iterations: 1,
       last_response: { rows: rows ?? null },
@@ -111,10 +118,11 @@ Deno.serve(async (req) => {
       status: snapErr ? "failed" : "ok",
       rows_ingested: typeof rows === "number" ? rows : 0,
       duration_ms: Date.now() - snapStart,
-      metadata: { error: snapErr?.message ?? null },
+      metadata: { error: snapErr?.message ?? null, reason },
       finished_at: new Date().toISOString(),
     });
   };
+
 
   const runChain = async () => {
    try {
@@ -200,8 +208,17 @@ Deno.serve(async (req) => {
         finished_at: new Date().toISOString(),
       });
 
+      // Prices and scores for the session are complete at this point. Rebuild
+      // the screener snapshot NOW rather than only after the hour-long
+      // fundamentals/technicals drains, so the board never serves a session
+      // with null trade_dates while the rest of the chain runs.
+      if (step.fn === "market-rescore-from-prices" && status === "ok") {
+        try { await refreshScreenerSnapshot("interim"); } catch { /* recorded above */ }
+      }
+
       // Continue the chain even on failure — later steps (technicals, aggregates)
       // must still run so the app has fresh scores; the failure is recorded above.
+
     }
 
     // Rebuild the screener snapshot before the freshness assertion. It also

@@ -461,7 +461,12 @@ function writeStaticCache(key: string, rows: any[]): void {
 // the same order the board opens in — and the full plane is only fetched when
 // something actually needs it (an active filter, a CSV export, "load all").
 export const BOARD_ROWS = 300;
-const PAGE = 1000;
+// EGRESS: one response must stay under the 128 KB oversize ceiling enforced by
+// src/lib/egressMeter.ts. A 1 000-row page of the wide plane measured 237 KB
+// (27 cols) / 176 KB (22 cols) — i.e. ~165 B per row — so the full-plane read
+// now pages in 600-row slices (~100 KB worst case) instead of one oversize hit.
+const PAGE = 600;
+
 
 async function fetchScreenerRows(
   universeSet: Set<string> | "nifty500" | "fno" | "sme" | null,

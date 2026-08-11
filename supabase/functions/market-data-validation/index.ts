@@ -66,7 +66,7 @@ serve(async (req) => {
 
     // ---- 1. Reference universe -------------------------------------------
     const stocks = await selectAll<any>(
-      supabase, "market_stocks", "symbol,exchange,market_cap,roe,is_active,series,instrument_type",
+      supabase, "market_stocks", "symbol,exchange,market_cap,roe,is_active,series,instrument_type,in_universe",
       (q) => q.eq("is_active", true),
     );
     validated += stocks.length;
@@ -74,10 +74,24 @@ serve(async (req) => {
 
     const seen = new Set<string>();
     let dupes = 0;
+    let nullCapInUniverse = 0;
+    let indexInUniverse = 0;
     for (const s of stocks) {
       const key = `${s.exchange}:${s.symbol}`;
       if (seen.has(key)) { dupes++; errors.push(`duplicate active row: ${key}`); }
       seen.add(key);
+      if (s.in_universe === true) {
+        // The universe gate requires a known market cap and excludes index
+        // rows — either state means the monthly sweep left drift behind.
+        if (s.market_cap == null) {
+          nullCapInUniverse++;
+          errors.push(`${s.symbol}: in universe with no market_cap`);
+        }
+        if (String(s.instrument_type ?? "EQ") === "INDEX") {
+          indexInUniverse++;
+          errors.push(`${s.symbol}: index row marked in_universe`);
+        }
+      }
       if (s.market_cap != null && Number(s.market_cap) <= 0) {
         warnings.push(`${s.symbol}: non-positive market_cap (${s.market_cap})`);
       }
@@ -86,6 +100,8 @@ serve(async (req) => {
       }
     }
     checks.duplicate_symbols = dupes;
+    checks.universe_null_market_cap = nullCapInUniverse;
+    checks.universe_index_rows = indexInUniverse;
 
     // ---- 2. Fundamentals plane -------------------------------------------
     const funds = await selectAll<any>(

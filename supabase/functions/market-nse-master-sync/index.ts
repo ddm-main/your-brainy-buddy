@@ -133,7 +133,9 @@ Deno.serve(async (req) => {
           company_name: company, series, isin,
           yahoo_symbol: `${symbol}.NS`,
           instrument_type: "EQ",
-          is_active: true, in_universe: true,
+          // in_universe is not set here: the monthly sweep / scrips-sync admit
+          // a name only once a market cap is known.
+          is_active: true,
         });
       }
     }
@@ -185,7 +187,7 @@ Deno.serve(async (req) => {
       }
       const seedRows = [...toSeed.values()].map((r) => ({
         symbol: r.symbol, exchange: "NSE", series: r.series,
-        instrument_type: "EQ", is_active: true, in_universe: true,
+        instrument_type: "EQ", is_active: true,
         yahoo_symbol: `${r.symbol}.NS`,
       }));
       for (let i = 0; i < seedRows.length; i += 500) {

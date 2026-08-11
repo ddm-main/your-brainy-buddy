@@ -323,7 +323,13 @@ Deno.serve(async (req) => {
     // chunk chained into a second COLD invocation that re-read the snapshot
     // and the settings row just to find nothing — 3.6 snapshot reads per
     // recorded run. The authoritative chunk count ends the sweep instead.
-    const drained = (chunkCount >= 0 && chunkIndex >= chunkCount - 1) || list.length < limit;
+    // A short chunk is NOT proof of drain when the snapshot's own chunk count
+    // says more chunks remain: that is exactly how every sweep on 2026-08-11
+    // ended after chunk 0 with 169 of 2 656 symbols priced and failed the
+    // promotion floor. Trust the authoritative count when we have it, and only
+    // fall back to the short-chunk heuristic on a chained (cold) invocation.
+    const drained = chunkCount >= 0 ? chunkIndex >= chunkCount - 1 : list.length < limit;
+
 
 
     if (drained) {

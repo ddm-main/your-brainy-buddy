@@ -961,6 +961,39 @@ export type Database = {
         }
         Relationships: []
       }
+      market_excluded_symbols: {
+        Row: {
+          company_name: string | null
+          exchange: string
+          excluded_at: string
+          last_close: number | null
+          market_cap: number | null
+          reason: string
+          series: string | null
+          symbol: string
+        }
+        Insert: {
+          company_name?: string | null
+          exchange?: string
+          excluded_at?: string
+          last_close?: number | null
+          market_cap?: number | null
+          reason: string
+          series?: string | null
+          symbol: string
+        }
+        Update: {
+          company_name?: string | null
+          exchange?: string
+          excluded_at?: string
+          last_close?: number | null
+          market_cap?: number | null
+          reason?: string
+          series?: string | null
+          symbol?: string
+        }
+        Relationships: []
+      }
       market_feed_heartbeat: {
         Row: {
           detail: string | null
@@ -4968,6 +5001,15 @@ export type Database = {
           yahoo_symbol: string
         }[]
       }
+      market_is_non_equity: {
+        Args: {
+          _company_name: string
+          _instrument_type: string
+          _series: string
+          _symbol: string
+        }
+        Returns: boolean
+      }
       market_live_settled_anchors: {
         Args: { _before: string; _symbols: string[] }
         Returns: {
@@ -5034,6 +5076,8 @@ export type Database = {
           provider: string
         }[]
       }
+      market_purge_orphans: { Args: never; Returns: Json }
+      market_purge_symbols: { Args: { _symbols: string[] }; Returns: number }
       market_rescore_latest_from_prices: {
         Args: { _limit?: number; _trade_date?: string }
         Returns: number

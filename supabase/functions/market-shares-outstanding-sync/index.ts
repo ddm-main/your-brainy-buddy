@@ -86,6 +86,7 @@ function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
 
 type Candidate = {
   symbol: string;
+  market_cap: number | null;
   shares_sync_attempts: number | null;
   shares_sync_attempted_at: string | null;
 };
@@ -121,11 +122,11 @@ Deno.serve(async (req) => {
     const pool = await fetchAllRows<Candidate>((from, to) =>
       supabase
         .from("market_stocks")
-        .select("symbol,shares_sync_attempts,shares_sync_attempted_at")
+        .select("symbol,market_cap,shares_sync_attempts,shares_sync_attempted_at")
         .eq("is_active", true).eq("exchange", "NSE")
-        // Penny-excluded names are out of the universe; their share counts are
-        // never read and market_shares_outstanding rejects their rows anyway.
-        .not("penny_excluded", "is", true)
+        // `in_universe` is the single universe gate; excluded names' share
+        // counts are never read and market_shares_outstanding rejects them.
+        .eq("in_universe", true)
         .order("symbol")
         .range(from, to) as any,
     );
@@ -160,9 +161,14 @@ Deno.serve(async (req) => {
       return true;
     });
 
-    // Never-attempted symbols first, then least-recently-attempted. This is
-    // what finally drags the alphabetical tail of the universe into coverage.
+    // Stocks with no market cap on record come first: the monthly penny scan can
+    // only judge them on price until a cap exists. Then never-attempted symbols,
+    // then least-recently-attempted — that is what finally drags the
+    // alphabetical tail of the universe into coverage.
     eligible.sort((a, b) => {
+      const ac = a.market_cap == null ? 0 : 1;
+      const bc = b.market_cap == null ? 0 : 1;
+      if (ac !== bc) return ac - bc;
       const aa = a.shares_sync_attempts ?? 0, ba = b.shares_sync_attempts ?? 0;
       if (aa !== ba) return aa - ba;
       const at = a.shares_sync_attempted_at ?? "", bt = b.shares_sync_attempted_at ?? "";

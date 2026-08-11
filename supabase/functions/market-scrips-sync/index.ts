@@ -262,13 +262,15 @@ Deno.serve(async (req) => {
         { onConflict: "symbol,exchange", ignoreDuplicates: true },
       );
     }
-    // Flag every active NSE equity as in_universe — the screener view and
-    // sync pipelines now cover the full active set, not just Nifty 500 + user
-    // holdings. Nifty 500 membership stays on is_nifty500 below.
-    // Penny-excluded names (weekly market-penny-sweep) must not be re-admitted
-    // here; a BEFORE trigger also re-asserts in_universe=false for them.
+    // `in_universe` is the single gate. Admit every active NSE equity that has
+    // a known market cap; a capless or penny name stays out until the monthly
+    // sweep proves it clean (a BEFORE trigger re-asserts that too, and index
+    // rows are never universe members). Nifty 500 membership stays on
+    // is_nifty500 below.
     await svc.from("market_stocks").update({ in_universe: true })
       .eq("is_active", true).eq("exchange", "NSE")
+      .eq("instrument_type", "EQ")
+      .not("market_cap", "is", null)
       .not("penny_excluded", "is", true);
     // Flag is_nifty500 on the official (or fallback) list
     await svc.from("market_stocks").update({ is_nifty500: false }).eq("is_nifty500", true);

@@ -190,7 +190,8 @@ Deno.serve(async (req) => {
         symbol, exchange: "BSE",
         company_name: name, isin,
         yahoo_symbol: `${symbol}.BO`,
-        instrument_type: "EQ", is_active: true, in_universe: true,
+        // Universe admission is the sweep's job (needs a known market cap).
+        instrument_type: "EQ", is_active: true,
       });
       eodBatch.push({
         symbol, exchange: "BSE", series: type || "A",

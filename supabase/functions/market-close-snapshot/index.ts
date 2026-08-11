@@ -143,11 +143,23 @@ Deno.serve(async (req) => {
         c = (row?.last_symbol as string | null) ?? null;
         if (processed === 0 || !c) break;
       }
+      // The screener reads a precomputed snapshot table, not the live view —
+      // rebuilding it here is what makes the fresh closes visible instead of
+      // leaving the board on null trade_dates until some later job happens to
+      // refresh it.
+      let snapshotRows: number | null = null;
+      let snapshotError: string | null = null;
+      {
+        const { data: snap, error: snapErr } = await svc.rpc("refresh_market_screener_snapshot");
+        snapshotRows = typeof snap === "number" ? snap : null;
+        snapshotError = snapErr?.message ?? null;
+      }
       await svc.from("market_ingestion_runs").insert({
-        source: "close_snapshot", stage: "drained", status: "ok",
+        source: "close_snapshot", stage: "drained", status: snapshotError ? "error" : "ok",
         trade_date: today, rows_ingested: rescored,
-        metadata: { rescored, trade_date: today },
+        metadata: { rescored, trade_date: today, snapshot_rows: snapshotRows, snapshot_error: snapshotError },
       });
+
     } else if (chain && isCron) {
       // Self-chain the next batch so one cron tick drains the universe.
       const secret = req.headers.get("x-cron-secret") ?? "";

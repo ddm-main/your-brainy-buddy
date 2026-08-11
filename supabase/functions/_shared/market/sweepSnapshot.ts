@@ -45,7 +45,7 @@ type UniverseRow = {
 // Bump whenever the encoded payload or authoritative universe semantics change.
 // This is part of reuse eligibility, so a same-day deployment cannot keep an
 // obsolete watched-only snapshot alive for the rest of the session.
-const SNAPSHOT_VERSION = 2;
+const SNAPSHOT_VERSION = 3;
 
 /** Stable fingerprint of the watched set, so a snapshot is rebuilt the moment
  *  a symbol is added to a watchlist / holding / alert and not before. */

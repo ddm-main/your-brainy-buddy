@@ -111,10 +111,10 @@ Deno.serve(async (req) => {
       .select("symbol,exchange,yahoo_symbol,sector,market_cap,price_sync_attempts,price_sync_attempts_day")
       .eq("is_active", true)
       .eq("exchange", "NSE")
-      // Same penny rule as `market_universe` (this query needs sync-bookkeeping
-      // columns the view doesn't expose). Penny bars are rejected by trigger,
-      // so pricing them is pure wasted quota.
-      .not("penny_excluded", "is", true)
+      // `in_universe` is the single universe gate (this query needs
+      // sync-bookkeeping columns the view doesn't expose). Out-of-universe bars
+      // are rejected by trigger, so pricing them is pure wasted quota.
+      .eq("in_universe", true)
       .or(`last_price_sync_at.is.null,last_price_sync_at.lt.${cutoff}`)
       .or(`price_data_missing_at.is.null,price_data_missing_at.lt.${unavailableCutoff}`)
       // Cap same-day retries at 3 per symbol so a permanently-broken symbol
@@ -136,7 +136,7 @@ Deno.serve(async (req) => {
         .select("symbol,exchange,yahoo_symbol,sector,market_cap,price_sync_attempts,price_sync_attempts_day")
         .eq("is_active", true)
         .eq("exchange", "NSE")
-        .not("penny_excluded", "is", true)
+        .eq("in_universe", true)
         .in("symbol", symbols.slice(0, room * 3))
         .or(`price_sync_attempts_day.neq.${today},price_sync_attempts.lt.3`);
       for (const r of rows ?? []) {
@@ -214,6 +214,11 @@ Deno.serve(async (req) => {
       }
     }
     let contextPreserved = 0;
+    // Symbols whose score row already sits on a NEWER session than this pass's
+    // settled bar — skipped instead of rolled back. Reported so a systematic
+    // provider lag is visible rather than silent.
+    let sessionRegressionsSkipped = 0;
+
     // Per-symbol coverage failures ("insufficient candles", Yahoo 404 on a
     // delisted ticker) are NOT provider outages, and writing one health row
     // per symbol both slandered the broker on the Providers page (617 rows in
@@ -389,6 +394,19 @@ Deno.serve(async (req) => {
           const keepContext = !!prior?.context_complete && prior.trade_date === nseTradeDate;
           if (keepContext) contextPreserved++;
 
+          // NEVER regress the score row to an older session. This pass writes
+          // the last SETTLED provider bar (frequently T-1), while
+          // market_rescore_prices_batch has already priced the row from the
+          // authoritative bhavcopy session (T). market_stock_scores is keyed
+          // (symbol, exchange) — one row per symbol — so the older bar
+          // overwrote today's, which is what left 520 of 1 440 symbols stuck
+          // on the previous session after the 2026-08-11 chain. Daily prices
+          // and indicator overlays are still written; only the score row is
+          // held back.
+          const regressesSession = !!prior?.trade_date && prior.trade_date > nseTradeDate;
+          if (regressesSession) sessionRegressionsSkipped++;
+
+
           const scoreFields = keepContext ? {} : {
             breakout_score: bs.score,
             prebreakout_score: ps.score,
@@ -422,7 +440,7 @@ Deno.serve(async (req) => {
           };
 
 
-          scoreBuf.push({
+          if (!regressesSession) scoreBuf.push({
             symbol: stock.symbol,
             exchange: stock.exchange,
             trade_date: nseTradeDate,
@@ -610,6 +628,8 @@ Deno.serve(async (req) => {
       ok: true, processed: candidates.length, succeeded: okCount, failed: realFailures,
       skipped_unavailable: permanentCount,
       symbol_errors: symbolErrors.slice(0, 20), context_preserved: contextPreserved,
+      session_regressions_skipped: sessionRegressionsSkipped,
+
       local_rescored: localRescored, score_stale_remaining: scoreStaleRemaining,
       drained: candidates.length < CHUNK,
     });
