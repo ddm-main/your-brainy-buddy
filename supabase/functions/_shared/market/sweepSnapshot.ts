@@ -45,7 +45,35 @@ type UniverseRow = {
 // Bump whenever the encoded payload or authoritative universe semantics change.
 // This is part of reuse eligibility, so a same-day deployment cannot keep an
 // obsolete watched-only snapshot alive for the rest of the session.
-const SNAPSHOT_VERSION = 3;
+// v4: the universe is read in explicit pages. v3 snapshots were silently
+// truncated to PostgREST's 1 000-row ceiling (universe = 1 441), which failed
+// the run/snapshot equality guard on every sweep and froze the live plane.
+const SNAPSHOT_VERSION = 4;
+
+/** PostgREST caps an unranged response; the universe must be paged explicitly. */
+const UNIVERSE_PAGE = 1000;
+
+/** Read the whole sweep universe, page by page.
+ *  A single `.rpc()` call returns at most `db-max-rows` (1 000) rows, so an
+ *  unpaged read silently truncated a 1 441-symbol universe — the snapshot then
+ *  disagreed with the run's SQL-side `expected_count` and every sweep failed
+ *  with "universe mismatch". Paging is the only way to prove completeness. */
+async function readUniverse(svc: SupabaseClient): Promise<UniverseRow[]> {
+  const out: UniverseRow[] = [];
+  for (let from = 0; ; from += UNIVERSE_PAGE) {
+    const { data, error } = await svc
+      .rpc("market_live_sweep_universe")
+      .range(from, from + UNIVERSE_PAGE - 1);
+    if (error) throw new Error(error.message);
+    const page = ((data ?? []) as unknown as UniverseRow[]).filter((r) => r.symbol);
+    out.push(...page);
+    if (page.length < UNIVERSE_PAGE) break;
+    // Hard stop: the universe is ~1.5 k symbols. Anything beyond this is a bug,
+    // not a market.
+    if (out.length > 50_000) break;
+  }
+  return out;
+}
 
 /** Stable fingerprint of the watched set, so a snapshot is rebuilt the moment
  *  a symbol is added to a watchlist / holding / alert and not before. */
@@ -81,10 +109,18 @@ export async function buildSweepSnapshot(
   sweepId: string,
   sessionDate: string,
   chunkSize: number,
+  /** The run's SQL-side population count. When given, a snapshot that does not
+   *  match it is rejected here with a truncation-aware message instead of
+   *  silently producing a short universe. */
+  expectedCount?: number | null,
 ): Promise<{ chunkCount: number; symbolCount: number; reused: boolean }> {
-  const { data: watchRows, error: watchErr } = await svc.rpc("market_live_sweep_universe");
-  if (watchErr) throw new Error(watchErr.message);
-  const rows = ((watchRows ?? []) as unknown as UniverseRow[]).filter((r) => r.symbol);
+  const rows = await readUniverse(svc);
+  if (expectedCount != null && expectedCount > 0 && rows.length !== expectedCount) {
+    throw new Error(
+      `universe read incomplete: expected ${expectedCount}, read ${rows.length}` +
+      (rows.length % UNIVERSE_PAGE === 0 ? " (looks like a truncated PostgREST page)" : ""),
+    );
+  }
   const watchHash = await hashSymbols(rows.map((r) => String(r.symbol)));
 
   // Reuse this session's snapshot when one is already built for the same

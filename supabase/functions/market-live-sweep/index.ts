@@ -120,20 +120,31 @@ Deno.serve(async (req) => {
       // Resolve the whole universe + anchors + broker tokens ONCE for this
       // sweep. Every chained chunk below then reads just its own slice.
       try {
-        const built = await buildSweepSnapshot(svc, sweepId, sessionDate, limit);
+        const runExpected = Number(begun?.expected_count ?? 0);
+        const built = await buildSweepSnapshot(svc, sweepId, sessionDate, limit, runExpected);
         chunkCount = built.chunkCount;
         // The DB run and snapshot must use the same authoritative population.
         // Never hide schema drift by silently replacing the denominator.
-        if (built.symbolCount <= 0 || Number(begun?.expected_count) !== built.symbolCount) {
+        if (built.symbolCount <= 0 || runExpected !== built.symbolCount) {
+          const hint = built.symbolCount > 0 && built.symbolCount % 1000 === 0
+            ? " (snapshot count is an exact page multiple — the universe read was truncated, not shrunk)"
+            : "";
+          const msg = `universe mismatch: run=${runExpected} snapshot=${built.symbolCount}${hint}`;
           await svc.from("market_live_price_runs").update({
             status: "failed",
             completed_at: new Date().toISOString(),
-            error_message: `universe mismatch: run=${Number(begun?.expected_count ?? 0)} snapshot=${built.symbolCount}`,
+            error_message: msg,
           }).eq("sweep_id", sweepId);
-          return errorResponse(req, `universe mismatch: run=${Number(begun?.expected_count ?? 0)} snapshot=${built.symbolCount}`, 500);
+          return errorResponse(req, msg, 500);
         }
       } catch (e) {
-        return errorResponse(req, `snapshot build failed: ${e instanceof Error ? e.message : String(e)}`, 500);
+        const msg = `snapshot build failed: ${e instanceof Error ? e.message : String(e)}`;
+        await svc.from("market_live_price_runs").update({
+          status: "failed",
+          completed_at: new Date().toISOString(),
+          error_message: msg,
+        }).eq("sweep_id", sweepId);
+        return errorResponse(req, msg, 500);
       }
       pruneSweepSnapshots(svc).catch(() => {});
     }
