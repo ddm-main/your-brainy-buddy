@@ -1,7 +1,7 @@
 // Stock Screener — Tickertape/Screener.in-style 2-pane layout.
 // Left rail: collapsible filter categories with search & data-coverage chips.
 // Right pane: query chips → results grid with coverage note, pagination & CSV.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
@@ -9,7 +9,7 @@ import type { ColumnDef, SortingState } from "@tanstack/react-table";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { HudModal } from "@/components/hud/HudModal";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
-import { DataTable, deriveChangeAbs, fmtInt, fmtNum, PctCell, Return1DCell } from "@/components/hud/DataTable";
+import { DataTable, fmtInt, fmtNum, PctCell, Return1DCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { AddToWatchlistButton } from "@/components/market/AddToWatchlistButton";
 
@@ -32,8 +32,6 @@ import {
   latestTradeDateOf,
   resolveReferenceSession,
   isEquityRow,
-  isOpenEndedMax,
-  isOpenEndedMin,
   TECH_FRESHNESS_LAG_DAYS,
   type ActiveFilter,
   type FilterDef,
@@ -496,9 +494,8 @@ function ScreenerInner() {
   }, [universe, active]);
 
 
-  // "+ Add Filter" picker: bring a filter into the sidebar seeded with its full
-  // catalogue range, ready to narrow. Edge values are open-ended (see
-  // isOpenEndedMax/Min), so a freshly-added filter never drops a single row.
+  // "+ Add Filter" picker: bring a blank filter into the sidebar. Every bound
+  // the user enters is then treated literally and inclusively.
   const addFilter = (fid: string) => {
     const id = canonicalFilterId(fid);
     if (active.some((a) => canonicalFilterId(a.id) === id)) return;
