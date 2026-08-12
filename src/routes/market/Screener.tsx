@@ -1,7 +1,7 @@
 // Stock Screener — Tickertape/Screener.in-style 2-pane layout.
 // Left rail: collapsible filter categories with search & data-coverage chips.
 // Right pane: query chips → results grid with coverage note, pagination & CSV.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
@@ -9,16 +9,13 @@ import type { ColumnDef, SortingState } from "@tanstack/react-table";
 import { HudPanel } from "@/components/hud/HudPanel";
 import { HudModal } from "@/components/hud/HudModal";
 import { Btn, Chip, EmptyState, inputStyle, labelStyle } from "@/components/hud/HudControls";
-import { DataTable, deriveChangeAbs, fmtInt, fmtNum, PctCell, Return1DCell } from "@/components/hud/DataTable";
+import { DataTable, fmtInt, fmtNum, PctCell, Return1DCell } from "@/components/hud/DataTable";
 import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { AddToWatchlistButton } from "@/components/market/AddToWatchlistButton";
 
-import { useSavedScreeners, useScreenerMutations, useQuotes, useMarketSettings, useFavoriteFilters, useFavoriteFilterMutations, useLatestPriceSession } from "@/lib/market/hooks";
+import { useSavedScreeners, useScreenerMutations, useMarketSettings, useFavoriteFilters, useFavoriteFilterMutations, useLatestPriceSession } from "@/lib/market/hooks";
 import { useScreenerData, useScreenerSectors, useScreenerIndustries, getAsofMeta, projectRowsForMode, type AsofMeta, type ScreenerRow } from "@/lib/market/screenerRun";
 import { todayIstDateString } from "@/lib/market/liveSnapshot";
-import { quoteKey } from "@/lib/market/pnl";
-import { isFreshTick, useLiveTickStore, useTicksRevision} from "@/lib/market/liveTickStore";
-import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
 import { Link } from "react-router-dom";
 import { useUi } from "@/store/uiStore";
 import { supabase } from "@/integrations/supabase/client";
@@ -35,8 +32,6 @@ import {
   latestTradeDateOf,
   resolveReferenceSession,
   isEquityRow,
-  isOpenEndedMax,
-  isOpenEndedMin,
   TECH_FRESHNESS_LAG_DAYS,
   type ActiveFilter,
   type FilterDef,
@@ -106,6 +101,12 @@ const HIDE_ILLIQUID_KEY = "screener.hideIlliquid.v1";
 const PAGE_SIZE_KEY  = "screener.pageSize.v2";
 const DEFAULT_SAVED_KEY = "market.screener.defaultSavedId";
 const STATE_STORE_KEY = "screener.state.v2"; // { universe, active, savedId } — persists across visits so re-opening doesn't reset filters or the attached saved screen
+const ET_PARITY_FILTERS: ActiveFilter[] = [
+  { id: "market_cap", min: 1_000, max: 100_000 },
+  { id: "ltp", min: 100, max: 10_000 },
+  { id: "change_pct", min: 5, max: 10 },
+  { id: "volume", min: 100_000, max: 10_000_000 },
+];
 
 // Filter-id → column-id map used when the user has active filters. The
 // results grid then renders ONLY the columns matching what they filtered on
@@ -142,9 +143,7 @@ function fmtBound(def: FilterDef, v: number | "" | undefined, side: "min" | "max
   const digits = def.step && def.step < 1 ? 2 : 0;
   const n = Number(v);
   const num = n.toLocaleString("en-IN", { maximumFractionDigits: digits });
-  // A catalogue-edge bound is open-ended — mark it so the chip doesn't read
-  // like a hard cap the filter isn't actually applying.
-  const suffix = side === "max" ? (isOpenEndedMax(def, n) ? "+" : "") : (isOpenEndedMin(def, n) ? "-" : "");
+  const suffix = "";
   return def.unit ? (def.unit === "₹" ? `₹${num}${suffix}` : `${num}${suffix}${def.unit === "%" || def.unit === "x" ? def.unit : " " + def.unit}`) : `${num}${suffix}`;
 }
 
@@ -171,6 +170,10 @@ function toCsv(rows: ScreenerRow[], cols: string[]): string {
       return tags.join("|");
     }
     if (c === "close") return r.ltp == null ? "" : String(r.ltp);
+    if (c === "change_pct") {
+      const value = r.change_pct_raw ?? r.change_pct;
+      return value == null ? "" : String(value);
+    }
     const v = (r as any)[c];
     if (v == null) return "";
     if (typeof v === "string") return v.includes(",") ? `"${v.replace(/"/g, '""')}"` : v;
@@ -495,9 +498,8 @@ function ScreenerInner() {
   }, [universe, active]);
 
 
-  // "+ Add Filter" picker: bring a filter into the sidebar seeded with its full
-  // catalogue range, ready to narrow. Edge values are open-ended (see
-  // isOpenEndedMax/Min), so a freshly-added filter never drops a single row.
+  // "+ Add Filter" picker: bring a blank filter into the sidebar. Every bound
+  // the user enters is then treated literally and inclusively.
   const addFilter = (fid: string) => {
     const id = canonicalFilterId(fid);
     if (active.some((a) => canonicalFilterId(a.id) === id)) return;
@@ -505,7 +507,7 @@ function ScreenerInner() {
     const initial: ActiveFilter =
       def.kind === "boolean" ? { id, bool: true } :
       def.kind === "enum"    ? { id, values: [] } :
-      { id, min: def.min ?? "", max: def.max ?? "" };
+      { id, min: "", max: "" };
     setActive((a) => [...a, initial]);
   };
 
@@ -748,75 +750,14 @@ function ScreenerInner() {
   const paged = useMemo(() => sorted.slice(pageStart, pageStart + pageSize), [sorted, pageStart, pageSize]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
 
-  // ---- Sub-minute tick overlay for visible rows (Kotak WS push + REST) -----
-  // The row's own live value (from the promoted sweep) is what filters and CSV
-  // use. This overlay only refreshes the *displayed* Price/1D% of the ~50 rows
-  // on screen between sweeps, and is disabled in EOD mode so settled numbers
-  // never get repainted with an intraday tick.
-  const visibleKeysJoined = useMemo(
-    () => (liveMode && !asOfDate
-      ? Array.from(new Set(paged.map((r) => quoteKey(r.exchange ?? "NSE", r.symbol)))).sort().join(",")
-      : ""),
-    [paged, liveMode, asOfDate],
-  );
-  const visibleKeys = useMemo(() => (visibleKeysJoined ? visibleKeysJoined.split(",") : []), [visibleKeysJoined]);
-  // No interval override: useQuotes polls 1 s focused / 15 s blurred and stops
-  // off-hours. Sub-second movement arrives on the WS push tick, which is free.
-  const { data: liveQuotes } = useQuotes(visibleKeys);
-  const _ticksRev_pushTicks = useTicksRevision();
-  const pushTicks = useLiveTickStore.getState().ticks;
-  void _ticksRev_pushTicks; // re-render on any tick flush; read fresh map above
-  const relayAlive = useRelayAlive();
-  useEffect(() => { subscribeSymbolsForTicks(visibleKeys); }, [visibleKeysJoined]);
-  const liveByKey = useMemo(() => {
-    const m = new Map<string, { ltp: number | null; change_pct: number | null; provider: string | null }>();
-    if (!liveMode || asOfDate) return m;
-    for (const q of liveQuotes?.quotes ?? []) {
-      m.set(quoteKey(q.exchange, q.symbol), {
-        ltp: q.ltp ?? null,
-        change_pct: q.change_pct ?? null,
-        provider: (q as any).provider ?? q.source ?? null,
-      });
-    }
-    // Push ticks always come from the Kotak WS relay — treat as "kotak".
-    for (const [key, tick] of Object.entries(pushTicks)) {
-      if (!isFreshTick(tick)) continue;
-      m.set(key, { ltp: tick.ltp, change_pct: tick.change_pct, provider: "kotak" });
-    }
-    return m;
-  }, [liveQuotes, pushTicks, liveMode, asOfDate]);
-
-  // Sub-minute tick overlay, but ONLY on rows whose filtered values already
-  // come from today's live plane. Painting a fresh tick onto a row that was
-  // matched on a settled/stale session is what made the table show -1.7% under
-  // a "1D Return > 5%" filter: the filter read August 11, the cell read now.
-  // On such rows we show the value the filter actually used.
-  const overlayQuote = useCallback(
-    (r: ScreenerRow): { ltp: number | null; change_pct: number | null } | null => {
-      if (!liveMode || asOfDate) return null;
-      if (r.quote_state !== "live") return null;
-      const live = liveByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
-      if (!live || live.provider !== "kotak") return null;
-      if (live.ltp == null && live.change_pct == null) return null;
-      return { ltp: live.ltp, change_pct: live.change_pct };
-    },
-    [liveByKey, liveMode, asOfDate],
-  );
-
-  const anyPush = useMemo(() => visibleKeys.some((k) => isFreshTick(pushTicks[k])), [visibleKeys, pushTicks]);
-  const quoteProvider = (liveQuotes as any)?.provider as "kotak" | "none" | undefined;
-  // The quote route is broker-only now: it returns Kotak prices or nothing at
-  // all (never a delayed Yahoo tick or yesterday's close dressed up as live).
-  // So the only states left are push / REST-kotak / broker-offline / closed.
-  const brokerAvailable = (liveQuotes as any)?.broker_available !== false;
-  // "push" > "kotak" (REST) > "offline" (session gone) > "closed"/"idle"
-  const liveState = useMemo<"push" | "kotak" | "offline" | "closed" | "idle">(() => {
-    if (visibleKeys.length === 0) return "idle";
-    if (anyPush || relayAlive) return "push";
-    if (quoteProvider === "kotak") return "kotak";
-    if (!nseOpenNow) return "closed";
-    return brokerAvailable ? "idle" : "offline";
-  }, [visibleKeys.length, anyPush, relayAlive, quoteProvider, brokerAvailable, nseOpenNow]);
+  // Screener values come only from the promoted five-minute plane. Sub-minute
+  // quote repainting was removed because it made a row pass on one number and
+  // render/sort on another. Drill-down and watchlist surfaces still carry ticks.
+  const liveState: "kotak" | "offline" | "closed" | "idle" = !nseOpenNow
+    ? "closed"
+    : Number(plane?.kotak_count ?? 0) > 0
+      ? "kotak"
+      : plane ? "idle" : "offline";
 
 
   // Provider guardrail — the user's OWN Kotak session (account-bound actions
@@ -887,28 +828,15 @@ function ScreenerInner() {
       },
       close: {
         header: "LTP (₹)", id: "livePrice", meta: { align: "right" },
-        accessorFn: (r) => overlayQuote(r)?.ltp ?? r.ltp,
-        cell: ({ row, getValue }) => {
-          const ov = overlayQuote(row.original);
-          return (
-            <span title={ov ? "Sub-minute tick, newer than the filter plane" : undefined}>
-              {fmtNum(getValue() as number | null)}
-              {ov ? <span style={{ color: "var(--accent)", fontSize: 9, marginLeft: 3 }}>•</span> : null}
-            </span>
-          );
-        },
+        accessorFn: (r) => r.ltp,
+        cell: ({ getValue }) => fmtNum(getValue() as number | null),
       },
       change_pct: {
         header: "1D Return", id: "liveChangePct", meta: { align: "right" },
-        accessorFn: (r) => overlayQuote(r)?.change_pct ?? r.change_pct,
+        accessorFn: (r) => r.change_pct_raw ?? r.change_pct,
         cell: ({ row }) => {
           const r = row.original;
-          const ov = overlayQuote(r);
-          const pct = ov?.change_pct ?? r.change_pct ?? null;
-          const abs = ov && ov.ltp != null && ov.change_pct != null
-            ? deriveChangeAbs(ov.ltp, ov.change_pct)
-            : (r.change_abs ?? null);
-          return <Return1DCell abs={abs} pct={pct} />;
+          return <Return1DCell abs={r.change_abs ?? null} pct={r.change_pct_raw ?? r.change_pct ?? null} />;
         },
       },
       volume: {
@@ -1027,7 +955,7 @@ function ScreenerInner() {
       },
     };
     return effectiveCols.map((id) => all[id]).filter(Boolean);
-  }, [effectiveCols, latestTradeDate, liveByKey, liveMode, nav, volUnit]);
+  }, [effectiveCols, latestTradeDate, liveMode, nav, volUnit]);
 
   const columnsWithActions = useMemo<ColumnDef<ScreenerRow, any>[]>(() => {
     return [
@@ -1074,6 +1002,14 @@ function ScreenerInner() {
             <RotateCcw size={11} style={{ marginRight: 4 }} />Clear values
           </Btn>
         )}
+        <Btn size="sm" variant="ghost" onClick={() => {
+          setUniverse("all");
+          setActive(ET_PARITY_FILTERS.map((f) => ({ ...f })));
+          setVolBasis("raw");
+          setLiveMode(true);
+        }} title="Market cap 1,000–100,000 · Price 100–10,000 · 1D return 5–10% · Volume 100,000–10,000,000">
+          ET parity
+        </Btn>
         <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
           <span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
             {isFetching ? "loading…" : `${filtered.length} / ${rows.length}`}
@@ -1176,11 +1112,10 @@ function ScreenerInner() {
                   const disc = liveState === "offline" || (kotakDisconnected && liveState === "idle");
                   const label = disc
                     ? "kotak disconnected · reconnect"
-                    : liveState === "push"   ? "push · kotak"
-                    : liveState === "kotak"  ? "live · kotak"
+                    : liveState === "kotak"  ? "sweep · kotak"
                     : liveState === "closed" ? "closed" : "idle";
                   const tone = disc ? "var(--danger, #ff6a6a)"
-                    : liveState === "push" || liveState === "kotak" ? "var(--ok, #4ade80)"
+                    : liveState === "kotak" ? "var(--ok, #4ade80)"
                     : "var(--text-muted)";
                   const Cmp: any = disc ? "button" : "span";
                   return (
@@ -1375,6 +1310,11 @@ function ScreenerInner() {
               </div>
             }
           >
+            {active.length > 0 && (
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap", paddingBottom: 8 }} aria-label="Active filter summary">
+                {active.map((af) => <Chip key={af.id} tone="accent">{chipDesc(af)}</Chip>)}
+              </div>
+            )}
             {error ? (
               <EmptyState hint={String((error as Error).message)}>failed to load</EmptyState>
             ) : (

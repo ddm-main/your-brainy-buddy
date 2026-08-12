@@ -1,0 +1,1 @@
+SELECT public.market_cron_call('market-live-sweep');
