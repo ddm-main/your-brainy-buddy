@@ -222,20 +222,21 @@ describe("coverageOf — denominator is the scoped set, numerator is fields actu
   });
 });
 
-describe("catalogue-edge bounds are open-ended", () => {
+describe("numeric bounds are literal and inclusive", () => {
   const row = (over: Record<string, any>) => ({
     symbol: "X", exchange: "NSE", instrument_type: "EQ", trade_date: "2026-07-22", ...over,
   });
 
-  it("a 1D Return filter left at the catalogue range keeps a +25% mover", () => {
+  it("a 1D Return maximum at the catalogue edge remains a hard maximum", () => {
     const af: ActiveFilter = { id: "change_pct", min: -20, max: 20 };
-    expect(filterMatches(row({ change_pct_raw: 25 }), af, "2026-07-22")).toBe(true);
-    expect(filterMatches(row({ change_pct_raw: -32 }), af, "2026-07-22")).toBe(true);
+    expect(filterMatches(row({ change_pct_raw: 25 }), af, "2026-07-22")).toBe(false);
+    expect(filterMatches(row({ change_pct_raw: -32 }), af, "2026-07-22")).toBe(false);
+    expect(filterMatches(row({ change_pct_raw: 20 }), af, "2026-07-22")).toBe(true);
   });
 
-  it("a Market Cap filter at the catalogue max keeps a larger company", () => {
+  it("a Market Cap maximum at the catalogue edge remains a hard maximum", () => {
     const af: ActiveFilter = { id: "market_cap", min: 0, max: 2_500_000 };
-    expect(filterMatches(row({ market_cap: 4_000_000 }), af, "2026-07-22")).toBe(true);
+    expect(filterMatches(row({ market_cap: 4_000_000 }), af, "2026-07-22")).toBe(false);
   });
 
   it("a narrowed max is still a hard cap", () => {
@@ -249,9 +250,9 @@ describe("catalogue-edge bounds are open-ended", () => {
     expect(filterMatches(row({ change_pct_raw: 2 }), af, "2026-07-22")).toBe(false);
   });
 
-  it("a full-range filter doesn't count rows as excluded-by-missing-data", () => {
+  it("an explicitly bounded full-range filter still excludes missing data", () => {
     const active: ActiveFilter[] = [{ id: "rsi", min: 0, max: 100 }];
-    expect(excludedByMissingData([rowWithEodNoTech, rowWithNoEod], active)).toBe(0);
+    expect(excludedByMissingData([rowWithEodNoTech, rowWithNoEod], active)).toBe(2);
   });
 });
 

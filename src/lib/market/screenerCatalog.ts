@@ -399,22 +399,23 @@ export interface ActiveFilter {
   values?: string[]; // for enum filters
 }
 
-/** A bound sitting exactly on the catalogue edge means "and beyond", not a hard
- *  cap. Numeric filters are seeded with their full catalogue range when added,
- *  so an edge value must never drop legitimate outliers (a +25% mover under a
- *  1D Return filter whose catalogue max is 20). */
+/** Bounds are literal user input. New numeric filters start blank, so there is
+ *  no need to reinterpret catalogue-edge values as open-ended. A user entering
+ *  20 as the maximum must get <= 20, not an silently unbounded result set. */
 export function isOpenEndedMax(def: FilterDef | undefined, v: number | null): boolean {
-  return !!def && def.max !== undefined && v !== null && v >= def.max;
+  void def;
+  return v === null;
 }
 export function isOpenEndedMin(def: FilterDef | undefined, v: number | null): boolean {
-  return !!def && def.min !== undefined && v !== null && v <= def.min;
+  void def;
+  return v === null;
 }
 
 /** Returns true if the row satisfies the active filter.
  *  Rules:
  *   - Rows outside the filter's applicability scope are always kept (they are "N/A").
  *   - Numeric filter with no min/max set → matches everything.
- *   - A bound on the catalogue edge is open-ended (see isOpenEndedMax/Min).
+ *   - Every entered numeric bound is inclusive and literal.
  *   - Numeric filter with a bound + `nullMeansZero` → NULL is treated as 0.
  *   - Numeric filter with a bound and no `nullMeansZero` → NULL is excluded. */
 
