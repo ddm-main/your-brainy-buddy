@@ -754,7 +754,7 @@ function ScreenerInner() {
   // render/sort on another. Drill-down and watchlist surfaces still carry ticks.
   const liveState: "kotak" | "offline" | "closed" | "idle" = !nseOpenNow
     ? "closed"
-    : plane?.provider === "kotak" || plane?.provider === "kotak_neo"
+    : Number(plane?.kotak_count ?? 0) > 0
       ? "kotak"
       : plane ? "idle" : "offline";
 
@@ -1111,11 +1111,10 @@ function ScreenerInner() {
                   const disc = liveState === "offline" || (kotakDisconnected && liveState === "idle");
                   const label = disc
                     ? "kotak disconnected · reconnect"
-                    : liveState === "push"   ? "push · kotak"
-                    : liveState === "kotak"  ? "live · kotak"
+                    : liveState === "kotak"  ? "sweep · kotak"
                     : liveState === "closed" ? "closed" : "idle";
                   const tone = disc ? "var(--danger, #ff6a6a)"
-                    : liveState === "push" || liveState === "kotak" ? "var(--ok, #4ade80)"
+                    : liveState === "kotak" ? "var(--ok, #4ade80)"
                     : "var(--text-muted)";
                   const Cmp: any = disc ? "button" : "span";
                   return (
