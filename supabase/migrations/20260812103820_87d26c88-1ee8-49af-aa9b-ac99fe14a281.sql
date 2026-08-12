@@ -1,0 +1,1 @@
+SELECT public.refresh_market_screener_snapshot();
