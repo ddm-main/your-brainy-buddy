@@ -1,7 +1,7 @@
 // Stock Screener — Tickertape/Screener.in-style 2-pane layout.
 // Left rail: collapsible filter categories with search & data-coverage chips.
 // Right pane: query chips → results grid with coverage note, pagination & CSV.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
@@ -786,6 +786,23 @@ function ScreenerInner() {
     return m;
   }, [liveQuotes, pushTicks, liveMode, asOfDate]);
 
+  // Sub-minute tick overlay, but ONLY on rows whose filtered values already
+  // come from today's live plane. Painting a fresh tick onto a row that was
+  // matched on a settled/stale session is what made the table show -1.7% under
+  // a "1D Return > 5%" filter: the filter read August 11, the cell read now.
+  // On such rows we show the value the filter actually used.
+  const overlayQuote = useCallback(
+    (r: ScreenerRow): { ltp: number | null; change_pct: number | null } | null => {
+      if (!liveMode || asOfDate) return null;
+      if (r.quote_state !== "live") return null;
+      const live = liveByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
+      if (!live || live.provider !== "kotak") return null;
+      if (live.ltp == null && live.change_pct == null) return null;
+      return { ltp: live.ltp, change_pct: live.change_pct };
+    },
+    [liveByKey, liveMode, asOfDate],
+  );
+
   const anyPush = useMemo(() => visibleKeys.some((k) => isFreshTick(pushTicks[k])), [visibleKeys, pushTicks]);
   const quoteProvider = (liveQuotes as any)?.provider as "kotak" | "none" | undefined;
   // The quote route is broker-only now: it returns Kotak prices or nothing at
@@ -870,31 +887,26 @@ function ScreenerInner() {
       },
       close: {
         header: "LTP (₹)", id: "livePrice", meta: { align: "right" },
-        accessorFn: (r) => {
-          const live = liveByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
-          // Only overlay when the live value actually came from Kotak (push
-          // tick or Kotak REST). Yahoo/cache values would silently disagree
-          // with the EOD row the filter matched on, so we stay on EOD.
-          if (live && (liveMode || live.provider === "kotak") && live.ltp != null) return live.ltp;
-          return r.ltp;
+        accessorFn: (r) => overlayQuote(r)?.ltp ?? r.ltp,
+        cell: ({ row, getValue }) => {
+          const ov = overlayQuote(row.original);
+          return (
+            <span title={ov ? "Sub-minute tick, newer than the filter plane" : undefined}>
+              {fmtNum(getValue() as number | null)}
+              {ov ? <span style={{ color: "var(--accent)", fontSize: 9, marginLeft: 3 }}>•</span> : null}
+            </span>
+          );
         },
-        cell: ({ getValue }) => fmtNum(getValue() as number | null),
       },
       change_pct: {
         header: "1D Return", id: "liveChangePct", meta: { align: "right" },
-        accessorFn: (r) => {
-          const live = liveByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
-          if (live && (liveMode || live.provider === "kotak") && live.change_pct != null) return live.change_pct;
-          return r.change_pct;
-        },
+        accessorFn: (r) => overlayQuote(r)?.change_pct ?? r.change_pct,
         cell: ({ row }) => {
           const r = row.original;
-          const live = liveByKey.get(quoteKey(r.exchange ?? "NSE", r.symbol));
-          const ok = !!live && (liveMode || live.provider === "kotak");
-          const livePct = ok && live!.change_pct != null ? live!.change_pct : null;
-          const pct = livePct ?? r.change_pct ?? null;
-          const abs = ok && live!.ltp != null && live!.change_pct != null
-            ? deriveChangeAbs(live!.ltp!, live!.change_pct!)
+          const ov = overlayQuote(r);
+          const pct = ov?.change_pct ?? r.change_pct ?? null;
+          const abs = ov && ov.ltp != null && ov.change_pct != null
+            ? deriveChangeAbs(ov.ltp, ov.change_pct)
             : (r.change_abs ?? null);
           return <Return1DCell abs={abs} pct={pct} />;
         },
