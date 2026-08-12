@@ -170,6 +170,10 @@ function toCsv(rows: ScreenerRow[], cols: string[]): string {
       return tags.join("|");
     }
     if (c === "close") return r.ltp == null ? "" : String(r.ltp);
+    if (c === "change_pct") {
+      const value = r.change_pct_raw ?? r.change_pct;
+      return value == null ? "" : String(value);
+    }
     const v = (r as any)[c];
     if (v == null) return "";
     if (typeof v === "string") return v.includes(",") ? `"${v.replace(/"/g, '""')}"` : v;

@@ -81,6 +81,9 @@ export interface ScreenerRow {
   eod_pe: number | null;
   eod_pb: number | null;
   eod_rel_volume: number | null;
+  eod_atr_pct: number | null;
+  eod_above_ema_200: boolean | null;
+  eod_near_resistance: boolean | null;
   eod_pct_from_52w_high: number | null;
 
 
@@ -589,6 +592,9 @@ function toScreenerRow(s: any, idxSets: { NIFTY50: Set<string>; BANKNIFTY: Set<s
     eod_pe:              num(s.pe_ttm),
     eod_pb:              num(s.pb),
     eod_rel_volume:      num(s.rel_volume),
+    eod_atr_pct:         num(s.atr_pct),
+    eod_above_ema_200:   s.above_ema200 ?? s.above_ema_200 ?? null,
+    eod_near_resistance: s.near_resistance ?? null,
     eod_pct_from_52w_high: num(s.pct_from_52w_high),
 
 
@@ -899,7 +905,10 @@ export function projectRowsForMode(
     change_pct_raw: r.eod_change_pct_raw ?? r.eod_change_pct,
     volume:         r.eod_volume,
     vol_gt_avg30:   r.eod_vol_gt_avg30,
-    rel_volume:     r.eod_rel_volume ?? r.rel_volume,
+    rel_volume:     r.eod_rel_volume,
+    atr_pct:        r.eod_atr_pct,
+    above_ema_200:  r.eod_above_ema_200,
+    near_resistance: r.eod_near_resistance,
     market_cap:     r.eod_market_cap ?? r.market_cap,
     // Valuation and 52-week distance must fall back to the settled basis too —
     // showing live-revalued P/E next to a settled close is the inconsistency
