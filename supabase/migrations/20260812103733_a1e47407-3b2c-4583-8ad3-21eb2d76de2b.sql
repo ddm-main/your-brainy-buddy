@@ -1,0 +1,1 @@
+DELETE FROM public.market_sweep_snapshot;
