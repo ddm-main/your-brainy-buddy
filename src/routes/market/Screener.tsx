@@ -97,8 +97,6 @@ const DEFAULT_COLS = [
 // v5: bumped so browsers holding a prior selection pick up the current
 // default instead of rendering a stale column set.
 const COLS_STORE_KEY = "screener.visibleCols.v5";
-const HIDE_ILLIQUID_KEY = "screener.hideIlliquid.v1";
-const PAGE_SIZE_KEY  = "screener.pageSize.v2";
 const DEFAULT_SAVED_KEY = "market.screener.defaultSavedId";
 const STATE_STORE_KEY = "screener.state.v2"; // { universe, active, savedId } — persists across visits so re-opening doesn't reset filters or the attached saved screen
 const ET_PARITY_FILTERS: ActiveFilter[] = [
@@ -207,55 +205,25 @@ function ScreenerInner() {
   });
   useEffect(() => { safeStorage.setJSON(COLS_STORE_KEY, visibleCols); }, [visibleCols]);
 
-  // Penny/illiquid names are hidden by default (see LIQUIDITY_MIN_* gate in
-  // scoring.ts) — an explicit opt-in surfaces them rather than silently
-  // excluding names with no way back. `is_liquid_tradable == null` (gate not
-  // yet computed for this row, e.g. pre-migration backfill) is treated as
-  // "unknown" and always shown so this never hides the whole universe.
-  // Default OFF: the gate was quietly removing legitimate screen matches
-  // (illiquid but real NSE names such as UEL, HMVL, AARTISURF) so app results
-  // disagreed with external screeners. It stays available as an explicit
-  // opt-in, and when on the results header reports what it removed.
-  const [hideIlliquid, setHideIlliquid] = useState<boolean>(() => safeStorage.getJSON<boolean>(HIDE_ILLIQUID_KEY, false));
-  useEffect(() => { safeStorage.setJSON(HIDE_ILLIQUID_KEY, hideIlliquid); }, [hideIlliquid]);
+  // Penny / illiquid names are never tradable here, so they are always hidden.
+  // The old opt-in toggle is gone: the universe this screen shows is the
+  // non-penny, liquid universe, full stop.
+  const hideIlliquid = true;
 
   const [page, setPage] = useState(0);
-  const [pageSize, setPageSize] = useState<number>(() => {
-    const raw = safeStorage.get(PAGE_SIZE_KEY);
-    return raw ? Number(raw) || 50 : 50;
-  });
-  useEffect(() => { safeStorage.set(PAGE_SIZE_KEY, String(pageSize)); }, [pageSize]);
+  // Fixed page size — 100 rows. Pagination only appears past that.
+  const pageSize = 100;
 
-  // Live vs EOD is a projection of one fetched row set (both planes travel in
-  // the same row), so filters, sort, table cells and CSV can never disagree.
-  // While the market is open the screener always opens in Live mode: a sticky
-  // "0" from a previous EOD session otherwise made an intraday screen compare
-  // yesterday's settled closes against live prices elsewhere.
-  const [liveMode, setLiveMode] = useState<boolean>(() => {
-    const ist = new Date(Date.now() + 5.5 * 3600_000);
-    const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
-    const day = ist.getUTCDay();
-    const openNow = day >= 1 && day <= 5 && mins >= 555 && mins < 930;
-    return openNow || safeStorage.get("screener.liveMode") !== "0";
-  });
-  useEffect(() => { safeStorage.set("screener.liveMode", liveMode ? "1" : "0"); }, [liveMode]);
 
-  // "Volume > 30D Avg" defaults to the literal, externally comparable rule:
-  // cumulative session volume vs the full-day 30D average. Pace-adjusted is an
-  // explicitly selected intraday signal, never a silent replacement formula.
-  const [volBasis, setVolBasis] = useState<"paced" | "raw">(
-    () => (safeStorage.get("screener.volBasis") === "paced" ? "paced" : "raw"),
-  );
-  useEffect(() => { safeStorage.set("screener.volBasis", volBasis); }, [volBasis]);
+  // Live is the only mode: rows are priced by the latest promoted sweep during
+  // market hours and fall back to the settled plane outside them. Back-dated
+  // runs (`asOfDate`) are settled by definition.
+  const liveMode = true;
 
-  // Volume unit for DISPLAY only. Economic Times prints volume in thousands
-  // ('000) while the app stores and filters raw shares, so a threshold copied
-  // from ET is 1,000x off. The toggle makes the basis explicit; stored values
-  // and filter arithmetic are untouched.
-  const [volUnit, setVolUnit] = useState<"shares" | "k">(
-    () => (safeStorage.get("screener.volUnit") === "k" ? "k" : "shares"),
-  );
-  useEffect(() => { safeStorage.set("screener.volUnit", volUnit); }, [volUnit]);
+  // "Volume > 30D Avg" is always the literal, externally comparable rule:
+  // cumulative session volume vs the full-day 30D average (ET parity).
+  const volBasis: "paced" | "raw" = "raw";
+
 
   // EGRESS: only the columns this screen can actually render right now are
   // fetched. Everything the table shows, everything the active filters gate on,
@@ -330,38 +298,30 @@ function ScreenerInner() {
     () => resolveReferenceSession(rows, { settledOnly: nseOpenNow && !liveActive, todayIst: todayIstDateString() }),
     [rows, nseOpenNow, liveActive],
   );
-  // Prefer the promoted sweep's own session date in Live mode: it is
-  // authoritative and immune to a coverage dip mid-sweep sending the resolver
-  // back to yesterday.
+  // Display reference: prefer the promoted sweep's own session date in Live
+  // mode — it is authoritative for the "LIVE <date>" label.
   const latestTradeDate = (liveActive && plane?.session_date)
     ? String(plane.session_date).slice(0, 10)
     : refSession.tradeDate;
-  // Symbols that carry no row for the reference session — the exact-session
-  // filters (ltp / 1D return / volume) can't judge them, so they are excluded
-  // and we say so instead of silently shrinking the result count. Counted
-  // against the session actually in force (live sweep or settled EOD) so the
-  // chip can never disagree with the filters.
-  const sessionCoverage = useMemo(() => {
-    let total = 0, covered = 0;
-    for (const r of rows) {
-      if (!isEquityRow(r as any)) continue;
-      total++;
-      if (latestTradeDate && String(r.trade_date ?? "").slice(0, 10) === latestTradeDate) covered++;
-    }
-    return { total, covered };
-  }, [latestTradeDate, rows]);
-  const excludedNoSession = latestTradeDate ? Math.max(0, sessionCoverage.total - sessionCoverage.covered) : 0;
+  // Filter reference: always the *settled* session resolved from the rows
+  // themselves (coverage-guarded). Using the sweep's session here rejected
+  // every row the sweep hadn't ticked yet — rows that render, and are judged
+  // on, their settled numbers. Live-quoted rows bypass this gate inside
+  // filterMatches, so live screening is unaffected.
+  const filterSession = refSession.tradeDate;
 
-
-  // Naming the symbols beats a bare count: with 99.9% coverage the handful of
-  // stragglers are actionable (renamed/delisted tickers), not a pipeline alarm.
+  // Rows that carry no usable quote at all — neither a live tick nor a settled
+  // close. The old chip counted "row.trade_date !== the live plane's session
+  // date", which flagged 1,300+ perfectly-quoted rows mid-sweep; this counts
+  // only the real holes, so it stays silent on a healthy board.
   const noQuoteSymbols = useMemo(() => {
-    if (!latestTradeDate) return [] as string[];
     return rows
-      .filter((r) => isEquityRow(r as any) && String(r.trade_date ?? "") !== String(latestTradeDate))
+      .filter((r) => isEquityRow(r as any) && (r as any).quote_state === "no_quote")
       .map((r) => r.symbol)
       .sort();
-  }, [rows, latestTradeDate]);
+  }, [rows]);
+  const excludedNoSession = noQuoteSymbols.length;
+
 
 
   // Relative freshness (above) can't catch a pipeline that's stale across a
@@ -417,8 +377,6 @@ function ScreenerInner() {
     return { fundPct, sectorPct, techPct, tone, eod: latestTradeDate };
   }, [rows, latestTradeDate]);
 
-  const illiquidCount = useMemo(() => rows.filter((r) => r.is_liquid_tradable === false).length, [rows]);
-
   // Change %/Price come from the once-daily EOD pipeline (market_stock_scores),
   // while the results table's Chg%/Price columns overlay a live quote for
   // display — filtering on the stale value while showing the live one meant a
@@ -437,14 +395,10 @@ function ScreenerInner() {
   const matched = useMemo(() => {
     let out: ScreenerRow[] = rows;
     for (const af of active) {
-      out = out.filter((r) => filterMatches(r as any, af, latestTradeDate));
+      out = out.filter((r) => filterMatches(r as any, af, filterSession));
     }
     return out;
-  }, [rows, active, latestTradeDate]);
-  const hiddenByLiquidity = useMemo(
-    () => (hideIlliquid ? matched.filter((r) => r.is_liquid_tradable === false).length : 0),
-    [matched, hideIlliquid],
-  );
+  }, [rows, active, filterSession]);
   // Rows a live "Volume > 30D Avg" screen cannot judge because the 30-day
   // average itself is missing. They are unknown, not "no" — reporting the
   // count keeps a data gap from looking like an empty market.
@@ -840,21 +794,20 @@ function ScreenerInner() {
         },
       },
       volume: {
-        header: volUnit === "k" ? "Volume ('000)" : "Volume", accessorKey: "volume", meta: { align: "right" },
+        header: "Volume", accessorKey: "volume", meta: { align: "right" },
         cell: ({ getValue }) => {
           const v = getValue() as number | null;
-          if (v == null) return "—";
-          return volUnit === "k" ? fmtInt(Math.round(v / 1000)) : fmtInt(v);
+          return v == null ? "—" : fmtInt(v);
         },
       },
       vol_avg30: {
-        header: volUnit === "k" ? "30D Avg Vol ('000)" : "30D Avg Vol", accessorKey: "vol_avg30", meta: { align: "right" },
+        header: "30D Avg Vol", accessorKey: "vol_avg30", meta: { align: "right" },
         cell: ({ getValue }) => {
           const v = getValue() as number | null;
-          if (v == null) return "—";
-          return volUnit === "k" ? fmtInt(Math.round(v / 1000)) : fmtInt(v);
+          return v == null ? "—" : fmtInt(v);
         },
       },
+
       // null is "unknown" (no 30-day average yet, e.g. a recent listing), not
       // "fails the test" — the row is reported as unjudgeable instead.
       vol_gt_avg30: {
@@ -955,7 +908,7 @@ function ScreenerInner() {
       },
     };
     return effectiveCols.map((id) => all[id]).filter(Boolean);
-  }, [effectiveCols, latestTradeDate, liveMode, nav, volUnit]);
+  }, [effectiveCols, latestTradeDate, liveMode, nav]);
 
   const columnsWithActions = useMemo<ColumnDef<ScreenerRow, any>[]>(() => {
     return [
@@ -1005,8 +958,6 @@ function ScreenerInner() {
         <Btn size="sm" variant="ghost" onClick={() => {
           setUniverse("all");
           setActive(ET_PARITY_FILTERS.map((f) => ({ ...f })));
-          setVolBasis("raw");
-          setLiveMode(true);
         }} title="Market cap 1,000–100,000 · Price 100–10,000 · 1D return 5–10% · Volume 100,000–10,000,000">
           ET parity
         </Btn>
@@ -1043,20 +994,18 @@ function ScreenerInner() {
 
       {excludedNoSession > 0 && (
         <div
-          title={noQuoteSymbols.length
-            ? `No ${String(latestTradeDate)} quote: ${noQuoteSymbols.slice(0, 40).join(", ")}${noQuoteSymbols.length > 40 ? ` +${noQuoteSymbols.length - 40} more` : ""}`
-            : undefined}
+          title={`No quote (neither live nor settled): ${noQuoteSymbols.slice(0, 40).join(", ")}${noQuoteSymbols.length > 40 ? ` +${noQuoteSymbols.length - 40} more` : ""}`}
           style={{
             display: "inline-flex", alignItems: "center", gap: 8, padding: "4px 9px",
             border: "1px solid var(--edge)", borderRadius: 2, alignSelf: "flex-start",
           }}>
           <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-            {sessionCoverage.covered.toLocaleString()}/{sessionCoverage.total.toLocaleString()} priced
-            {" · "}{excludedNoSession.toLocaleString()} no quote
-            {noQuoteSymbols.length > 0 && noQuoteSymbols.length <= 6 ? ` (${noQuoteSymbols.join(", ")})` : ""}
+            {excludedNoSession.toLocaleString()} symbol{excludedNoSession === 1 ? "" : "s"} with no quote
+            {noQuoteSymbols.length <= 6 ? ` (${noQuoteSymbols.join(", ")})` : ""}
           </span>
         </div>
       )}
+
 
 
 
@@ -1106,37 +1055,30 @@ function ScreenerInner() {
             actions={
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                 {(() => {
-                  // Broker-only quotes: when Kotak can't answer there is no
-                  // delayed substitute to label, so the chip becomes a
-                  // reconnect affordance instead of a "delayed" badge.
+                  // Only actionable state survives here: a disconnected Kotak
+                  // session (click to reconnect). "closed"/"idle" carried no
+                  // information, so they no longer render at all.
                   const disc = liveState === "offline" || (kotakDisconnected && liveState === "idle");
-                  const label = disc
-                    ? "kotak disconnected · reconnect"
-                    : liveState === "kotak"  ? "sweep · kotak"
-                    : liveState === "closed" ? "closed" : "idle";
-                  const tone = disc ? "var(--danger, #ff6a6a)"
-                    : liveState === "kotak" ? "var(--ok, #4ade80)"
-                    : "var(--text-muted)";
-                  const Cmp: any = disc ? "button" : "span";
+                  if (!disc) return null;
                   return (
-                    <Cmp
-                      onClick={disc ? openKotakReconnect : undefined}
-                      title={disc
-                        ? "Kotak Neo session isn't connected — click to reconnect and enable real-time quotes."
-                        : "Price / 1D% source for the visible page — filters and other columns stay on EOD."}
+                    <button
+                      type="button"
+                      onClick={openKotakReconnect}
+                      title="Kotak Neo session isn't connected — click to reconnect and enable real-time quotes."
                       style={{
                         display: "inline-flex", alignItems: "center", gap: 6,
                         padding: "3px 8px", border: "1px solid var(--edge)",
                         background: "transparent",
                         fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase",
-                        color: disc ? "var(--danger, #ff6a6a)" : "var(--text-muted)",
-                        borderRadius: 2, cursor: disc ? "pointer" : "default",
+                        color: "var(--danger, #ff6a6a)",
+                        borderRadius: 2, cursor: "pointer",
                       }}>
-                      <span style={{ width: 6, height: 6, borderRadius: "50%", background: tone }} />
-                      {label}
-                    </Cmp>
+                      <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--danger, #ff6a6a)" }} />
+                      kotak disconnected · reconnect
+                    </button>
                   );
                 })()}
+
                 {healthSummary && (
                   <button type="button" onClick={() => setHealthOpen(true)}
                     title={`Pipeline: Fund ${healthSummary.fundPct}% · Sector ${healthSummary.sectorPct}% · Tech ${healthSummary.techPct}%`
@@ -1155,87 +1097,18 @@ function ScreenerInner() {
                       fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
                       borderRadius: 2,
                     }}>
-                    <span style={{
-                      width: 6, height: 6, borderRadius: "50%",
-                      background: healthSummary.tone === "ok" ? "var(--ok, #4ade80)"
-                        : healthSummary.tone === "warn" ? "var(--warn, #d29a2b)"
-                        : "var(--danger, #ff6a6a)",
-                    }} />
+                    <span
+                      className={nseOpenNow ? "screener-live-dot" : undefined}
+                      style={{
+                        width: 6, height: 6, borderRadius: "50%",
+                        background: nseOpenNow ? "var(--ok, #4ade80)" : "var(--danger, #ff6a6a)",
+                      }}
+                    />
                     {liveMode && !asOfDate
                       ? `LIVE ${latestTradeDate ?? "—"}`
                       : `EOD ${healthSummary.eod ?? "—"}`}
                   </button>
                 )}
-                <button type="button" onClick={() => setLiveMode((v) => !v)}
-                  title={liveMode
-                    ? "Live mode: every row is priced by the latest promoted sweep. Click for settled EOD parity."
-                    : "EOD mode: filters and columns use the last settled session (Tickertape parity). Click to use live sweep values instead."}
-                  aria-label="Toggle live filtering"
-                  aria-pressed={liveMode}
-                  disabled={!!asOfDate}
-                  style={{
-                    display: "inline-flex", alignItems: "center", gap: 5,
-                    padding: "3px 7px", border: "1px solid var(--edge)",
-                    background: liveMode && !asOfDate ? "var(--accent-dim, rgba(255,184,77,0.12))" : "transparent",
-                    color: liveMode && !asOfDate ? "var(--accent)" : "var(--text-muted)",
-                    cursor: asOfDate ? "not-allowed" : "pointer", opacity: asOfDate ? 0.5 : 1,
-                    fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
-                    borderRadius: 2,
-                  }}>
-                  {liveMode && !asOfDate ? "Live" : "EOD"}
-                </button>
-
-                {/* Intraday honesty: EOD mode while the market is open means
-                    every price on screen is yesterday's close. Say so. */}
-                {!liveMode && !asOfDate && nseOpenNow && (
-                  <button type="button" onClick={() => setLiveMode(true)}
-                    title="The market is open but this screen is filtering on the last settled session. Click to switch to live sweep values."
-                    style={{
-                      display: "inline-flex", alignItems: "center", gap: 5,
-                      padding: "3px 7px", border: "1px solid var(--warn, #d29a2b)",
-                      background: "rgba(255,176,32,0.08)", color: "var(--warn, #d29a2b)",
-                      cursor: "pointer", fontFamily: "var(--font-hud)", fontSize: 10,
-                      letterSpacing: "0.12em", textTransform: "uppercase", borderRadius: 2,
-                    }}>
-                    <AlertTriangle size={11} /> go live
-                  </button>
-                )}
-
-                {/* Raw ET-parity comparison is the default; paced is explicit. */}
-                {liveMode && !asOfDate && (
-                  <button type="button" onClick={() => setVolBasis((v) => (v === "raw" ? "paced" : "raw"))}
-                    title={volBasis === "raw"
-                      ? "Volume > 30D Avg compares cumulative session volume against the full-day 30-day average (Economic Times parity). Click for pace-adjusted."
-                      : "Volume > 30D Avg compares session volume against the 30-day average pro-rated to the elapsed session. Click for raw ET-parity comparison."
-                      + (volUnknownCount > 0 ? ` · ${volUnknownCount} stocks have no 30D average yet` : "")}
-                    aria-label="Toggle volume comparison basis"
-                    style={{
-                      display: "inline-flex", alignItems: "center", gap: 5,
-                      padding: "3px 7px", border: "1px solid var(--edge)", background: "transparent",
-                      color: "var(--text-muted)", cursor: "pointer",
-                      fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
-                      borderRadius: 2,
-                    }}>
-                    vol · {volBasis === "raw" ? "raw (ET)" : "paced signal"}
-                  </button>
-                )}
-
-                {/* Volume unit — display only, states which basis the numbers are in. */}
-                <button type="button" onClick={() => setVolUnit((u) => (u === "k" ? "shares" : "k"))}
-                  title={volUnit === "k"
-                    ? "Volume columns are shown in thousands ('000), the way Economic Times prints them. Filter thresholds are always entered in raw shares. Click for raw shares."
-                    : "Volume columns are shown in raw shares. Economic Times prints thousands ('000) — click to display '000."}
-                  aria-label="Toggle volume unit"
-                  aria-pressed={volUnit === "k"}
-                  style={{
-                    display: "inline-flex", alignItems: "center", gap: 5,
-                    padding: "3px 7px", border: "1px solid var(--edge)", background: "transparent",
-                    color: "var(--text-muted)", cursor: "pointer",
-                    fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
-                    borderRadius: 2,
-                  }}>
-                  {volUnit === "k" ? "vol · '000" : "vol · shares"}
-                </button>
 
                 {/* Staleness must be impossible to miss: filters running on a
                     plane that stopped publishing is exactly how this screen
@@ -1256,29 +1129,6 @@ function ScreenerInner() {
                   </span>
                 )}
 
-                <button type="button" onClick={() => setHideIlliquid((v) => !v)}
-                  title={hideIlliquid
-                    ? `Hiding ${illiquidCount} penny/illiquid name${illiquidCount === 1 ? "" : "s"}`
-                      + (hiddenByLiquidity > 0 ? ` (${hiddenByLiquidity} match the active filters)` : "")
-                      + " — click to show them"
-                    : "Showing all stocks, including penny/illiquid names — click to hide them again"}
-                  aria-label="Toggle penny/illiquid stocks"
-                  aria-pressed={hideIlliquid}
-                  style={{
-                    display: "inline-flex", alignItems: "center", gap: 5,
-                    padding: "3px 7px",
-                    border: `1px solid ${hideIlliquid && hiddenByLiquidity > 0 ? "var(--warn, #d29a2b)" : "var(--edge)"}`,
-                    background: hideIlliquid ? "transparent" : "var(--accent-dim, rgba(255,184,77,0.12))",
-                    color: hideIlliquid
-                      ? (hiddenByLiquidity > 0 ? "var(--warn, #d29a2b)" : "var(--text-muted)")
-                      : "var(--accent)",
-                    cursor: "pointer",
-                    fontFamily: "var(--font-hud)", fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase",
-                    borderRadius: 2,
-                  }}>
-                  {hideIlliquid ? <Check size={11} /> : <X size={11} />}
-                  {hideIlliquid ? `Liquid${hiddenByLiquidity > 0 ? ` · ${hiddenByLiquidity} hidden` : ""}` : "All"}
-                </button>
                 {partial && (
                   <button type="button" onClick={() => setLoadAllRequested(true)}
                     title="Load the full universe (larger download)"
@@ -1293,11 +1143,7 @@ function ScreenerInner() {
                   </button>
                 )}
 
-                <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}
-                  style={{ ...inputStyle, padding: "4px 6px", fontSize: 11 }}
-                  title="Rows per page">
-                  {[25, 50, 100, 200].map((n) => <option key={n} value={n}>{n}/page</option>)}
-                </select>
+
                 {/* Columns · CSV grouped together as one cluster */}
                 <div style={{ display: "inline-flex", gap: 4, padding: 2, border: "1px solid var(--edge)", borderRadius: 2 }}>
                   <ColumnPicker value={visibleCols} onChange={setVisibleCols} />
@@ -1344,12 +1190,11 @@ function ScreenerInner() {
                       Showing {pageStart + 1}–{Math.min(pageStart + pageSize, filtered.length)} of {filtered.length}
                     </span>
                     <div style={{ display: "flex", gap: 4 }}>
-                      <Btn size="sm" onClick={() => setPage(0)} disabled={page === 0}>« First</Btn>
                       <Btn size="sm" onClick={() => setPage((p) => Math.max(0, p - 1))} disabled={page === 0}>‹ Prev</Btn>
                       <span style={{ padding: "4px 10px", fontFamily: "var(--font-hud)", fontSize: 11, color: "var(--accent)" }}>{page + 1} / {totalPages}</span>
                       <Btn size="sm" onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1}>Next ›</Btn>
-                      <Btn size="sm" onClick={() => setPage(totalPages - 1)} disabled={page >= totalPages - 1}>Last »</Btn>
                     </div>
+
                   </div>
                 )}
               </>
@@ -2183,9 +2028,13 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
           const hhmm = ist.toISOString().slice(11, 16);
           const day = ist.toISOString().slice(0, 10);
           const failed = dailySync.metadata?.failed_count ?? 0;
-          const status = dailySync.status;
-          const color = status === "ok" ? "var(--text-muted)"
-            : status === "partial" ? "var(--warn, #d4a017)"
+          // A handful of symbols failing a nightly step is normal noise (a
+          // vendor gap on 1–4 names). The run is only reported as degraded
+          // once 5 or more failures land.
+          const degraded = failed >= 5;
+          const status = degraded ? dailySync.status : "ok";
+          const color = !degraded ? "var(--text-muted)"
+            : dailySync.status === "partial" ? "var(--warn, #d4a017)"
             : "var(--err, #d4634e)";
           const failedFns = (dailySync.metadata?.steps ?? [])
             .filter((s) => s.status !== "ok").map((s) => s.fn).join(", ");
@@ -2197,7 +2046,8 @@ function DataHealthStrip({ rows, filteredCount, loading }: { rows: ScreenerRow[]
               title={title}
               style={{ fontFamily: "var(--font-hud)", fontSize: 10, color, letterSpacing: "0.12em", textTransform: "uppercase" }}
             >
-              Daily sync · {status}{failed > 0 ? ` · ${failed} failed` : ""} · {day} {hhmm} IST
+              Daily sync · {status}{degraded ? ` · ${failed} failed` : ""} · {day} {hhmm} IST
+
             </span>
           );
         })() : <span />}

@@ -437,6 +437,10 @@ export function filterMatches(row: Record<string, any>, af: ActiveFilter, latest
   const scope: ApplicabilityScope = def.scope ?? (def.fundamental ? "eq" : "all");
   // A promoted live quote carries its own authoritative session/freshness.
   // Its static score row may legitimately still be dated to the prior close.
+  // Everything else is judged against the *settled* reference session — the
+  // caller must pass that date, never the live sweep's session, or every row
+  // the sweep hasn't ticked yet is rejected while the table still shows its
+  // perfectly good settled numbers.
   const validLiveQuote = row.quote_state === "live" && row.live_stale !== true;
   if (scope === "tech" && latestTradeDate != null && EXACT_SESSION_FILTERS.has(filterId) && !validLiveQuote && row.trade_date !== latestTradeDate) {
     return false;

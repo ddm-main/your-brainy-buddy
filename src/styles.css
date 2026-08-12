@@ -1866,3 +1866,7 @@ body.is-fs-chart .hud-voicebar { display: none !important; }
   
   
 }
+
+/* Screener results header: the session dot blinks green while NSE is open and
+   sits solid red outside market hours. */
+.screener-live-dot { animation: live-pulse 1.4s ease-in-out infinite; }
