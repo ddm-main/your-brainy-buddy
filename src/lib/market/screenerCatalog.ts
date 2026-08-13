@@ -147,6 +147,7 @@ export const FILTERS: FilterDef[] = [
   { id: "low_52w",            label: "52w Low",           category: "basics",     kind: "number", unit: "₹", min: 0, max: 200000, step: 1, scope: "tech" },
   { id: "fno_enabled",        label: "F&O Available",     category: "basics",     kind: "boolean", scope: "all" },
   { id: "sme",                label: "SME Listed",        category: "basics",     kind: "boolean", scope: "all" },
+  { id: "is_liquid_tradable", label: "Liquid tradable only", category: "basics", kind: "boolean", scope: "eq", hint: "Optional liquidity gate. When off, no matching stock is hidden." },
 
   // Profitability
   { id: "roe",                label: "ROE",               category: "profitability", kind: "number", unit: "%", min: -50, max: 100, step: 1, fundamental: true, scope: "eq" },

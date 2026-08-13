@@ -167,6 +167,13 @@ export interface ScreenerRow {
   context_complete: boolean | null;
 }
 
+export interface ScreenerBasis {
+  sweepId: string | null;
+  liveAsOf: string | null;
+  providers: string[];
+  universeCount: number | null;
+}
+
 
 const universeIndexKey: Record<UniverseId, string | null> = {
   all:       null,
@@ -259,6 +266,7 @@ const FIELD_STATIC: Record<string, string[]> = {
   institutional_holding: ["fii_holding","dii_holding"],
   ret_5d: ["ret_5d"], ret_21d: ["ret_21d"], ret_ytd: ["ret_ytd"],
   fno_enabled: [], sme: [],
+  is_liquid_tradable: [],
   // Filter-only ids that never became their own column, plus the row-actions
   // column. Without these a single "Price" or "BB Squeeze" filter silently
   // widened the request back to the full 108-column plane.
@@ -382,6 +390,60 @@ const SERVER_FILTER_COLUMNS: Record<string, string[]> = {
   change_pct: ["change_pct_raw", "eod_change_pct_raw"],
   volume:     ["volume", "eod_volume"],
 };
+
+const CORE_FILTER_IDS = new Set(["ltp", "market_cap", "change_pct", "volume", "vol_gt_avg30"]);
+
+function numericBound(active: ActiveFilter[], id: string): { min: number | null; max: number | null } {
+  const af = active.find((item) => canonicalFilterId(item.id) === id);
+  const parse = (value: number | "" | undefined) => value === "" || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value);
+  return { min: parse(af?.min), max: parse(af?.max) };
+}
+
+/** Parameters for the single-sweep core candidate RPC. Null means the filter
+ * is not active; the database applies every supplied bound inclusively. */
+export function coreCandidateParams(active: ActiveFilter[]): Record<string, unknown> | null {
+  if (!active.some((item) => CORE_FILTER_IDS.has(canonicalFilterId(item.id)))) return null;
+  const price = numericBound(active, "ltp");
+  const cap = numericBound(active, "market_cap");
+  const change = numericBound(active, "change_pct");
+  const volume = numericBound(active, "volume");
+  const volumeAbove = active.find((item) => canonicalFilterId(item.id) === "vol_gt_avg30")?.bool;
+  const liquidOnly = active.find((item) => canonicalFilterId(item.id) === "is_liquid_tradable")?.bool === true;
+  return {
+    _min_price: price.min, _max_price: price.max,
+    _min_market_cap: cap.min, _max_market_cap: cap.max,
+    _min_change_pct: change.min, _max_change_pct: change.max,
+    _min_volume: volume.min, _max_volume: volume.max,
+    _volume_above_avg: volumeAbove ?? null,
+    _liquid_only: liquidOnly,
+  };
+}
+
+async function fetchCoreCandidates(params: Record<string, unknown>): Promise<{ rows: any[]; basis: ScreenerBasis }> {
+  const rows: any[] = [];
+  let after: string | null = null;
+  for (;;) {
+    const result: { data: unknown; error: { message?: string } | null } = await (supabase as any).rpc("market_screener_core_candidates", {
+      ...params, _limit: PAGE, _after_symbol: after,
+    });
+    if (result.error) throw result.error;
+    const chunk: any[] = Array.isArray(result.data) ? result.data : [];
+    rows.push(...chunk);
+    if (chunk.length < PAGE) break;
+    after = String(chunk[chunk.length - 1]?.symbol ?? "");
+    if (!after) break;
+  }
+  const first = rows[0];
+  return {
+    rows,
+    basis: {
+      sweepId: first?.live_sweep_id ?? null,
+      liveAsOf: first?.live_as_of ?? null,
+      providers: Array.from(new Set(rows.map((row) => String(row.live_provider ?? "")).filter(Boolean))).sort(),
+      universeCount: first?.universe_count == null ? null : Number(first.universe_count),
+    },
+  };
+}
 
 export interface ServerFilter { cols: string[]; gte?: number; lte?: number }
 
@@ -738,11 +800,31 @@ export function useScreenerData(
   // (~190 fetches / 26 MB for a handful of sessions). Both are now monotonic:
   // the plane only ever widens, and a widened plane already answers every
   // narrower request, so toggling back and forth costs nothing.
-  const widened = useMemo(() => widenPlan(fields, loadAll), [fields?.join("|"), loadAll]);
+  const fieldsKey = fields?.join("|") ?? "";
+  const activeKey = JSON.stringify(active ?? []);
+  const widened = useMemo(() => widenPlan(fields, loadAll), [fields, fieldsKey, loadAll]);
   const projection = widened.projection;
   const cap = widened.loadAll ? null : BOARD_ROWS;
   const capKey = widened.loadAll ? "all" : String(BOARD_ROWS);
-  const server = useMemo(() => planServerFilters(active), [JSON.stringify(active ?? [])]);
+  const server = useMemo(() => planServerFilters(active), [active, activeKey]);
+  const coreParams = useMemo(() => coreCandidateParams(active ?? []), [active, activeKey]);
+
+  // Core live predicates are evaluated once against one completed sweep. The
+  // returned rows are both the authoritative values and the candidate symbols;
+  // static/fundamental columns are joined onto that fixed set below.
+  const core = useQuery({
+    queryKey: ["market", "screener-core-candidates-v1", universe, coreParams],
+    queryFn: () => fetchCoreCandidates(coreParams ?? {}),
+    staleTime: marketOpen() ? 5 * 60_000 : 15 * 60_000,
+    gcTime: 30 * 60_000,
+    refetchInterval: liveInterval(5 * 60_000, false),
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: false,
+    retry: false,
+    enabled: enabled && !asOfDate && universe === "all" && coreParams != null,
+  });
+  const coreSymbols = useMemo(() => core.data ? new Set(core.data.rows.map((row) => String(row.symbol))) : null, [core.data]);
+  const coreKey = core.data?.basis.sweepId ?? (coreParams ? "pending" : "none");
 
   // ---- Back-date branch: one deterministic edge-function call, cached forever.
   const asof = useQuery({
@@ -785,14 +867,15 @@ export function useScreenerData(
   // These only change after the close, so this is fetched once per session and
   // never polled — it is ~3/4 of the payload and 0 % of the intraday movement.
   const statics = useQuery({
-    queryKey: ["market", "screener-static-v3", universe, projection.key, capKey, server.key],
+    queryKey: ["market", "screener-static-v4", universe, projection.key, capKey, server.key, coreKey],
     queryFn: async () => {
       // Static rows must contain the complete candidate population. Intraday
       // bounds belong only on the polled live plane; filtering this six-hour
       // cache prevented later threshold crossers from ever entering the merge.
-      const cacheKey = `${staticSessionKey()}:${universe}:${projection.key}:${capKey}:all`;
+      const cacheKey = `${staticSessionKey()}:${universe}:${projection.key}:${capKey}:${coreKey}`;
       const cached = readStaticCache(cacheKey);
-      const rows = cached ?? await fetchScreenerRows(await resolveUniverseFilter(universe), projection.statics, cap, []);
+      const universeFilter = coreSymbols ?? await resolveUniverseFilter(universe);
+      const rows = cached ?? await fetchScreenerRows(universeFilter, projection.statics, coreSymbols ? null : cap, []);
 
       if (rows.length === 0) return { rows, idxSets: EMPTY_IDX };
       if (!cached) writeStaticCache(cacheKey, rows);
@@ -805,16 +888,16 @@ export function useScreenerData(
     refetchOnWindowFocus: false,
     refetchOnMount: false,
     retry: false,
-    enabled: enabled && !asOfDate,
+    enabled: enabled && !asOfDate && (!coreParams || universe !== "all" || core.isSuccess),
   });
 
   // ---- Live plane: the ~30 columns that actually tick. Polled on the server
   // sweep cadence (5 min) and never in a background tab.
   const live = useQuery({
-    queryKey: ["market", "screener-live-v3", universe, projection.key, capKey, server.key],
+    queryKey: ["market", "screener-live-v4", universe, projection.key, capKey, server.key, coreKey],
     queryFn: async () => {
-      const universeSet = await resolveUniverseFilter(universe);
-      return await fetchScreenerRows(universeSet, projection.live, cap, server.filters);
+      const universeSet = coreSymbols ?? await resolveUniverseFilter(universe);
+      return await fetchScreenerRows(universeSet, projection.live, coreSymbols ? null : cap, coreSymbols ? [] : server.filters);
 
     },
     staleTime: marketOpen() ? 5 * 60_000 : 15 * 60_000,
@@ -825,7 +908,7 @@ export function useScreenerData(
     // The 5-minute poll already covers the sweep cadence.
     refetchOnWindowFocus: false,
     retry: false,
-    enabled: enabled && !asOfDate,
+    enabled: enabled && !asOfDate && (!coreParams || universe !== "all" || core.isSuccess),
   });
 
   // Universe size for the "showing the top N of M" hint. `head: true` ships a
@@ -856,19 +939,25 @@ export function useScreenerData(
     const liveByKey = new Map<string, any>();
     for (const r of live.data ?? []) liveByKey.set(`${r.exchange}:${r.symbol}`, r);
     const idxSets = statics.data?.idxSets ?? EMPTY_IDX;
-    return base.map((s: any) => toScreenerRow({ ...s, ...(liveByKey.get(`${s.exchange}:${s.symbol}`) ?? {}) }, idxSets));
-  }, [asOfDate, asof.data, statics.data, live.data]);
+    const authoritative = new Map((core.data?.rows ?? []).map((row) => [`${row.exchange}:${row.symbol}`, row]));
+    return base.map((s: any) => toScreenerRow({
+      ...s,
+      ...(liveByKey.get(`${s.exchange}:${s.symbol}`) ?? {}),
+      ...(authoritative.get(`${s.exchange}:${s.symbol}`) ?? {}),
+    }, idxSets));
+  }, [asOfDate, asof.data, statics.data, live.data, core.data]);
 
   return {
     data: merged,
-    isLoading: asOfDate ? asof.isLoading : (statics.isLoading || live.isLoading),
-    isFetching: asOfDate ? asof.isFetching : (statics.isFetching || live.isFetching),
-    error: (asOfDate ? asof.error : (statics.error ?? live.error)) as Error | null,
+    isLoading: asOfDate ? asof.isLoading : (core.isLoading || statics.isLoading || live.isLoading),
+    isFetching: asOfDate ? asof.isFetching : (core.isFetching || statics.isFetching || live.isFetching),
+    error: (asOfDate ? asof.error : (core.error ?? statics.error ?? live.error)) as Error | null,
     dataUpdatedAt: asOfDate ? asof.dataUpdatedAt : live.dataUpdatedAt,
     /** Universe size behind the current board (null while unknown). */
     universeCount: asOfDate ? null : (total.data ?? null),
     /** True while only the first board page is loaded. */
     partial: !asOfDate && !loadAll && (total.data ?? 0) > merged.length,
+    basis: asOfDate ? null : (core.data?.basis ?? null),
     refetch: () => { if (asOfDate) { void asof.refetch(); } else { void statics.refetch(); void live.refetch(); } },
   };
 }

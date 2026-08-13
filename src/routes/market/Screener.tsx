@@ -205,11 +205,6 @@ function ScreenerInner() {
   });
   useEffect(() => { safeStorage.setJSON(COLS_STORE_KEY, visibleCols); }, [visibleCols]);
 
-  // Penny / illiquid names are never tradable here, so they are always hidden.
-  // The old opt-in toggle is gone: the universe this screen shows is the
-  // non-penny, liquid universe, full stop.
-  const hideIlliquid = true;
-
   const [page, setPage] = useState(0);
   // Fixed page size — 100 rows. Pagination only appears past that.
   const pageSize = 100;
@@ -242,7 +237,7 @@ function ScreenerInner() {
   const [loadAllRequested, setLoadAllRequested] = useState(false);
   const loadAll = loadAllRequested || active.length > 0 || !!asOfDate;
   const {
-    data: rawRows = [], isFetching, error, universeCount, partial,
+    data: rawRows = [], isFetching, error, universeCount, partial, basis,
     // EGRESS: the active numeric bounds are pushed into the query as a superset,
     // so a filtered run fetches the matching rows instead of the whole universe.
     // The displayed result is still decided by the client-side filter pass below.
@@ -412,10 +407,9 @@ function ScreenerInner() {
     }
     return n;
   }, [rows, active]);
-  const filtered = useMemo(
-    () => (hideIlliquid ? matched.filter((r) => r.is_liquid_tradable !== false) : matched),
-    [matched, hideIlliquid],
-  );
+  // Selected filters are the complete contract: no invisible liquidity gate
+  // is allowed to remove an otherwise matching row.
+  const filtered = matched;
 
 
 
@@ -1159,6 +1153,11 @@ function ScreenerInner() {
             {active.length > 0 && (
               <div style={{ display: "flex", gap: 5, flexWrap: "wrap", paddingBottom: 8 }} aria-label="Active filter summary">
                 {active.map((af) => <Chip key={af.id} tone="accent">{chipDesc(af)}</Chip>)}
+              </div>
+            )}
+            {basis && (
+              <div style={{ fontSize: 10, color: "var(--text-muted)", paddingBottom: 8, lineHeight: 1.5 }}>
+                NSE · {basis.universeCount?.toLocaleString("en-IN") ?? "—"} eligible · sweep {basis.liveAsOf ? new Date(basis.liveAsOf).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—"} IST · {basis.providers.join(" + ") || "promoted feed"} · inclusive bounds · raw volume vs 30D average
               </div>
             )}
             {error ? (
