@@ -800,14 +800,12 @@ export function useScreenerData(
   // (~190 fetches / 26 MB for a handful of sessions). Both are now monotonic:
   // the plane only ever widens, and a widened plane already answers every
   // narrower request, so toggling back and forth costs nothing.
-  const fieldsKey = fields?.join("|") ?? "";
-  const activeKey = JSON.stringify(active ?? []);
-  const widened = useMemo(() => widenPlan(fields, loadAll), [fields, fieldsKey, loadAll]);
+  const widened = useMemo(() => widenPlan(fields, loadAll), [fields, loadAll]);
   const projection = widened.projection;
   const cap = widened.loadAll ? null : BOARD_ROWS;
   const capKey = widened.loadAll ? "all" : String(BOARD_ROWS);
-  const server = useMemo(() => planServerFilters(active), [active, activeKey]);
-  const coreParams = useMemo(() => coreCandidateParams(active ?? []), [active, activeKey]);
+  const server = useMemo(() => planServerFilters(active), [active]);
+  const coreParams = useMemo(() => coreCandidateParams(active ?? []), [active]);
 
   // Core live predicates are evaluated once against one completed sweep. The
   // returned rows are both the authoritative values and the candidate symbols;
@@ -958,7 +956,7 @@ export function useScreenerData(
     /** True while only the first board page is loaded. */
     partial: !asOfDate && !loadAll && (total.data ?? 0) > merged.length,
     basis: asOfDate ? null : (core.data?.basis ?? null),
-    refetch: () => { if (asOfDate) { void asof.refetch(); } else { void statics.refetch(); void live.refetch(); } },
+    refetch: () => { if (asOfDate) { void asof.refetch(); } else { void core.refetch(); void statics.refetch(); void live.refetch(); } },
   };
 }
 
