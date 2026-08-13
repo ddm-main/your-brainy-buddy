@@ -5191,6 +5191,44 @@ export type Database = {
               symbol: string
             }[]
           }
+      market_screener_core_candidates: {
+        Args: {
+          _after_symbol?: string
+          _limit?: number
+          _liquid_only?: boolean
+          _max_change_pct?: number
+          _max_market_cap?: number
+          _max_price?: number
+          _max_volume?: number
+          _min_change_pct?: number
+          _min_market_cap?: number
+          _min_price?: number
+          _min_volume?: number
+          _volume_above_avg?: boolean
+        }
+        Returns: {
+          breakout_score_v4: number
+          change_abs: number
+          change_pct: number
+          change_pct_raw: number
+          close: number
+          company_name: string
+          exchange: string
+          is_liquid_tradable: boolean
+          live_as_of: string
+          live_provider: string
+          live_sweep_id: string
+          market_cap: number
+          mcap_basis: string
+          previous_close: number
+          quote_state: string
+          symbol: string
+          trade_date: string
+          universe_count: number
+          vol_avg30: number
+          volume: number
+        }[]
+      }
       market_screener_et_parity: {
         Args: {
           _after_symbol?: string

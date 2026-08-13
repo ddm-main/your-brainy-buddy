@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { filterMatches, excludedByMissingData, coverageOf, latestTradeDateOf, resolveReferenceSession, filterMatchesLive, type ActiveFilter } from "../src/lib/market/screenerCatalog";
 import { colsFromActiveFilters } from "../src/lib/market/screenerColumnModel";
+import { coreCandidateParams } from "../src/lib/market/screenerRun";
 
 // A row with a full EOD triple (ltp/change_pct/volume via trade_date) but no
 // technical indicators synced yet — the exact shape that used to get dropped
@@ -21,6 +22,13 @@ const rowWithNoEod = {
 };
 
 describe("filterMatches — scope-aware applicability", () => {
+  it("does not apply the liquidity gate unless the filter is selected", () => {
+    const illiquid = { symbol: "ILLIQ", instrument_type: "EQ", is_liquid_tradable: false };
+    expect(filterMatches(illiquid, { id: "market_cap", min: 1000 })).toBe(false);
+    expect(filterMatches({ ...illiquid, market_cap: 2000 }, { id: "market_cap", min: 1000 })).toBe(true);
+    expect(filterMatches(illiquid, { id: "is_liquid_tradable", bool: true })).toBe(false);
+  });
+
   it("an enum filter excludes a non-equity row that cannot prove a match", () => {
     const etf = { symbol: "ETF", instrument_type: "ETF", sector: null };
     expect(filterMatches(etf, { id: "sector", values: ["Technology"] })).toBe(false);
@@ -51,6 +59,28 @@ describe("filterMatches — scope-aware applicability", () => {
     const etfRow = { symbol: "ETF1", exchange: "NSE", instrument_type: "ETF", trade_date: "2026-07-21", pe: null };
     const af: ActiveFilter = { id: "pe", min: 10 };
     expect(filterMatches(etfRow, af)).toBe(true);
+  });
+});
+
+describe("single-sweep core candidate parameters", () => {
+  it("passes literal inclusive bounds and the explicit volume/liquidity choices", () => {
+    expect(coreCandidateParams([
+      { id: "market_cap", min: 1000 },
+      { id: "ltp", min: 100 },
+      { id: "change_pct", min: 5 },
+      { id: "vol_gt_avg30", bool: true },
+      { id: "is_liquid_tradable", bool: true },
+    ])).toMatchObject({
+      _min_market_cap: 1000,
+      _min_price: 100,
+      _min_change_pct: 5,
+      _volume_above_avg: true,
+      _liquid_only: true,
+    });
+  });
+
+  it("does not invoke the core RPC for a liquidity-only screen", () => {
+    expect(coreCandidateParams([{ id: "is_liquid_tradable", bool: true }])).toBeNull();
   });
 });
 
