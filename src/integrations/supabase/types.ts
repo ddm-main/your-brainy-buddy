@@ -3225,6 +3225,7 @@ export type Database = {
           stop_loss: number | null
           symbol: string
           targets: number[] | null
+          trade_date: string | null
           user_id: string
         }
         Insert: {
@@ -3243,6 +3244,7 @@ export type Database = {
           stop_loss?: number | null
           symbol: string
           targets?: number[] | null
+          trade_date?: string | null
           user_id?: string
         }
         Update: {
@@ -3261,6 +3263,7 @@ export type Database = {
           stop_loss?: number | null
           symbol?: string
           targets?: number[] | null
+          trade_date?: string | null
           user_id?: string
         }
         Relationships: []
@@ -3361,9 +3364,11 @@ export type Database = {
           rs_percentile: number | null
           rs_percentile_nifty: number | null
           rsi14: number | null
+          score_ceiling: number | null
           score_components: Json | null
           score_components_v2: Json | null
           score_coverage: Json | null
+          score_trade_date: string | null
           score_unavailable_reason: string | null
           sector: string | null
           sector_strength: number | null
@@ -3486,9 +3491,11 @@ export type Database = {
           rs_percentile?: number | null
           rs_percentile_nifty?: number | null
           rsi14?: number | null
+          score_ceiling?: number | null
           score_components?: Json | null
           score_components_v2?: Json | null
           score_coverage?: Json | null
+          score_trade_date?: string | null
           score_unavailable_reason?: string | null
           sector?: string | null
           sector_strength?: number | null
@@ -3611,9 +3618,11 @@ export type Database = {
           rs_percentile?: number | null
           rs_percentile_nifty?: number | null
           rsi14?: number | null
+          score_ceiling?: number | null
           score_components?: Json | null
           score_components_v2?: Json | null
           score_coverage?: Json | null
+          score_trade_date?: string | null
           score_unavailable_reason?: string | null
           sector?: string | null
           sector_strength?: number | null
@@ -4936,18 +4945,16 @@ export type Database = {
         Args: { _limit?: number }
         Returns: number
       }
-      fit_score_calibration:
-        | { Args: { _min_n?: number; _model?: string }; Returns: number }
-        | {
-            Args: {
-              _min_n?: number
-              _min_sessions?: number
-              _min_symbols?: number
-              _min_symbols_neutral?: number
-              _model?: string
-            }
-            Returns: number
-          }
+      fit_score_calibration: {
+        Args: {
+          _min_n?: number
+          _min_sessions?: number
+          _min_symbols?: number
+          _min_symbols_neutral?: number
+          _model?: string
+        }
+        Returns: number
+      }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
@@ -5078,10 +5085,6 @@ export type Database = {
       }
       market_purge_orphans: { Args: never; Returns: Json }
       market_purge_symbols: { Args: { _symbols: string[] }; Returns: number }
-      market_rescore_latest_from_prices: {
-        Args: { _limit?: number; _trade_date?: string }
-        Returns: number
-      }
       market_rescore_prices_batch: {
         Args: { _after_symbol?: string; _limit?: number; _trade_date?: string }
         Returns: {
