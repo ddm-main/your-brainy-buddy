@@ -1003,6 +1003,8 @@ export function computeSnapshot(candles: Candle[]): IndicatorSnapshot | null {
 
     breakoutLevelCleared: bkState.level,
     pivotLevel: pivot.level,
+    triggerLevel,
+
     pivotTouches: pivot.touches,
     pivotTouchQuality: pivot.touchQuality,
     rollingHigh20Touches: rh20Q.touches,
