@@ -1213,9 +1213,6 @@ Deno.serve(async (req) => {
           ? ((peakClose - entry) / entry) * 100
           : null;
 
-        // Sessions, not rows: a re-run on the same day must not advance it, and
-        // a skipped session must not compress the timeline.
-        const elapsed = sessionsSince(e.first_detected_date);
         const daysTracked = elapsed != null
           ? elapsed + 1
           : (alreadyToday ? (e.days_tracked ?? 1) : (e.days_tracked ?? 1) + 1);
