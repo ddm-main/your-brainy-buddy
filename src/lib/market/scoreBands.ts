@@ -6,6 +6,15 @@ export const SCORE_BAND_STRONG = 70;   // 70+   strong / qualifies for the break
 export const SCORE_BAND_MODERATE = 55; // 55-69 moderate
 export const SCORE_BAND_WEAK = 40;     // 40-54 weak
 
+// Episode lifecycle thresholds — mirror of nextEpisodeStatus() in scoring.ts.
+// The Breakout legend builds its wording from these instead of restating the
+// numbers in prose (tests/breakoutEpisode.test.ts asserts they still match).
+export const EXTEND_PCT = 8;      // return since entry that marks the move "run"
+export const FAIL_PCT = 6;        // drawdown from entry that fails the breakout
+export const COOL_DAYS = 3;       // sessions below the qualify score before cooling
+export const MAX_TRACK_DAYS = 15; // tracking horizon in sessions
+
+
 export interface ScoreBandCuts {
   trade_date: string;
   strong_cut: number | null;
