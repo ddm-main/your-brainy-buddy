@@ -915,7 +915,7 @@ export function computeSnapshot(candles: Candle[]): IndicatorSnapshot | null {
   const triggerPivot = resistancePivot(candles, 250, TRIGGER_MAX_ATRS);
   const triggerLevel = (() => {
     if (triggerPivot.level != null) return triggerPivot.level;
-    const atrV = atr14v;
+    const atrV2 = atrV;
     const rh = rollingHighExclToday(candles, 20);
     if (rh == null || atrV == null || !(atrV > 0)) return null;
     // A fresh new-high breakout has no cleared cluster — the rolling high is
