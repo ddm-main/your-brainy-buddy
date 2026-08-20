@@ -193,24 +193,27 @@ function BreakoutInner() {
     const tick = liveTicks[quoteKey(e.exchange, e.symbol)];
     const live = isFreshTick(tick);
     const liveLtp = live ? tick!.ltp : meta?.ltp ?? e.current_close;
-    // On the detection session the entry *is* that day's close, so a return
-    // measured off it is 0.00% for every day-1 row by construction. The pivot
-    // the name actually broke is the honest basis there; from day 2 on the
-    // stored entry is the immutable history every other number is measured on.
-    const dayOne = (e.days_tracked ?? 1) <= 1;
-    const entry = dayOne && e.trigger_price != null && e.trigger_price > 0
-      ? e.trigger_price
-      : e.entry_close;
+    // The entry is the entry. Substituting the trigger level on day 1 to avoid
+    // showing 0.00% quietly measured the return off a level that could sit 30%
+    // below the close, printing "+40%" on a name that had not moved. Day-1
+    // return since entry is 0.00% by construction and is shown as such.
+    const entry = e.entry_close;
     const liveReturnPct = entry != null && entry > 0 && liveLtp != null
       ? ((liveLtp - entry) / entry) * 100
       : e.current_return_pct;
 
+    // A missing close is a missing close: it must not be replaced by 0 (which
+    // fed ATR/pivot maths and manufactured a confident EXTENDED/FAILED read).
+    // The live tick is an acceptable stand-in; nothing else is.
+    const stageClose = meta?.close ?? liveLtp ?? null;
     const read = deriveBreakoutStage(meta ? ({
-      close: meta.close ?? liveLtp ?? 0,
+      close: stageClose,
       ema20: meta.ema20,
       atr14: meta.atr14,
-      bbSqueeze: meta.bb_squeeze ?? false,
-      nearResistance: meta.near_resistance ?? false,
+      // null, not false — an unmeasured squeeze is unknown, and defaulting it
+      // to false was indistinguishable from a measured "not squeezed".
+      bbSqueeze: meta.bb_squeeze ?? null,
+      nearResistance: meta.near_resistance ?? null,
       // Real trigger geometry — with these nulled out the read could never
       // resolve to TRIGGERED, so every row showed COILED or LOADING.
       pivotLevel: meta.pivot_level ?? meta.resistance_level,
@@ -224,7 +227,7 @@ function BreakoutInner() {
       // so without this the live recompute under-penalises a fresh failure.
       breakoutStateDays: meta.breakout_state_days ?? meta.breakout_freshness_days ?? null,
       breakoutLevelCleared: meta.breakout_level_cleared ?? null,
-      atrContracting: (meta.base_tightness ?? 1) < 0.04,
+      atrContracting: meta.base_tightness == null ? null : meta.base_tightness < 0.04,
       baseTightness: meta.base_tightness ?? null,
       baseDurationDays: meta.base_duration_days ?? null,
     } as any) : null);
@@ -240,14 +243,17 @@ function BreakoutInner() {
     const term = search.trim().toUpperCase();
     return allRows.filter((r) => {
       if (view === "open" && !OPEN_STATUSES.includes(r.status)) return false;
-      // "New today" is literally today (IST) and includes same-day failures.
-      if (view === "new" && r.first_detected_date !== todayIst) return false;
+      // "New" = detected in the latest evaluated session, which on a holiday or
+      // before the day's run is the previous trading day. Includes same-session
+      // failures.
+      if (view === "new" && r.first_detected_date !== latestSession) return false;
       if (minScore > 0 && (r.last_score ?? 0) < minScore) return false;
       if (term && !r.symbol.toUpperCase().includes(term)
         && !(r.company_name ?? "").toUpperCase().includes(term)) return false;
       return true;
     });
-  }, [allRows, view, todayIst, minScore, search]);
+  }, [allRows, view, latestSession, minScore, search]);
+
 
   const columns = useMemo<ColumnDef<Row, any>[]>(() => [
     {
