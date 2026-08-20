@@ -481,7 +481,7 @@ function BreakoutInner() {
         </div>
       ),
     },
-  ], [nav]);
+  ], [nav, latestSession]);
 
   const loading = isFetching && episodes.length === 0;
 
