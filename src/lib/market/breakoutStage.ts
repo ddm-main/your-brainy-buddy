@@ -8,6 +8,21 @@ import type { IndicatorSnapshot } from "../../../supabase/functions/_shared/mark
 // different facts and used to share the single "LOADING" label.
 export type BreakoutStage = "NO DATA" | "NO SETUP" | "COILED" | "ARMED" | "TRIGGERED" | "EXTENDED" | "FAILED";
 
+/**
+ * Lifecycle order for sorting. The column used to sort alphabetically, which
+ * put ARMED before COILED and EXTENDED before TRIGGERED — no relation to the
+ * progression the header tooltip describes.
+ */
+export const STAGE_ORDER: Record<BreakoutStage, number> = {
+  "NO DATA": 0,
+  "NO SETUP": 1,
+  COILED: 2,
+  ARMED: 3,
+  TRIGGERED: 4,
+  EXTENDED: 5,
+  FAILED: 6,
+};
+
 export interface StageRead {
   stage: BreakoutStage;
   detail: string;
@@ -15,8 +30,16 @@ export interface StageRead {
 
 export function deriveBreakoutStage(s: IndicatorSnapshot | null | undefined): StageRead {
   if (!s) return { stage: "NO DATA", detail: "no technical snapshot for this symbol" };
+  // A price of 0 (or none) used to be substituted for a missing close, which
+  // fed ATR / pivot-distance maths and produced a confident EXTENDED or FAILED
+  // read out of nothing at all.
+  if (s.close == null || !(s.close > 0)) {
+    return { stage: "NO DATA", detail: "no price for this symbol in the latest session" };
+  }
 
-  const pivot = s.pivotLevel ?? s.rollingHigh20 ?? null;
+  // rollingHigh55 is part of the fetched geometry; without it in the fallback a
+  // name whose only level is the 55-day high could never read ARMED/TRIGGERED.
+  const pivot = s.pivotLevel ?? s.rollingHigh20 ?? s.rollingHigh55 ?? null;
   const atr = s.atr14 ?? null;
 
   // FAILED — a breakout fired and price fell back inside the base. This used to
@@ -48,8 +71,14 @@ export function deriveBreakoutStage(s: IndicatorSnapshot | null | undefined): St
   // TRIGGERED — close above the strongest pivot within the last few sessions.
   if (triggered) return { stage: "TRIGGERED", detail: triggerDetail };
 
-  const coiled = !!(s.bbSqueeze || s.atrContracting ||
-    (s.baseTightness != null && s.baseTightness < 0.04 && (s.baseDurationDays ?? 0) >= 15));
+  // Every coil input is optional: `false` for an unmeasured squeeze is a claim,
+  // not a reading. When nothing about the coil is measurable, say NO DATA
+  // instead of the friendliest available label.
+  const tight = s.baseTightness ?? null;
+  const coilInputs = [s.bbSqueeze, s.atrContracting, tight]
+    .filter((v) => v != null);
+  const coiled = !!(s.bbSqueeze === true || s.atrContracting === true ||
+    (tight != null && tight < 0.04 && (s.baseDurationDays ?? 0) >= 15));
 
   // ARMED — coiled AND within 1 ATR below a real pivot / near resistance.
   if (coiled && atr != null && atr > 0 && pivot != null) {
@@ -58,11 +87,15 @@ export function deriveBreakoutStage(s: IndicatorSnapshot | null | undefined): St
       return { stage: "ARMED", detail: `${atrsBelow.toFixed(2)}× ATR below pivot` };
     }
   }
-  if (coiled && s.nearResistance) {
+  if (coiled && s.nearResistance === true) {
     return { stage: "ARMED", detail: "coiled at resistance" };
   }
 
   if (coiled) return { stage: "COILED", detail: s.bbSqueeze ? "BB squeeze" : "volatility contracting" };
+
+  if (coilInputs.length === 0) {
+    return { stage: "NO DATA", detail: "no volatility or base measurements for this symbol" };
+  }
 
   return { stage: "NO SETUP", detail: "no coil, trigger or extension in the current read" };
 }
