@@ -5211,6 +5211,7 @@ export type Database = {
         }
         Returns: {
           breakout_score_v4: number
+          candidate_count: number
           change_abs: number
           change_pct: number
           change_pct_raw: number
@@ -5225,6 +5226,8 @@ export type Database = {
           mcap_basis: string
           previous_close: number
           quote_state: string
+          snapshot_session: string
+          snapshot_token: string
           symbol: string
           trade_date: string
           universe_count: number
@@ -5257,6 +5260,33 @@ export type Database = {
           trade_date: string
           vol_avg30: number
           volume: number
+        }[]
+      }
+      market_screener_snapshot_diagnostic: {
+        Args: {
+          _liquid_only?: boolean
+          _max_change_pct?: number
+          _max_market_cap?: number
+          _max_price?: number
+          _max_volume?: number
+          _min_change_pct?: number
+          _min_market_cap?: number
+          _min_price?: number
+          _min_volume?: number
+          _volume_above_avg?: boolean
+        }
+        Returns: Json
+      }
+      market_valid_prior_volume_avg: {
+        Args: {
+          _before: string
+          _exchange: string
+          _sessions?: number
+          _symbol: string
+        }
+        Returns: {
+          avg_volume: number
+          session_count: number
         }[]
       }
       promote_market_eod_session: {
