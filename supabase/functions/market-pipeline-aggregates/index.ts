@@ -804,7 +804,11 @@ Deno.serve(async (req) => {
           sector: r.sector ?? null, rel_volume: r.rel_volume ?? null,
           breakout: bs.score, prebreakout: ps.score, swing: sw.score,
           liquidityOk: liquidity.ok, components: scoreComponents,
-          trigger: snap.pivotLevel ?? snap.rollingHigh20 ?? null,
+          // The level price *just* cleared (within 1.5 ATR). The old
+          // `pivotLevel ?? rollingHigh20` fallback could sit 6 ATRs — often
+          // 30% — below the close, which is not a trigger.
+          trigger: snap.triggerLevel ?? null,
+
           v4: v4.score,
           v4Buckets: v4.buckets, v4Coverage: v4.coverage,
           v4Raw: v4RawDetail(v4),
