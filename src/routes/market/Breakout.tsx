@@ -23,7 +23,9 @@ import {
   SCORE_BAND_STRONG, SCORE_BAND_MODERATE, SCORE_BAND_WEAK,
   EXTEND_PCT, FAIL_PCT, COOL_DAYS, MAX_TRACK_DAYS,
 } from "@/lib/market/scoreBands";
+import { todayIstDateString } from "@/lib/market/liveSnapshot";
 import { quoteKey } from "@/lib/market/pnl";
+
 import { isFreshTick, useLiveTickStore, useTicksRevision } from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
 import { ChevronDown, ChevronRight, LineChart, Info, PieChart, SlidersHorizontal } from "lucide-react";
