@@ -155,7 +155,19 @@ function BreakoutInner() {
   );
   const { data: metaMap } = useBreakoutSymbolMeta(symbolKeys);
 
-  const todayIst = todayIstDateString();
+  // "New today" used to compare against the browser's IST clock alone, so a
+  // late pipeline run, a holiday or a wrong device clock rendered an empty tab
+  // indistinguishable from "nothing broke out". The latest session the pipeline
+  // actually evaluated is the reference; the clock is only a fallback.
+  const latestSession = useMemo(() => {
+    const dates = episodes
+      .map((e) => e.last_evaluated_date)
+      .filter((d): d is string => typeof d === "string" && d.length >= 10);
+    return dates.length ? dates.reduce((a, b) => (a > b ? a : b)) : todayIstDateString();
+  }, [episodes]);
+  const clockToday = todayIstDateString();
+  const staleSession = latestSession < clockToday;
+
 
   const relayAlive = useRelayAlive();
   const _ticksRev = useTicksRevision();
