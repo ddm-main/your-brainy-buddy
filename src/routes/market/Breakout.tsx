@@ -311,7 +311,11 @@ function BreakoutInner() {
       // "Setup" not "Stage": Status already owns the episode lifecycle
       // vocabulary, and two columns both called a stage read as contradictory
       // when one says EXTENDED and the other says Active.
-      id: "stage", accessorKey: "stage",
+      // Sorted by lifecycle position, not alphabetically — an A-Z sort put
+      // ARMED before COILED and EXTENDED before TRIGGERED, contradicting the
+      // progression the header describes.
+      id: "stage", accessorFn: (r) => STAGE_ORDER[r.stage],
+
       header: () => (
         <span title="Today's technical read, independent of the episode: COILED (volatility contracting) → ARMED (coiled at a pivot) → TRIGGERED (pivot cleared) → EXTENDED (stretched above EMA20).">
           Setup
