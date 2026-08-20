@@ -417,12 +417,18 @@ export function levelTouchQuality(
   return { touches, touchQuality: Math.round(touchQuality * 100) / 100 };
 }
 
+// Maximum distance (in ATRs) between the close and a level for that level to
+// count as the one price just *triggered* through. Deliberately much tighter
+// than resistancePivot's default base-ceiling search.
+export const TRIGGER_MAX_ATRS = 1.5;
+
 // The breakout pivot proper: the strongest clustered swing-high level that
 // price has already cleared (at or below the last close), rather than a blind
 // rolling-N high. A level touched 3+ times is a real base ceiling; a rolling
 // high can be a single spike bar. Returns null when no cleared cluster exists
 // within `maxAtrsBelow` ATRs of price (i.e. nothing meaningful was broken).
 export function resistancePivot(
+
   candles: Candle[],
   lookback = 250,
   maxAtrsBelow = 6,
