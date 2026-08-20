@@ -1175,27 +1175,44 @@ Deno.serve(async (req) => {
           daysTracked: prevDays, belowThresholdDays: prevBelow,
         });
         const bar = barBySymbol.get(key);
-        // Peak and trough measure what happened *after* entry. Seeding them at
-        // the entry price made peak return unable to go negative, so a name
-        // that only ever fell still reported "Peak +0.00%" — a number that
-        // implies it traded back to entry when it never did.
-        const prevPeak = e.peak_close == null ? null : Number(e.peak_close);
-        const peakClose = prevPeak == null ? now.close : Math.max(prevPeak, now.close);
+        // Sessions, not rows: a re-run on the same day must not advance it, and
+        // a skipped session must not compress the timeline.
+        const elapsed = sessionsSince(e.first_detected_date);
+        // Peak, trough and MAE describe what happened *after* entry. On the
+        // detection session entry IS today's close while the bar's high/low
+        // cover the whole day, including the hours before the breakout — so
+        // "MAE -9%" there was the day's range, not heat taken after entry.
+        // Nothing is measurable until the next session.
+        // `firstSessionAfter` also discards the bogus extremes any earlier
+        // build stamped on the opening session, instead of carrying them
+        // forward as the running peak/trough seed.
+        const firstSessionAfter = elapsed === 1;
+        const seed = openedToday || firstSessionAfter;
+        const prevPeak = seed || e.peak_close == null ? null : Number(e.peak_close);
+        const prevPeakHigh = seed || e.peak_high == null ? null : Number(e.peak_high);
+        const prevTrough = seed || e.trough_low == null ? null : Number(e.trough_low);
+
+        const peakClose = openedToday
+          ? null
+          : (prevPeak == null ? now.close : Math.max(prevPeak, now.close));
         // On a data-gap day the intraday extremes are unknown. Falling back to
         // the close understated MAE and overstated nothing — it reported a
         // measurement that was never taken. Unknown stays null.
-        const prevPeakHigh = e.peak_high == null ? null : Number(e.peak_high);
-        const highCandidates = [prevPeakHigh, bar?.high ?? null, peakClose]
-          .filter((v): v is number => v != null);
+        const highCandidates = openedToday
+          ? []
+          : [prevPeakHigh, bar?.high ?? null, peakClose].filter((v): v is number => v != null);
         const peakHigh = highCandidates.length ? Math.max(...highCandidates) : null;
-        const prevTrough = e.trough_low == null ? null : Number(e.trough_low);
-        const lowCandidates = [prevTrough, bar?.low ?? null]
-          .filter((v): v is number => v != null);
+        const lowCandidates = openedToday
+          ? []
+          : [prevTrough, bar?.low ?? null].filter((v): v is number => v != null);
         const troughLow = lowCandidates.length ? Math.min(...lowCandidates) : null;
         const maePct = troughLow != null && entry > 0
           ? ((troughLow - entry) / entry) * 100
           : null;
-        const peakRet = entry > 0 ? ((peakClose - entry) / entry) * 100 : 0;
+        const peakRet = peakClose != null && entry > 0
+          ? ((peakClose - entry) / entry) * 100
+          : null;
+
         // Sessions, not rows: a re-run on the same day must not advance it, and
         // a skipped session must not compress the timeline.
         const elapsed = sessionsSince(e.first_detected_date);
