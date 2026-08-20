@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { filterMatches, excludedByMissingData, coverageOf, latestTradeDateOf, resolveReferenceSession, filterMatchesLive, type ActiveFilter } from "../src/lib/market/screenerCatalog";
 import { colsFromActiveFilters } from "../src/lib/market/screenerColumnModel";
-import { coreCandidateParams } from "../src/lib/market/screenerRun";
+import { coreCandidateParams, isCoreCandidateFilter } from "../src/lib/market/screenerRun";
 
 // A row with a full EOD triple (ltp/change_pct/volume via trade_date) but no
 // technical indicators synced yet — the exact shape that used to get dropped
@@ -81,6 +81,15 @@ describe("single-sweep core candidate parameters", () => {
 
   it("does not invoke the core RPC for a liquidity-only screen", () => {
     expect(coreCandidateParams([{ id: "is_liquid_tradable", bool: true }])).toBeNull();
+  });
+
+  it("marks every predicate decided by the canonical RPC", () => {
+    expect(isCoreCandidateFilter({ id: "ltp", min: 100 })).toBe(true);
+    expect(isCoreCandidateFilter({ id: "market_cap", min: 1000 })).toBe(true);
+    expect(isCoreCandidateFilter({ id: "change_pct", min: 6 })).toBe(true);
+    expect(isCoreCandidateFilter({ id: "volume", min: 100000 })).toBe(true);
+    expect(isCoreCandidateFilter({ id: "vol_gt_avg30", bool: true })).toBe(true);
+    expect(isCoreCandidateFilter({ id: "rsi", min: 50 })).toBe(false);
   });
 });
 

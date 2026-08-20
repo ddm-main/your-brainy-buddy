@@ -1,0 +1,1 @@
+ALTER FUNCTION public.market_screener_snapshot_diagnostic(numeric,numeric,numeric,numeric,numeric,numeric,numeric,numeric,boolean,boolean) SECURITY INVOKER;

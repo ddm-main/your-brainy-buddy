@@ -14,7 +14,7 @@ import { ScoreBadge } from "@/components/market/ScoreBadge";
 import { AddToWatchlistButton } from "@/components/market/AddToWatchlistButton";
 
 import { useSavedScreeners, useScreenerMutations, useMarketSettings, useFavoriteFilters, useFavoriteFilterMutations, useLatestPriceSession } from "@/lib/market/hooks";
-import { useScreenerData, useScreenerSectors, useScreenerIndustries, getAsofMeta, projectRowsForMode, type AsofMeta, type ScreenerRow } from "@/lib/market/screenerRun";
+import { useScreenerData, useScreenerSectors, useScreenerIndustries, getAsofMeta, projectRowsForMode, coreCandidateParams, isCoreCandidateFilter, type AsofMeta, type ScreenerRow } from "@/lib/market/screenerRun";
 import { todayIstDateString } from "@/lib/market/liveSnapshot";
 import { Link } from "react-router-dom";
 import { useUi } from "@/store/uiStore";
@@ -235,6 +235,7 @@ function ScreenerInner() {
   // Anything that needs the whole universe — an active filter, sorting the full
   // set, a CSV export — flips this on explicitly.
   const [loadAllRequested, setLoadAllRequested] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
   const loadAll = loadAllRequested || active.length > 0 || !!asOfDate;
   const {
     data: rawRows = [], isFetching, error, universeCount, partial, basis,
@@ -390,10 +391,14 @@ function ScreenerInner() {
   const matched = useMemo(() => {
     let out: ScreenerRow[] = rows;
     for (const af of active) {
+      // The canonical RPC has already admitted/rejected these fields against
+      // one immutable sweep. Re-running them after the static join caused the
+      // misleading “12 of 16” state and made membership depend on projection.
+      if (basis && isCoreCandidateFilter(af)) continue;
       out = out.filter((r) => filterMatches(r as any, af, filterSession));
     }
     return out;
-  }, [rows, active, filterSession]);
+  }, [rows, active, filterSession, basis]);
   // Rows a live "Volume > 30D Avg" screen cannot judge because the 30-day
   // average itself is missing. They are unknown, not "no" — reporting the
   // count keeps a data gap from looking like an empty market.
@@ -410,6 +415,27 @@ function ScreenerInner() {
   // Selected filters are the complete contract: no invisible liquidity gate
   // is allowed to remove an otherwise matching row.
   const filtered = matched;
+
+  const comparisonParams = useMemo(() => coreCandidateParams(active), [active]);
+  const comparison = useQuery({
+    queryKey: ["market", "screener-snapshot-diagnostic", basis?.snapshotToken, comparisonParams],
+    queryFn: async () => {
+      const p = comparisonParams ?? {};
+      const { data, error: rpcError } = await (supabase as any).rpc("market_screener_snapshot_diagnostic", p);
+      if (rpcError) throw rpcError;
+      return data as {
+        snapshot_token: string | null;
+        session_date: string | null;
+        as_of: string | null;
+        universe_count: number;
+        matched_symbols: string[];
+        reason_counts: Record<string, number>;
+      };
+    },
+    enabled: compareOpen && comparisonParams != null && !asOfDate,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
 
 
 
@@ -957,7 +983,7 @@ function ScreenerInner() {
         </Btn>
         <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
           <span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
-            {isFetching ? "loading…" : `${filtered.length} / ${rows.length}`}
+            {isFetching ? "loading…" : `${filtered.length} match${filtered.length === 1 ? "" : "es"}`}
           </span>
         </div>
       </div>
@@ -1032,6 +1058,43 @@ function ScreenerInner() {
         <DataHealthStrip rows={rows} universe={universe} filteredCount={filtered.length} loading={isFetching} />
       </HudModal>
 
+      <HudModal open={compareOpen} onClose={() => setCompareOpen(false)} title="Snapshot comparison" width={560}>
+        {comparison.isLoading ? (
+          <EmptyState>loading snapshot</EmptyState>
+        ) : comparison.error ? (
+          <EmptyState hint={(comparison.error as Error).message}>comparison unavailable</EmptyState>
+        ) : comparison.data ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.6 }}>
+              NSE · Kotak five-minute sweep · strict cumulative volume &gt; previous 30 valid NSE sessions · inclusive numeric bounds
+              <br />Snapshot {comparison.data.as_of ? new Date(comparison.data.as_of).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : "—"} IST · {comparison.data.universe_count?.toLocaleString("en-IN")} eligible
+            </div>
+            <div>
+              <div style={labelStyle}>Matched symbols ({comparison.data.matched_symbols.length})</div>
+              <div style={{ marginTop: 6, fontSize: 11, lineHeight: 1.7, color: "var(--text)" }}>
+                {comparison.data.matched_symbols.join(", ") || "None"}
+              </div>
+            </div>
+            <div>
+              <div style={labelStyle}>Exclusions by reason</div>
+              <div style={{ marginTop: 6, display: "grid", gridTemplateColumns: "1fr auto", gap: "6px 12px", fontSize: 11 }}>
+                {Object.entries(comparison.data.reason_counts)
+                  .filter(([reason]) => reason !== "matched")
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([reason, count]) => (
+                    <div key={reason} style={{ display: "contents" }}>
+                      <span style={{ color: "var(--text-muted)" }}>{reason.replaceAll("_", " ")}</span>
+                      <span style={{ color: "var(--text)", textAlign: "right" }}>{count.toLocaleString("en-IN")}</span>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <EmptyState hint="Add Price, Market Cap, 1D Return, Volume, or Volume > 30D Avg.">no canonical filters</EmptyState>
+        )}
+      </HudModal>
+
       {/* Two-pane workspace — fills the remaining viewport, no wasted space. */}
       <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 8, alignItems: "stretch", flex: 1, minHeight: 0 }}>
         <div style={{ minHeight: 0, overflow: "auto" }}>
@@ -1044,7 +1107,7 @@ function ScreenerInner() {
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0, minHeight: 0 }}>
-          <HudPanel flow title={`Results · ${filtered.length}${filtered.length !== rows.length ? ` of ${rows.length}` : ""}`} style={{ flex: 1, minHeight: 0 }}
+          <HudPanel flow title={`Results · ${filtered.length} match${filtered.length === 1 ? "" : "es"}`} style={{ flex: 1, minHeight: 0 }}
             live={isFetching ? "warn" : error ? "err" : "ok"}
             actions={
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
@@ -1137,6 +1200,12 @@ function ScreenerInner() {
                   </button>
                 )}
 
+                {basis && comparisonParams && (
+                  <Btn size="sm" variant="ghost" onClick={() => setCompareOpen(true)} title="Explain this snapshot's matches and exclusions">
+                    <Search size={11} /> Compare snapshot
+                  </Btn>
+                )}
+
 
                 {/* Columns · CSV grouped together as one cluster */}
                 <div style={{ display: "inline-flex", gap: 4, padding: 2, border: "1px solid var(--edge)", borderRadius: 2 }}>
@@ -1157,7 +1226,7 @@ function ScreenerInner() {
             )}
             {basis && (
               <div style={{ fontSize: 10, color: "var(--text-muted)", paddingBottom: 8, lineHeight: 1.5 }}>
-                NSE · {basis.universeCount?.toLocaleString("en-IN") ?? "—"} eligible · sweep {basis.liveAsOf ? new Date(basis.liveAsOf).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—"} IST · {basis.providers.join(" + ") || "promoted feed"} · inclusive bounds · raw volume vs 30D average
+                NSE · {basis.universeCount?.toLocaleString("en-IN") ?? "—"} eligible · {basis.candidateCount?.toLocaleString("en-IN") ?? filtered.length} canonical matches · sweep {basis.liveAsOf ? new Date(basis.liveAsOf).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—"} IST · {basis.providers.join(" + ") || "promoted feed"} · inclusive bounds · raw volume vs previous 30 valid NSE sessions
               </div>
             )}
             {error ? (
