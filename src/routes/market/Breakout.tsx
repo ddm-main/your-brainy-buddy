@@ -18,10 +18,14 @@ import {
   useBreakoutTracker, useBreakoutSymbolMeta, metaKey,
   OPEN_STATUSES, type BreakoutEpisode, type BreakoutStatus, type BreakoutSymbolMeta,
 } from "@/lib/market/breakoutRun";
-import { deriveBreakoutStage, STAGE_TONE, type BreakoutStage } from "@/lib/market/breakoutStage";
-import { SCORE_BAND_STRONG, SCORE_BAND_MODERATE, SCORE_BAND_WEAK } from "@/lib/market/scoreBands";
+import { deriveBreakoutStage, STAGE_TONE, STAGE_ORDER, type BreakoutStage } from "@/lib/market/breakoutStage";
+import {
+  SCORE_BAND_STRONG, SCORE_BAND_MODERATE, SCORE_BAND_WEAK,
+  EXTEND_PCT, FAIL_PCT, COOL_DAYS, MAX_TRACK_DAYS,
+} from "@/lib/market/scoreBands";
 import { todayIstDateString } from "@/lib/market/liveSnapshot";
 import { quoteKey } from "@/lib/market/pnl";
+
 import { isFreshTick, useLiveTickStore, useTicksRevision } from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
 import { ChevronDown, ChevronRight, LineChart, Info, PieChart, SlidersHorizontal } from "lucide-react";
@@ -29,12 +33,14 @@ import { ScoreWeightsDialog } from "@/components/market/ScoreWeightsDialog";
 import { CalibrationDialog } from "@/components/market/CalibrationDialog";
 
 // ---- Status presentation ----
+// The rules are generated from the same constants the state machine uses, so
+// the legend cannot drift from the behaviour it describes.
 const STATUS_META: Record<BreakoutStatus, { label: string; color: string; rule: string }> = {
   active:   { label: "Active",   color: "var(--accent)",     rule: "Tracking forward — still within normal range since entry." },
-  extended: { label: "Extended", color: "var(--ok)",         rule: "Up 8%+ from entry — the move has run; chase risk." },
-  cooled:   { label: "Cooled",   color: "var(--warn)",       rule: "Score has stayed below the qualify threshold for 3 sessions." },
-  failed:   { label: "Failed",   color: "var(--err)",        rule: "Down 6% from entry — the breakout broke down." },
-  closed:   { label: "Closed",   color: "var(--text-muted)", rule: "Reached the 15-session tracking horizon." },
+  extended: { label: "Extended", color: "var(--ok)",         rule: `Up ${EXTEND_PCT}%+ from entry — the move has run; chase risk.` },
+  cooled:   { label: "Cooled",   color: "var(--warn)",       rule: `Score has stayed below the qualify threshold for ${COOL_DAYS} sessions.` },
+  failed:   { label: "Failed",   color: "var(--err)",        rule: `Down ${FAIL_PCT}% from entry — the breakout broke down.` },
+  closed:   { label: "Closed",   color: "var(--text-muted)", rule: `Reached the ${MAX_TRACK_DAYS}-session tracking horizon.` },
 };
 
 const TONE_COLOR: Record<string, string> = {
@@ -43,7 +49,10 @@ const TONE_COLOR: Record<string, string> = {
 };
 
 type View = "open" | "new" | "all";
-const THRESHOLDS = [0, 60, 70, 80] as const;
+// Aligned to the real score bands (70 strong / 55 moderate / 40 weak) — the
+// chips used to offer 60/70/80 while being coloured by those bands.
+const THRESHOLDS = [0, SCORE_BAND_WEAK, SCORE_BAND_MODERATE, SCORE_BAND_STRONG] as const;
+
 
 interface Row extends BreakoutEpisode {
   meta: BreakoutSymbolMeta | null;
@@ -56,12 +65,16 @@ interface Row extends BreakoutEpisode {
   stageDetail: string;
 }
 
-function daysAgo(dateStr: string): number {
+// Age in calendar days against a reference session. `null` for a date that
+// cannot be parsed — it used to return 0, i.e. render a corrupt date as
+// "detected today".
+function daysAgo(dateStr: string, reference: string): number | null {
   const then = Date.parse(`${dateStr}T00:00:00Z`);
-  const today = Date.parse(`${todayIstDateString()}T00:00:00Z`);
-  if (!Number.isFinite(then) || !Number.isFinite(today)) return 0;
+  const today = Date.parse(`${reference}T00:00:00Z`);
+  if (!Number.isFinite(then) || !Number.isFinite(today)) return null;
   return Math.max(0, Math.round((today - then) / 86_400_000));
 }
+
 
 function scoreBandColor(score: number | null): string {
   if (score == null) return "var(--text-muted)";
@@ -142,7 +155,19 @@ function BreakoutInner() {
   );
   const { data: metaMap } = useBreakoutSymbolMeta(symbolKeys);
 
-  const todayIst = todayIstDateString();
+  // "New today" used to compare against the browser's IST clock alone, so a
+  // late pipeline run, a holiday or a wrong device clock rendered an empty tab
+  // indistinguishable from "nothing broke out". The latest session the pipeline
+  // actually evaluated is the reference; the clock is only a fallback.
+  const latestSession = useMemo(() => {
+    const dates = episodes
+      .map((e) => e.last_evaluated_date)
+      .filter((d): d is string => typeof d === "string" && d.length >= 10);
+    return dates.length ? dates.reduce((a, b) => (a > b ? a : b)) : todayIstDateString();
+  }, [episodes]);
+  const clockToday = todayIstDateString();
+  const staleSession = latestSession < clockToday;
+
 
   const relayAlive = useRelayAlive();
   const _ticksRev = useTicksRevision();
@@ -168,24 +193,27 @@ function BreakoutInner() {
     const tick = liveTicks[quoteKey(e.exchange, e.symbol)];
     const live = isFreshTick(tick);
     const liveLtp = live ? tick!.ltp : meta?.ltp ?? e.current_close;
-    // On the detection session the entry *is* that day's close, so a return
-    // measured off it is 0.00% for every day-1 row by construction. The pivot
-    // the name actually broke is the honest basis there; from day 2 on the
-    // stored entry is the immutable history every other number is measured on.
-    const dayOne = (e.days_tracked ?? 1) <= 1;
-    const entry = dayOne && e.trigger_price != null && e.trigger_price > 0
-      ? e.trigger_price
-      : e.entry_close;
+    // The entry is the entry. Substituting the trigger level on day 1 to avoid
+    // showing 0.00% quietly measured the return off a level that could sit 30%
+    // below the close, printing "+40%" on a name that had not moved. Day-1
+    // return since entry is 0.00% by construction and is shown as such.
+    const entry = e.entry_close;
     const liveReturnPct = entry != null && entry > 0 && liveLtp != null
       ? ((liveLtp - entry) / entry) * 100
       : e.current_return_pct;
 
+    // A missing close is a missing close: it must not be replaced by 0 (which
+    // fed ATR/pivot maths and manufactured a confident EXTENDED/FAILED read).
+    // The live tick is an acceptable stand-in; nothing else is.
+    const stageClose = meta?.close ?? liveLtp ?? null;
     const read = deriveBreakoutStage(meta ? ({
-      close: meta.close ?? liveLtp ?? 0,
+      close: stageClose,
       ema20: meta.ema20,
       atr14: meta.atr14,
-      bbSqueeze: meta.bb_squeeze ?? false,
-      nearResistance: meta.near_resistance ?? false,
+      // null, not false — an unmeasured squeeze is unknown, and defaulting it
+      // to false was indistinguishable from a measured "not squeezed".
+      bbSqueeze: meta.bb_squeeze ?? null,
+      nearResistance: meta.near_resistance ?? null,
       // Real trigger geometry — with these nulled out the read could never
       // resolve to TRIGGERED, so every row showed COILED or LOADING.
       pivotLevel: meta.pivot_level ?? meta.resistance_level,
@@ -199,7 +227,7 @@ function BreakoutInner() {
       // so without this the live recompute under-penalises a fresh failure.
       breakoutStateDays: meta.breakout_state_days ?? meta.breakout_freshness_days ?? null,
       breakoutLevelCleared: meta.breakout_level_cleared ?? null,
-      atrContracting: (meta.base_tightness ?? 1) < 0.04,
+      atrContracting: meta.base_tightness == null ? null : meta.base_tightness < 0.04,
       baseTightness: meta.base_tightness ?? null,
       baseDurationDays: meta.base_duration_days ?? null,
     } as any) : null);
@@ -215,14 +243,17 @@ function BreakoutInner() {
     const term = search.trim().toUpperCase();
     return allRows.filter((r) => {
       if (view === "open" && !OPEN_STATUSES.includes(r.status)) return false;
-      // "New today" is literally today (IST) and includes same-day failures.
-      if (view === "new" && r.first_detected_date !== todayIst) return false;
+      // "New" = detected in the latest evaluated session, which on a holiday or
+      // before the day's run is the previous trading day. Includes same-session
+      // failures.
+      if (view === "new" && r.first_detected_date !== latestSession) return false;
       if (minScore > 0 && (r.last_score ?? 0) < minScore) return false;
       if (term && !r.symbol.toUpperCase().includes(term)
         && !(r.company_name ?? "").toUpperCase().includes(term)) return false;
       return true;
     });
-  }, [allRows, view, todayIst, minScore, search]);
+  }, [allRows, view, latestSession, minScore, search]);
+
 
   const columns = useMemo<ColumnDef<Row, any>[]>(() => [
     {
@@ -280,7 +311,11 @@ function BreakoutInner() {
       // "Setup" not "Stage": Status already owns the episode lifecycle
       // vocabulary, and two columns both called a stage read as contradictory
       // when one says EXTENDED and the other says Active.
-      id: "stage", accessorKey: "stage",
+      // Sorted by lifecycle position, not alphabetically — an A-Z sort put
+      // ARMED before COILED and EXTENDED before TRIGGERED, contradicting the
+      // progression the header describes.
+      id: "stage", accessorFn: (r) => STAGE_ORDER[r.stage],
+
       header: () => (
         <span title="Today's technical read, independent of the episode: COILED (volatility contracting) → ARMED (coiled at a pivot) → TRIGGERED (pivot cleared) → EXTENDED (stretched above EMA20).">
           Setup
@@ -315,11 +350,14 @@ function BreakoutInner() {
       id: "detected", header: "Detected", accessorFn: (r) => r.first_detected_date,
       meta: { align: "right" },
       cell: ({ row }) => {
-        const d = daysAgo(row.original.first_detected_date);
+        const d = daysAgo(row.original.first_detected_date, latestSession);
         return (
           <div style={{ textAlign: "right", lineHeight: 1.2 }}>
             <div>{row.original.first_detected_date}</div>
-            <div style={{ fontSize: 10, color: "var(--text-muted)" }}>{d === 0 ? "today" : `${d}d ago`}</div>
+            <div style={{ fontSize: 10, color: "var(--text-muted)" }}
+                 title={`Relative to the latest evaluated session (${latestSession})`}>
+              {d == null ? "unknown date" : d === 0 ? "this session" : `${d}d ago`}
+            </div>
           </div>
         );
       },
@@ -332,22 +370,19 @@ function BreakoutInner() {
       id: "entry_close", header: "Entry ₹", accessorKey: "entry_close", meta: { align: "right" },
       cell: ({ row }) => {
         const r = row.original;
-        const dayOne = (r.days_tracked ?? 1) <= 1;
-        const usingTrigger = dayOne && r.trigger_price != null && r.trigger_price > 0;
         return (
           <span
             style={{ textAlign: "right", display: "block" }}
             title={r.trigger_price != null
-              ? `Detection close ${fmtNum(r.entry_close)} · pivot ${fmtNum(r.trigger_price)}`
-                + (usingTrigger ? " — day-1 return is measured from the pivot" : "")
-              : "No pivot recorded for this episode"}
+              ? `Detection close ${fmtNum(r.entry_close)} · trigger level ${fmtNum(r.trigger_price)}`
+              : "No trigger level recorded for this episode"}
           >
-            {fmtNum(usingTrigger ? r.trigger_price : r.entry_close)}
-            {usingTrigger && <span style={{ color: "var(--text-muted)" }}> ▲</span>}
+            {fmtNum(r.entry_close)}
           </span>
         );
       },
     },
+
 
     {
       id: "ltp", header: "LTP ₹", accessorFn: (r) => r.liveLtp, meta: { align: "right" },
@@ -361,28 +396,42 @@ function BreakoutInner() {
       },
     },
     {
-      id: "return", header: "Return %", accessorFn: (r) => r.liveReturnPct ?? -999, meta: { align: "right" },
+      id: "return",
+      header: () => <span title="Since the detection close. 0.00% on the detection session by definition.">Return %</span>,
+      accessorFn: (r) => r.liveReturnPct ?? Number.NEGATIVE_INFINITY, meta: { align: "right" },
       cell: ({ row }) => <PctCell value={row.original.liveReturnPct} />,
     },
     {
-      id: "peak", header: "Peak %", accessorKey: "peak_return_pct", meta: { align: "right" },
-      cell: ({ getValue }) => <PctCell value={getValue() as number} />,
+      id: "peak",
+      header: () => <span title="Best close since entry, as a return off the detection close. Not measurable on the detection session itself.">Peak %</span>,
+      accessorFn: (r) => r.peak_return_pct ?? Number.NEGATIVE_INFINITY, meta: { align: "right" },
+      cell: ({ row }) => (row.original.peak_return_pct == null
+        ? <span title="Nothing has happened after entry yet — measured from the next session on"
+                style={{ textAlign: "right", display: "block", color: "var(--text-muted)" }}>n/a</span>
+        : <PctCell value={row.original.peak_return_pct} />),
     },
     {
       // Peak return alone flatters every episode. MAE is the heat you had to
       // sit through to get it.
       // Unknown MAE sorts to the bottom in both directions rather than
       // crowding the top of a "worst drawdown" sort with blanks.
-      id: "mae", header: "MAE %", accessorFn: (r) => r.mae_pct ?? Number.NEGATIVE_INFINITY, meta: { align: "right" },
+      id: "mae",
+      header: () => <span title="Maximum adverse excursion: worst low since entry, as a % of the detection close. Not measurable on the detection session.">MAE %</span>,
+      accessorFn: (r) => r.mae_pct ?? Number.NEGATIVE_INFINITY, meta: { align: "right" },
       cell: ({ row }) => (row.original.mae_pct == null
-        ? <span title="Not computed for this episode — written from the next aggregates pass onward"
+        ? <span title="Nothing has happened after entry yet — measured from the next session on"
                 style={{ textAlign: "right", display: "block", color: "var(--text-muted)" }}>n/a</span>
         : <PctCell value={row.original.mae_pct} />),
     },
     {
-      id: "relvol", header: "Rel Vol", accessorFn: (r) => r.rel_volume ?? -1, meta: { align: "right" },
-      cell: ({ row }) => <span style={{ textAlign: "right", display: "block" }}>{fmtNum(row.original.rel_volume)}</span>,
+      id: "relvol",
+      header: () => <span title="Volume vs its own 30-day average. Blank when volume history is unavailable; blanks sort last.">Rel Vol</span>,
+      accessorFn: (r) => r.rel_volume ?? Number.NEGATIVE_INFINITY, meta: { align: "right" },
+      cell: ({ row }) => (row.original.rel_volume == null
+        ? <span style={{ textAlign: "right", display: "block", color: "var(--text-muted)" }}>n/a</span>
+        : <span style={{ textAlign: "right", display: "block" }}>{fmtNum(row.original.rel_volume)}</span>),
     },
+
     {
       id: "trend", header: "Trend", accessorFn: (r) => r.score_trend.length, enableSorting: false, meta: { align: "right" },
       cell: ({ row }) => <div style={{ display: "flex", justifyContent: "flex-end" }}><Sparkline points={row.original.score_trend} /></div>,
@@ -432,7 +481,7 @@ function BreakoutInner() {
         </div>
       ),
     },
-  ], [nav]);
+  ], [nav, latestSession]);
 
   const loading = isFetching && episodes.length === 0;
 
@@ -488,9 +537,18 @@ function BreakoutInner() {
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: relayAlive ? "var(--ok)" : "var(--text-muted)" }} />
             {relayAlive ? "Live" : "EOD"}
           </span>
+          {staleSession && (
+            <span
+              title={`The pipeline's latest evaluated session is ${latestSession}, not today (${clockToday}). "New" shows that session's detections.`}
+              style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--warn)", letterSpacing: "0.1em", textTransform: "uppercase" }}
+            >
+              session {latestSession}
+            </span>
+          )}
           <span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
             {loading ? "loading…" : `${rows.length} tracked`}
           </span>
+
         </div>
       </div>
 

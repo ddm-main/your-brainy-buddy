@@ -417,12 +417,18 @@ export function levelTouchQuality(
   return { touches, touchQuality: Math.round(touchQuality * 100) / 100 };
 }
 
+// Maximum distance (in ATRs) between the close and a level for that level to
+// count as the one price just *triggered* through. Deliberately much tighter
+// than resistancePivot's default base-ceiling search.
+export const TRIGGER_MAX_ATRS = 1.5;
+
 // The breakout pivot proper: the strongest clustered swing-high level that
 // price has already cleared (at or below the last close), rather than a blind
 // rolling-N high. A level touched 3+ times is a real base ceiling; a rolling
 // high can be a single spike bar. Returns null when no cleared cluster exists
 // within `maxAtrsBelow` ATRs of price (i.e. nothing meaningful was broken).
 export function resistancePivot(
+
   candles: Candle[],
   lookback = 250,
   maxAtrsBelow = 6,
@@ -799,6 +805,11 @@ export interface IndicatorSnapshot {
   breakoutLevelCleared?: number | null;
 
   pivotLevel?: number | null;         // strongest cleared swing-high cluster (real base ceiling)
+  // The level price has only just cleared (within TRIGGER_MAX_ATRS). Null when
+  // nothing was broken recently — an episode with no trigger level is honest
+  // about it instead of borrowing a base ceiling far below price.
+  triggerLevel?: number | null;
+
   pivotTouches?: number | null;       // how many swing highs formed that cluster
   // Volume-weighted touch count for that cluster: heavy-volume rejections
   // count for more than thin pokes at the same price.
@@ -907,6 +918,22 @@ export function computeSnapshot(candles: Candle[]): IndicatorSnapshot | null {
   const rH55 = rollingHighExclToday(candles, 55);
   const cir = closeInRangePct(last);
   const pivot = resistancePivot(candles, 250);
+  // The *trigger* level is a different question from "what is this base's
+  // ceiling": an episode's entry reference must be a level price has only just
+  // cleared. resistancePivot accepts anything up to 6 ATRs under the close, so
+  // using it as a trigger produced levels 30% below price (and, downstream, a
+  // day-1 "return" of +40% on a name that had not moved).
+  const triggerPivot = resistancePivot(candles, 250, TRIGGER_MAX_ATRS);
+  const triggerLevel = (() => {
+    if (triggerPivot.level != null) return triggerPivot.level;
+    const rh = rollingHighExclToday(candles, 20);
+    if (rh == null || atrV == null || !(atrV > 0)) return null;
+    // A fresh new-high breakout has no cleared cluster — the rolling high is
+    // the level, but only while price is still near it.
+    const atrsAbove = (close - rh) / atrV;
+    return atrsAbove >= 0 && atrsAbove <= TRIGGER_MAX_ATRS ? rh : null;
+  })();
+
   const bkState = breakoutState(candles, 20, 10);
   const freshness = bkState.state === "fresh" ? bkState.days : null;
   // Measure the base up to the last bar that was still under the pivot, so the
@@ -976,6 +1003,8 @@ export function computeSnapshot(candles: Candle[]): IndicatorSnapshot | null {
 
     breakoutLevelCleared: bkState.level,
     pivotLevel: pivot.level,
+    triggerLevel,
+
     pivotTouches: pivot.touches,
     pivotTouchQuality: pivot.touchQuality,
     rollingHigh20Touches: rh20Q.touches,
