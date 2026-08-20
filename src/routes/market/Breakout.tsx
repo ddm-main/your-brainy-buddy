@@ -537,9 +537,18 @@ function BreakoutInner() {
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: relayAlive ? "var(--ok)" : "var(--text-muted)" }} />
             {relayAlive ? "Live" : "EOD"}
           </span>
+          {staleSession && (
+            <span
+              title={`The pipeline's latest evaluated session is ${latestSession}, not today (${clockToday}). "New" shows that session's detections.`}
+              style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--warn)", letterSpacing: "0.1em", textTransform: "uppercase" }}
+            >
+              session {latestSession}
+            </span>
+          )}
           <span style={{ fontFamily: "var(--font-hud)", fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.14em", textTransform: "uppercase" }}>
             {loading ? "loading…" : `${rows.length} tracked`}
           </span>
+
         </div>
       </div>
 
