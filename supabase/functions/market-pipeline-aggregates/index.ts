@@ -1224,24 +1224,37 @@ Deno.serve(async (req) => {
         // below the threshold on more sessions than you have been tracked.
         const belowDays = Math.min(tick.belowThresholdDays, daysTracked);
         const ft = breakoutFollowThroughScore({
-          entryClose: entry, currentClose: now.close, peakClose,
+          entryClose: entry, currentClose: now.close, peakClose: peakClose ?? now.close,
           daysTracked, belowThresholdDays: belowDays,
           scoreTrend: scoreTrend.filter((v): v is number => typeof v === "number"),
           lastScore: nowScore,
         });
         const terminal = tick.status === "failed" || tick.status === "closed";
 
+        // Trigger level bookkeeping: fill it on the first tick where a level
+        // becomes available, and drop values an earlier build stamped from a
+        // far-below base ceiling (they were up to 30% under the entry close and
+        // are not a trigger by any reading).
+        const storedTrigger = e.trigger_price == null ? null : Number(e.trigger_price);
+        const storedPlausible = storedTrigger != null && storedTrigger > 0 &&
+          entry > 0 && (entry - storedTrigger) / entry <= 0.12;
+        const triggerPrice = storedPlausible
+          ? storedTrigger
+          : ((now as { trigger?: number | null }).trigger ?? null);
+
         epUpdates.push({
           symbol: e.symbol, exchange: e.exchange, first_detected_date: e.first_detected_date,
-          entry_close: entry, trigger_price: e.trigger_price ?? null,
+          entry_close: entry, trigger_price: triggerPrice,
           detected_score: e.detected_score,
           detected_score_legacy: e.detected_score_legacy ?? null,
           last_score_legacy: now.breakout,
           rank_pct: rankPct.get(key) ?? null,
-          peak_close: peakClose, peak_return_pct: Math.round(peakRet * 100) / 100,
+          peak_close: peakClose,
+          peak_return_pct: peakRet == null ? null : Math.round(peakRet * 100) / 100,
           peak_high: peakHigh == null ? null : Math.round(peakHigh * 100) / 100,
           trough_low: troughLow == null ? null : Math.round(troughLow * 100) / 100,
           mae_pct: maePct == null ? null : Math.round(maePct * 100) / 100,
+
           sessions_elapsed: elapsed,
           current_close: now.close, current_return_pct: Math.round(tick.returnPct * 100) / 100,
           days_tracked: daysTracked, last_score: nowScore,
