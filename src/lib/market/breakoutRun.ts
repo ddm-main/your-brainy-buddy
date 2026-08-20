@@ -164,21 +164,34 @@ export function useBreakoutSymbolMeta(keys: { symbol: string; exchange: string }
       const cols = "symbol,exchange,company_name,close,rel_volume,atr14,ema20,bb_squeeze,near_resistance,resistance_level,score_components";
       const geoCols = "symbol,exchange,trade_date,rolling_high_20,rolling_high_55,breakout_freshness_days,base_tightness,base_duration_days,pivot_level,breakout_state,breakout_state_days,breakout_level_cleared,breakout_v4_components";
 
+      // Bound the geometry read to the latest stored session. Without it the
+      // query pulled every trade_date for 300 symbols against PostgREST's
+      // 1000-row default, so as history accumulates the tail of a chunk is
+      // silently truncated and those rows lose their Setup read entirely.
+      const { data: latestRow } = await (supabase as any)
+        .from("market_stock_scores")
+        .select("trade_date").order("trade_date", { ascending: false }).limit(1);
+      const latestDate: string | null = latestRow?.[0]?.trade_date ?? null;
+
       // Both passes cover the same symbol chunks and neither depends on the
       // other's result, so they run together instead of as a serial waterfall
       // (previously 2 x ceil(n/300) sequential round-trips).
       const chunks: string[][] = [];
-      for (let i = 0; i < symbols.length; i += 300) chunks.push(symbols.slice(i, i + 300));
+      for (let i = 0; i < symbols.length; i += 150) chunks.push(symbols.slice(i, i + 150));
 
       const [screenerRes, geoRes] = await Promise.all([
         Promise.all(chunks.map((chunk) => (supabase as any)
           .from("market_screener_rows").select(cols).in("symbol", chunk))),
-        Promise.all(chunks.map((chunk) => (supabase as any)
-          .from("market_stock_scores").select(geoCols).in("symbol", chunk)
+        Promise.all(chunks.map((chunk) => {
+          let q = (supabase as any)
+            .from("market_stock_scores").select(geoCols).in("symbol", chunk);
+          if (latestDate) q = q.eq("trade_date", latestDate);
           // Newest bar first, so the de-dupe below keeps the current session
           // when the table still holds prior trade_dates for a symbol.
-          .order("trade_date", { ascending: false }))),
+          return q.order("trade_date", { ascending: false });
+        })),
       ]);
+
 
       for (const { data, error } of screenerRes) {
         if (error) throw error;
