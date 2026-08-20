@@ -169,9 +169,12 @@ export interface ScreenerRow {
 
 export interface ScreenerBasis {
   sweepId: string | null;
+  snapshotToken: string | null;
+  snapshotSession: string | null;
   liveAsOf: string | null;
   providers: string[];
   universeCount: number | null;
+  candidateCount: number | null;
 }
 
 
@@ -393,6 +396,14 @@ const SERVER_FILTER_COLUMNS: Record<string, string[]> = {
 
 const CORE_FILTER_IDS = new Set(["ltp", "market_cap", "change_pct", "volume", "vol_gt_avg30"]);
 
+/** True when membership is already decided by the canonical single-sweep RPC.
+ * These predicates must never be evaluated a second time after static columns
+ * are joined, because that turns a deterministic candidate set into “N of M”. */
+export function isCoreCandidateFilter(filter: ActiveFilter): boolean {
+  const id = canonicalFilterId(filter.id);
+  return CORE_FILTER_IDS.has(id) || id === "is_liquid_tradable";
+}
+
 function numericBound(active: ActiveFilter[], id: string): { min: number | null; max: number | null } {
   const af = active.find((item) => canonicalFilterId(item.id) === id);
   const parse = (value: number | "" | undefined) => value === "" || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value);
@@ -438,9 +449,12 @@ async function fetchCoreCandidates(params: Record<string, unknown>): Promise<{ r
     rows,
     basis: {
       sweepId: first?.live_sweep_id ?? null,
+      snapshotToken: first?.snapshot_token ?? null,
+      snapshotSession: first?.snapshot_session ?? null,
       liveAsOf: first?.live_as_of ?? null,
       providers: Array.from(new Set(rows.map((row) => String(row.live_provider ?? "")).filter(Boolean))).sort(),
       universeCount: first?.universe_count == null ? null : Number(first.universe_count),
+      candidateCount: first?.candidate_count == null ? rows.length : Number(first.candidate_count),
     },
   };
 }
@@ -952,7 +966,7 @@ export function useScreenerData(
     error: (asOfDate ? asof.error : (core.error ?? statics.error ?? live.error)) as Error | null,
     dataUpdatedAt: asOfDate ? asof.dataUpdatedAt : live.dataUpdatedAt,
     /** Universe size behind the current board (null while unknown). */
-    universeCount: asOfDate ? null : (total.data ?? null),
+    universeCount: asOfDate ? null : (core.data?.basis.universeCount ?? total.data ?? null),
     /** True while only the first board page is loaded. */
     partial: !asOfDate && !loadAll && (total.data ?? 0) > merged.length,
     basis: asOfDate ? null : (core.data?.basis ?? null),

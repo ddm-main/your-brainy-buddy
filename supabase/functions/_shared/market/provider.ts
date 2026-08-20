@@ -665,7 +665,13 @@ function quoteRowFromKotak(p: ParsedQuoteRequest, r: any): QuoteRow | null {
     previous_close: prevClose,
     change_abs: changeAbs,
     change_pct: prevClose ? ((price - prevClose) / prevClose) * 100 : directChangePct,
-    volume: firstNum(r, ["volume", "vol_traded_today", "last_volume", "totalTradedVolume"]),
+    // Only cumulative-session fields belong here. `last_volume` is last-trade
+    // quantity on some Neo payloads; treating it as day volume made the 30-day
+    // comparison change meaning between symbols.
+    volume: firstNum(r, [
+      "volume", "vol_traded_today", "totalTradedVolume", "total_traded_volume",
+      "total_volume", "totTrdQty", "tot_trd_qty", "vtt", "v",
+    ]),
     day_open: firstNum(r, ["open_price", "ohlc.open", "ohlc.o", "opn_pric", "open", "o"]),
     day_high: firstNum(r, ["high_price", "ohlc.high", "ohlc.h", "hgh_pric", "high", "h"]),
     day_low: firstNum(r, ["low_price", "ohlc.low", "ohlc.l", "lw_pric", "low", "l"]),
