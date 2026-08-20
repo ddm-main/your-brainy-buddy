@@ -396,28 +396,42 @@ function BreakoutInner() {
       },
     },
     {
-      id: "return", header: "Return %", accessorFn: (r) => r.liveReturnPct ?? -999, meta: { align: "right" },
+      id: "return",
+      header: () => <span title="Since the detection close. 0.00% on the detection session by definition.">Return %</span>,
+      accessorFn: (r) => r.liveReturnPct ?? Number.NEGATIVE_INFINITY, meta: { align: "right" },
       cell: ({ row }) => <PctCell value={row.original.liveReturnPct} />,
     },
     {
-      id: "peak", header: "Peak %", accessorKey: "peak_return_pct", meta: { align: "right" },
-      cell: ({ getValue }) => <PctCell value={getValue() as number} />,
+      id: "peak",
+      header: () => <span title="Best close since entry, as a return off the detection close. Not measurable on the detection session itself.">Peak %</span>,
+      accessorFn: (r) => r.peak_return_pct ?? Number.NEGATIVE_INFINITY, meta: { align: "right" },
+      cell: ({ row }) => (row.original.peak_return_pct == null
+        ? <span title="Nothing has happened after entry yet — measured from the next session on"
+                style={{ textAlign: "right", display: "block", color: "var(--text-muted)" }}>n/a</span>
+        : <PctCell value={row.original.peak_return_pct} />),
     },
     {
       // Peak return alone flatters every episode. MAE is the heat you had to
       // sit through to get it.
       // Unknown MAE sorts to the bottom in both directions rather than
       // crowding the top of a "worst drawdown" sort with blanks.
-      id: "mae", header: "MAE %", accessorFn: (r) => r.mae_pct ?? Number.NEGATIVE_INFINITY, meta: { align: "right" },
+      id: "mae",
+      header: () => <span title="Maximum adverse excursion: worst low since entry, as a % of the detection close. Not measurable on the detection session.">MAE %</span>,
+      accessorFn: (r) => r.mae_pct ?? Number.NEGATIVE_INFINITY, meta: { align: "right" },
       cell: ({ row }) => (row.original.mae_pct == null
-        ? <span title="Not computed for this episode — written from the next aggregates pass onward"
+        ? <span title="Nothing has happened after entry yet — measured from the next session on"
                 style={{ textAlign: "right", display: "block", color: "var(--text-muted)" }}>n/a</span>
         : <PctCell value={row.original.mae_pct} />),
     },
     {
-      id: "relvol", header: "Rel Vol", accessorFn: (r) => r.rel_volume ?? -1, meta: { align: "right" },
-      cell: ({ row }) => <span style={{ textAlign: "right", display: "block" }}>{fmtNum(row.original.rel_volume)}</span>,
+      id: "relvol",
+      header: () => <span title="Volume vs its own 30-day average. Blank when volume history is unavailable; blanks sort last.">Rel Vol</span>,
+      accessorFn: (r) => r.rel_volume ?? Number.NEGATIVE_INFINITY, meta: { align: "right" },
+      cell: ({ row }) => (row.original.rel_volume == null
+        ? <span style={{ textAlign: "right", display: "block", color: "var(--text-muted)" }}>n/a</span>
+        : <span style={{ textAlign: "right", display: "block" }}>{fmtNum(row.original.rel_volume)}</span>),
     },
+
     {
       id: "trend", header: "Trend", accessorFn: (r) => r.score_trend.length, enableSorting: false, meta: { align: "right" },
       cell: ({ row }) => <div style={{ display: "flex", justifyContent: "flex-end" }}><Sparkline points={row.original.score_trend} /></div>,
