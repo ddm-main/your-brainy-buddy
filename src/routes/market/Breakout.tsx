@@ -65,12 +65,16 @@ interface Row extends BreakoutEpisode {
   stageDetail: string;
 }
 
-function daysAgo(dateStr: string): number {
+// Age in calendar days against a reference session. `null` for a date that
+// cannot be parsed — it used to return 0, i.e. render a corrupt date as
+// "detected today".
+function daysAgo(dateStr: string, reference: string): number | null {
   const then = Date.parse(`${dateStr}T00:00:00Z`);
-  const today = Date.parse(`${todayIstDateString()}T00:00:00Z`);
-  if (!Number.isFinite(then) || !Number.isFinite(today)) return 0;
+  const today = Date.parse(`${reference}T00:00:00Z`);
+  if (!Number.isFinite(then) || !Number.isFinite(today)) return null;
   return Math.max(0, Math.round((today - then) / 86_400_000));
 }
+
 
 function scoreBandColor(score: number | null): string {
   if (score == null) return "var(--text-muted)";
