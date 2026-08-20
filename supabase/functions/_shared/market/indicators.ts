@@ -916,7 +916,6 @@ export function computeSnapshot(candles: Candle[]): IndicatorSnapshot | null {
   const triggerLevel = (() => {
     if (triggerPivot.level != null) return triggerPivot.level;
     const rh = rollingHighExclToday(candles, 20);
-    const rh = rollingHighExclToday(candles, 20);
     if (rh == null || atrV == null || !(atrV > 0)) return null;
     // A fresh new-high breakout has no cleared cluster — the rolling high is
     // the level, but only while price is still near it.
