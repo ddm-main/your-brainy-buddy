@@ -18,9 +18,11 @@ import {
   useBreakoutTracker, useBreakoutSymbolMeta, metaKey,
   OPEN_STATUSES, type BreakoutEpisode, type BreakoutStatus, type BreakoutSymbolMeta,
 } from "@/lib/market/breakoutRun";
-import { deriveBreakoutStage, STAGE_TONE, type BreakoutStage } from "@/lib/market/breakoutStage";
-import { SCORE_BAND_STRONG, SCORE_BAND_MODERATE, SCORE_BAND_WEAK } from "@/lib/market/scoreBands";
-import { todayIstDateString } from "@/lib/market/liveSnapshot";
+import { deriveBreakoutStage, STAGE_TONE, STAGE_ORDER, type BreakoutStage } from "@/lib/market/breakoutStage";
+import {
+  SCORE_BAND_STRONG, SCORE_BAND_MODERATE, SCORE_BAND_WEAK,
+  EXTEND_PCT, FAIL_PCT, COOL_DAYS, MAX_TRACK_DAYS,
+} from "@/lib/market/scoreBands";
 import { quoteKey } from "@/lib/market/pnl";
 import { isFreshTick, useLiveTickStore, useTicksRevision } from "@/lib/market/liveTickStore";
 import { subscribeSymbolsForTicks, useRelayAlive } from "@/lib/market/useRealtimeTicks";
@@ -29,12 +31,14 @@ import { ScoreWeightsDialog } from "@/components/market/ScoreWeightsDialog";
 import { CalibrationDialog } from "@/components/market/CalibrationDialog";
 
 // ---- Status presentation ----
+// The rules are generated from the same constants the state machine uses, so
+// the legend cannot drift from the behaviour it describes.
 const STATUS_META: Record<BreakoutStatus, { label: string; color: string; rule: string }> = {
   active:   { label: "Active",   color: "var(--accent)",     rule: "Tracking forward — still within normal range since entry." },
-  extended: { label: "Extended", color: "var(--ok)",         rule: "Up 8%+ from entry — the move has run; chase risk." },
-  cooled:   { label: "Cooled",   color: "var(--warn)",       rule: "Score has stayed below the qualify threshold for 3 sessions." },
-  failed:   { label: "Failed",   color: "var(--err)",        rule: "Down 6% from entry — the breakout broke down." },
-  closed:   { label: "Closed",   color: "var(--text-muted)", rule: "Reached the 15-session tracking horizon." },
+  extended: { label: "Extended", color: "var(--ok)",         rule: `Up ${EXTEND_PCT}%+ from entry — the move has run; chase risk.` },
+  cooled:   { label: "Cooled",   color: "var(--warn)",       rule: `Score has stayed below the qualify threshold for ${COOL_DAYS} sessions.` },
+  failed:   { label: "Failed",   color: "var(--err)",        rule: `Down ${FAIL_PCT}% from entry — the breakout broke down.` },
+  closed:   { label: "Closed",   color: "var(--text-muted)", rule: `Reached the ${MAX_TRACK_DAYS}-session tracking horizon.` },
 };
 
 const TONE_COLOR: Record<string, string> = {
@@ -43,7 +47,10 @@ const TONE_COLOR: Record<string, string> = {
 };
 
 type View = "open" | "new" | "all";
-const THRESHOLDS = [0, 60, 70, 80] as const;
+// Aligned to the real score bands (70 strong / 55 moderate / 40 weak) — the
+// chips used to offer 60/70/80 while being coloured by those bands.
+const THRESHOLDS = [0, SCORE_BAND_WEAK, SCORE_BAND_MODERATE, SCORE_BAND_STRONG] as const;
+
 
 interface Row extends BreakoutEpisode {
   meta: BreakoutSymbolMeta | null;
