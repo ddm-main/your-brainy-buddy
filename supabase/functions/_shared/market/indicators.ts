@@ -805,6 +805,11 @@ export interface IndicatorSnapshot {
   breakoutLevelCleared?: number | null;
 
   pivotLevel?: number | null;         // strongest cleared swing-high cluster (real base ceiling)
+  // The level price has only just cleared (within TRIGGER_MAX_ATRS). Null when
+  // nothing was broken recently — an episode with no trigger level is honest
+  // about it instead of borrowing a base ceiling far below price.
+  triggerLevel?: number | null;
+
   pivotTouches?: number | null;       // how many swing highs formed that cluster
   // Volume-weighted touch count for that cluster: heavy-volume rejections
   // count for more than thin pokes at the same price.
