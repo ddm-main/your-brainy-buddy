@@ -350,11 +350,14 @@ function BreakoutInner() {
       id: "detected", header: "Detected", accessorFn: (r) => r.first_detected_date,
       meta: { align: "right" },
       cell: ({ row }) => {
-        const d = daysAgo(row.original.first_detected_date);
+        const d = daysAgo(row.original.first_detected_date, latestSession);
         return (
           <div style={{ textAlign: "right", lineHeight: 1.2 }}>
             <div>{row.original.first_detected_date}</div>
-            <div style={{ fontSize: 10, color: "var(--text-muted)" }}>{d === 0 ? "today" : `${d}d ago`}</div>
+            <div style={{ fontSize: 10, color: "var(--text-muted)" }}
+                 title={`Relative to the latest evaluated session (${latestSession})`}>
+              {d == null ? "unknown date" : d === 0 ? "this session" : `${d}d ago`}
+            </div>
           </div>
         );
       },
@@ -367,22 +370,19 @@ function BreakoutInner() {
       id: "entry_close", header: "Entry ₹", accessorKey: "entry_close", meta: { align: "right" },
       cell: ({ row }) => {
         const r = row.original;
-        const dayOne = (r.days_tracked ?? 1) <= 1;
-        const usingTrigger = dayOne && r.trigger_price != null && r.trigger_price > 0;
         return (
           <span
             style={{ textAlign: "right", display: "block" }}
             title={r.trigger_price != null
-              ? `Detection close ${fmtNum(r.entry_close)} · pivot ${fmtNum(r.trigger_price)}`
-                + (usingTrigger ? " — day-1 return is measured from the pivot" : "")
-              : "No pivot recorded for this episode"}
+              ? `Detection close ${fmtNum(r.entry_close)} · trigger level ${fmtNum(r.trigger_price)}`
+              : "No trigger level recorded for this episode"}
           >
-            {fmtNum(usingTrigger ? r.trigger_price : r.entry_close)}
-            {usingTrigger && <span style={{ color: "var(--text-muted)" }}> ▲</span>}
+            {fmtNum(r.entry_close)}
           </span>
         );
       },
     },
+
 
     {
       id: "ltp", header: "LTP ₹", accessorFn: (r) => r.liveLtp, meta: { align: "right" },
